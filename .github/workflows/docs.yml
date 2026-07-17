@@ -41,6 +41,12 @@ jobs:
       - name: Build documentation
         run: python -m mkdocs build --strict
 
+      - name: Verify Pages origin indexing policy
+        run: |
+          grep -Fqx 'https://:project.pages.dev/*' site/_headers
+          grep -Fqx 'https://:version.:project.pages.dev/*' site/_headers
+          test "$(grep -Fxc '  X-Robots-Tag: noindex' site/_headers)" -eq 2
+
       - name: Deploy to Cloudflare Pages
         if: github.ref == 'refs/heads/main'
         uses: cloudflare/wrangler-action@v4
