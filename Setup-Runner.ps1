@@ -133,10 +133,13 @@ $legacyLabels = @('ephemeral-managed-runner')
 $composePath = Join-Path $here 'docker-compose.yml'
 $composeEnvironmentNames = @(
     'ACCESS_TOKEN',
+    'REPO_URLS',
+    'REPO_URL',
     'RUNNER_SCOPE',
     'ORG_NAME',
     'ENTERPRISE_NAME',
     'RUNNER_PROFILE_ID',
+    'RUNNER_REPLICAS',
     'RUNNER_IMAGE',
     'RUNNER_PULL_IMAGE',
     'RUNNER_NAME_PREFIX',
@@ -338,6 +341,29 @@ function Wait-RunnerCapacityAcknowledgement {
     throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation within $TimeoutSeconds seconds.$detail"
 }
 
+function Get-RunnerEnvironmentFileValue {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        return $null
+    }
+
+    $prefix = "$Name="
+    $line = Get-Content -LiteralPath $Path -Encoding UTF8 |
+        Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } |
+        Select-Object -Last 1
+    if ($null -eq $line) {
+        return $null
+    }
+    return $line.Substring($prefix.Length)
+}
+
 Push-Location $here
 $profileLock = $null
 try {
@@ -419,6 +445,31 @@ try {
                 )
             } elseif ($currentDesiredReadError) {
                 Write-Error "Cannot apply -AddRepos or -RemoveRepos because existing desired capacity is unreadable. Pass the complete -Repos list. $currentDesiredReadError"
+            } else {
+                $legacyRepositories = Get-RunnerEnvironmentFileValue `
+                    -Path $profileConfig.EnvironmentPath `
+                    -Name 'REPO_URLS'
+                if ([string]::IsNullOrWhiteSpace($legacyRepositories)) {
+                    $legacyRepositories = Get-RunnerEnvironmentFileValue `
+                        -Path $profileConfig.EnvironmentPath `
+                        -Name 'REPO_URL'
+                }
+                if (-not [string]::IsNullOrWhiteSpace($legacyRepositories)) {
+                    $repoList = @(
+                        $legacyRepositories -split ',' |
+                            ForEach-Object {
+                                $legacyEntry = $_.Trim()
+                                if ($legacyEntry) {
+                                    if ($legacyEntry.LastIndexOf('=') -gt 0) {
+                                        $legacyEntry
+                                    } else {
+                                        "$legacyEntry=1"
+                                    }
+                                }
+                            }
+                    )
+                    Write-Host '  Imported repository targets from the pre-reconciliation profile environment.'
+                }
             }
         }
 
@@ -521,11 +572,15 @@ try {
         0
     }
     $generationBase = [math]::Max($currentGeneration, $acknowledgedGeneration)
+    $acknowledgementCurrent = (
+        $acknowledgementValid -and
+        $acknowledgedGeneration -eq $currentGeneration
+    )
     $desiredStateChanged = (
         -not $currentDesiredState -or
         $currentDesiredSignature -ne $desiredSignature -or
         $currentGeneration -lt $acknowledgedGeneration -or
-        -not $acknowledgementValid
+        -not $acknowledgementCurrent
     )
     $nextGeneration = if ($desiredStateChanged) {
         $generationBase + 1

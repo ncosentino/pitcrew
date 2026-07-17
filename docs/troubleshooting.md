@@ -57,6 +57,8 @@ Get-Content .pitcrew-state\default\acknowledged-capacity.json
 
 Malformed or lower-generation desired state is rejected without changing the
 last valid pool. Correct the setup input and reapply the complete command.
+Missing or older acknowledgements are repaired by the manager; setup publishes
+a higher recovery generation when necessary.
 
 ## Scale-down still shows the removed runner
 

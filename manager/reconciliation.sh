@@ -110,3 +110,74 @@ render_desired_slots() {
 
     sort -o "${output_path}" "${output_path}"
 }
+
+write_legacy_desired_state() {
+    output_path="$1"
+    scope="$2"
+    repositories="$3"
+    replicas="$4"
+    repository_objects="${output_path}.repositories"
+    rm -f "${output_path}" "${repository_objects}"
+
+    case "${scope}" in
+        repo)
+            [ -n "${repositories}" ] || return 1
+            : > "${repository_objects}"
+            if ! printf '%s\n' "${repositories}" |
+                tr ',' '\n' |
+                while IFS= read -r entry; do
+                    entry=$(printf '%s' "${entry}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+                    [ -n "${entry}" ] || continue
+                    url="${entry%%=*}"
+                    workers="${entry##*=}"
+                    [ "${workers}" = "${url}" ] && workers=1
+                    case "${workers}" in
+                        ''|*[!0-9]*|0) exit 1 ;;
+                    esac
+                    jq -n \
+                        --arg url "${url}" \
+                        --argjson workers "${workers}" \
+                        '{url: $url, workers: $workers}' >> "${repository_objects}" ||
+                        exit 1
+                done; then
+                rm -f "${repository_objects}"
+                return 1
+            fi
+            if ! jq -s \
+                '{
+                    schemaVersion: 1,
+                    generation: 1,
+                    scope: "repo",
+                    repositories: .,
+                    replicas: null
+                }' "${repository_objects}" > "${output_path}"; then
+                rm -f "${output_path}" "${repository_objects}"
+                return 1
+            fi
+            ;;
+        org|ent)
+            case "${replicas}" in
+                ''|*[!0-9]*|0) return 1 ;;
+            esac
+            if ! jq -n \
+                --arg scope "${scope}" \
+                --argjson replicas "${replicas}" \
+                '{
+                    schemaVersion: 1,
+                    generation: 1,
+                    scope: $scope,
+                    repositories: [],
+                    replicas: $replicas
+                }' > "${output_path}"; then
+                rm -f "${output_path}"
+                return 1
+            fi
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+
+    rm -f "${repository_objects}"
+    desired_state_is_valid "${output_path}"
+}

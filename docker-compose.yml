@@ -35,6 +35,12 @@ services:
       # Scope, identity, and registration settings are static for the life of the
       # manager. Mutable targets and counts come from the mounted state directory.
       RUNNER_SCOPE: ${RUNNER_SCOPE:-repo}
+      # Bootstrap adapter for pre-reconciliation .env files and direct Compose
+      # usage. The manager imports these only when no desired or accepted state
+      # exists; subsequent changes must update desired-capacity.json through setup.
+      RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}
+      REPO_URLS: ${REPO_URLS:-}
+      REPO_URL: ${REPO_URL:-}
       ORG_NAME: ${ORG_NAME:-}
       ENTERPRISE_NAME: ${ENTERPRISE_NAME:-}
       # Fine-grained PAT used to register runners. Setup-Runner validates it before
@@ -48,7 +54,7 @@ services:
       RUNNER_LABELS: ${RUNNER_LABELS:-}
       RUNNER_NO_DEFAULT_LABELS: ${RUNNER_NO_DEFAULT_LABELS:-}
       RUNNER_GROUP: ${RUNNER_GROUP:-}
-      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-2}
+      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-3}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
     volumes:
