@@ -111,6 +111,21 @@ render_desired_slots() {
     sort -o "${output_path}" "${output_path}"
 }
 
+write_undesired_slot_keys() {
+    desired_slots_path="$1"
+    active_keys_path="$2"
+    output_path="$3"
+    awk -F '\t' '
+        NR == FNR {
+            desired[$1] = 1
+            next
+        }
+        !($1 in desired) {
+            print $1
+        }
+    ' "${desired_slots_path}" "${active_keys_path}" > "${output_path}"
+}
+
 write_legacy_desired_state() {
     output_path="$1"
     scope="$2"

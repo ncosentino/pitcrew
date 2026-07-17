@@ -7,8 +7,8 @@ set -u
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 
-MANAGER_CONTRACT_VERSION=3
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-3}"
+MANAGER_CONTRACT_VERSION=4
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-4}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -58,6 +58,7 @@ CONNECT_MARKER="Listening for Jobs"
 MAX_BACKOFF="${RUNNER_MAX_BACKOFF:-120}"
 CURRENT_GENERATION=0
 CURRENT_STATE_HASH=""
+LAST_DESIRED_DOCUMENT_HASH=""
 LAST_REJECTION=""
 STOPPING=0
 
@@ -268,11 +269,11 @@ reconcile_slots() {
     added_path="$2"
     draining_path="$3"
     unchanged_path="$4"
-    desired_keys_path="${desired_slots_path}.keys"
+    active_keys_path="/tmp/pitcrew-active-keys.$$"
+    undesired_keys_path="/tmp/pitcrew-undesired-keys.$$"
     : > "${added_path}"
     : > "${draining_path}"
     : > "${unchanged_path}"
-    cut -f1 "${desired_slots_path}" > "${desired_keys_path}"
 
     tab=$(printf '\t')
     while IFS="${tab}" read -r desired_key desired_repo desired_tag; do
@@ -288,20 +289,28 @@ reconcile_slots() {
         fi
     done < "${desired_slots_path}"
 
+    : > "${active_keys_path}"
     for active_path in "${SLOT_DIRECTORY}"/*; do
         [ -d "${active_path}" ] || continue
         active_key=${active_path##*/}
-        if ! grep -Fqx "${active_key}" "${desired_keys_path}"; then
-            if slot_is_running "${active_key}"; then
-                : > "${active_path}/drain"
-                printf '%s\n' "${active_key}" >> "${draining_path}"
-            else
-                remove_slot_registry "${active_key}"
-            fi
-        fi
+        printf '%s\n' "${active_key}" >> "${active_keys_path}"
     done
+    write_undesired_slot_keys \
+        "${desired_slots_path}" \
+        "${active_keys_path}" \
+        "${undesired_keys_path}"
+    while IFS= read -r active_key; do
+        [ -n "${active_key}" ] || continue
+        active_path=$(slot_path "${active_key}")
+        if slot_is_running "${active_key}"; then
+            : > "${active_path}/drain"
+            printf '%s\n' "${active_key}" >> "${draining_path}"
+        else
+            remove_slot_registry "${active_key}"
+        fi
+    done < "${undesired_keys_path}"
 
-    rm -f "${desired_keys_path}"
+    rm -f "${active_keys_path}" "${undesired_keys_path}"
 }
 
 persist_accepted_state() {
@@ -367,7 +376,15 @@ load_accepted_state() {
 }
 
 process_desired_state() {
-    [ -f "${DESIRED_STATE_PATH}" ] || return
+    if [ ! -f "${DESIRED_STATE_PATH}" ]; then
+        LAST_DESIRED_DOCUMENT_HASH=""
+        return
+    fi
+    observed_document_hash=$(sha256sum "${DESIRED_STATE_PATH}" 2>/dev/null | awk '{ print $1 }')
+    [ -n "${observed_document_hash}" ] || return
+    if [ "${observed_document_hash}" = "${LAST_DESIRED_DOCUMENT_HASH}" ]; then
+        return
+    fi
     state_snapshot="/tmp/pitcrew-desired-capacity-snapshot.json"
     if ! cp "${DESIRED_STATE_PATH}" "${state_snapshot}"; then
         rm -f "${state_snapshot}"
@@ -378,6 +395,7 @@ process_desired_state() {
         "${state_snapshot}" \
         "${CURRENT_GENERATION}" \
         "${CURRENT_STATE_HASH}")
+    snapshot_document_hash=$(sha256sum "${state_snapshot}" 2>/dev/null | awk '{ print $1 }')
 
     case "${classification}" in
         new)
@@ -421,16 +439,18 @@ process_desired_state() {
             echo "[manager:${PROFILE_ID}] accepted generation ${CURRENT_GENERATION}: $(count_lines "${added_file}") added, $(count_lines "${draining_file}") draining, $(count_lines "${unchanged_file}") unchanged"
             rm -f "${added_file}" "${draining_file}" "${unchanged_file}"
             LAST_REJECTION=""
+            LAST_DESIRED_DOCUMENT_HASH="${snapshot_document_hash}"
             ;;
         unchanged)
+            LAST_DESIRED_DOCUMENT_HASH="${snapshot_document_hash}"
             ;;
         invalid|stale|conflict)
-            rejected_hash=$(sha256sum "${state_snapshot}" 2>/dev/null | awk '{ print $1 }')
-            rejection="${classification}:${rejected_hash:-unreadable}"
+            rejection="${classification}:${snapshot_document_hash:-unreadable}"
             if [ "${rejection}" != "${LAST_REJECTION}" ]; then
                 echo "[manager:${PROFILE_ID}] rejected ${classification} desired-capacity state; retaining generation ${CURRENT_GENERATION}" >&2
                 LAST_REJECTION="${rejection}"
             fi
+            LAST_DESIRED_DOCUMENT_HASH="${snapshot_document_hash}"
             ;;
     esac
     rm -f "${state_snapshot}"

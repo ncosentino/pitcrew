@@ -24,6 +24,7 @@ $schemaPath = Join-Path $runnerRoot 'runner-profile.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
+$managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
@@ -110,7 +111,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 3
+        managerContractVersion = 4
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -166,7 +167,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 3
+                            managerContractVersion = 4
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -199,6 +200,7 @@ $requiredPaths = @(
     $copilotProfilePath,
     $copilotDockerfilePath,
     $managerPath,
+    $managerDockerfilePath,
     $reconciliationPath,
     $composePath,
     $routingPath
@@ -252,7 +254,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 3) 'The setup contract does not identify the migration-safe manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 4) 'The setup contract does not identify the hardened manager.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
     -Generation 4 `
@@ -298,6 +300,11 @@ $defaultStaticProfile = New-RunnerStaticProfileState `
     -Scope repo `
     -OrgName '' `
     -EnterpriseName ''
+$copilotStaticProfile = New-RunnerStaticProfileState `
+    -Profile $copilotProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName ''
 $replicaOverrideProfile = Resolve-RunnerProfile `
     -RootPath $runnerRoot `
     -Profile default `
@@ -324,6 +331,9 @@ Add-Check (
 Add-Check (
     $defaultStaticProfile.fingerprint -ne $imageOverrideStaticProfile.fingerprint
 ) 'Worker image changes do not select full profile replacement.'
+Add-Check (
+    $copilotStaticProfile.configuration.build.contextSha256 -match '^[0-9a-f]{64}$'
+) 'Locally built profiles do not fingerprint their complete build context.'
 
 $copilotDockerfile = Get-Content -LiteralPath $copilotDockerfilePath -Raw -Encoding UTF8
 Add-Check ($copilotDockerfile -match [regex]::Escape('sha256sum -c -')) 'The Copilot CLI image does not verify the downloaded checksum.'
@@ -343,7 +353,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=3$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=4$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -368,6 +378,52 @@ Add-ThrowsCheck `
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "pitcrew-runner-profile-tests-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 try {
+    $fingerprintContext = Join-Path $tempRoot 'fingerprint-context'
+    $excludedContextState = Join-Path $fingerprintContext '.pitcrew-state'
+    New-Item -ItemType Directory -Path $excludedContextState -Force | Out-Null
+    Set-Content -LiteralPath (Join-Path $fingerprintContext 'Dockerfile') -Value 'FROM scratch' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $fingerprintContext 'copied-tool.txt') -Value 'version-one' -Encoding UTF8
+    Set-Content -LiteralPath (Join-Path $excludedContextState 'ack.json') -Value 'generation-one' -Encoding UTF8
+    $contextFingerprintOne = Get-RunnerBuildContextFingerprint `
+        -ContextPath $fingerprintContext `
+        -ExcludedPaths @($excludedContextState)
+    Set-Content -LiteralPath (Join-Path $fingerprintContext 'copied-tool.txt') -Value 'version-two' -Encoding UTF8
+    $contextFingerprintTwo = Get-RunnerBuildContextFingerprint `
+        -ContextPath $fingerprintContext `
+        -ExcludedPaths @($excludedContextState)
+    Set-Content -LiteralPath (Join-Path $excludedContextState 'ack.json') -Value 'generation-two' -Encoding UTF8
+    $contextFingerprintThree = Get-RunnerBuildContextFingerprint `
+        -ContextPath $fingerprintContext `
+        -ExcludedPaths @($excludedContextState)
+    Add-Check ($contextFingerprintOne -ne $contextFingerprintTwo) 'A changed Docker build input did not change the context fingerprint.'
+    Add-Check ($contextFingerprintTwo -eq $contextFingerprintThree) 'Generated reconciliation state changed the Docker build-context fingerprint.'
+
+    $hardLinkTarget = Join-Path $tempRoot 'hard-link-target.txt'
+    $hardLinkPath = Join-Path $fingerprintContext 'hard-linked-input.txt'
+    Set-Content -LiteralPath $hardLinkTarget -Value 'hard-link-one' -Encoding UTF8
+    New-Item -ItemType HardLink -Path $hardLinkPath -Target $hardLinkTarget | Out-Null
+    $hardLinkFingerprintOne = Get-RunnerBuildContextFingerprint `
+        -ContextPath $fingerprintContext `
+        -ExcludedPaths @($excludedContextState)
+    Set-Content -LiteralPath $hardLinkTarget -Value 'hard-link-two' -Encoding UTF8
+    $hardLinkFingerprintTwo = Get-RunnerBuildContextFingerprint `
+        -ContextPath $fingerprintContext `
+        -ExcludedPaths @($excludedContextState)
+    Add-Check ($hardLinkFingerprintOne -ne $hardLinkFingerprintTwo) 'Changed hard-linked build content was omitted from the context fingerprint.'
+
+    if (-not $IsWindows) {
+        $modeInputPath = Join-Path $fingerprintContext 'copied-tool.txt'
+        & chmod 0644 $modeInputPath
+        $modeFingerprintOne = Get-RunnerBuildContextFingerprint `
+            -ContextPath $fingerprintContext `
+            -ExcludedPaths @($excludedContextState)
+        & chmod 0755 $modeInputPath
+        $modeFingerprintTwo = Get-RunnerBuildContextFingerprint `
+            -ContextPath $fingerprintContext `
+            -ExcludedPaths @($excludedContextState)
+        Add-Check ($modeFingerprintOne -ne $modeFingerprintTwo) 'Changed Unix build-input mode was omitted from the context fingerprint.'
+    }
+
     $lockPath = Join-Path $tempRoot 'lock-contract' 'setup.lock'
     $firstLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
     try {
@@ -756,6 +812,7 @@ finally {
 }
 
 $manager = Get-Content -LiteralPath $managerPath -Raw -Encoding UTF8
+$managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
 Add-Check ($manager -match [regex]::Escape('MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"')) 'The manager cleanup label is not profile-specific.'
@@ -765,8 +822,16 @@ Add-Check ($manager -match [regex]::Escape('RUNNER_PULL_IMAGE:-1')) 'The manager
 Add-Check ($manager -match [regex]::Escape('last-valid-capacity.json')) 'The manager does not persist the last valid desired state.'
 Add-Check ($manager -match [regex]::Escape('bootstrap_legacy_desired_state')) 'The manager does not bootstrap pre-reconciliation capacity.'
 Add-Check ($manager -match [regex]::Escape('acknowledgement_matches_current')) 'The manager does not repair stale acknowledgements.'
+Add-Check ($manager -match [regex]::Escape('LAST_DESIRED_DOCUMENT_HASH')) 'The manager reparses unchanged desired JSON on every poll.'
+Add-Check ($manager -notmatch 'grep -Fqx') 'The manager still performs a quadratic desired-key scan.'
 Add-Check ($manager -match [regex]::Escape('/drain')) 'The manager does not represent graceful slot draining.'
 Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Worker containers do not expose stable slot identity.'
+Add-Check ($managerDockerfile -match 'ARG JQ_VERSION=1\.8\.2') 'The manager does not pin its jq release.'
+Add-Check ($managerDockerfile -match 'JQ_SHA256_AMD64=[0-9a-f]{64}') 'The manager does not checksum-pin jq for amd64.'
+Add-Check ($managerDockerfile -match 'JQ_SHA256_ARM64=[0-9a-f]{64}') 'The manager does not checksum-pin jq for arm64.'
+Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The manager does not verify the downloaded jq binary.'
+Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
+Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
 Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'

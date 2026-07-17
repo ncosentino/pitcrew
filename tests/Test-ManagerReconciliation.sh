@@ -83,6 +83,15 @@ case "${removed_key}" in
 esac
 ASSERTIONS=$((ASSERTIONS + 1))
 
+active_keys="${TEMP_DIRECTORY}/active-keys.txt"
+undesired_keys="${TEMP_DIRECTORY}/undesired-keys.txt"
+cut -f1 "${slots_six}" > "${active_keys}"
+printf '%s\n' 'orphan-slot' >> "${active_keys}"
+write_undesired_slot_keys "${slots_five}" "${active_keys}" "${undesired_keys}"
+assert_equals "2" "$(wc -l < "${undesired_keys}" | tr -d ' ')" "Linear desired-key lookup returned the wrong drain set."
+assert_true "Linear desired-key lookup missed the removed ordinal." grep -Fqx "${removed_key}" "${undesired_keys}"
+assert_true "Linear desired-key lookup missed an orphaned slot." grep -Fqx 'orphan-slot' "${undesired_keys}"
+
 multi_initial="${TEMP_DIRECTORY}/multi-initial.json"
 multi_changed="${TEMP_DIRECTORY}/multi-changed.json"
 multi_removed="${TEMP_DIRECTORY}/multi-removed.json"
