@@ -1,0 +1,26 @@
+{
+  "$schema": "../../runner-profile.schema.json",
+  "schemaVersion": 1,
+  "name": "copilot-cli",
+  "description": "Isolated runners with a checksum-verified GitHub Copilot CLI installation.",
+  "image": "pitcrew-copilot-cli:1.0.71",
+  "labels": [
+    "agentic-tooling"
+  ],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true,
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile",
+    "args": {
+      "COPILOT_CLI_VERSION": "1.0.71",
+      "COPILOT_CLI_SHA256_X64": "779e9b3e52399d8fdf5bcd61779e3f1d606796ba478b614ad41fb80d522910bb",
+      "COPILOT_CLI_SHA256_ARM64": "74cc7cdaaed398f26b7d72c7d41ba2bff41a903525aeac778361d6dbd8a0c60d"
+    }
+  },
+  "verificationCommands": [
+    "test \"$(command -v copilot)\" = \"/usr/local/bin/copilot\"",
+    "copilot --version | grep -F \"1.0.71\""
+  ]
+}

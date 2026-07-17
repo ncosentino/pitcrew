@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  contracts:
+    name: Runner contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Validate PowerShell syntax
+        shell: pwsh
+        run: |
+          $errors = @(
+            Get-ChildItem -Recurse -File -Filter '*.ps1' |
+              ForEach-Object {
+                $tokens = $null
+                $parseErrors = $null
+                [System.Management.Automation.Language.Parser]::ParseFile(
+                  $_.FullName,
+                  [ref]$tokens,
+                  [ref]$parseErrors) | Out-Null
+                $parseErrors
+              }
+          )
+          if ($errors.Count -gt 0) {
+            $errors | ForEach-Object { Write-Error $_ }
+            exit 1
+          }
+
+      - name: Run runner-profile contracts
+        shell: pwsh
+        run: ./tests/Test-RunnerProfiles.ps1
+
+      - name: Validate manager shell syntax
+        run: sh -n manager/manage-runners.sh
+
+      - name: Validate Docker Compose configuration
+        run: docker compose --file docker-compose.yml config --quiet

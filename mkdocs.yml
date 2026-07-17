@@ -1,0 +1,103 @@
+site_name: PitCrew
+site_url: https://www.devleader.ca/projects/pitcrew
+site_description: Profile-driven orchestration for isolated, ephemeral GitHub Actions runner pools.
+repo_url: https://github.com/ncosentino/pitcrew
+repo_name: ncosentino/pitcrew
+strict: true
+
+theme:
+  name: material
+  custom_dir: docs/overrides
+  logo: assets/pitcrew-favicon.png
+  favicon: assets/pitcrew-favicon.png
+  features:
+    - navigation.tabs
+    - navigation.sections
+    - navigation.expand
+    - navigation.top
+    - content.code.copy
+    - content.code.annotate
+    - search.highlight
+    - search.suggest
+    - toc.integrate
+  palette:
+    - scheme: default
+      primary: deep orange
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: deep orange
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+
+nav:
+  - Home: index.md
+  - Getting Started: getting-started.md
+  - Configuration: configuration.md
+  - Troubleshooting: troubleshooting.md
+  - Building from Source: building.md
+  - Deployment: deployment.md
+  - Guides:
+      - Overview: guides/index.md
+      - Named Profiles: guides/named-profiles.md
+      - Custom Profiles: guides/custom-profiles.md
+      - Routing Workloads: guides/routing-workloads.md
+      - Security Boundaries: guides/security-boundaries.md
+
+plugins:
+  - search
+
+hooks:
+  - docs/hooks/schema.py
+  - docs/hooks/llms_txt.py
+
+markdown_extensions:
+  - pymdownx.highlight:
+      anchor_linenums: true
+      line_spans: __span
+      pygments_lang_class: true
+  - pymdownx.inlinehilite
+  - pymdownx.snippets
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.tabbed:
+      alternate_style: true
+  - pymdownx.emoji:
+      emoji_index: !!python/name:material.extensions.emoji.twemoji
+      emoji_generator: !!python/name:material.extensions.emoji.to_svg
+  - pymdownx.magiclink
+  - admonition
+  - pymdownx.details
+  - attr_list
+  - md_in_html
+  - tables
+  - toc:
+      permalink: true
+      toc_depth: 4
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      name: PitCrew on GitHub
+      link: https://github.com/ncosentino/pitcrew
+    - icon: material/web
+      name: Dev Leader
+      link: https://www.devleader.ca
+    - icon: material/ghost
+      name: BrandGhost
+      link: https://www.brandghost.ai
+
+docs_dir: docs
+
+copyright: >
+  Copyright &copy; 2026 Nick Cosentino.
+  <a href="https://www.devleader.ca">Dev Leader</a> |
+  <a href="https://links.devleader.ca">Links</a> |
+  <a href="https://www.brandghost.ai">BrandGhost</a>

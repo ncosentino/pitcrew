@@ -1,0 +1,11 @@
+# Never commit profile environment files - they hold the runner registration PAT.
+.env
+.env.*
+!.env.example
+
+# Generated documentation and local Python state.
+site/
+__pycache__/
+*.py[cod]
+.venv/
+.wrangler/

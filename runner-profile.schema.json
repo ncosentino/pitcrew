@@ -1,0 +1,86 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "PitCrew runner profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "name",
+    "description",
+    "image",
+    "labels",
+    "replicas"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "name": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,31}$"
+    },
+    "description": {
+      "type": "string",
+      "minLength": 1
+    },
+    "image": {
+      "type": "string",
+      "minLength": 1
+    },
+    "labels": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {
+        "type": "string",
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]{0,62}$"
+      }
+    },
+    "replicas": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "pullImage": {
+      "type": "boolean"
+    },
+    "disableDefaultLabels": {
+      "type": "boolean"
+    },
+    "runnerGroup": {
+      "type": "string"
+    },
+    "verificationCommands": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
+    },
+    "build": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "context",
+        "dockerfile"
+      ],
+      "properties": {
+        "context": {
+          "type": "string",
+          "minLength": 1
+        },
+        "dockerfile": {
+          "type": "string",
+          "minLength": 1
+        },
+        "args": {
+          "type": "object",
+          "additionalProperties": {
+            "type": "string"
+          }
+        }
+      }
+    }
+  }
+}

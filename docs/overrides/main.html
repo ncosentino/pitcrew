@@ -1,0 +1,62 @@
+{% extends "base.html" %}
+
+{% block extrahead %}
+  {{ super() }}
+  {% if page %}
+  <meta property="og:type" content="website" />
+  <meta property="og:title" content="{{ page.title }} – {{ config.site_name }}" />
+  <meta property="og:description" content="{{ page.meta.description | default(config.site_description) }}" />
+  <meta property="og:image" content="{{ config.site_url }}/assets/pitcrew-social-preview.png" />
+  <meta property="og:url" content="{{ page.canonical_url }}" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="{{ page.title }} – {{ config.site_name }}" />
+  <meta name="twitter:description" content="{{ page.meta.description | default(config.site_description) }}" />
+  <meta name="twitter:image" content="{{ config.site_url }}/assets/pitcrew-social-preview.png" />
+  {% endif %}
+  {% if page and page.ancestors %}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "BreadcrumbList",
+    "itemListElement": [
+      {
+        "@type": "ListItem",
+        "position": 1,
+        "name": "{{ config.site_name }}",
+        "item": "{{ config.site_url }}"
+      }{% for ancestor in page.ancestors %},
+      {
+        "@type": "ListItem",
+        "position": {{ loop.index + 1 }},
+        "name": "{{ ancestor.title }}",
+        "item": "{{ config.site_url }}"
+      }{% endfor %},
+      {
+        "@type": "ListItem",
+        "position": {{ page.ancestors | length + 2 }},
+        "name": "{{ page.title }}",
+        "item": "{{ page.canonical_url }}"
+      }
+    ]
+  }
+  </script>
+  {% endif %}
+  {% if page and page.is_homepage %}
+  <script type="application/ld+json">
+  {
+    "@context": "https://schema.org",
+    "@type": "SoftwareSourceCode",
+    "name": "{{ config.site_name }}",
+    "description": "{{ config.site_description }}",
+    "url": "{{ config.site_url }}",
+    "codeRepository": "{{ config.repo_url }}",
+    "license": "{{ config.repo_url }}/blob/main/LICENSE",
+    "author": {
+      "@type": "Person",
+      "name": "Nick Cosentino",
+      "url": "https://www.devleader.ca"
+    }
+  }
+  </script>
+  {% endif %}
+{% endblock %}

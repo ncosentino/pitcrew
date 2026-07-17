@@ -1,0 +1,9 @@
+# Cloudflare Pages project configuration.
+# https://developers.cloudflare.com/pages/functions/wrangler-configuration/
+#
+# `name` is your Cloudflare Pages project name (lowercase letters, numbers, hyphens).
+# The post-scaffold prompt fills this in; you can also edit it by hand at any time.
+# `pages_build_output_dir` is the directory your build produces.
+name = "pitcrew"
+pages_build_output_dir = "site"
+compatibility_date = "2026-07-16"

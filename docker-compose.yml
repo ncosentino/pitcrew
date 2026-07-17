@@ -1,0 +1,64 @@
+# Truly-ephemeral self-hosted GitHub Actions runners for any repo(s).
+#
+# A single "babysitter" container (the manager) keeps RUNNER_REPLICAS runner
+# slots filled. Each job runs in a brand-new runner container started with
+# --rm + EPHEMERAL=1, so the container is DESTROYED the instant the job ends and
+# the manager launches a pristine replacement. Nothing carries between jobs, so a
+# cancelled job, an interrupted apt, an OOM, or any other mess vanishes with the
+# container - every job starts clean. (Plain Docker can't do this itself: its
+# restart policy reuses the same container, and --rm deletes without relaunching;
+# the manager is the missing "recreate fresh on exit" piece.)
+#
+# The manager mounts the host Docker socket so it can start the runner containers
+# as siblings on the host daemon. That socket gives the MANAGER control of Docker
+# on this host - acceptable here because it is a single-purpose container running
+# only this script. The runner containers it launches do NOT get the socket, so
+# CI jobs still cannot touch Docker on the host.
+#
+# Setup-Runner.ps1 supplies a profile-specific Compose project and gitignored
+# environment file so several isolated managers can share one Docker host.
+
+services:
+  runner-manager:
+    build: ./manager
+    image: ephemeral-runner-manager:local
+    # Keep the babysitter alive across crashes and reboots; on start it clears any
+    # runners orphaned by a previous incarnation, so the pool self-recovers.
+    restart: unless-stopped
+    environment:
+      # Number of concurrent runner slots (~ half this machine's physical cores is
+      # a good default - leaves headroom so parallel builds don't starve the host).
+      RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}
+      RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}
+      # The runner image each slot launches. The default base already ships
+      # PowerShell 7 + a broad OS toolchain; point this at a custom image only if
+      # you have one.
+      RUNNER_IMAGE: ${RUNNER_IMAGE:-myoung34/github-runner:ubuntu-noble}
+      RUNNER_PULL_IMAGE: ${RUNNER_PULL_IMAGE:-1}
+      # repo (default) | org | ent. Org and enterprise scopes use their name
+      # variable and ignore the repository list.
+      RUNNER_SCOPE: ${RUNNER_SCOPE:-repo}
+      # Repos to serve (repo scope), each "url" or "url=workers" - REPO_URLS is the
+      # comma-separated list; REPO_URL is the single-repo back-compat alias. Each
+      # repo gets its own dedicated workers. Empty -> org/ent uses RUNNER_REPLICAS.
+      REPO_URLS: ${REPO_URLS:-}
+      REPO_URL: ${REPO_URL:-}
+      ORG_NAME: ${ORG_NAME:-}
+      ENTERPRISE_NAME: ${ENTERPRISE_NAME:-}
+      # Fine-grained PAT used to register runners. Setup-Runner validates it before
+      # replacing a live profile.
+      ACCESS_TOKEN: ${ACCESS_TOKEN:-}
+      # Cosmetic name prefix; the repo slug + index + timestamp are appended, so
+      # workers read like builder-project-a-1-..., builder-project-b-2-....
+      RUNNER_NAME_PREFIX: ${RUNNER_NAME_PREFIX:-runner}
+      # Effective custom labels. Isolated profiles disable GitHub defaults and the
+      # manager adds explicit linux and architecture labels.
+      RUNNER_LABELS: ${RUNNER_LABELS:-}
+      RUNNER_NO_DEFAULT_LABELS: ${RUNNER_NO_DEFAULT_LABELS:-}
+      RUNNER_GROUP: ${RUNNER_GROUP:-}
+    labels:
+      ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
+    volumes:
+      # The manager needs the host Docker daemon to launch sibling runner
+      # containers. Only the manager mounts this - never the runners.
+      - /var/run/docker.sock:/var/run/docker.sock
