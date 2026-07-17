@@ -186,6 +186,7 @@ docker build \
     --tag "${FAKE_IMAGE}" \
     "${ROOT}/tests/integration/fake-runner"
 
+mkdir -p "${ROOT}/.pitcrew-state"
 start_legacy_compose
 wait_for_legacy_worker_count 2
 [ -n "$(docker ps -q --filter "label=${LEGACY_MANAGER_LABEL}")" ] || {
