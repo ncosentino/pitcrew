@@ -100,6 +100,11 @@ enterprise identity, runner group, name prefix, registration token, build or
 verification contract, or manager runtime contract continue to replace the
 selected profile.
 
+Locally built profiles also fingerprint their complete build-context inventory.
+Generated PitCrew state and the selected secret environment are excluded. The
+fingerprint is intentionally conservative: a file Docker later excludes may
+trigger an unnecessary rebuild, but a changed copied input cannot be skipped.
+
 ## Legacy and direct Compose bootstrap
 
 When neither desired nor last-valid state exists, the manager can import
