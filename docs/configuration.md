@@ -111,6 +111,11 @@ After the adapter creates generation one, environment changes do not alter
 capacity. Use `Setup-Runner.ps1` for every subsequent update so generation,
 locking, atomic publication, and acknowledgement remain enforced.
 
+The mounted directory contains no credentials. If Docker creates a missing bind
+source as root, the manager makes that directory host-writable so a later setup
+command can replace state atomically. Pre-create the directory when stricter
+host ownership is required.
+
 On the first setup run after upgrading, `-AddRepos` and `-RemoveRepos` import
 repository targets from the old profile environment when desired state has not
 been created yet.

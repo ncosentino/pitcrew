@@ -437,6 +437,11 @@ process_desired_state() {
 }
 
 mkdir -p "${STATE_DIRECTORY}"
+# Docker creates a missing bind source as root. This directory contains only
+# non-secret reconciliation state and must remain replaceable by host-side setup.
+if [ "$(stat -c '%u' "${STATE_DIRECTORY}")" = "0" ]; then
+    chmod 0777 "${STATE_DIRECTORY}"
+fi
 rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
