@@ -99,3 +99,18 @@ Changes to image, labels, default-label behavior, scope, organization or
 enterprise identity, runner group, name prefix, registration token, build or
 verification contract, or manager runtime contract continue to replace the
 selected profile.
+
+## Legacy and direct Compose bootstrap
+
+When neither desired nor last-valid state exists, the manager can import
+`REPO_URLS` or `REPO_URL` for repository scope, or `RUNNER_REPLICAS` for
+organization and enterprise scope. This is a one-time adapter for
+pre-reconciliation `.env` files and direct `docker compose up` usage.
+
+After the adapter creates generation one, environment changes do not alter
+capacity. Use `Setup-Runner.ps1` for every subsequent update so generation,
+locking, atomic publication, and acknowledgement remain enforced.
+
+On the first setup run after upgrading, `-AddRepos` and `-RemoveRepos` import
+repository targets from the old profile environment when desired state has not
+been created yet.

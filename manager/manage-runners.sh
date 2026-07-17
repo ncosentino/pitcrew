@@ -252,6 +252,17 @@ write_acknowledgement() {
     publish_pending_acknowledgement
 }
 
+acknowledgement_matches_current() {
+    [ -f "${ACKNOWLEDGEMENT_PATH}" ] || return 1
+    jq -e \
+        --argjson generation "${CURRENT_GENERATION}" \
+        '
+            .schemaVersion == 1
+            and .status == "accepted"
+            and .generation == $generation
+        ' "${ACKNOWLEDGEMENT_PATH}" >/dev/null 2>&1
+}
+
 reconcile_slots() {
     desired_slots_path="$1"
     added_path="$2"
@@ -304,6 +315,30 @@ persist_accepted_state() {
         rm -f "${accepted_temporary}"
         return 1
     fi
+}
+
+bootstrap_legacy_desired_state() {
+    if [ -f "${DESIRED_STATE_PATH}" ] || [ -f "${ACCEPTED_STATE_PATH}" ]; then
+        return
+    fi
+
+    legacy_temporary="${STATE_DIRECTORY}/.legacy-desired-capacity.$$.tmp"
+    legacy_repositories="${REPO_URLS:-${REPO_URL:-}}"
+    if ! write_legacy_desired_state \
+        "${legacy_temporary}" \
+        "${RUNNER_SCOPE:-repo}" \
+        "${legacy_repositories}" \
+        "${RUNNER_REPLICAS:-1}"; then
+        rm -f "${legacy_temporary}"
+        echo "[manager:${PROFILE_ID}] no valid desired state or legacy capacity configuration was found" >&2
+        return
+    fi
+    if ! mv -f "${legacy_temporary}" "${DESIRED_STATE_PATH}"; then
+        rm -f "${legacy_temporary}"
+        echo "[manager:${PROFILE_ID}] legacy capacity could not be published as desired state" >&2
+        return
+    fi
+    echo "[manager:${PROFILE_ID}] imported legacy environment capacity as desired generation 1"
 }
 
 load_accepted_state() {
@@ -417,6 +452,7 @@ else
     echo "[manager:${PROFILE_ID}] using locally prepared runner image ${IMAGE}"
 fi
 
+bootstrap_legacy_desired_state
 load_accepted_state
 if [ "${CURRENT_GENERATION}" -gt 0 ]; then
     startup_added="/tmp/pitcrew-startup-added.$$"
@@ -427,6 +463,14 @@ if [ "${CURRENT_GENERATION}" -gt 0 ]; then
         "${startup_added}" \
         "${startup_draining}" \
         "${startup_unchanged}"
+    if ! acknowledgement_matches_current; then
+        write_acknowledgement \
+            "$(count_lines "${CURRENT_DESIRED_SLOTS}")" \
+            "${startup_added}" \
+            "${startup_draining}" \
+            "${startup_unchanged}" ||
+            echo "[manager:${PROFILE_ID}] restored generation ${CURRENT_GENERATION} but acknowledgement could not be repaired" >&2
+    fi
     rm -f "${startup_added}" "${startup_draining}" "${startup_unchanged}"
 fi
 
@@ -444,6 +488,14 @@ while [ "${STOPPING}" -eq 0 ]; do
             "${periodic_added}" \
             "${periodic_draining}" \
             "${periodic_unchanged}"
+        if [ ! -f "${PENDING_ACKNOWLEDGEMENT}" ] &&
+            ! acknowledgement_matches_current; then
+            write_acknowledgement \
+                "$(count_lines "${CURRENT_DESIRED_SLOTS}")" \
+                "${periodic_added}" \
+                "${periodic_draining}" \
+                "${periodic_unchanged}" || true
+        fi
         rm -f "${periodic_added}" "${periodic_draining}" "${periodic_unchanged}"
     fi
     sleep "${RECONCILE_INTERVAL}"

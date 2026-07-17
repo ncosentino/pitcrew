@@ -2,14 +2,24 @@
 set -euo pipefail
 
 ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
-PROFILE_LABEL="ephemeral-managed-runner-profile=default"
-MANAGER_LABEL="ephemeral-runner-manager-profile=default"
+RUN_ID="${GITHUB_RUN_ID:-$$}"
+PROFILE_NAME="integration-${RUN_ID}"
+LEGACY_PROFILE_NAME="legacy-${RUN_ID}"
+PROFILE_LABEL="ephemeral-managed-runner-profile=${PROFILE_NAME}"
+MANAGER_LABEL="ephemeral-runner-manager-profile=${PROFILE_NAME}"
+LEGACY_PROFILE_LABEL="ephemeral-managed-runner-profile=${LEGACY_PROFILE_NAME}"
+LEGACY_MANAGER_LABEL="ephemeral-runner-manager-profile=${LEGACY_PROFILE_NAME}"
 SLOT_LABEL="ephemeral-managed-runner-slot"
-FAKE_IMAGE="pitcrew-fake-runner:integration"
+FAKE_IMAGE="pitcrew-fake-runner:${PROFILE_NAME}"
 REPOSITORY_URL="https://github.com/example/integration"
-STATE_DIRECTORY="${ROOT}/.pitcrew-state/default"
+STATE_DIRECTORY="${ROOT}/.pitcrew-state/${PROFILE_NAME}"
 DESIRED_STATE="${STATE_DIRECTORY}/desired-capacity.json"
 ACKNOWLEDGEMENT="${STATE_DIRECTORY}/acknowledged-capacity.json"
+LEGACY_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${LEGACY_PROFILE_NAME}"
+LEGACY_DESIRED_STATE="${LEGACY_STATE_DIRECTORY}/desired-capacity.json"
+LEGACY_COMPOSE_PROJECT="self-hosted-runner-${LEGACY_PROFILE_NAME}"
+FIXTURE_DIRECTORY=$(mktemp -d)
+PROFILE_PATH="${FIXTURE_DIRECTORY}/profile.json"
 MANAGER_ID=""
 
 worker_ids() {
@@ -75,7 +85,58 @@ wait_for_slot_replacement() {
 run_setup() {
     workers="$1"
     pwsh -NoProfile -Command \
-        "& '${ROOT}/Setup-Runner.ps1' -Token 'integration-token' -Image '${FAKE_IMAGE}' -PullImage:\$false -Repos '${REPOSITORY_URL}=${workers}'"
+        "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
+}
+
+start_legacy_compose() {
+    (
+        cd "${ROOT}"
+        ACCESS_TOKEN="integration-token" \
+        REPO_URLS="${REPOSITORY_URL}=2" \
+        REPO_URL="" \
+        RUNNER_SCOPE="repo" \
+        ORG_NAME="" \
+        ENTERPRISE_NAME="" \
+        RUNNER_PROFILE_ID="${LEGACY_PROFILE_NAME}" \
+        RUNNER_REPLICAS="1" \
+        RUNNER_IMAGE="${FAKE_IMAGE}" \
+        RUNNER_PULL_IMAGE="0" \
+        RUNNER_NAME_PREFIX="${LEGACY_PROFILE_NAME}" \
+        RUNNER_LABELS="integration" \
+        RUNNER_NO_DEFAULT_LABELS="1" \
+        RUNNER_GROUP="" \
+        PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
+        PITCREW_MANAGER_CONTRACT_VERSION="2" \
+            docker compose \
+                --file docker-compose.yml \
+                --project-name "${LEGACY_COMPOSE_PROJECT}" \
+                up -d --build
+    )
+}
+
+stop_legacy_compose() {
+    (
+        cd "${ROOT}"
+        PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
+            docker compose \
+                --file docker-compose.yml \
+                --project-name "${LEGACY_COMPOSE_PROJECT}" \
+                down --remove-orphans
+    )
+}
+
+wait_for_legacy_worker_count() {
+    expected="$1"
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        count=$(docker ps -q --filter "label=${LEGACY_PROFILE_LABEL}" | awk 'END { print NR + 0 }')
+        if [ "${count}" -eq "${expected}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for ${expected} legacy-adapter workers." >&2
+    return 1
 }
 
 assert_running() {
@@ -93,19 +154,54 @@ cleanup() {
         docker logs "${MANAGER_ID}" 2>&1 || true
     fi
     pwsh -NoProfile -Command \
-        "& '${ROOT}/Setup-Runner.ps1' -Down" >/dev/null 2>&1 || true
+        "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Down" >/dev/null 2>&1 || true
+    stop_legacy_compose >/dev/null 2>&1 || true
     docker ps -aq --filter "label=${PROFILE_LABEL}" |
         xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker ps -aq --filter "label=${LEGACY_PROFILE_LABEL}" |
+        xargs -r docker rm -f >/dev/null 2>&1 || true
     docker image rm -f "${FAKE_IMAGE}" >/dev/null 2>&1 || true
-    rm -rf "${ROOT}/.env" "${ROOT}/.pitcrew-state"
+    rm -f "${ROOT}/.env.${PROFILE_NAME}"
+    rm -rf "${STATE_DIRECTORY}" "${LEGACY_STATE_DIRECTORY}" "${FIXTURE_DIRECTORY}"
+    rmdir "${ROOT}/.pitcrew-state" >/dev/null 2>&1 || true
     trap - EXIT
     exit "${status}"
 }
 trap cleanup EXIT
 
+cat > "${PROFILE_PATH}" <<EOF
+{
+  "schemaVersion": 1,
+  "name": "${PROFILE_NAME}",
+  "description": "Isolated real-Docker reconciliation test profile.",
+  "image": "${FAKE_IMAGE}",
+  "labels": ["integration"],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true
+}
+EOF
+
 docker build \
     --tag "${FAKE_IMAGE}" \
     "${ROOT}/tests/integration/fake-runner"
+
+start_legacy_compose
+wait_for_legacy_worker_count 2
+[ -n "$(docker ps -q --filter "label=${LEGACY_MANAGER_LABEL}")" ] || {
+    echo "Legacy direct-Compose manager did not start." >&2
+    exit 1
+}
+[ "$(jq -r '.generation' "${LEGACY_DESIRED_STATE}")" -eq 1 ] || {
+    echo "Legacy direct-Compose capacity did not bootstrap generation one." >&2
+    exit 1
+}
+[ "$(jq -r '.repositories[0].workers' "${LEGACY_DESIRED_STATE}")" -eq 2 ] || {
+    echo "Legacy direct-Compose capacity did not preserve worker count." >&2
+    exit 1
+}
+stop_legacy_compose
+wait_for_legacy_worker_count 0
 
 run_setup 5
 wait_for_acknowledgement 1
@@ -183,7 +279,10 @@ docker stop --time 5 "${replacement_source}" >/dev/null
 wait_for_slot_replacement "${replacement_slot}" "${replacement_source}"
 wait_for_worker_count 5
 
+jq '.generation = 2' "${ACKNOWLEDGEMENT}" > "${ACKNOWLEDGEMENT}.stale"
+mv -f "${ACKNOWLEDGEMENT}.stale" "${ACKNOWLEDGEMENT}"
 docker restart "${MANAGER_ID}" >/dev/null
+wait_for_acknowledgement 3
 restart_deadline=$((SECONDS + 60))
 while [ "${SECONDS}" -lt "${restart_deadline}" ]; do
     restored=$(docker logs "${MANAGER_ID}" 2>&1 |

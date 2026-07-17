@@ -28,6 +28,15 @@ assert_true() {
     "$@" || fail "${message}"
 }
 
+assert_false() {
+    message="$1"
+    shift
+    ASSERTIONS=$((ASSERTIONS + 1))
+    if "$@"; then
+        fail "${message}"
+    fi
+}
+
 write_repo_state() {
     path="$1"
     generation="$2"
@@ -135,5 +144,29 @@ write_repo_state \
     9 \
     '[{"url":"-","workers":1}]'
 assert_equals "invalid" "$(classify_desired_state "${sentinel_state}" 4 "${five_hash}")" "The scope sentinel was accepted as a repository URL."
+
+legacy_repo_state="${TEMP_DIRECTORY}/legacy-repo.json"
+write_legacy_desired_state \
+    "${legacy_repo_state}" \
+    repo \
+    'https://github.com/example/alpha=2,https://github.com/example/beta' \
+    99
+assert_true "Legacy repository capacity was not converted into valid desired state." desired_state_is_valid "${legacy_repo_state}"
+assert_equals "2" "$(jq -r '.repositories | length' "${legacy_repo_state}")" "Legacy repository conversion lost a target."
+assert_equals "2" "$(jq -r '.repositories[] | select(.url == "https://github.com/example/alpha") | .workers' "${legacy_repo_state}")" "Legacy explicit worker count changed during conversion."
+assert_equals "1" "$(jq -r '.repositories[] | select(.url == "https://github.com/example/beta") | .workers' "${legacy_repo_state}")" "Legacy implicit worker count did not preserve the original default."
+
+legacy_org_state="${TEMP_DIRECTORY}/legacy-org.json"
+write_legacy_desired_state "${legacy_org_state}" org '' 4
+assert_true "Legacy organization capacity was not converted into valid desired state." desired_state_is_valid "${legacy_org_state}"
+assert_equals "4" "$(jq -r '.replicas' "${legacy_org_state}")" "Legacy organization replicas changed during conversion."
+
+assert_false \
+    "Legacy conversion accepted a zero worker count." \
+    write_legacy_desired_state \
+    "${TEMP_DIRECTORY}/legacy-invalid.json" \
+    repo \
+    'https://github.com/example/project=0' \
+    1
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."
