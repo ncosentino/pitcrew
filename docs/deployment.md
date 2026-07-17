@@ -46,6 +46,18 @@ npx wrangler pages deploy site --project-name=pitcrew --branch=main
 The `www.devleader.ca/projects/pitcrew` route is maintained by the Dev Leader
 project-documentation router after the Pages origin is live.
 
+## Keep the Pages origin out of search results
+
+`docs/_headers` adds `X-Robots-Tag: noindex` to production and preview
+`pages.dev` responses. Crawlers can still fetch those URLs, which is required
+for them to observe the `noindex` directive, but the origins are not eligible
+for search results.
+
+The Dev Leader project-documentation router removes that origin-only header
+before returning the canonical `www.devleader.ca/projects/pitcrew` response.
+Do not replace this policy with `robots.txt: Disallow`, because blocked
+crawlers cannot observe either `noindex` or canonical metadata.
+
 ## Configure the GitHub repository
 
 Set the repository homepage to:

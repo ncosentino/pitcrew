@@ -24,6 +24,8 @@ PowerShell, Docker Compose, and a POSIX shell manager.
 - Never put credentials in manifests, Docker build arguments, images, examples,
   or tracked environment files.
 - Never broaden cleanup from exact labels to container-name matching.
+- Keep `docs/_headers` noindex rules on Pages production and preview origins;
+  the canonical Dev Leader router removes that header from public responses.
 
 ## Validation
 
