@@ -110,7 +110,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 2
+        managerContractVersion = 3
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -166,7 +166,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 2
+                            managerContractVersion = 3
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -252,7 +252,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 2) 'The setup contract does not identify the reconciliation-capable manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 3) 'The setup contract does not identify the migration-safe manager.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
     -Generation 4 `
@@ -343,7 +343,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=2$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=3$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'

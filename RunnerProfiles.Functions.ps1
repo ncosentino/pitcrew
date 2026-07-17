@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 2
+$script:RunnerManagerContractVersion = 3
 
 function ConvertTo-RunnerLabelList {
     param(
