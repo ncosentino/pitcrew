@@ -123,7 +123,7 @@ write_legacy_desired_state() {
         repo)
             [ -n "${repositories}" ] || return 1
             : > "${repository_objects}"
-            if ! printf '%s' "${repositories}" |
+            if ! printf '%s\n' "${repositories}" |
                 tr ',' '\n' |
                 while IFS= read -r entry; do
                     entry=$(printf '%s' "${entry}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
