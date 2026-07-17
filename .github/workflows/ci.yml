@@ -43,7 +43,26 @@ jobs:
         run: ./tests/Test-RunnerProfiles.ps1
 
       - name: Validate manager shell syntax
-        run: sh -n manager/manage-runners.sh
+        run: |
+          sh -n manager/manage-runners.sh
+          sh -n manager/reconciliation.sh
+          sh -n tests/Test-ManagerReconciliation.sh
+          sh -n tests/integration/fake-runner/fake-runner.sh
+          bash -n tests/integration/Test-CapacityReconciliation.sh
+
+      - name: Run manager reconciliation contracts
+        run: sh ./tests/Test-ManagerReconciliation.sh
 
       - name: Validate Docker Compose configuration
         run: docker compose --file docker-compose.yml config --quiet
+
+  docker-integration:
+    name: Real Docker capacity reconciliation
+    needs: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run real Docker reconciliation
+        run: bash ./tests/integration/Test-CapacityReconciliation.sh

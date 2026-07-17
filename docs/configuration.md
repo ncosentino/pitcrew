@@ -62,6 +62,40 @@ Named profiles conform to
 
 ## Generated state
 
-The default profile writes `.env`; named profiles write `.env.<profile>`.
-PitCrew generates these files and Git ignores them because they contain the
-runner-registration token. Do not edit or commit them.
+The default profile writes `.env`; named profiles write `.env.<profile>`. These
+static environment files contain the runner-registration token plus image,
+labels, scope, runner group, and name-prefix settings. PitCrew generates them
+and Git ignores them. Do not edit or commit them.
+
+Mutable capacity is stored separately under
+`.pitcrew-state/<profile>/desired-capacity.json`. The document contains no
+registration token or workload credential. Setup validates the complete next
+document, writes it through a temporary file and atomic rename, and waits for
+the running manager to acknowledge its generation.
+
+For repository scope, desired state records each repository URL and worker
+count. Organization and enterprise scope record one shared replica count. The
+manager derives stable ordinal slot keys, so changing a repository from five
+workers to six starts only ordinal six. Changing it back to five drains only
+ordinal six.
+
+## Capacity reconciliation
+
+When the static profile fingerprint is unchanged and the manager is running,
+setup skips image pull/build and verification, leaves the manager container
+untouched, and publishes only desired capacity. Reapplying identical capacity
+is a no-op.
+
+Scale-down is graceful:
+
+- A runner already executing a job is never force-removed because capacity
+  decreased.
+- Once the draining runner container exits, its slot stops instead of spawning
+  a replacement.
+- An idle ephemeral runner can accept one final job before it exits. PitCrew
+  does not query GitHub's runner `busy` state in this reconciliation path.
+
+Changes to image, labels, default-label behavior, scope, organization or
+enterprise identity, runner group, name prefix, registration token, build or
+verification contract, or manager runtime contract continue to replace the
+selected profile.

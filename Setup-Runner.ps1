@@ -9,13 +9,10 @@
     images, labels, replica defaults, verification checks, Compose projects,
     environment files, and Docker cleanup labels without duplicating the manager.
 
-    Each run converges only the selected profile:
-      1. Resolves and validates repository targets and credentials.
-      2. Builds the profile image when its manifest defines a build.
-      3. Verifies the image contract.
-      4. Writes the selected profile's gitignored environment file.
-      5. Replaces only that profile's existing manager and runners.
-      6. Starts that profile's manager.
+    Each run converges only the selected profile. Capacity-only changes update
+    atomically mounted desired state and are reconciled by the existing manager.
+    Changes to image, routing, scope, naming, or other static configuration retain
+    the full profile replacement path.
 
 .PARAMETER Token
     Fine-grained PAT with Administration: Read and write on every target. If
@@ -136,19 +133,18 @@ $legacyLabels = @('ephemeral-managed-runner')
 $composePath = Join-Path $here 'docker-compose.yml'
 $composeEnvironmentNames = @(
     'ACCESS_TOKEN',
-    'REPO_URLS',
-    'REPO_URL',
     'RUNNER_SCOPE',
     'ORG_NAME',
     'ENTERPRISE_NAME',
     'RUNNER_PROFILE_ID',
-    'RUNNER_REPLICAS',
     'RUNNER_IMAGE',
     'RUNNER_PULL_IMAGE',
     'RUNNER_NAME_PREFIX',
     'RUNNER_LABELS',
     'RUNNER_NO_DEFAULT_LABELS',
-    'RUNNER_GROUP'
+    'RUNNER_GROUP',
+    'PITCREW_STATE_DIR',
+    'PITCREW_MANAGER_CONTRACT_VERSION'
 )
 
 function Invoke-RunnerCompose {
@@ -223,6 +219,7 @@ function Stop-RunnerProfile {
             docker ps -aq --filter "label=$label" 2>$null
         }
     }
+
     foreach ($id in (@($ids) | Where-Object { $_ } | Select-Object -Unique)) {
         docker rm -f $id 2>&1 | Out-Null
         if ($LASTEXITCODE -ne 0) {
@@ -231,16 +228,130 @@ function Stop-RunnerProfile {
     }
 }
 
+function Test-RunnerManagerRunning {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    $managerIds = @(
+        docker ps -q --filter "label=ephemeral-runner-manager-profile=$($ProfileConfig.Name)" 2>$null |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to inspect the manager for profile '$($ProfileConfig.Name)'."
+    }
+    return $managerIds.Count -gt 0
+}
+
+function New-RunnerTextStagingFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Value
+    )
+
+    $directory = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporaryPath = Join-Path $directory ".$([IO.Path]::GetFileName($Path)).$([guid]::NewGuid().ToString('N')).tmp"
+    try {
+        [IO.File]::WriteAllText($temporaryPath, $Value, [Text.UTF8Encoding]::new($false))
+        return $temporaryPath
+    }
+    catch {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+        throw
+    }
+}
+
+function New-RunnerJsonStagingFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [object]$Value
+    )
+
+    $json = $Value | ConvertTo-Json -Depth 20
+    return New-RunnerTextStagingFile -Path $Path -Value "$json`n"
+}
+
+function Complete-RunnerStagedFile {
+    param(
+        [Parameter(Mandatory)]
+        [string]$TemporaryPath,
+
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    [IO.File]::Move($TemporaryPath, $Path, $true)
+}
+
+function Wait-RunnerCapacityAcknowledgement {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$Generation,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $lastReadError = $null
+    do {
+        if (Test-Path -LiteralPath $ProfileConfig.CapacityAcknowledgementPath -PathType Leaf) {
+            try {
+                $acknowledgement = Read-RunnerJsonFile -Path $ProfileConfig.CapacityAcknowledgementPath
+                if (
+                    [int]$acknowledgement.schemaVersion -ne 1 -or
+                    [string]$acknowledgement.status -ne 'accepted'
+                ) {
+                    throw 'Acknowledgement has an unsupported contract.'
+                }
+
+                $acknowledgedGeneration = [int]$acknowledgement.generation
+                if ($acknowledgedGeneration -eq $Generation) {
+                    return $acknowledgement
+                }
+                if ($acknowledgedGeneration -gt $Generation) {
+                    throw "Manager acknowledged generation $acknowledgedGeneration while setup was waiting for generation $Generation."
+                }
+                $lastReadError = $null
+            } catch {
+                $lastReadError = $_.Exception.Message
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    } while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+
+    $detail = if ($lastReadError) { " Last acknowledgement error: $lastReadError" } else { '' }
+    throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation within $TimeoutSeconds seconds.$detail"
+}
+
 Push-Location $here
+$profileLock = $null
 try {
+    New-Item -ItemType Directory -Path $profileConfig.StateDirectory -Force | Out-Null
+    $profileLock = Enter-RunnerProfileLock -Path $profileConfig.LockPath -TimeoutSeconds 30
+
     if ($Down) {
-        Write-Host "[1/1] Stopping profile '$($profileConfig.Name)'"
+        Write-Host "[stop] Stopping profile '$($profileConfig.Name)'"
         Stop-RunnerProfile -ProfileConfig $profileConfig
         Write-Host "[done] Profile '$($profileConfig.Name)' stopped. Other profiles were not changed."
         return
     }
 
-    Write-Host "[1/6] Resolving workers, targets, and registration credentials"
+    Write-Host "[resolve] Resolving workers, targets, and registration credentials"
     if ($profileConfig.Replicas -eq 0) {
         $profileConfig.Replicas = [math]::Max(2, [math]::Floor([Environment]::ProcessorCount / 2))
     }
@@ -263,18 +374,51 @@ try {
         Write-Error 'No token: pass -Token <PAT>, or authenticate gh so Setup-Runner can use that token.'
     }
 
+    $currentDesiredState = $null
+    $currentDesiredReadError = $null
+    if (Test-Path -LiteralPath $profileConfig.DesiredCapacityPath -PathType Leaf) {
+        try {
+            $storedDesiredState = Read-RunnerJsonFile -Path $profileConfig.DesiredCapacityPath
+            if ([int]$storedDesiredState.schemaVersion -ne 1) {
+                throw "Unsupported desired-capacity schema version '$($storedDesiredState.schemaVersion)'."
+            }
+            $storedReplicas = if (
+                $storedDesiredState.PSObject.Properties['replicas'] -and
+                $null -ne $storedDesiredState.replicas
+            ) {
+                [Nullable[int]][int]$storedDesiredState.replicas
+            } else {
+                $null
+            }
+            $currentDesiredState = New-RunnerDesiredCapacityState `
+                -Generation ([int]$storedDesiredState.generation) `
+                -Scope ([string]$storedDesiredState.scope) `
+                -Repositories @(
+                    @($storedDesiredState.repositories) |
+                        ForEach-Object {
+                            [PSCustomObject]@{
+                                Url = [string]$_.url
+                                Workers = [int]$_.workers
+                            }
+                        }
+                ) `
+                -Replicas $storedReplicas
+        } catch {
+            $currentDesiredReadError = $_.Exception.Message
+        }
+    }
+
     $repoList = @()
-    $repoUrls = ''
     if ($Scope -eq 'repo') {
         $repoList = @($Repos)
-        if (($AddRepos -or $RemoveRepos) -and -not $Repos -and (Test-Path -LiteralPath $profileConfig.EnvironmentPath)) {
-            $current = (
-                Get-Content -LiteralPath $profileConfig.EnvironmentPath |
-                    Where-Object { $_ -match '^REPO_URLS=' }
-            ) -replace '^REPO_URLS=', ''
-            $current = ([string]$current).Trim()
-            if ($current) {
-                $repoList = @($current -split ',')
+        if (($AddRepos -or $RemoveRepos) -and -not $Repos) {
+            if ($currentDesiredState -and $currentDesiredState.scope -eq 'repo') {
+                $repoList = @(
+                    $currentDesiredState.repositories |
+                        ForEach-Object { "$($_.url)=$($_.workers)" }
+                )
+            } elseif ($currentDesiredReadError) {
+                Write-Error "Cannot apply -AddRepos or -RemoveRepos because existing desired capacity is unreadable. Pass the complete -Repos list. $currentDesiredReadError"
             }
         }
 
@@ -315,23 +459,150 @@ try {
                 $repoCounts[$url] = $count
             }
         }
-        $repoList = @(
+        $desiredRepositories = @(
             $repoCounts.Keys |
                 Sort-Object |
-                ForEach-Object { "$_=$($repoCounts[$_])" }
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        Url = $_
+                        Workers = [int]$repoCounts[$_]
+                    }
+                }
         )
-        $repoUrls = ($repoList -join ',').Trim()
-        if (-not $repoUrls) {
+        if ($desiredRepositories.Count -eq 0) {
             Write-Error '-Repos is required for repo scope (for example, -Repos https://github.com/me/a=2).'
         }
+    } else {
+        $desiredRepositories = @()
     }
     $total = if ($Scope -eq 'repo') {
-        ($repoList | ForEach-Object { [int]($_ -split '=')[1] } | Measure-Object -Sum).Sum
+        [int]($desiredRepositories | Measure-Object -Property Workers -Sum).Sum
     } else {
-        $profileConfig.Replicas
+        [int]$profileConfig.Replicas
+    }
+    $desiredReplicas = if ($Scope -eq 'repo') {
+        $null
+    } else {
+        [Nullable[int]][int]$profileConfig.Replicas
+    }
+    $desiredDraft = New-RunnerDesiredCapacityState `
+        -Generation 1 `
+        -Scope $Scope `
+        -Repositories $desiredRepositories `
+        -Replicas $desiredReplicas
+    $desiredSignature = Get-RunnerDesiredCapacitySignature -State $desiredDraft
+    $currentDesiredSignature = if ($currentDesiredState) {
+        Get-RunnerDesiredCapacitySignature -State $currentDesiredState
+    } else {
+        $null
     }
 
-    Write-Host "[2/6] Preparing runner image '$($profileConfig.Image)'"
+    $acknowledgedGeneration = 0
+    $acknowledgementValid = $false
+    if (Test-Path -LiteralPath $profileConfig.CapacityAcknowledgementPath -PathType Leaf) {
+        try {
+            $storedAcknowledgement = Read-RunnerJsonFile -Path $profileConfig.CapacityAcknowledgementPath
+            if (
+                [int]$storedAcknowledgement.schemaVersion -eq 1 -and
+                [string]$storedAcknowledgement.status -eq 'accepted' -and
+                [int]$storedAcknowledgement.generation -gt 0
+            ) {
+                $acknowledgedGeneration = [int]$storedAcknowledgement.generation
+                $acknowledgementValid = $true
+            }
+        } catch {
+            $acknowledgedGeneration = 0
+            $acknowledgementValid = $false
+        }
+    }
+    $currentGeneration = if ($currentDesiredState) {
+        [int]$currentDesiredState.generation
+    } else {
+        0
+    }
+    $generationBase = [math]::Max($currentGeneration, $acknowledgedGeneration)
+    $desiredStateChanged = (
+        -not $currentDesiredState -or
+        $currentDesiredSignature -ne $desiredSignature -or
+        $currentGeneration -lt $acknowledgedGeneration -or
+        -not $acknowledgementValid
+    )
+    $nextGeneration = if ($desiredStateChanged) {
+        $generationBase + 1
+    } else {
+        $currentGeneration
+    }
+    $desiredState = New-RunnerDesiredCapacityState `
+        -Generation $nextGeneration `
+        -Scope $Scope `
+        -Repositories $desiredRepositories `
+        -Replicas $desiredReplicas
+
+    $environmentContent = New-RunnerEnvironmentContent `
+        -Profile $profileConfig `
+        -AccessToken $Token `
+        -Scope $Scope `
+        -OrgName $OrgName `
+        -EnterpriseName $EnterpriseName
+    $staticProfileState = New-RunnerStaticProfileState `
+        -Profile $profileConfig `
+        -Scope $Scope `
+        -OrgName $OrgName `
+        -EnterpriseName $EnterpriseName
+
+    $managerRunning = Test-RunnerManagerRunning -ProfileConfig $profileConfig
+    $environmentMatches = (
+        (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) -and
+        (Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8) -ceq $environmentContent
+    )
+    $staticProfileMatches = $false
+    if (Test-Path -LiteralPath $profileConfig.StaticProfilePath -PathType Leaf) {
+        try {
+            $storedStaticProfile = Read-RunnerJsonFile -Path $profileConfig.StaticProfilePath
+            $staticProfileMatches = (
+                [int]$storedStaticProfile.schemaVersion -eq 1 -and
+                [string]$storedStaticProfile.fingerprint -ceq [string]$staticProfileState.fingerprint
+            )
+        } catch {
+            $staticProfileMatches = $false
+        }
+    }
+    $capacityOnlyCompatible = (
+        $managerRunning -and
+        $environmentMatches -and
+        $staticProfileMatches -and
+        ($currentGeneration -gt 0 -or $acknowledgedGeneration -gt 0)
+    )
+
+    if ($capacityOnlyCompatible) {
+        if ($desiredStateChanged) {
+            Write-Host "[capacity] Publishing desired-capacity generation $nextGeneration"
+            Write-RunnerJsonAtomically `
+                -Path $profileConfig.DesiredCapacityPath `
+                -Value $desiredState
+            $acknowledgement = Wait-RunnerCapacityAcknowledgement `
+                -ProfileConfig $profileConfig `
+                -Generation $nextGeneration `
+                -TimeoutSeconds 30
+
+            $added = [int]$acknowledgement.addedSlots
+            $draining = [int]$acknowledgement.drainingSlots
+            $unchanged = [int]$acknowledgement.unchangedSlots
+            if ([int]$acknowledgement.desiredSlots -ne $total) {
+                throw "Manager acknowledged $($acknowledgement.desiredSlots) desired slots, but setup requested $total."
+            }
+            Write-Host "[done] Capacity-only change: adding $added worker(s), draining $draining worker(s), $unchanged unchanged; manager restart not required."
+        } else {
+            Wait-RunnerCapacityAcknowledgement `
+                -ProfileConfig $profileConfig `
+                -Generation $nextGeneration `
+                -TimeoutSeconds 30 | Out-Null
+            Write-Host "[done] Capacity unchanged: 0 added, 0 draining, $total unchanged; manager restart not required."
+        }
+        return
+    }
+
+    Write-Host "[image] Preparing runner image '$($profileConfig.Image)'"
     if ($profileConfig.Build) {
         $buildArguments = @(
             'build',
@@ -359,7 +630,7 @@ try {
         Write-Host '  Profile uses a locally available prebuilt runner image.'
     }
 
-    Write-Host "[3/6] Verifying runner image contract"
+    Write-Host "[verify] Verifying runner image contract"
     foreach ($command in $profileConfig.VerificationCommands) {
         & docker run --rm --entrypoint /bin/sh $profileConfig.Image -lc $command
         if ($LASTEXITCODE -ne 0) {
@@ -370,31 +641,65 @@ try {
         Write-Host '  Profile defines no runtime verification commands.'
     }
 
-    Write-Host "[4/6] Writing $([IO.Path]::GetFileName($profileConfig.EnvironmentPath)) (workers=$total, scope=$Scope)"
-    $environmentContent = New-RunnerEnvironmentContent `
-        -Profile $profileConfig `
-        -AccessToken $Token `
-        -RepoUrls $repoUrls `
-        -Scope $Scope `
-        -OrgName $OrgName `
-        -EnterpriseName $EnterpriseName
-    Set-Content `
-        -LiteralPath $profileConfig.EnvironmentPath `
-        -Value $environmentContent `
-        -NoNewline `
-        -Encoding UTF8
+    Write-Host "[state] Staging static profile and desired capacity (workers=$total, scope=$Scope)"
+    $stagedFiles = [System.Collections.Generic.List[object]]::new()
+    try {
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerTextStagingFile `
+                -Path $profileConfig.EnvironmentPath `
+                -Value $environmentContent
+            Path = $profileConfig.EnvironmentPath
+        })
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerJsonStagingFile `
+                -Path $profileConfig.StaticProfilePath `
+                -Value $staticProfileState
+            Path = $profileConfig.StaticProfilePath
+        })
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerJsonStagingFile `
+                -Path $profileConfig.DesiredCapacityPath `
+                -Value $desiredState
+            Path = $profileConfig.DesiredCapacityPath
+        })
 
-    if (-not $profileConfig.IsDefault -and -not $profileConfig.DisableDefaultLabels) {
-        Write-Warning "Profile '$($profileConfig.Name)' retains GitHub's default labels, so jobs targeting only 'self-hosted' can run on it."
+        if (-not $profileConfig.IsDefault -and -not $profileConfig.DisableDefaultLabels) {
+            Write-Warning "Profile '$($profileConfig.Name)' retains GitHub's default labels, so jobs targeting only 'self-hosted' can run on it."
+        }
+
+        Write-Host "[replace] Replacing existing profile '$($profileConfig.Name)'"
+        Stop-RunnerProfile -ProfileConfig $profileConfig
+
+        foreach ($stagedFile in $stagedFiles) {
+            Complete-RunnerStagedFile `
+                -TemporaryPath $stagedFile.TemporaryPath `
+                -Path $stagedFile.Path
+            $stagedFile.TemporaryPath = $null
+        }
+        foreach ($managerStatePath in @(
+            $profileConfig.CapacityAcknowledgementPath,
+            $profileConfig.AcceptedCapacityPath
+        )) {
+            if (Test-Path -LiteralPath $managerStatePath) {
+                Remove-Item -LiteralPath $managerStatePath -Force -ErrorAction Stop
+            }
+        }
+
+        Write-Host "[start] Starting profile '$($profileConfig.Name)'"
+        Invoke-RunnerCompose `
+            -ProfileConfig $profileConfig `
+            -CommandArguments @('up', '-d', '--build')
     }
-
-    Write-Host "[5/6] Replacing existing profile '$($profileConfig.Name)'"
-    Stop-RunnerProfile -ProfileConfig $profileConfig
-
-    Write-Host "[6/6] Starting profile '$($profileConfig.Name)'"
-    Invoke-RunnerCompose `
-        -ProfileConfig $profileConfig `
-        -CommandArguments @('up', '-d', '--build')
+    finally {
+        foreach ($stagedFile in $stagedFiles) {
+            if ($stagedFile.TemporaryPath) {
+                Remove-Item `
+                    -LiteralPath $stagedFile.TemporaryPath `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+    }
 
     Write-Host "[done] $total worker(s) + 1 manager for profile '$($profileConfig.Name)'."
     Write-Host "  logs: docker compose --project-name $($profileConfig.ComposeProjectName) --env-file $([IO.Path]::GetFileName($profileConfig.EnvironmentPath)) logs -f"
@@ -406,5 +711,8 @@ try {
     Write-Host "  stop: .\Setup-Runner.ps1 $stopSelector -Down"
 }
 finally {
+    if ($profileLock) {
+        $profileLock.Dispose()
+    }
     Pop-Location
 }

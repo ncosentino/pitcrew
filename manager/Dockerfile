@@ -4,7 +4,10 @@
 # run dockerd itself (the runners are siblings on the host, not nested).
 FROM docker:28-cli
 
+RUN apk add --no-cache jq
+
+COPY reconciliation.sh /usr/local/bin/reconciliation.sh
 COPY manage-runners.sh /usr/local/bin/manage-runners.sh
-RUN chmod +x /usr/local/bin/manage-runners.sh
+RUN chmod +x /usr/local/bin/manage-runners.sh /usr/local/bin/reconciliation.sh
 
 ENTRYPOINT ["/usr/local/bin/manage-runners.sh"]

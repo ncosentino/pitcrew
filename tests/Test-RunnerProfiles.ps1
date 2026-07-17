@@ -24,6 +24,7 @@ $schemaPath = Join-Path $runnerRoot 'runner-profile.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
+$reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
 
@@ -95,6 +96,102 @@ function Copy-RunnerFixture {
     }
 }
 
+function Set-TestCapacityAcknowledgement {
+    param(
+        [string]$Path,
+        [int]$Generation,
+        [int]$DesiredSlots,
+        [int]$AddedSlots,
+        [int]$DrainingSlots,
+        [int]$UnchangedSlots
+    )
+
+    [PSCustomObject][ordered]@{
+        schemaVersion = 1
+        status = 'accepted'
+        generation = $Generation
+        managerContractVersion = 2
+        desiredStateHash = 'test'
+        observedAt = '2026-01-01T00:00:00Z'
+        desiredSlots = $DesiredSlots
+        addedSlots = $AddedSlots
+        drainingSlots = $DrainingSlots
+        unchangedSlots = $UnchangedSlots
+        addedKeys = @()
+        drainingKeys = @()
+        unchangedKeys = @()
+    } |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
+function Start-TestCapacityAcknowledgementWriter {
+    param(
+        [string]$DesiredPath,
+        [string]$AcknowledgementPath,
+        [int]$Generation,
+        [int]$DesiredSlots,
+        [int]$AddedSlots,
+        [int]$DrainingSlots,
+        [int]$UnchangedSlots
+    )
+
+    return Start-Job -ArgumentList @(
+        $DesiredPath,
+        $AcknowledgementPath,
+        $Generation,
+        $DesiredSlots,
+        $AddedSlots,
+        $DrainingSlots,
+        $UnchangedSlots
+    ) -ScriptBlock {
+        param(
+            $DesiredPath,
+            $AcknowledgementPath,
+            $Generation,
+            $DesiredSlots,
+            $AddedSlots,
+            $DrainingSlots,
+            $UnchangedSlots
+        )
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        do {
+            if (Test-Path -LiteralPath $DesiredPath -PathType Leaf) {
+                try {
+                    $desired = Get-Content -LiteralPath $DesiredPath -Raw -Encoding UTF8 |
+                        ConvertFrom-Json -Depth 10 -ErrorAction Stop
+                    if ([int]$desired.generation -eq $Generation) {
+                        [PSCustomObject][ordered]@{
+                            schemaVersion = 1
+                            status = 'accepted'
+                            generation = $Generation
+                            managerContractVersion = 2
+                            desiredStateHash = 'test'
+                            observedAt = '2026-01-01T00:00:00Z'
+                            desiredSlots = $DesiredSlots
+                            addedSlots = $AddedSlots
+                            drainingSlots = $DrainingSlots
+                            unchangedSlots = $UnchangedSlots
+                            addedKeys = @()
+                            drainingKeys = @()
+                            unchangedKeys = @()
+                        } |
+                            ConvertTo-Json -Depth 10 |
+                            Set-Content -LiteralPath $AcknowledgementPath -Encoding UTF8
+                        return
+                    }
+                } catch {
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $deadline)
+
+        throw "Desired generation $Generation was not observed."
+    }
+}
+
 $requiredPaths = @(
     $functionsPath,
     $setupPath,
@@ -102,6 +199,7 @@ $requiredPaths = @(
     $copilotProfilePath,
     $copilotDockerfilePath,
     $managerPath,
+    $reconciliationPath,
     $composePath,
     $routingPath
 )
@@ -152,6 +250,80 @@ Add-Check (-not $copilotProfile.PullImage) 'A locally built profile must not be 
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_VERSION'] -eq '1.0.71') 'The Copilot CLI version is not pinned in the profile.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI x64 checksum is not pinned.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
+Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
+Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 2) 'The setup contract does not identify the reconciliation-capable manager.'
+
+$fiveWorkers = New-RunnerDesiredCapacityState `
+    -Generation 4 `
+    -Scope repo `
+    -Repositories @(
+        [PSCustomObject]@{
+            Url = 'https://github.com/example/project'
+            Workers = 5
+        }
+    ) `
+    -Replicas $null
+$sixWorkers = New-RunnerDesiredCapacityState `
+    -Generation 5 `
+    -Scope repo `
+    -Repositories @(
+        [PSCustomObject]@{
+            Url = 'https://github.com/example/project'
+            Workers = 6
+        }
+    ) `
+    -Replicas $null
+$sameFiveWorkers = New-RunnerDesiredCapacityState `
+    -Generation 99 `
+    -Scope repo `
+    -Repositories @(
+        [PSCustomObject]@{
+            Url = 'https://github.com/example/project'
+            Workers = 5
+        }
+    ) `
+    -Replicas $null
+Add-Check (
+    (Get-RunnerDesiredCapacitySignature -State $fiveWorkers) -eq
+    (Get-RunnerDesiredCapacitySignature -State $sameFiveWorkers)
+) 'Desired-capacity equality incorrectly depends on generation.'
+Add-Check (
+    (Get-RunnerDesiredCapacitySignature -State $fiveWorkers) -ne
+    (Get-RunnerDesiredCapacitySignature -State $sixWorkers)
+) 'Desired-capacity equality ignores worker-count changes.'
+
+$defaultStaticProfile = New-RunnerStaticProfileState `
+    -Profile $defaultProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName ''
+$replicaOverrideProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile default `
+    -Replicas 9 `
+    -HostName 'test-host'
+$replicaOverrideStaticProfile = New-RunnerStaticProfileState `
+    -Profile $replicaOverrideProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName ''
+$imageOverrideProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile default `
+    -Image 'example/runner:changed' `
+    -HostName 'test-host'
+$imageOverrideStaticProfile = New-RunnerStaticProfileState `
+    -Profile $imageOverrideProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName ''
+Add-Check (
+    $defaultStaticProfile.fingerprint -eq $replicaOverrideStaticProfile.fingerprint
+) 'Mutable capacity is included in the static profile fingerprint.'
+Add-Check (
+    $defaultStaticProfile.fingerprint -ne $imageOverrideStaticProfile.fingerprint
+) 'Worker image changes do not select full profile replacement.'
 
 $copilotDockerfile = Get-Content -LiteralPath $copilotDockerfilePath -Raw -Encoding UTF8
 Add-Check ($copilotDockerfile -match [regex]::Escape('sha256sum -c -')) 'The Copilot CLI image does not verify the downloaded checksum.'
@@ -161,16 +333,17 @@ Add-Check ($profileJson -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOK
 
 $defaultEnvironment = New-RunnerEnvironmentContent `
     -Profile $defaultProfile `
-    -AccessToken 'test-registration-token' `
-    -RepoUrls 'https://github.com/example/project=1'
+    -AccessToken 'test-registration-token'
 $copilotEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
-    -AccessToken 'test-registration-token' `
-    -RepoUrls 'https://github.com/example/project=1'
+    -AccessToken 'test-registration-token'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PROFILE_ID=default$') 'The default environment does not identify its profile.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_LABELS=general-purpose$') 'The default environment does not emit the general-purpose label.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The default environment unexpectedly disables GitHub default labels.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
+Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=2$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -195,6 +368,24 @@ Add-ThrowsCheck `
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "pitcrew-runner-profile-tests-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 try {
+    $lockPath = Join-Path $tempRoot 'lock-contract' 'setup.lock'
+    $firstLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
+    try {
+        Add-ThrowsCheck `
+            -Action {
+                $contendingLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
+                $contendingLock.Dispose()
+            } `
+            -ExpectedMessage 'Timed out waiting for profile setup lock' `
+            -Failure 'Concurrent profile setup was not serialized.'
+    }
+    finally {
+        $firstLock.Dispose()
+    }
+    $releasedLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
+    $releasedLock.Dispose()
+    Add-Check $true 'A released profile setup lock could not be reacquired.'
+
     $externalDirectory = Join-Path $tempRoot 'external-profile'
     New-Item -ItemType Directory -Path $externalDirectory -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $externalDirectory 'Dockerfile') -Value 'FROM scratch' -Encoding UTF8
@@ -244,7 +435,13 @@ try {
 
     $previousDockerFunction = Get-Item Function:\global:docker -ErrorAction SilentlyContinue
     $env:PITCREW_RUNNER_DOCKER_LOG = $dockerLog
-    $ambientNames = @('ACCESS_TOKEN', 'REPO_URLS', 'RUNNER_PROFILE_ID', 'RUNNER_IMAGE')
+    $ambientNames = @(
+        'ACCESS_TOKEN',
+        'RUNNER_PROFILE_ID',
+        'RUNNER_IMAGE',
+        'PITCREW_STATE_DIR',
+        'PITCREW_MANAGER_CONTRACT_VERSION'
+    )
     $savedAmbient = @{}
     foreach ($name in $ambientNames) {
         $item = Get-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
@@ -254,9 +451,11 @@ try {
         }
     }
     $env:ACCESS_TOKEN = 'ambient-registration-token'
-    $env:REPO_URLS = 'https://github.com/ambient/wrong=99'
     $env:RUNNER_PROFILE_ID = 'ambient-profile'
     $env:RUNNER_IMAGE = 'ambient/image:wrong'
+    $env:PITCREW_STATE_DIR = 'ambient-state'
+    $env:PITCREW_MANAGER_CONTRACT_VERSION = '99'
+    $env:PITCREW_TEST_MANAGER_RUNNING = '0'
 
     function global:docker {
         $dockerArguments = @($args)
@@ -267,7 +466,14 @@ try {
         if ($dockerArguments[0] -eq 'compose') {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
-                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_IMAGE=$env:RUNNER_IMAGE"
+                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+        }
+        if (
+            $dockerArguments[0] -eq 'ps' -and
+            $dockerArguments -contains 'label=ephemeral-runner-manager-profile=default' -and
+            $env:PITCREW_TEST_MANAGER_RUNNING -eq '1'
+        ) {
+            Write-Output 'manager-container-id'
         }
         $global:LASTEXITCODE = 0
     }
@@ -303,15 +509,133 @@ try {
         & $fixtureSetup `
             -Token 'test-registration-token' `
             -Repos 'https://github.com/example/project=1'
-        $defaultStatePath = Join-Path $fixtureRoot '.env'
-        $defaultState = Get-Content -LiteralPath $defaultStatePath -Raw -Encoding UTF8
-        Add-Check ($defaultState -match '(?m)^RUNNER_PROFILE_ID=default$') 'Default setup did not write the default profile state.'
-        Add-Check ($defaultState -match '(?m)^RUNNER_LABELS=general-purpose$') 'Default setup did not write the general-purpose label.'
+        $defaultEnvironmentPath = Join-Path $fixtureRoot '.env'
+        $defaultEnvironmentState = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
+        $defaultDesiredPath = Join-Path $fixtureRoot '.pitcrew-state' 'default' 'desired-capacity.json'
+        $defaultAcknowledgementPath = Join-Path $fixtureRoot '.pitcrew-state' 'default' 'acknowledged-capacity.json'
+        $defaultDesiredState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($defaultEnvironmentState -match '(?m)^RUNNER_PROFILE_ID=default$') 'Default setup did not write the default profile environment.'
+        Add-Check ($defaultEnvironmentState -match '(?m)^RUNNER_LABELS=general-purpose$') 'Default setup did not write the general-purpose label.'
+        Add-Check ($defaultEnvironmentState -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Default setup wrote mutable capacity into the static environment.'
+        Add-Check ($defaultDesiredState.generation -eq 1) 'Initial desired capacity did not start at generation one.'
+        Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
-        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tRUNNER_PROFILE_ID=`tRUNNER_IMAGE=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tRUNNER_PROFILE_ID=`tRUNNER_IMAGE=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
+        Set-TestCapacityAcknowledgement `
+            -Path $defaultAcknowledgementPath `
+            -Generation 1 `
+            -DesiredSlots 1 `
+            -AddedSlots 1 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 0
+        $env:PITCREW_TEST_MANAGER_RUNNING = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $scaleUpAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation 2 `
+            -DesiredSlots 2 `
+            -AddedSlots 1 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Repos 'https://github.com/example/project=2'
+        }
+        finally {
+            Wait-Job -Job $scaleUpAcknowledgement -Timeout 25 | Out-Null
+            Receive-Job -Job $scaleUpAcknowledgement -ErrorAction Stop | Out-Null
+            Remove-Job -Job $scaleUpAcknowledgement -Force
+        }
+        $scaleUpCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $scaledUpState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($scaledUpState.generation -eq 2) 'Scale-up did not advance desired-capacity generation.'
+        Add-Check ($scaledUpState.repositories[0].workers -eq 2) 'Scale-up did not publish the requested worker count.'
+        Add-Check (-not ($scaleUpCommands -match 'compose.*down')) 'Capacity-only scale-up restarted the manager.'
+        Add-Check (-not ($scaleUpCommands -match '(^|\t)(pull|build|run)(\t|$)')) 'Capacity-only scale-up prepared or reverified the unchanged image.'
+        Add-Check (-not ($scaleUpCommands -match 'rm.*-f')) 'Capacity-only scale-up ran broad worker cleanup.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $scaleDownAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation 3 `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 1 `
+            -UnchangedSlots 1
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Repos 'https://github.com/example/project=1'
+        }
+        finally {
+            Wait-Job -Job $scaleDownAcknowledgement -Timeout 25 | Out-Null
+            Receive-Job -Job $scaleDownAcknowledgement -ErrorAction Stop | Out-Null
+            Remove-Job -Job $scaleDownAcknowledgement -Force
+        }
+        $scaleDownCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $scaledDownState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($scaledDownState.generation -eq 3) 'Scale-down did not advance desired-capacity generation.'
+        Add-Check ($scaledDownState.repositories[0].workers -eq 1) 'Scale-down did not publish the requested worker count.'
+        Add-Check (-not ($scaleDownCommands -match 'compose.*down')) 'Capacity-only scale-down restarted the manager.'
+        Add-Check (-not ($scaleDownCommands -match 'rm.*-f')) 'Capacity-only scale-down force-removed a worker.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Repos 'https://github.com/example/project=1'
+        $idempotentCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $idempotentState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($idempotentState.generation -eq 3) 'Reapplying identical capacity advanced its generation.'
+        Add-Check (-not ($idempotentCommands -match 'compose.*down')) 'Reapplying identical capacity restarted the manager.'
+
+        if (-not $IsWindows) {
+            $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
+            & chmod 0555 $defaultStateDirectory
+            try {
+                Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+                $unchangedBeforeFailedWrite = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
+                Add-ThrowsCheck `
+                    -Action {
+                        & $fixtureSetup `
+                            -Token 'test-registration-token' `
+                            -Repos 'https://github.com/example/project=2'
+                    } `
+                    -ExpectedMessage '(denied|permission|read-only)' `
+                    -Failure 'A failed atomic desired-state write was not surfaced.'
+                $failedWriteCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+                Add-Check (-not ($failedWriteCommands -match 'compose.*down')) 'A failed desired-state write restarted the running manager.'
+                Add-Check (-not ($failedWriteCommands -match 'rm.*-f')) 'A failed desired-state write removed a running worker.'
+                Add-Check (
+                    (Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8) -eq
+                    $unchangedBeforeFailedWrite
+                ) 'A failed desired-state write changed the visible desired document.'
+            }
+            finally {
+                & chmod 0755 $defaultStateDirectory
+            }
+        }
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Labels 'additional-capability' `
+            -Repos 'https://github.com/example/project=1'
+        $immutableCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check ($immutableCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'An immutable profile change skipped image preparation.'
+        Add-Check ($immutableCommands -match 'compose.*down') 'An immutable profile change did not replace the manager.'
+        Add-Check ($immutableCommands -match 'compose.*up') 'An immutable profile change did not restart the profile.'
+
+        $defaultDesiredBeforeNamed = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup `
             -Profile copilot-cli `
@@ -322,7 +646,7 @@ try {
         $namedCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($copilotState -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'Named setup did not write profile-specific state.'
         Add-Check ($copilotState -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'Named setup did not write isolated routing state.'
-        Add-Check ((Get-Content -LiteralPath $defaultStatePath -Raw -Encoding UTF8) -eq $defaultState) 'Provisioning a named profile changed the default profile state.'
+        Add-Check ((Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8) -eq $defaultDesiredBeforeNamed) 'Provisioning a named profile changed the default desired capacity.'
         Add-Check ($namedCommands -match 'build.*--tag.*pitcrew-copilot-cli:1\.0\.71') 'Named setup did not build the profile image.'
         Add-Check ($namedCommands -match 'run.*--entrypoint.*/bin/sh.*copilot --version') 'Named setup did not run profile verification commands.'
         Add-Check ($namedCommands -match 'compose.*--project-name.*self-hosted-runner-copilot-cli.*up') 'Named setup did not start its isolated Compose project.'
@@ -355,6 +679,7 @@ try {
             }
         }
         Remove-Item Env:\PITCREW_RUNNER_DOCKER_LOG -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_RUNNING -ErrorAction SilentlyContinue
     }
 }
 finally {
@@ -368,7 +693,12 @@ Add-Check ($manager -match [regex]::Escape('MANAGED_LABEL="${MANAGED_LABEL_KEY}=
 Add-Check ($manager -match [regex]::Escape('-e NO_DEFAULT_LABELS=1')) 'The manager does not support isolated registration without GitHub default labels.'
 Add-Check ($manager -match [regex]::Escape('-e UNSET_CONFIG_VARS=true')) 'Runner registration variables are not removed before workflow steps.'
 Add-Check ($manager -match [regex]::Escape('RUNNER_PULL_IMAGE:-1')) 'The manager cannot distinguish pullable and locally prepared images.'
+Add-Check ($manager -match [regex]::Escape('last-valid-capacity.json')) 'The manager does not persist the last valid desired state.'
+Add-Check ($manager -match [regex]::Escape('/drain')) 'The manager does not represent graceful slot draining.'
+Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Worker containers do not expose stable slot identity.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
+Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
+Add-Check ($compose -notmatch 'RUNNER_REPLICAS:') 'Compose still treats capacity as immutable manager environment.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
