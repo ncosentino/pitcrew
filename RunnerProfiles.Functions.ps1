@@ -1,6 +1,10 @@
 #Requires -Version 7.0
 Set-StrictMode -Version Latest
 
+$script:RunnerDesiredCapacitySchemaVersion = 1
+$script:RunnerStaticProfileSchemaVersion = 1
+$script:RunnerManagerContractVersion = 2
+
 function ConvertTo-RunnerLabelList {
     param(
         [string[]]$Labels,
@@ -241,14 +245,24 @@ function Resolve-RunnerProfile {
     } else {
         "self-hosted-runner-$profileName"
     }
+    $stateDirectory = Join-Path $resolvedRoot '.pitcrew-state' $profileName
+    $stateVolumePath = ".pitcrew-state/$profileName"
 
     return [PSCustomObject]@{
         Name = $profileName
         IsDefault = $isDefault
         ManifestPath = $manifestPath
         EnvironmentPath = $environmentPath
+        StateDirectory = $stateDirectory
+        StateVolumePath = $stateVolumePath
+        DesiredCapacityPath = Join-Path $stateDirectory 'desired-capacity.json'
+        AcceptedCapacityPath = Join-Path $stateDirectory 'last-valid-capacity.json'
+        CapacityAcknowledgementPath = Join-Path $stateDirectory 'acknowledged-capacity.json'
+        StaticProfilePath = Join-Path $stateDirectory 'static-profile.json'
+        LockPath = Join-Path $stateDirectory 'setup.lock'
         ComposeProjectName = $composeProjectName
         ManagedRunnerLabel = "ephemeral-managed-runner-profile=$profileName"
+        ManagerContractVersion = $script:RunnerManagerContractVersion
         Image = $effectiveImage
         Replicas = $effectiveReplicas
         Labels = @($labelList)
@@ -260,6 +274,339 @@ function Resolve-RunnerProfile {
         Build = $build
         PullImage = $effectivePullImage
     }
+}
+
+<#
+.SYNOPSIS
+    Creates and validates a desired-capacity document.
+
+.DESCRIPTION
+    Normalizes repository targets and worker counts into the non-secret state
+    contract consumed by the runner manager.
+
+.PARAMETER Generation
+    Monotonically increasing desired-state generation.
+
+.PARAMETER Scope
+    GitHub runner scope represented by the state.
+
+.PARAMETER Repositories
+    Repository targets for repository scope. Each object must expose Url and
+    Workers properties.
+
+.PARAMETER Replicas
+    Total desired workers for organization or enterprise scope. Must be null for
+    repository scope.
+
+.OUTPUTS
+    PSCustomObject ready for atomic JSON serialization.
+#>
+function New-RunnerDesiredCapacityState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$Generation,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('repo', 'org', 'ent')]
+        [string]$Scope,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Repositories,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [Nullable[int]]$Replicas
+    )
+
+    $normalizedRepositories = @(
+        foreach ($repository in $Repositories) {
+            $url = [string]$repository.Url
+            $workers = [int]$repository.Workers
+            if (
+                [string]::IsNullOrWhiteSpace($url) -or
+                $url -eq '-' -or
+                $url -match "[`t`r`n]"
+            ) {
+                throw 'Repository URLs in desired capacity must be non-empty, cannot be "-", and cannot contain tabs or newlines.'
+            }
+            if ($workers -lt 1) {
+                throw "Repository '$url' must request at least one worker."
+            }
+
+            [PSCustomObject][ordered]@{
+                url = $url
+                workers = $workers
+            }
+        }
+    )
+    $normalizedRepositories = @($normalizedRepositories | Sort-Object url)
+    $duplicateUrls = @(
+        $normalizedRepositories |
+            Group-Object url |
+            Where-Object Count -gt 1
+    )
+    if ($duplicateUrls.Count -gt 0) {
+        throw "Desired capacity contains duplicate repository URL '$($duplicateUrls[0].Name)'."
+    }
+
+    if ($Scope -eq 'repo') {
+        if ($normalizedRepositories.Count -eq 0) {
+            throw 'Repository scope requires at least one repository target.'
+        }
+        if ($null -ne $Replicas) {
+            throw 'Repository-scoped desired capacity cannot define a shared replica count.'
+        }
+    } else {
+        if ($normalizedRepositories.Count -ne 0) {
+            throw 'Organization and enterprise desired capacity cannot define repository targets.'
+        }
+        if ($null -eq $Replicas -or $Replicas -lt 1) {
+            throw 'Organization and enterprise desired capacity requires a positive replica count.'
+        }
+    }
+
+    return [PSCustomObject][ordered]@{
+        schemaVersion = $script:RunnerDesiredCapacitySchemaVersion
+        generation = $Generation
+        scope = $Scope
+        repositories = @($normalizedRepositories)
+        replicas = if ($null -eq $Replicas) { $null } else { [int]$Replicas }
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the generation-independent identity of desired capacity.
+
+.PARAMETER State
+    Desired-capacity object created by New-RunnerDesiredCapacityState.
+
+.OUTPUTS
+    Compact JSON suitable for equality comparisons.
+#>
+function Get-RunnerDesiredCapacitySignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$State
+    )
+
+    $normalized = New-RunnerDesiredCapacityState `
+        -Generation 1 `
+        -Scope ([string]$State.scope) `
+        -Repositories @(
+            @($State.repositories) |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        Url = [string]$_.url
+                        Workers = [int]$_.workers
+                    }
+                }
+        ) `
+        -Replicas $(if ($null -eq $State.replicas) { $null } else { [Nullable[int]][int]$State.replicas })
+    return $normalized | ConvertTo-Json -Depth 10 -Compress
+}
+
+<#
+.SYNOPSIS
+    Creates static profile metadata used to select in-place reconciliation.
+
+.DESCRIPTION
+    Produces a non-secret fingerprint over manager compatibility, image
+    preparation, routing, scope, runner naming, and registration behavior.
+
+.PARAMETER Profile
+    Effective profile returned by Resolve-RunnerProfile.
+
+.PARAMETER Scope
+    GitHub runner scope.
+
+.PARAMETER OrgName
+    Organization name for organization scope.
+
+.PARAMETER EnterpriseName
+    Enterprise name for enterprise scope.
+
+.OUTPUTS
+    PSCustomObject containing the static contract and its SHA-256 fingerprint.
+#>
+function New-RunnerStaticProfileState {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('repo', 'org', 'ent')]
+        [string]$Scope,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$OrgName,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$EnterpriseName
+    )
+
+    $buildState = $null
+    if ($Profile.Build) {
+        $buildArguments = [ordered]@{}
+        foreach ($key in @($Profile.Build.Arguments.Keys | Sort-Object)) {
+            $buildArguments[$key] = [string]$Profile.Build.Arguments[$key]
+        }
+        $dockerfileHash = (Get-FileHash -LiteralPath $Profile.Build.Dockerfile -Algorithm SHA256).Hash.ToLowerInvariant()
+        $buildState = [PSCustomObject][ordered]@{
+            context = [string]$Profile.Build.Context
+            dockerfile = [string]$Profile.Build.Dockerfile
+            dockerfileSha256 = $dockerfileHash
+            arguments = $buildArguments
+        }
+    }
+
+    $staticConfiguration = [PSCustomObject][ordered]@{
+        managerContractVersion = [int]$Profile.ManagerContractVersion
+        profile = [string]$Profile.Name
+        image = [string]$Profile.Image
+        pullImage = [bool]$Profile.PullImage
+        verificationCommands = @($Profile.VerificationCommands)
+        build = $buildState
+        labels = @($Profile.Labels)
+        disableDefaultLabels = [bool]$Profile.DisableDefaultLabels
+        scope = $Scope
+        organization = $OrgName
+        enterprise = $EnterpriseName
+        runnerGroup = [string]$Profile.RunnerGroup
+        namePrefix = [string]$Profile.NamePrefix
+    }
+    $configurationJson = $staticConfiguration | ConvertTo-Json -Depth 20 -Compress
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($configurationJson)
+    $fingerprint = [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData($bytes)
+    ).ToLowerInvariant()
+
+    return [PSCustomObject][ordered]@{
+        schemaVersion = $script:RunnerStaticProfileSchemaVersion
+        fingerprint = $fingerprint
+        configuration = $staticConfiguration
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads a UTF-8 JSON state file.
+
+.PARAMETER Path
+    Existing JSON file to parse.
+
+.OUTPUTS
+    Parsed PSCustomObject.
+
+.EXCEPTION
+    Throws when the file is missing or contains invalid JSON.
+#>
+function Read-RunnerJsonFile {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path
+    )
+
+    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
+        throw "Runner state file '$Path' does not exist."
+    }
+
+    try {
+        return Get-Content -LiteralPath $Path -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 20 -ErrorAction Stop
+    } catch {
+        throw "Runner state file '$Path' is not valid JSON: $($_.Exception.Message)"
+    }
+}
+
+<#
+.SYNOPSIS
+    Atomically replaces a JSON state file.
+
+.DESCRIPTION
+    Serializes the complete document to a temporary file in the destination
+    directory, flushes it, and then replaces the visible path with one rename.
+
+.PARAMETER Path
+    Destination JSON path.
+
+.PARAMETER Value
+    Complete validated object to serialize.
+#>
+function Write-RunnerJsonAtomically {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [object]$Value
+    )
+
+    $directory = Split-Path -Parent $Path
+    New-Item -ItemType Directory -Path $directory -Force | Out-Null
+    $temporaryPath = Join-Path $directory ".$([IO.Path]::GetFileName($Path)).$([guid]::NewGuid().ToString('N')).tmp"
+    $json = $Value | ConvertTo-Json -Depth 20
+    try {
+        [IO.File]::WriteAllText($temporaryPath, "$json`n", [Text.UTF8Encoding]::new($false))
+        [IO.File]::Move($temporaryPath, $Path, $true)
+    }
+    finally {
+        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
+    }
+}
+
+<#
+.SYNOPSIS
+    Acquires exclusive ownership of a profile setup lock.
+
+.PARAMETER Path
+    Profile-scoped lock file.
+
+.PARAMETER TimeoutSeconds
+    Maximum time to wait for another setup process to release the lock.
+
+.OUTPUTS
+    FileStream that must be disposed to release the lock.
+
+.EXCEPTION
+    Throws when the lock cannot be acquired before the timeout.
+#>
+function Enter-RunnerProfileLock {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Path,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 600)]
+        [int]$TimeoutSeconds
+    )
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        try {
+            return [IO.File]::Open(
+                $Path,
+                [IO.FileMode]::OpenOrCreate,
+                [IO.FileAccess]::ReadWrite,
+                [IO.FileShare]::None)
+        } catch [IO.IOException] {
+            if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+                throw "Timed out waiting for profile setup lock '$Path'."
+            }
+            Start-Sleep -Milliseconds 200
+        }
+    } while ($true)
 }
 
 <#
@@ -284,8 +631,6 @@ function New-RunnerEnvironmentContent {
         [Parameter(Mandatory)]
         [string]$AccessToken,
 
-        [string]$RepoUrls = '',
-
         [ValidateSet('repo', 'org', 'ent')]
         [string]$Scope = 'repo',
 
@@ -296,7 +641,6 @@ function New-RunnerEnvironmentContent {
 
     $values = @(
         $AccessToken,
-        $RepoUrls,
         $Scope,
         $OrgName,
         $EnterpriseName,
@@ -313,17 +657,17 @@ function New-RunnerEnvironmentContent {
     $disableDefaultLabels = if ($Profile.DisableDefaultLabels) { '1' } else { '' }
     return @(
         "ACCESS_TOKEN=$AccessToken"
-        "REPO_URLS=$RepoUrls"
         "RUNNER_SCOPE=$Scope"
         "ORG_NAME=$OrgName"
         "ENTERPRISE_NAME=$EnterpriseName"
         "RUNNER_PROFILE_ID=$($Profile.Name)"
-        "RUNNER_REPLICAS=$($Profile.Replicas)"
         "RUNNER_IMAGE=$($Profile.Image)"
         "RUNNER_PULL_IMAGE=0"
         "RUNNER_NAME_PREFIX=$($Profile.NamePrefix)"
         "RUNNER_LABELS=$($Profile.LabelsValue)"
         "RUNNER_NO_DEFAULT_LABELS=$disableDefaultLabels"
         "RUNNER_GROUP=$($Profile.RunnerGroup)"
+        "PITCREW_STATE_DIR=$($Profile.StateVolumePath)"
+        "PITCREW_MANAGER_CONTRACT_VERSION=$($Profile.ManagerContractVersion)"
     ) -join "`n"
 }

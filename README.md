@@ -26,6 +26,8 @@ and is immediately replaced with a clean container.
   from consuming specialized workers.
 - **Independent pools:** each profile has its own manager, image, state file,
   Compose project, capacity, and cleanup boundary.
+- **In-place capacity changes:** add slots immediately or drain removed slots
+  after their current runner exits without restarting the manager.
 - **Repository, organization, and enterprise scope:** dedicate workers to
   repositories or share capacity through supported GitHub scopes.
 - **No credentials in images:** registration state stays in gitignored local
@@ -100,16 +102,20 @@ jobs cannot consume their capacity accidentally.
 ```text
 Setup-Runner.ps1
         |
+        +-- static profile environment (token, image, labels, scope)
+        +-- atomic desired-capacity state
+        |
         v
 profile manager (Docker socket)
         |
-        +-- docker run --rm -> one GitHub Actions job -> destroyed
-        +-- docker run --rm -> one GitHub Actions job -> destroyed
-        +-- continuously replenishes the configured worker slots
+        +-- desired slot -> docker run --rm -> one job -> replace
+        +-- draining slot -> current docker run exits -> stop
 ```
 
 One lightweight manager runs per profile. Worker containers are siblings on the
-host Docker daemon rather than nested containers.
+host Docker daemon rather than nested containers. Reapplying setup with only
+worker-count changes updates mounted state in place; image, label, scope,
+runner-group, and naming changes retain full profile replacement.
 
 ## Documentation
 

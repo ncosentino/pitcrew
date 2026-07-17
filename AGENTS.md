@@ -9,6 +9,8 @@ PowerShell, Docker Compose, and a POSIX shell manager.
 - `RunnerProfiles.Functions.ps1` resolves and validates profile manifests.
 - `runner-profile.schema.json` defines the public profile contract.
 - `manager/` contains the socket-owning babysitter container.
+- `manager/reconciliation.sh` validates desired capacity and derives stable slot
+  keys for the manager.
 - `profiles/` contains built-in specialized worker images.
 - `tests/Test-RunnerProfiles.ps1` is the hermetic contract suite.
 - `docs/` and `mkdocs.yml` define the public documentation site.
@@ -19,6 +21,8 @@ PowerShell, Docker Compose, and a POSIX shell manager.
 - Only the manager mounts the host Docker socket.
 - Named profiles have isolated Compose projects, state files, labels, and
   cleanup selectors.
+- Capacity-only updates leave existing workers and the manager untouched;
+  removed slots drain after their current runner exits.
 - Named profiles omit GitHub's broad default labels unless explicitly opted in.
 - Validate new images before replacing a live profile.
 - Never put credentials in manifests, Docker build arguments, images, examples,

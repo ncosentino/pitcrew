@@ -48,8 +48,18 @@ Provision two general-purpose workers for a repository:
 ```
 
 PitCrew builds or pulls the required image, verifies the profile contract,
-writes gitignored local state, replaces only the selected profile, and starts
-its manager.
+writes gitignored local state, and starts the selected profile manager.
+
+Reapply the same command with a different worker count to reconcile capacity
+without replacing that manager:
+
+```powershell
+.\Setup-Runner.ps1 `
+    -Repos https://github.com/you/project=3
+```
+
+Scaling up starts only the additional slots. Scaling down marks the highest
+removed ordinals as draining and lets their current runner containers finish.
 
 ## Route a workflow
 

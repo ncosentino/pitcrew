@@ -1,7 +1,7 @@
 # Truly-ephemeral self-hosted GitHub Actions runners for any repo(s).
 #
-# A single "babysitter" container (the manager) keeps RUNNER_REPLICAS runner
-# slots filled. Each job runs in a brand-new runner container started with
+# A single "babysitter" container (the manager) reconciles runner slots from
+# atomically updated desired state. Each job runs in a brand-new container with
 # --rm + EPHEMERAL=1, so the container is DESTROYED the instant the job ends and
 # the manager launches a pristine replacement. Nothing carries between jobs, so a
 # cancelled job, an interrupted apt, an OOM, or any other mess vanishes with the
@@ -26,23 +26,15 @@ services:
     # runners orphaned by a previous incarnation, so the pool self-recovers.
     restart: unless-stopped
     environment:
-      # Number of concurrent runner slots (~ half this machine's physical cores is
-      # a good default - leaves headroom so parallel builds don't starve the host).
-      RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}
       RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}
       # The runner image each slot launches. The default base already ships
       # PowerShell 7 + a broad OS toolchain; point this at a custom image only if
       # you have one.
       RUNNER_IMAGE: ${RUNNER_IMAGE:-myoung34/github-runner:ubuntu-noble}
       RUNNER_PULL_IMAGE: ${RUNNER_PULL_IMAGE:-1}
-      # repo (default) | org | ent. Org and enterprise scopes use their name
-      # variable and ignore the repository list.
+      # Scope, identity, and registration settings are static for the life of the
+      # manager. Mutable targets and counts come from the mounted state directory.
       RUNNER_SCOPE: ${RUNNER_SCOPE:-repo}
-      # Repos to serve (repo scope), each "url" or "url=workers" - REPO_URLS is the
-      # comma-separated list; REPO_URL is the single-repo back-compat alias. Each
-      # repo gets its own dedicated workers. Empty -> org/ent uses RUNNER_REPLICAS.
-      REPO_URLS: ${REPO_URLS:-}
-      REPO_URL: ${REPO_URL:-}
       ORG_NAME: ${ORG_NAME:-}
       ENTERPRISE_NAME: ${ENTERPRISE_NAME:-}
       # Fine-grained PAT used to register runners. Setup-Runner validates it before
@@ -56,9 +48,12 @@ services:
       RUNNER_LABELS: ${RUNNER_LABELS:-}
       RUNNER_NO_DEFAULT_LABELS: ${RUNNER_NO_DEFAULT_LABELS:-}
       RUNNER_GROUP: ${RUNNER_GROUP:-}
+      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-2}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
     volumes:
       # The manager needs the host Docker daemon to launch sibling runner
       # containers. Only the manager mounts this - never the runners.
       - /var/run/docker.sock:/var/run/docker.sock
+      # Mount the directory, not one file, so atomic rename updates remain visible.
+      - ${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew

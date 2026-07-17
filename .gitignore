@@ -2,6 +2,7 @@
 .env
 .env.*
 !.env.example
+.pitcrew-state/
 
 # Generated documentation and local Python state.
 site/

@@ -44,6 +44,27 @@ PitCrew prepares and verifies the new image before replacing the live profile.
 Resolve the Docker pull, build, architecture, checksum, or verification-command
 failure and run setup again.
 
+## A capacity update is not acknowledged
+
+Setup waits for the selected manager to acknowledge the new desired-capacity
+generation. Inspect profile logs and the generated state directory:
+
+```powershell
+docker compose --project-name self-hosted-runner logs runner-manager
+Get-Content .pitcrew-state\default\desired-capacity.json
+Get-Content .pitcrew-state\default\acknowledged-capacity.json
+```
+
+Malformed or lower-generation desired state is rejected without changing the
+last valid pool. Correct the setup input and reapply the complete command.
+
+## Scale-down still shows the removed runner
+
+Removed slots drain gracefully. A runner already executing a job finishes
+normally, and an idle ephemeral runner may accept one final job before its
+container exits. The slot disappears after that container exits and is not
+respawned.
+
 ## Docker-dependent workflow steps fail
 
 PitCrew workers intentionally do not receive a Docker socket. Route container
