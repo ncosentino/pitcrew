@@ -20,7 +20,7 @@ Create the Direct Upload project once with `main` as the production branch:
 npx wrangler pages project create pitcrew --production-branch main
 ```
 
-The Pages origin is `https://pitcrew.pages.dev`.
+The Pages origin is `https://pitcrew-69b.pages.dev`.
 
 ## Add repository secrets
 
