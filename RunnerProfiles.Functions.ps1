@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 4
+$script:RunnerManagerContractVersion = 5
 
 function ConvertTo-RunnerLabelList {
     param(
@@ -259,6 +259,7 @@ function Resolve-RunnerProfile {
         DesiredCapacityPath = Join-Path $stateDirectory 'desired-capacity.json'
         AcceptedCapacityPath = Join-Path $stateDirectory 'last-valid-capacity.json'
         CapacityAcknowledgementPath = Join-Path $stateDirectory 'acknowledged-capacity.json'
+        ObservedStatePath = Join-Path $stateDirectory 'observed-state.json'
         StaticProfilePath = Join-Path $stateDirectory 'static-profile.json'
         LockPath = Join-Path $stateDirectory 'setup.lock'
         ComposeProjectName = $composeProjectName
@@ -431,12 +432,24 @@ function New-RunnerDesiredCapacityState {
         foreach ($repository in $Repositories) {
             $url = [string]$repository.Url
             $workers = [int]$repository.Workers
+            $parsedUrl = $null
             if (
                 [string]::IsNullOrWhiteSpace($url) -or
                 $url -eq '-' -or
-                $url -match "[`t`r`n]"
+                $url -ne $url.Trim() -or
+                $url -match '\s' -or
+                -not [Uri]::TryCreate(
+                    $url,
+                    [UriKind]::Absolute,
+                    [ref]$parsedUrl) -or
+                $parsedUrl.Scheme -notin @('http', 'https') -or
+                [string]::IsNullOrWhiteSpace($parsedUrl.Host) -or
+                [string]::IsNullOrWhiteSpace($parsedUrl.AbsolutePath.Trim('/')) -or
+                -not [string]::IsNullOrEmpty($parsedUrl.UserInfo) -or
+                -not [string]::IsNullOrEmpty($parsedUrl.Query) -or
+                -not [string]::IsNullOrEmpty($parsedUrl.Fragment)
             ) {
-                throw 'Repository URLs in desired capacity must be non-empty, cannot be "-", and cannot contain tabs or newlines.'
+                throw 'Repository URLs in desired capacity must be canonical absolute HTTP(S) URLs without credentials, whitespace, query strings, or fragments.'
             }
             if ($workers -lt 1) {
                 throw "Repository '$url' must request at least one worker."

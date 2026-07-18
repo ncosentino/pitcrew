@@ -104,6 +104,7 @@ Setup-Runner.ps1
         |
         +-- static profile environment (token, image, labels, scope)
         +-- atomic desired-capacity state
+        +-- credential-free observed-state projection
         |
         v
 profile manager (Docker socket)

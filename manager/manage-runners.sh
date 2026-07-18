@@ -6,9 +6,10 @@ set -u
 
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
+. "${SCRIPT_DIRECTORY}/observability.sh"
 
-MANAGER_CONTRACT_VERSION=4
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-4}"
+MANAGER_CONTRACT_VERSION=5
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-5}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -21,10 +22,13 @@ STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
 DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
+OBSERVED_STATE_PATH="${STATE_DIRECTORY}/observed-state.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
+OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
 SLOT_DIRECTORY="/tmp/pitcrew-slots"
 CURRENT_DESIRED_SLOTS="/tmp/pitcrew-current-desired-slots.tsv"
 PENDING_ACKNOWLEDGEMENT="/tmp/pitcrew-pending-acknowledgement.json"
+OBSERVED_STATE_DIRTY="/tmp/pitcrew-observed-state-dirty"
 MANAGED_LABEL_KEY="ephemeral-managed-runner-profile"
 MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"
 SLOT_LABEL_KEY="ephemeral-managed-runner-slot"
@@ -32,6 +36,12 @@ SLOT_LABEL_KEY="ephemeral-managed-runner-slot"
 case "${RECONCILE_INTERVAL}" in
     ''|*[!0-9]*|0)
         echo "[manager:${PROFILE_ID}] PITCREW_RECONCILE_INTERVAL must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${OBSERVED_STATE_INTERVAL}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_OBSERVED_STATE_INTERVAL must be a positive integer." >&2
         exit 1
         ;;
 esac
@@ -61,14 +71,80 @@ CURRENT_STATE_HASH=""
 LAST_DESIRED_DOCUMENT_HASH=""
 LAST_REJECTION=""
 STOPPING=0
-
+MANAGER_STATUS="starting"
+LAST_OBSERVED_STATE_PUBLISH_EPOCH=0
 rand_hex() {
     tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 6
 }
 
+if [ -r /proc/sys/kernel/random/uuid ]; then
+    MANAGER_INSTANCE_ID=$(tr -d '\r\n' < /proc/sys/kernel/random/uuid)
+else
+    MANAGER_INSTANCE_ID="${PROFILE_ID}-$(date +%s)-$(rand_hex)"
+fi
+
 rand_jitter() {
     random_byte=$(od -An -N1 -tu1 /dev/urandom 2>/dev/null | tr -d ' ')
     echo $(( ${random_byte:-0} % 5 ))
+}
+
+mark_observed_state_dirty() {
+    : > "${OBSERVED_STATE_DIRTY}"
+}
+
+publish_observed_state() {
+    force="${1:-0}"
+    observed_now=$(date +%s)
+    if [ "${force}" != "1" ] &&
+        [ ! -f "${OBSERVED_STATE_DIRTY}" ] &&
+        [ $((observed_now - LAST_OBSERVED_STATE_PUBLISH_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ]; then
+        return
+    fi
+
+    rm -f "${OBSERVED_STATE_DIRTY}"
+    observed_slots_path="/tmp/pitcrew-observed-slots.json"
+    if ! render_observed_slots "${SLOT_DIRECTORY}" "${observed_slots_path}"; then
+        rm -f "${observed_slots_path}"
+        mark_observed_state_dirty
+        echo "[manager:${PROFILE_ID}] could not render observed slot state" >&2
+        return
+    fi
+
+    observed_scope="${RUNNER_SCOPE:-repo}"
+    if [ -f "${ACCEPTED_STATE_PATH}" ] && desired_state_is_valid "${ACCEPTED_STATE_PATH}"; then
+        observed_scope=$(jq -r '.scope' "${ACCEPTED_STATE_PATH}")
+    fi
+    if [ -n "${LAST_REJECTION}" ]; then
+        observed_desired_status=${LAST_REJECTION%%:*}
+    elif [ "${CURRENT_GENERATION}" -gt 0 ]; then
+        observed_desired_status="accepted"
+    else
+        observed_desired_status="waiting"
+    fi
+
+    observed_desired_count=0
+    if [ -f "${CURRENT_DESIRED_SLOTS}" ]; then
+        observed_desired_count=$(count_lines "${CURRENT_DESIRED_SLOTS}")
+    fi
+
+    if write_manager_observed_state \
+        "${OBSERVED_STATE_PATH}" \
+        "${PROFILE_ID}" \
+        "${MANAGER_INSTANCE_ID}" \
+        "${MANAGER_CONTRACT_VERSION}" \
+        "${MANAGER_STATUS}" \
+        "${observed_scope}" \
+        "${CURRENT_GENERATION}" \
+        "${CURRENT_STATE_HASH}" \
+        "${observed_desired_status}" \
+        "${observed_desired_count}" \
+        "${observed_slots_path}"; then
+        LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
+    else
+        mark_observed_state_dirty
+        echo "[manager:${PROFILE_ID}] could not publish observed state" >&2
+    fi
+    rm -f "${observed_slots_path}"
 }
 
 remove_managed() {
@@ -78,10 +154,78 @@ remove_managed() {
     fi
 }
 
+remove_managed_strict() {
+    strict_ids=$(docker ps -aq --filter "label=${MANAGED_LABEL}") || return 1
+    for strict_id in ${strict_ids}; do
+        docker rm -f "${strict_id}" >/dev/null || return 1
+    done
+    strict_remaining=$(docker ps -aq --filter "label=${MANAGED_LABEL}") || return 1
+    [ -z "${strict_remaining}" ]
+}
+
 shutdown() {
     echo "[manager:${PROFILE_ID}] received stop signal — removing managed runner containers"
     STOPPING=1
-    remove_managed
+    MANAGER_STATUS="stopping"
+    for stopping_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${stopping_path}" ] || continue
+        : > "${stopping_path}/drain"
+    done
+    remove_managed_strict || true
+    mark_observed_state_dirty
+    publish_observed_state 1
+
+    shutdown_elapsed=0
+    while [ "${shutdown_elapsed}" -lt 20 ]; do
+        remove_managed_strict || true
+        supervisors_running=0
+        for stopping_path in "${SLOT_DIRECTORY}"/*; do
+            [ -d "${stopping_path}" ] || continue
+            if [ -f "${stopping_path}/pid" ]; then
+                stopping_pid=$(cat "${stopping_path}/pid")
+                if kill -0 "${stopping_pid}" 2>/dev/null; then
+                    supervisors_running=1
+                fi
+            fi
+        done
+        [ "${supervisors_running}" -eq 0 ] && break
+        sleep 1
+        shutdown_elapsed=$((shutdown_elapsed + 1))
+    done
+
+    for stopping_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${stopping_path}" ] || continue
+        if [ -f "${stopping_path}/pid" ]; then
+            stopping_pid=$(cat "${stopping_path}/pid")
+            if kill -0 "${stopping_pid}" 2>/dev/null; then
+                kill "${stopping_pid}" 2>/dev/null || true
+            fi
+        fi
+    done
+    sleep 1
+    remove_managed_strict || true
+    for stopping_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${stopping_path}" ] || continue
+        if [ -f "${stopping_path}/pid" ]; then
+            stopping_pid=$(cat "${stopping_path}/pid")
+            if kill -0 "${stopping_pid}" 2>/dev/null; then
+                kill -KILL "${stopping_pid}" 2>/dev/null || true
+            fi
+            wait "${stopping_pid}" 2>/dev/null || true
+        fi
+    done
+    if ! remove_managed_strict; then
+        echo "[manager:${PROFILE_ID}] managed runners remain after shutdown cleanup" >&2
+        MANAGER_STATUS="stopping"
+        mark_observed_state_dirty
+        publish_observed_state 1
+        exit 1
+    fi
+    rm -rf "${SLOT_DIRECTORY}"
+    mkdir -p "${SLOT_DIRECTORY}"
+    MANAGER_STATUS="stopped"
+    mark_observed_state_dirty
+    publish_observed_state 1
     exit 0
 }
 trap shutdown TERM INT
@@ -99,11 +243,14 @@ slot_is_running() {
 
 remove_slot_registry() {
     removed_path=$(slot_path "$1")
+    removed_registry=0
+    [ -d "${removed_path}" ] && removed_registry=1
     if [ -f "${removed_path}/pid" ]; then
         removed_pid=$(cat "${removed_path}/pid")
         wait "${removed_pid}" 2>/dev/null || true
     fi
     rm -rf "${removed_path}"
+    [ "${removed_registry}" -eq 1 ] && mark_observed_state_dirty
 }
 
 run_slot() {
@@ -118,6 +265,14 @@ run_slot() {
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
         echo "[slot ${slot_key}] starting fresh ephemeral runner: ${name} -> ${repo:-<scope>}"
         : > "${log_path}"
+        rm -f "${slot_state_path}/connected"
+        write_slot_runtime_state \
+            "${slot_state_path}" \
+            "${OBSERVED_STATE_DIRTY}" \
+            "starting" \
+            "${name}" \
+            "${failures}" \
+            0 || true
         set -- docker run --rm \
             --label "${MANAGED_LABEL}" \
             --label "${SLOT_LABEL_KEY}=${slot_key}" \
@@ -139,7 +294,25 @@ run_slot() {
             set -- "$@" -e RUNNER_GROUP="${RUNNER_GROUP}"
         fi
         set -- "$@" "${IMAGE}"
-        "$@" 2>&1 | tee "${log_path}"
+        "$@" 2>&1 |
+            while IFS= read -r output_line || [ -n "${output_line:-}" ]; do
+                printf '%s\n' "${output_line}"
+                printf '%s\n' "${output_line}" >> "${log_path}"
+                case "${output_line}" in
+                    *"${CONNECT_MARKER}"*)
+                        if [ ! -f "${slot_state_path}/connected" ]; then
+                            : > "${slot_state_path}/connected"
+                            write_slot_runtime_state \
+                                "${slot_state_path}" \
+                                "${OBSERVED_STATE_DIRTY}" \
+                                "online" \
+                                "${name}" \
+                                0 \
+                                0 || true
+                        fi
+                        ;;
+                esac
+            done
 
         if [ -f "${slot_state_path}/drain" ]; then
             echo "[slot ${slot_key}] current runner exited; drained slot will not respawn"
@@ -149,6 +322,13 @@ run_slot() {
         if grep -q "${CONNECT_MARKER}" "${log_path}" 2>/dev/null; then
             failures=0
             wait_seconds=1
+            write_slot_runtime_state \
+                "${slot_state_path}" \
+                "${OBSERVED_STATE_DIRTY}" \
+                "restarting" \
+                "${name}" \
+                0 \
+                "${wait_seconds}" || true
         else
             failures=$((failures + 1))
             wait_seconds=$((failures * failures * 3))
@@ -158,6 +338,13 @@ run_slot() {
             if [ "${failures}" -eq 1 ]; then
                 echo "[slot ${slot_key}] Check host clock skew, available CPU and memory, and runner-administration token scope."
             fi
+            write_slot_runtime_state \
+                "${slot_state_path}" \
+                "${OBSERVED_STATE_DIRTY}" \
+                "backoff" \
+                "${name}" \
+                "${failures}" \
+                "${wait_seconds}" || true
         fi
         rm -f "${log_path}"
 
@@ -180,6 +367,13 @@ start_slot() {
     mkdir -p "${started_path}"
     printf '%s\n' "${started_repo}" > "${started_path}/repo"
     printf '%s\n' "${started_tag}" > "${started_path}/tag"
+    write_slot_runtime_state \
+        "${started_path}" \
+        "${OBSERVED_STATE_DIRTY}" \
+        "starting" \
+        "" \
+        0 \
+        0 || true
     run_slot "${started_key}" "${started_repo}" "${started_tag}" &
     printf '%s\n' "$!" > "${started_path}/pid"
 }
@@ -280,7 +474,11 @@ reconcile_slots() {
         [ -n "${desired_key}" ] || continue
         [ "${desired_repo}" = "-" ] && desired_repo=""
         if slot_is_running "${desired_key}"; then
-            rm -f "$(slot_path "${desired_key}")/drain"
+            desired_drain_path="$(slot_path "${desired_key}")/drain"
+            if [ -f "${desired_drain_path}" ]; then
+                rm -f "${desired_drain_path}"
+                mark_observed_state_dirty
+            fi
             printf '%s\n' "${desired_key}" >> "${unchanged_path}"
         else
             remove_slot_registry "${desired_key}"
@@ -303,7 +501,10 @@ reconcile_slots() {
         [ -n "${active_key}" ] || continue
         active_path=$(slot_path "${active_key}")
         if slot_is_running "${active_key}"; then
-            : > "${active_path}/drain"
+            if [ ! -f "${active_path}/drain" ]; then
+                : > "${active_path}/drain"
+                mark_observed_state_dirty
+            fi
             printf '%s\n' "${active_key}" >> "${draining_path}"
         else
             remove_slot_registry "${active_key}"
@@ -378,6 +579,10 @@ load_accepted_state() {
 process_desired_state() {
     if [ ! -f "${DESIRED_STATE_PATH}" ]; then
         LAST_DESIRED_DOCUMENT_HASH=""
+        if [ -n "${LAST_REJECTION}" ]; then
+            LAST_REJECTION=""
+            mark_observed_state_dirty
+        fi
         return
     fi
     observed_document_hash=$(sha256sum "${DESIRED_STATE_PATH}" 2>/dev/null | awk '{ print $1 }')
@@ -419,6 +624,7 @@ process_desired_state() {
             fi
             CURRENT_GENERATION="${candidate_generation}"
             CURRENT_STATE_HASH="${candidate_hash}"
+            mark_observed_state_dirty
 
             added_file="/tmp/pitcrew-added.$$"
             draining_file="/tmp/pitcrew-draining.$$"
@@ -442,6 +648,10 @@ process_desired_state() {
             LAST_DESIRED_DOCUMENT_HASH="${snapshot_document_hash}"
             ;;
         unchanged)
+            if [ -n "${LAST_REJECTION}" ]; then
+                LAST_REJECTION=""
+                mark_observed_state_dirty
+            fi
             LAST_DESIRED_DOCUMENT_HASH="${snapshot_document_hash}"
             ;;
         invalid|stale|conflict)
@@ -449,6 +659,7 @@ process_desired_state() {
             if [ "${rejection}" != "${LAST_REJECTION}" ]; then
                 echo "[manager:${PROFILE_ID}] rejected ${classification} desired-capacity state; retaining generation ${CURRENT_GENERATION}" >&2
                 LAST_REJECTION="${rejection}"
+                mark_observed_state_dirty
             fi
             LAST_DESIRED_DOCUMENT_HASH="${snapshot_document_hash}"
             ;;
@@ -465,6 +676,8 @@ fi
 rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
+rm -f "${OBSERVED_STATE_DIRTY}"
+mark_observed_state_dirty
 
 echo "[manager:${PROFILE_ID}] clearing any leftover managed runners"
 remove_managed
@@ -498,6 +711,9 @@ if [ "${CURRENT_GENERATION}" -gt 0 ]; then
     fi
     rm -f "${startup_added}" "${startup_draining}" "${startup_unchanged}"
 fi
+MANAGER_STATUS="running"
+mark_observed_state_dirty
+publish_observed_state 1
 
 while [ "${STOPPING}" -eq 0 ]; do
     process_desired_state
@@ -523,5 +739,6 @@ while [ "${STOPPING}" -eq 0 ]; do
         fi
         rm -f "${periodic_added}" "${periodic_draining}" "${periodic_unchanged}"
     fi
+    publish_observed_state 0
     sleep "${RECONCILE_INTERVAL}"
 done

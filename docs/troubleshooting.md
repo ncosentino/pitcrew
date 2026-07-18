@@ -53,6 +53,7 @@ generation. Inspect profile logs and the generated state directory:
 docker compose --project-name self-hosted-runner logs runner-manager
 Get-Content .pitcrew-state\default\desired-capacity.json
 Get-Content .pitcrew-state\default\acknowledged-capacity.json
+Get-Content .pitcrew-state\default\observed-state.json
 ```
 
 Malformed or lower-generation desired state is rejected without changing the

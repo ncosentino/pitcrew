@@ -111,7 +111,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 4
+        managerContractVersion = 5
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -156,7 +156,7 @@ function Start-TestCapacityAcknowledgementWriter {
             $UnchangedSlots
         )
 
-        $deadline = [DateTime]::UtcNow.AddSeconds(20)
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
         do {
             if (Test-Path -LiteralPath $DesiredPath -PathType Leaf) {
                 try {
@@ -167,7 +167,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 4
+                            managerContractVersion = 5
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -254,7 +254,8 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 4) 'The setup contract does not identify the hardened manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 5) 'The setup contract does not identify the observed-state manager.'
+Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
     -Generation 4 `
@@ -294,6 +295,51 @@ Add-Check (
     (Get-RunnerDesiredCapacitySignature -State $fiveWorkers) -ne
     (Get-RunnerDesiredCapacitySignature -State $sixWorkers)
 ) 'Desired-capacity equality ignores worker-count changes.'
+Add-ThrowsCheck `
+    -Action {
+        New-RunnerDesiredCapacityState `
+            -Generation 1 `
+            -Scope repo `
+            -Repositories @(
+                [PSCustomObject]@{
+                    Url = 'https://token@github.com/example/project'
+                    Workers = 1
+                }
+            ) `
+            -Replicas $null
+    } `
+    -ExpectedMessage 'without credentials' `
+    -Failure 'Desired capacity accepted repository URL credentials.'
+Add-ThrowsCheck `
+    -Action {
+        New-RunnerDesiredCapacityState `
+            -Generation 1 `
+            -Scope repo `
+            -Repositories @(
+                [PSCustomObject]@{
+                    Url = 'https://github.com/example/project?token=secret'
+                    Workers = 1
+                }
+            ) `
+            -Replicas $null
+    } `
+    -ExpectedMessage 'query strings' `
+    -Failure 'Desired capacity accepted repository URL query parameters.'
+Add-ThrowsCheck `
+    -Action {
+        New-RunnerDesiredCapacityState `
+            -Generation 1 `
+            -Scope repo `
+            -Repositories @(
+                [PSCustomObject]@{
+                    Url = ' https://token@github.com/example/project'
+                    Workers = 1
+                }
+            ) `
+            -Replicas $null
+    } `
+    -ExpectedMessage 'canonical absolute HTTP' `
+    -Failure 'Desired capacity accepted leading URL whitespace.'
 
 $defaultStaticProfile = New-RunnerStaticProfileState `
     -Profile $defaultProfile `
@@ -353,7 +399,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=4$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=5$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -641,7 +687,7 @@ try {
                 -Repos 'https://github.com/example/project=2'
         }
         finally {
-            Wait-Job -Job $scaleUpAcknowledgement -Timeout 25 | Out-Null
+            Wait-Job -Job $scaleUpAcknowledgement -Timeout 65 | Out-Null
             Receive-Job -Job $scaleUpAcknowledgement -ErrorAction Stop | Out-Null
             Remove-Job -Job $scaleUpAcknowledgement -Force
         }
@@ -669,7 +715,7 @@ try {
                 -Repos 'https://github.com/example/project=1'
         }
         finally {
-            Wait-Job -Job $scaleDownAcknowledgement -Timeout 25 | Out-Null
+            Wait-Job -Job $scaleDownAcknowledgement -Timeout 65 | Out-Null
             Receive-Job -Job $scaleDownAcknowledgement -ErrorAction Stop | Out-Null
             Remove-Job -Job $scaleDownAcknowledgement -Force
         }
@@ -713,7 +759,7 @@ try {
                 -Repos 'https://github.com/example/project=1'
         }
         finally {
-            Wait-Job -Job $recoveryAcknowledgement -Timeout 25 | Out-Null
+            Wait-Job -Job $recoveryAcknowledgement -Timeout 65 | Out-Null
             Receive-Job -Job $recoveryAcknowledgement -ErrorAction Stop | Out-Null
             Remove-Job -Job $recoveryAcknowledgement -Force
         }
@@ -814,6 +860,7 @@ finally {
 $manager = Get-Content -LiteralPath $managerPath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
+$exampleEnvironment = Get-Content -LiteralPath (Join-Path $runnerRoot '.env.example') -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
 Add-Check ($manager -match [regex]::Escape('MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"')) 'The manager cleanup label is not profile-specific.'
 Add-Check ($manager -match [regex]::Escape('-e NO_DEFAULT_LABELS=1')) 'The manager does not support isolated registration without GitHub default labels.'
@@ -826,6 +873,14 @@ Add-Check ($manager -match [regex]::Escape('LAST_DESIRED_DOCUMENT_HASH')) 'The m
 Add-Check ($manager -notmatch 'grep -Fqx') 'The manager still performs a quadratic desired-key scan.'
 Add-Check ($manager -match [regex]::Escape('/drain')) 'The manager does not represent graceful slot draining.'
 Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Worker containers do not expose stable slot identity.'
+Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
+Add-Check ($manager -match [regex]::Escape('PITCREW_OBSERVED_STATE_INTERVAL:-30')) 'The manager does not bound observed-state heartbeat writes.'
+Add-Check ($manager -match [regex]::Escape(': > "${stopping_path}/drain"')) 'Manager shutdown does not drain slot supervisors before cleanup.'
+Add-Check ($manager -match [regex]::Escape('if ! remove_managed_strict; then')) 'Manager shutdown can publish stopped without confirming runner cleanup.'
+Add-Check ($manager -match [regex]::Escape('rm -f "${OBSERVED_STATE_DIRTY}"')) 'Observed-state publication does not preserve concurrent dirty notifications.'
+Add-Check ($managerDockerfile -match 'FROM docker:28-cli AS docker-cli') 'The manager does not isolate the Docker client build stage.'
+Add-Check ($managerDockerfile -match 'FROM alpine:3\.22') 'The manager runtime is not based on minimal Alpine.'
+Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker')) 'The manager runtime does not copy only the Docker client binary.'
 Add-Check ($managerDockerfile -match 'ARG JQ_VERSION=1\.8\.2') 'The manager does not pin its jq release.'
 Add-Check ($managerDockerfile -match 'JQ_SHA256_AMD64=[0-9a-f]{64}') 'The manager does not checksum-pin jq for amd64.'
 Add-Check ($managerDockerfile -match 'JQ_SHA256_ARM64=[0-9a-f]{64}') 'The manager does not checksum-pin jq for arm64.'
@@ -834,9 +889,11 @@ Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry t
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
 Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
+Add-Check ($compose -match 'stop_grace_period:\s*30s') 'Compose does not allow manager shutdown to complete bounded worker cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=5$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

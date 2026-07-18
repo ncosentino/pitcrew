@@ -5,7 +5,12 @@ desired_state_is_valid() {
         def positive_integer:
             type == "number" and . >= 1 and floor == .;
         def valid_url:
-            type == "string" and length > 0 and . != "-" and (test("[\\t\\r\\n]") | not);
+            type == "string"
+            and length > 0
+            and . != "-"
+            and (test("\\s") | not)
+            and test("^https?://[^/@?#]+/[^?#]+$"; "i")
+            and (test("^https?://[^/@]+@"; "i") | not);
         type == "object"
         and .schemaVersion == 1
         and (.generation | positive_integer)
