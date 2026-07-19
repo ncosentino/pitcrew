@@ -83,3 +83,8 @@ Stop only the selected manager and its workers:
 ```
 
 Omit `-Profile` to stop the default pool.
+
+PitCrew gives compatible worker images time to deregister before exact-label
+force removal. If a custom image leaves offline registrations behind, verify
+that its entry point handles `SIGTERM`, retains a private removal credential,
+and does not export that credential to the runner process.
