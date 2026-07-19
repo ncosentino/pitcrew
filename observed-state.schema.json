@@ -1,0 +1,121 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://www.devleader.ca/projects/pitcrew/schemas/observed-state.schema.json",
+  "title": "PitCrew Manager Observed State",
+  "description": "Credential-free operational status projected by one PitCrew profile manager.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "managerContractVersion",
+    "profileId",
+    "managerInstanceId",
+    "managerStatus",
+    "observedAt",
+    "scope",
+    "generation",
+    "desiredStateHash",
+    "desiredStateStatus",
+    "desiredSlots",
+    "activeSlots",
+    "drainingSlots",
+    "slots"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "managerContractVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "profileId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "managerInstanceId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "managerStatus": {
+      "enum": ["starting", "running", "stopping", "stopped"]
+    },
+    "observedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scope": {
+      "enum": ["repo", "org", "ent"]
+    },
+    "generation": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "desiredStateHash": {
+      "type": ["string", "null"],
+      "minLength": 1
+    },
+    "desiredStateStatus": {
+      "enum": ["waiting", "accepted", "invalid", "stale", "conflict"]
+    },
+    "desiredSlots": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "activeSlots": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "drainingSlots": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "slots": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "key",
+          "repository",
+          "desired",
+          "processRunning",
+          "state",
+          "failureCount",
+          "backoffSeconds",
+          "updatedAt"
+        ],
+        "properties": {
+          "key": {
+            "type": "string",
+            "minLength": 1
+          },
+          "repository": {
+            "type": ["string", "null"]
+          },
+          "desired": {
+            "type": "boolean"
+          },
+          "processRunning": {
+            "type": "boolean"
+          },
+          "state": {
+            "enum": ["starting", "online", "backoff", "restarting", "draining", "stopped"]
+          },
+          "failureCount": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "backoffSeconds": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "updatedAt": {
+            "type": ["string", "null"],
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}

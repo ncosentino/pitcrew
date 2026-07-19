@@ -15,6 +15,7 @@ REPOSITORY_URL="https://github.com/example/integration"
 STATE_DIRECTORY="${ROOT}/.pitcrew-state/${PROFILE_NAME}"
 DESIRED_STATE="${STATE_DIRECTORY}/desired-capacity.json"
 ACKNOWLEDGEMENT="${STATE_DIRECTORY}/acknowledged-capacity.json"
+OBSERVED_STATE="${STATE_DIRECTORY}/observed-state.json"
 LEGACY_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${LEGACY_PROFILE_NAME}"
 LEGACY_DESIRED_STATE="${LEGACY_STATE_DIRECTORY}/desired-capacity.json"
 LEGACY_COMPOSE_PROJECT="self-hosted-runner-${LEGACY_PROFILE_NAME}"
@@ -67,6 +68,22 @@ wait_for_acknowledgement() {
     return 1
 }
 
+wait_for_observed_generation() {
+    expected_generation="$1"
+    expected_status="$2"
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${OBSERVED_STATE}" ] &&
+            [ "$(jq -r '.generation // -1' "${OBSERVED_STATE}" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ "$(jq -r '.desiredStateStatus // ""' "${OBSERVED_STATE}" 2>/dev/null || true)" = "${expected_status}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for observed generation ${expected_generation} with status ${expected_status}." >&2
+    return 1
+}
+
 wait_for_slot_replacement() {
     slot_key="$1"
     previous_id="$2"
@@ -106,7 +123,7 @@ start_legacy_compose() {
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="4" \
+        PITCREW_MANAGER_CONTRACT_VERSION="5" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -206,10 +223,33 @@ wait_for_legacy_worker_count 0
 
 run_setup 5
 wait_for_acknowledgement 1
+wait_for_observed_generation 1 accepted
 wait_for_worker_count 5
+manager_image_kib=$(docker run \
+    --rm \
+    --entrypoint /bin/sh \
+    ephemeral-runner-manager:local \
+    -c "du -sk / 2>/dev/null | awk '{ print \$1 }'")
+[ "${manager_image_kib}" -le 61440 ] || {
+    echo "Manager filesystem is ${manager_image_kib} KiB; expected at most 60 MiB." >&2
+    exit 1
+}
+echo "Manager filesystem size: ${manager_image_kib} KiB"
 MANAGER_ID=$(manager_id)
 [ -n "${MANAGER_ID}" ] || {
     echo "Runner manager did not start." >&2
+    exit 1
+}
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 5 ] || {
+    echo "Observed state did not report manager contract version five." >&2
+    exit 1
+}
+[ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
+    echo "Observed state was not isolated to the integration profile." >&2
+    exit 1
+}
+[ "$(jq -r '.desiredSlots' "${OBSERVED_STATE}")" -eq 5 ] || {
+    echo "Observed state did not report five desired slots." >&2
     exit 1
 }
 mapfile -t original_workers < <(worker_ids)
@@ -217,6 +257,7 @@ mapfile -t original_workers < <(worker_ids)
 
 run_setup 6
 wait_for_acknowledgement 2
+wait_for_observed_generation 2 accepted
 wait_for_worker_count 6
 [ "$(manager_id)" = "${MANAGER_ID}" ] || {
     echo "Capacity scale-up replaced the manager container." >&2
@@ -237,6 +278,7 @@ new_worker_count=$(comm -13 \
 
 run_setup 5
 wait_for_acknowledgement 3
+wait_for_observed_generation 3 accepted
 [ "$(manager_id)" = "${MANAGER_ID}" ] || {
     echo "Capacity scale-down replaced the manager container." >&2
     exit 1
@@ -314,7 +356,7 @@ fi
 
 mapfile -t workers_before_invalid_state < <(worker_ids)
 printf '{"schemaVersion":1,"generation":4' > "${DESIRED_STATE}"
-sleep 3
+wait_for_observed_generation 3 invalid
 mapfile -t workers_after_invalid_state < <(worker_ids)
 [ "${workers_before_invalid_state[*]}" = "${workers_after_invalid_state[*]}" ] || {
     echo "Malformed desired state churned a healthy worker pool." >&2

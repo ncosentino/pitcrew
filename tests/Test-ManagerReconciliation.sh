@@ -3,6 +3,7 @@ set -eu
 
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "${ROOT}/manager/reconciliation.sh"
+. "${ROOT}/manager/observability.sh"
 
 TEMP_DIRECTORY=$(mktemp -d)
 trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
@@ -35,6 +36,14 @@ assert_false() {
     if "$@"; then
         fail "${message}"
     fi
+}
+
+contains_access_token_field() {
+    jq -e '[.. | objects | has("accessToken")] | any' "$1" >/dev/null
+}
+
+contains_runner_identity_field() {
+    jq -e '[.slots[] | has("tag") or has("runnerName")] | any' "$1" >/dev/null
 }
 
 write_repo_state() {
@@ -154,6 +163,34 @@ write_repo_state \
     '[{"url":"-","workers":1}]'
 assert_equals "invalid" "$(classify_desired_state "${sentinel_state}" 4 "${five_hash}")" "The scope sentinel was accepted as a repository URL."
 
+credential_url_state="${TEMP_DIRECTORY}/credential-url.json"
+write_repo_state \
+    "${credential_url_state}" \
+    9 \
+    '[{"url":"https://token@github.com/example/project","workers":1}]'
+assert_equals "invalid" "$(classify_desired_state "${credential_url_state}" 4 "${five_hash}")" "Repository URL credentials were accepted."
+
+query_url_state="${TEMP_DIRECTORY}/query-url.json"
+write_repo_state \
+    "${query_url_state}" \
+    9 \
+    '[{"url":"https://github.com/example/project?token=secret","workers":1}]'
+assert_equals "invalid" "$(classify_desired_state "${query_url_state}" 4 "${five_hash}")" "Repository URL query parameters were accepted."
+
+whitespace_url_state="${TEMP_DIRECTORY}/whitespace-url.json"
+write_repo_state \
+    "${whitespace_url_state}" \
+    9 \
+    '[{"url":" https://token@github.com/example/project","workers":1}]'
+assert_equals "invalid" "$(classify_desired_state "${whitespace_url_state}" 4 "${five_hash}")" "Repository URL leading whitespace was accepted."
+
+relative_url_state="${TEMP_DIRECTORY}/relative-url.json"
+write_repo_state \
+    "${relative_url_state}" \
+    9 \
+    '[{"url":"github.com/example/project","workers":1}]'
+assert_equals "invalid" "$(classify_desired_state "${relative_url_state}" 4 "${five_hash}")" "A relative repository URL was accepted."
+
 legacy_repo_state="${TEMP_DIRECTORY}/legacy-repo.json"
 write_legacy_desired_state \
     "${legacy_repo_state}" \
@@ -177,5 +214,54 @@ assert_false \
     repo \
     'https://github.com/example/project=0' \
     1
+
+observed_slots_directory="${TEMP_DIRECTORY}/observed-slots"
+observed_slots_json="${TEMP_DIRECTORY}/observed-slots.json"
+observed_state_json="${TEMP_DIRECTORY}/observed-state.json"
+observed_dirty="${TEMP_DIRECTORY}/observed-dirty"
+mkdir -p \
+    "${observed_slots_directory}/repo-example-000001" \
+    "${observed_slots_directory}/repo-example-000002"
+printf '%s\n' "$$" > "${observed_slots_directory}/repo-example-000001/pid"
+printf '%s\n' "$$" > "${observed_slots_directory}/repo-example-000002/pid"
+printf '%s\n' 'https://token@example.com/example/project?secret=value' > "${observed_slots_directory}/repo-example-000001/repo"
+printf '%s\n' 'https://github.com/example/project' > "${observed_slots_directory}/repo-example-000002/repo"
+write_slot_runtime_state \
+    "${observed_slots_directory}/repo-example-000001" \
+    "${observed_dirty}" \
+    online \
+    runner-project-1 \
+    0 \
+    0
+write_slot_runtime_state \
+    "${observed_slots_directory}/repo-example-000002" \
+    "${observed_dirty}" \
+    backoff \
+    runner-project-2 \
+    2 \
+    12
+: > "${observed_slots_directory}/repo-example-000002/drain"
+render_observed_slots "${observed_slots_directory}" "${observed_slots_json}"
+write_manager_observed_state \
+    "${observed_state_json}" \
+    default \
+    manager-instance \
+    5 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${observed_slots_json}"
+assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
+assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
+assert_equals "1" "$(jq -r '.drainingSlots' "${observed_state_json}")" "Observed state reported the wrong draining slot count."
+assert_equals "online" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .state' "${observed_state_json}")" "Observed state lost an online slot."
+assert_equals "draining" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .state' "${observed_state_json}")" "Drain state did not override runtime backoff."
+assert_equals "2" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .failureCount' "${observed_state_json}")" "Observed state lost the slot failure count."
+assert_equals "https://example.com/example/project" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .repository' "${observed_state_json}")" "Observed state did not strip repository credentials and query parameters."
+assert_false "Observed state exposed an access token field." contains_access_token_field "${observed_state_json}"
+assert_false "Observed state exposed runner names or derived tags." contains_runner_identity_field "${observed_state_json}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

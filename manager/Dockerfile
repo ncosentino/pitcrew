@@ -1,8 +1,12 @@
-# Babysitter image: a tiny Docker-CLI container that keeps a pool of truly-
-# ephemeral runner containers filled (see manage-runners.sh). It only needs the
-# docker client to talk to the host daemon via the mounted socket — it does NOT
-# run dockerd itself (the runners are siblings on the host, not nested).
-FROM docker:28-cli
+# The manager needs only the Docker client binary, not the CLI image's Compose
+# and Buildx plugins. Keep the runtime layer to Alpine plus Docker, jq, and the
+# manager scripts.
+FROM docker:28-cli AS docker-cli
+
+FROM alpine:3.22
+
+COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
+COPY --from=docker-cli /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 
 ARG JQ_VERSION=1.8.2
 ARG TARGETARCH
@@ -41,7 +45,11 @@ RUN set -eu; \
     jq --version
 
 COPY reconciliation.sh /usr/local/bin/reconciliation.sh
+COPY observability.sh /usr/local/bin/observability.sh
 COPY manage-runners.sh /usr/local/bin/manage-runners.sh
-RUN chmod +x /usr/local/bin/manage-runners.sh /usr/local/bin/reconciliation.sh
+RUN chmod +x \
+    /usr/local/bin/manage-runners.sh \
+    /usr/local/bin/observability.sh \
+    /usr/local/bin/reconciliation.sh
 
 ENTRYPOINT ["/usr/local/bin/manage-runners.sh"]

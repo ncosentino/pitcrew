@@ -73,6 +73,14 @@ registration token or workload credential. Setup validates the complete next
 document, writes it through a temporary file and atomic rename, and waits for
 the running manager to acknowledge its generation.
 
+Each manager also projects credential-free operational status to
+`.pitcrew-state/<profile>/observed-state.json`. The manager replaces this file
+atomically after slot lifecycle changes and on a low-frequency heartbeat. It
+contains the manager instance, accepted generation, desired-state health, and
+per-slot lifecycle state, but no registration token, environment values, job
+logs, or Docker socket details. Consumers must use `observedAt` to reject stale
+status after an ungraceful manager exit.
+
 For repository scope, desired state records each repository URL and worker
 count. Organization and enterprise scope record one shared replica count. The
 manager derives stable ordinal slot keys, so changing a repository from five
