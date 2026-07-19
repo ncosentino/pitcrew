@@ -118,6 +118,11 @@ host Docker daemon rather than nested containers. Reapplying setup with only
 worker-count changes updates mounted state in place; image, label, scope,
 runner-group, and naming changes retain full profile replacement.
 
+Manager stop and restart send `SIGTERM` to all profile workers concurrently so
+compatible runner images can deregister from GitHub before their containers are
+removed. Exact-label force removal remains a bounded fallback for workers that
+do not exit.
+
 ## Documentation
 
 Full setup, profile, routing, security, and troubleshooting guidance is

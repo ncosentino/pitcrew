@@ -8,8 +8,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 . "${SCRIPT_DIRECTORY}/observability.sh"
 
-MANAGER_CONTRACT_VERSION=5
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-5}"
+MANAGER_CONTRACT_VERSION=6
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-6}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -66,6 +66,8 @@ fi
 
 CONNECT_MARKER="Listening for Jobs"
 MAX_BACKOFF="${RUNNER_MAX_BACKOFF:-120}"
+RUNNER_STOP_TIMEOUT=20
+SUPERVISOR_STOP_TIMEOUT=5
 CURRENT_GENERATION=0
 CURRENT_STATE_HASH=""
 LAST_DESIRED_DOCUMENT_HASH=""
@@ -147,37 +149,70 @@ publish_observed_state() {
     rm -f "${observed_slots_path}"
 }
 
+wait_for_cleanup_commands() {
+    cleanup_pids="$1"
+    cleanup_failed=0
+    for cleanup_pid in ${cleanup_pids}; do
+        if ! wait "${cleanup_pid}"; then
+            cleanup_failed=1
+        fi
+    done
+    [ "${cleanup_failed}" -eq 0 ]
+}
+
+stop_managed_gracefully() {
+    graceful_ids=$(docker ps -q --filter "label=${MANAGED_LABEL}") || return 1
+    graceful_pids=""
+    for graceful_id in ${graceful_ids}; do
+        docker stop \
+            --timeout "${RUNNER_STOP_TIMEOUT}" \
+            "${graceful_id}" >/dev/null 2>&1 &
+        graceful_pids="${graceful_pids} $!"
+    done
+    wait_for_cleanup_commands "${graceful_pids}"
+}
+
 remove_managed() {
-    ids=$(docker ps -aq --filter "label=${MANAGED_LABEL}" 2>/dev/null || true)
-    if [ -n "${ids}" ]; then
-        echo "${ids}" | xargs -r docker rm -f >/dev/null 2>&1 || true
-    fi
+    removal_ids=$(docker ps -aq --filter "label=${MANAGED_LABEL}" 2>/dev/null || true)
+    removal_pids=""
+    for removal_id in ${removal_ids}; do
+        docker rm -f "${removal_id}" >/dev/null 2>&1 &
+        removal_pids="${removal_pids} $!"
+    done
+    wait_for_cleanup_commands "${removal_pids}" || true
 }
 
 remove_managed_strict() {
     strict_ids=$(docker ps -aq --filter "label=${MANAGED_LABEL}") || return 1
+    strict_pids=""
     for strict_id in ${strict_ids}; do
-        docker rm -f "${strict_id}" >/dev/null || return 1
+        docker rm -f "${strict_id}" >/dev/null 2>&1 &
+        strict_pids="${strict_pids} $!"
     done
+    wait_for_cleanup_commands "${strict_pids}" || return 1
     strict_remaining=$(docker ps -aq --filter "label=${MANAGED_LABEL}") || return 1
     [ -z "${strict_remaining}" ]
 }
 
 shutdown() {
-    echo "[manager:${PROFILE_ID}] received stop signal — removing managed runner containers"
+    echo "[manager:${PROFILE_ID}] received stop signal — stopping managed runner containers"
     STOPPING=1
     MANAGER_STATUS="stopping"
     for stopping_path in "${SLOT_DIRECTORY}"/*; do
         [ -d "${stopping_path}" ] || continue
         : > "${stopping_path}/drain"
     done
+    mark_observed_state_dirty
+    publish_observed_state 1
+    if ! stop_managed_gracefully; then
+        echo "[manager:${PROFILE_ID}] one or more runners did not stop gracefully; forcing cleanup" >&2
+    fi
     remove_managed_strict || true
     mark_observed_state_dirty
     publish_observed_state 1
 
     shutdown_elapsed=0
-    while [ "${shutdown_elapsed}" -lt 20 ]; do
-        remove_managed_strict || true
+    while [ "${shutdown_elapsed}" -lt "${SUPERVISOR_STOP_TIMEOUT}" ]; do
         supervisors_running=0
         for stopping_path in "${SLOT_DIRECTORY}"/*; do
             [ -d "${stopping_path}" ] || continue
@@ -285,7 +320,8 @@ run_slot() {
             -e RUNNER_NAME="${name}" \
             -e EPHEMERAL=1 \
             -e DISABLE_AUTO_UPDATE=1 \
-            -e UNSET_CONFIG_VARS=true \
+            -e UNSET_CONFIG_VARS=false \
+            -e DISABLE_AUTOMATIC_DEREGISTRATION=false \
             -e LABELS="${LABELS}"
         if [ "${RUNNER_NO_DEFAULT_LABELS:-}" = "1" ]; then
             set -- "$@" -e NO_DEFAULT_LABELS=1
@@ -680,6 +716,9 @@ rm -f "${OBSERVED_STATE_DIRTY}"
 mark_observed_state_dirty
 
 echo "[manager:${PROFILE_ID}] clearing any leftover managed runners"
+if ! stop_managed_gracefully; then
+    echo "[manager:${PROFILE_ID}] one or more leftover runners did not stop gracefully; forcing cleanup" >&2
+fi
 remove_managed
 
 if [ "${RUNNER_PULL_IMAGE:-1}" = "1" ]; then

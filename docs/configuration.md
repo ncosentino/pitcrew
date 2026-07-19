@@ -60,6 +60,20 @@ Named profiles conform to
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |
 | `build` | No | Local Docker build context, Dockerfile, and non-secret build arguments. |
 
+## Worker image shutdown contract
+
+The default worker image retains its GitHub credential only in the entry-point
+shell and explicitly does not export that credential to the runner process.
+PitCrew leaves the private shell value available so the image can deregister on
+`SIGTERM`. Manager stop and restart signal all workers concurrently, wait a
+bounded period, and force-remove only exact-label leftovers.
+
+Custom worker images must provide the same contract: handle `SIGTERM`,
+deregister the current runner, keep registration credentials out of the runner
+process and workflow environment, and exit within the manager's shutdown
+window. Images that discard their deregistration credential after startup can
+leave offline runner registrations behind.
+
 ## Generated state
 
 The default profile writes `.env`; named profiles write `.env.<profile>`. These
