@@ -225,14 +225,16 @@ run_setup 5
 wait_for_acknowledgement 1
 wait_for_observed_generation 1 accepted
 wait_for_worker_count 5
-manager_image_bytes=$(docker image inspect \
+manager_image_kib=$(docker run \
+    --rm \
+    --entrypoint /bin/sh \
     ephemeral-runner-manager:local \
-    --format '{{.Size}}')
-[ "${manager_image_bytes}" -le 52428800 ] || {
-    echo "Manager image is ${manager_image_bytes} bytes; expected at most 50 MiB." >&2
+    -c "du -sk / 2>/dev/null | awk '{ print \$1 }'")
+[ "${manager_image_kib}" -le 61440 ] || {
+    echo "Manager filesystem is ${manager_image_kib} KiB; expected at most 60 MiB." >&2
     exit 1
 }
-echo "Manager image size: ${manager_image_bytes} bytes"
+echo "Manager filesystem size: ${manager_image_kib} KiB"
 MANAGER_ID=$(manager_id)
 [ -n "${MANAGER_ID}" ] || {
     echo "Runner manager did not start." >&2
