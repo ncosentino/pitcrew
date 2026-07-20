@@ -64,6 +64,86 @@ if [ "${RUNNER_NO_DEFAULT_LABELS:-}" = "1" ]; then
     append_label "${architecture_label}"
 fi
 
+# Optional per-runner resource limits. Unset by default so the docker run
+# invocation below is byte-for-byte identical to the historical behavior unless
+# an operator opts in. Without a cap a single heavy CI job can consume all host
+# memory or fork unbounded processes, so the kernel OOM killer reaps runner
+# processes host-wide at one instant — the "two runners lost at the same second"
+# signature. A malformed value is rejected loudly and dropped rather than
+# silently pretending to cap the job.
+RUNNER_MEMORY_LIMIT="${RUNNER_MEMORY_LIMIT:-}"
+RUNNER_MEMORY_SWAP_LIMIT="${RUNNER_MEMORY_SWAP_LIMIT:-}"
+RUNNER_CPU_LIMIT="${RUNNER_CPU_LIMIT:-}"
+RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-}"
+
+is_valid_memory_value() {
+    memory_value="$1"
+    case "${memory_value}" in
+        *[!0-9bBkKmMgG]*) return 1 ;;
+    esac
+    case "${memory_value}" in
+        *[bBkKmMgG]) memory_value="${memory_value%?}" ;;
+    esac
+    case "${memory_value}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    return 0
+}
+
+is_valid_cpu_value() {
+    cpu_value="$1"
+    case "${cpu_value}" in
+        ''|.|*[!0-9.]*) return 1 ;;
+    esac
+    case "${cpu_value}" in
+        *.*.*) return 1 ;;
+    esac
+    case "${cpu_value}" in
+        [0-9]*) ;;
+        *) return 1 ;;
+    esac
+    return 0
+}
+
+is_valid_pids_value() {
+    case "$1" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    return 0
+}
+
+if [ -n "${RUNNER_MEMORY_LIMIT}" ] && ! is_valid_memory_value "${RUNNER_MEMORY_LIMIT}"; then
+    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_MEMORY_LIMIT='${RUNNER_MEMORY_LIMIT}' (expected a Docker byte value, e.g. 4g, 512m, or 2147483648)" >&2
+    RUNNER_MEMORY_LIMIT=""
+fi
+if [ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ] && ! is_valid_memory_value "${RUNNER_MEMORY_SWAP_LIMIT}"; then
+    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_MEMORY_SWAP_LIMIT='${RUNNER_MEMORY_SWAP_LIMIT}' (expected a Docker byte value, e.g. 4g, 512m, or 2147483648)" >&2
+    RUNNER_MEMORY_SWAP_LIMIT=""
+fi
+if [ -n "${RUNNER_CPU_LIMIT}" ] && ! is_valid_cpu_value "${RUNNER_CPU_LIMIT}"; then
+    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_CPU_LIMIT='${RUNNER_CPU_LIMIT}' (expected a positive decimal core count, e.g. 2 or 1.5)" >&2
+    RUNNER_CPU_LIMIT=""
+fi
+if [ -n "${RUNNER_PIDS_LIMIT}" ] && ! is_valid_pids_value "${RUNNER_PIDS_LIMIT}"; then
+    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_PIDS_LIMIT='${RUNNER_PIDS_LIMIT}' (expected a positive integer process count)" >&2
+    RUNNER_PIDS_LIMIT=""
+fi
+if [ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ] && [ -z "${RUNNER_MEMORY_LIMIT}" ]; then
+    echo "[manager:${PROFILE_ID}] ignoring RUNNER_MEMORY_SWAP_LIMIT because RUNNER_MEMORY_LIMIT is unset (Docker requires --memory alongside --memory-swap)" >&2
+    RUNNER_MEMORY_SWAP_LIMIT=""
+fi
+
+runner_resource_limits_summary=""
+[ -n "${RUNNER_MEMORY_LIMIT}" ] && runner_resource_limits_summary="${runner_resource_limits_summary} memory=${RUNNER_MEMORY_LIMIT}"
+[ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ] && runner_resource_limits_summary="${runner_resource_limits_summary} memory-swap=${RUNNER_MEMORY_SWAP_LIMIT}"
+[ -n "${RUNNER_CPU_LIMIT}" ] && runner_resource_limits_summary="${runner_resource_limits_summary} cpus=${RUNNER_CPU_LIMIT}"
+[ -n "${RUNNER_PIDS_LIMIT}" ] && runner_resource_limits_summary="${runner_resource_limits_summary} pids=${RUNNER_PIDS_LIMIT}"
+if [ -n "${runner_resource_limits_summary}" ]; then
+    echo "[manager:${PROFILE_ID}] per-runner resource limits:${runner_resource_limits_summary}"
+else
+    echo "[manager:${PROFILE_ID}] per-runner resource limits: none (set RUNNER_MEMORY_LIMIT/RUNNER_CPU_LIMIT/RUNNER_PIDS_LIMIT to cap heavy jobs)"
+fi
+
 CONNECT_MARKER="Listening for Jobs"
 MAX_BACKOFF="${RUNNER_MAX_BACKOFF:-120}"
 RUNNER_STOP_TIMEOUT=20
@@ -295,6 +375,7 @@ run_slot() {
     slot_state_path=$(slot_path "${slot_key}")
     failures=0
     log_path="/tmp/slot-${slot_key}.log"
+    runner_status_path="/tmp/pitcrew-slot-${slot_key}.exit"
 
     while [ ! -f "${slot_state_path}/drain" ]; do
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
@@ -323,6 +404,18 @@ run_slot() {
             -e UNSET_CONFIG_VARS=false \
             -e DISABLE_AUTOMATIC_DEREGISTRATION=false \
             -e LABELS="${LABELS}"
+        if [ -n "${RUNNER_MEMORY_LIMIT}" ]; then
+            set -- "$@" --memory "${RUNNER_MEMORY_LIMIT}"
+        fi
+        if [ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ]; then
+            set -- "$@" --memory-swap "${RUNNER_MEMORY_SWAP_LIMIT}"
+        fi
+        if [ -n "${RUNNER_CPU_LIMIT}" ]; then
+            set -- "$@" --cpus "${RUNNER_CPU_LIMIT}"
+        fi
+        if [ -n "${RUNNER_PIDS_LIMIT}" ]; then
+            set -- "$@" --pids-limit "${RUNNER_PIDS_LIMIT}"
+        fi
         if [ "${RUNNER_NO_DEFAULT_LABELS:-}" = "1" ]; then
             set -- "$@" -e NO_DEFAULT_LABELS=1
         fi
@@ -330,7 +423,12 @@ run_slot() {
             set -- "$@" -e RUNNER_GROUP="${RUNNER_GROUP}"
         fi
         set -- "$@" "${IMAGE}"
-        "$@" 2>&1 |
+        rm -f "${runner_status_path}"
+        # The reader loop is the last stage of the pipe, so a plain pipeline would
+        # report the loop's exit status and discard the container's. Persist the
+        # container status from inside the pipe so a killed runner (137 / SIGKILL,
+        # the OOM-kill signature) is distinguishable from a clean job exit.
+        { "$@" 2>&1; printf '%s' "$?" > "${runner_status_path}"; } |
             while IFS= read -r output_line || [ -n "${output_line:-}" ]; do
                 printf '%s\n' "${output_line}"
                 printf '%s\n' "${output_line}" >> "${log_path}"
@@ -349,6 +447,24 @@ run_slot() {
                         ;;
                 esac
             done
+
+        runner_exit_status=0
+        if [ -f "${runner_status_path}" ]; then
+            runner_exit_status=$(cat "${runner_status_path}")
+            rm -f "${runner_status_path}"
+        fi
+        case "${runner_exit_status}" in
+            ''|*[!0-9]*) runner_exit_status=0 ;;
+        esac
+        if [ "${runner_exit_status}" -eq 0 ]; then
+            echo "[slot ${slot_key}] runner ${name} exited cleanly (status 0) — job completed"
+        elif [ "${runner_exit_status}" -eq 137 ]; then
+            echo "[slot ${slot_key}] runner ${name} was KILLED (status 137 / SIGKILL) — likely host OOM-kill or 'docker kill'. Inspect host memory/CPU pressure and set RUNNER_MEMORY_LIMIT/RUNNER_CPU_LIMIT/RUNNER_PIDS_LIMIT to keep one job from starving the fleet." >&2
+        elif [ "${runner_exit_status}" -ge 128 ]; then
+            echo "[slot ${slot_key}] runner ${name} terminated by signal $((runner_exit_status - 128)) (status ${runner_exit_status})" >&2
+        else
+            echo "[slot ${slot_key}] runner ${name} exited with status ${runner_exit_status}" >&2
+        fi
 
         if [ -f "${slot_state_path}/drain" ]; then
             echo "[slot ${slot_key}] current runner exited; drained slot will not respawn"
@@ -391,7 +507,7 @@ run_slot() {
         done
     done
 
-    rm -f "${log_path}"
+    rm -f "${log_path}" "${runner_status_path}"
 }
 
 start_slot() {

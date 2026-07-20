@@ -112,6 +112,10 @@ function Resolve-RunnerProfile {
     $effectivePullImage = $true
     $verificationCommands = @()
     $build = $null
+    $resourceMemory = ''
+    $resourceMemorySwap = ''
+    $resourceCpus = ''
+    $resourcePids = ''
 
     if ($manifestPath) {
         $schemaPath = Join-Path $resolvedRoot 'runner-profile.schema.json'
@@ -181,6 +185,22 @@ function Resolve-RunnerProfile {
         if ($manifest.PSObject.Properties['pullImage']) {
             $effectivePullImage = [bool]$manifest.pullImage
         }
+
+        if ($manifest.PSObject.Properties['resources']) {
+            $resources = $manifest.resources
+            if ($resources.PSObject.Properties['memory']) {
+                $resourceMemory = [string]$resources.memory
+            }
+            if ($resources.PSObject.Properties['memorySwap']) {
+                $resourceMemorySwap = [string]$resources.memorySwap
+            }
+            if ($resources.PSObject.Properties['cpus']) {
+                $resourceCpus = [string]$resources.cpus
+            }
+            if ($resources.PSObject.Properties['pids']) {
+                $resourcePids = [string][int]$resources.pids
+            }
+        }
     }
 
     if ($PSBoundParameters.ContainsKey('Replicas')) {
@@ -209,6 +229,22 @@ function Resolve-RunnerProfile {
     }
     if ($effectiveRunnerGroup -match '[\r\n]') {
         throw 'Runner group cannot contain a newline.'
+    }
+
+    if ($resourceMemory -and $resourceMemory -notmatch '^[0-9]+[bBkKmMgG]?$') {
+        throw "Runner resource memory '$resourceMemory' must be a Docker byte value such as 6g, 512m, or a positive byte count."
+    }
+    if ($resourceMemorySwap -and $resourceMemorySwap -notmatch '^[0-9]+[bBkKmMgG]?$') {
+        throw "Runner resource memorySwap '$resourceMemorySwap' must be a Docker byte value such as 6g, 512m, or a positive byte count."
+    }
+    if ($resourceCpus -and $resourceCpus -notmatch '^[0-9]+(\.[0-9]+)?$') {
+        throw "Runner resource cpus '$resourceCpus' must be a positive decimal core count such as 4 or 1.5."
+    }
+    if ($resourcePids -and $resourcePids -notmatch '^[0-9]+$') {
+        throw "Runner resource pids '$resourcePids' must be a positive integer process count."
+    }
+    if ($resourceMemorySwap -and -not $resourceMemory) {
+        throw 'Runner resource memorySwap requires memory to be set because Docker rejects --memory-swap without --memory.'
     }
 
     $requiredLabel = if ($profileName -eq 'default') { 'general-purpose' } else { $profileName }
@@ -272,6 +308,10 @@ function Resolve-RunnerProfile {
         DisableDefaultLabels = $disableDefaultLabels
         RunnerGroup = $effectiveRunnerGroup
         NamePrefix = $effectiveNamePrefix
+        ResourceMemory = $resourceMemory
+        ResourceMemorySwap = $resourceMemorySwap
+        ResourceCpus = $resourceCpus
+        ResourcePids = $resourcePids
         VerificationCommands = @($verificationCommands)
         Build = $build
         PullImage = $effectivePullImage
@@ -793,6 +833,10 @@ function New-RunnerEnvironmentContent {
         "RUNNER_LABELS=$($Profile.LabelsValue)"
         "RUNNER_NO_DEFAULT_LABELS=$disableDefaultLabels"
         "RUNNER_GROUP=$($Profile.RunnerGroup)"
+        "RUNNER_MEMORY_LIMIT=$($Profile.ResourceMemory)"
+        "RUNNER_MEMORY_SWAP_LIMIT=$($Profile.ResourceMemorySwap)"
+        "RUNNER_CPU_LIMIT=$($Profile.ResourceCpus)"
+        "RUNNER_PIDS_LIMIT=$($Profile.ResourcePids)"
         "PITCREW_STATE_DIR=$($Profile.StateVolumePath)"
         "PITCREW_MANAGER_CONTRACT_VERSION=$($Profile.ManagerContractVersion)"
     ) -join "`n"

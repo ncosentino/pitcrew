@@ -403,6 +403,10 @@ Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=6$'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
+Add-Check ($defaultEnvironment -match '(?m)^RUNNER_MEMORY_LIMIT=$') 'The default environment does not emit an unset per-runner memory limit.'
+Add-Check ($defaultEnvironment -match '(?m)^RUNNER_MEMORY_SWAP_LIMIT=$') 'The default environment does not emit an unset per-runner memory-swap limit.'
+Add-Check ($defaultEnvironment -match '(?m)^RUNNER_CPU_LIMIT=$') 'The default environment does not emit an unset per-runner CPU limit.'
+Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PIDS_LIMIT=$') 'The default environment does not emit an unset per-runner PID limit.'
 
 $enterpriseEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
@@ -517,6 +521,75 @@ try {
     Add-Check ($externalProfile.Name -eq 'browser-testing') 'An external profile did not resolve its manifest name.'
     Add-Check ($externalProfile.Build.Context -eq $externalDirectory) 'External build context is not relative to the profile manifest.'
     Add-Check ($externalProfile.Replicas -eq 2) 'External profile replica defaults were not applied.'
+
+    $resourcesDirectory = Join-Path $tempRoot 'resources-profile'
+    New-Item -ItemType Directory -Path $resourcesDirectory -Force | Out-Null
+    $resourcesManifestPath = Join-Path $resourcesDirectory 'profile.json'
+    @{
+        schemaVersion = 1
+        name = 'heavy-dotnet'
+        description = 'Resource-limited profile contract test.'
+        image = 'example/heavy:1.0.0'
+        labels = @('heavy-dotnet')
+        replicas = 1
+        resources = @{
+            memory = '6g'
+            memorySwap = '6g'
+            cpus = '4'
+            pids = 4096
+        }
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $resourcesManifestPath -Encoding UTF8
+    Add-Check (
+        (Get-Content -LiteralPath $resourcesManifestPath -Raw -Encoding UTF8) |
+            Test-Json -SchemaFile $schemaPath
+    ) 'A profile declaring per-runner resource limits did not conform to the schema.'
+    $resourcesProfile = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $resourcesManifestPath `
+        -HostName 'test-host'
+    Add-Check ($resourcesProfile.ResourceMemory -eq '6g') 'A profile memory limit was not surfaced by Resolve-RunnerProfile.'
+    Add-Check ($resourcesProfile.ResourceMemorySwap -eq '6g') 'A profile memory-swap limit was not surfaced by Resolve-RunnerProfile.'
+    Add-Check ($resourcesProfile.ResourceCpus -eq '4') 'A profile CPU limit was not surfaced by Resolve-RunnerProfile.'
+    Add-Check ($resourcesProfile.ResourcePids -eq '4096') 'A profile PID limit was not surfaced by Resolve-RunnerProfile.'
+    $resourcesEnvironment = New-RunnerEnvironmentContent `
+        -Profile $resourcesProfile `
+        -AccessToken 'test-registration-token'
+    Add-Check ($resourcesEnvironment -match '(?m)^RUNNER_MEMORY_LIMIT=6g$') 'The resource profile environment did not publish its memory limit.'
+    Add-Check ($resourcesEnvironment -match '(?m)^RUNNER_MEMORY_SWAP_LIMIT=6g$') 'The resource profile environment did not publish its memory-swap limit.'
+    Add-Check ($resourcesEnvironment -match '(?m)^RUNNER_CPU_LIMIT=4$') 'The resource profile environment did not publish its CPU limit.'
+    Add-Check ($resourcesEnvironment -match '(?m)^RUNNER_PIDS_LIMIT=4096$') 'The resource profile environment did not publish its PID limit.'
+
+    $invalidCpuManifestPath = Join-Path $resourcesDirectory 'invalid-cpu.json'
+    @{
+        schemaVersion = 1
+        name = 'heavy-dotnet'
+        description = 'Invalid CPU limit contract test.'
+        image = 'example/heavy:1.0.0'
+        labels = @('heavy-dotnet')
+        replicas = 1
+        resources = @{ cpus = 'lots' }
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $invalidCpuManifestPath -Encoding UTF8
+    $invalidCpuConforms = (Get-Content -LiteralPath $invalidCpuManifestPath -Raw -Encoding UTF8) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+    Add-Check (-not $invalidCpuConforms) 'The schema accepted a non-numeric per-runner CPU limit.'
+
+    $swapWithoutMemoryPath = Join-Path $resourcesDirectory 'swap-only.json'
+    @{
+        schemaVersion = 1
+        name = 'heavy-dotnet'
+        description = 'Swap-without-memory contract test.'
+        image = 'example/heavy:1.0.0'
+        labels = @('heavy-dotnet')
+        replicas = 1
+        resources = @{ memorySwap = '6g' }
+    } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $swapWithoutMemoryPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $swapWithoutMemoryPath
+        } `
+        -ExpectedMessage 'memorySwap requires memory' `
+        -Failure 'A profile accepted a memory-swap limit without a memory limit.'
+
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
     $secretManifest.build.args = [PSCustomObject]@{ API_TOKEN = 'not-a-real-token' }
@@ -874,6 +947,16 @@ Add-Check ($manager -match [regex]::Escape('LAST_DESIRED_DOCUMENT_HASH')) 'The m
 Add-Check ($manager -notmatch 'grep -Fqx') 'The manager still performs a quadratic desired-key scan.'
 Add-Check ($manager -match [regex]::Escape('/drain')) 'The manager does not represent graceful slot draining.'
 Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Worker containers do not expose stable slot identity.'
+Add-Check ($manager -match [regex]::Escape('is_valid_memory_value')) 'The manager does not validate per-runner memory limits.'
+Add-Check ($manager -match [regex]::Escape('is_valid_cpu_value')) 'The manager does not validate per-runner CPU limits.'
+Add-Check ($manager -match [regex]::Escape('is_valid_pids_value')) 'The manager does not validate per-runner PID limits.'
+Add-Check ($manager -match [regex]::Escape('set -- "$@" --memory "${RUNNER_MEMORY_LIMIT}"')) 'The manager does not apply a per-runner memory limit to worker containers.'
+Add-Check ($manager -match [regex]::Escape('set -- "$@" --memory-swap "${RUNNER_MEMORY_SWAP_LIMIT}"')) 'The manager does not apply a per-runner memory-swap limit to worker containers.'
+Add-Check ($manager -match [regex]::Escape('set -- "$@" --cpus "${RUNNER_CPU_LIMIT}"')) 'The manager does not apply a per-runner CPU limit to worker containers.'
+Add-Check ($manager -match [regex]::Escape('set -- "$@" --pids-limit "${RUNNER_PIDS_LIMIT}"')) 'The manager does not apply a per-runner PID limit to worker containers.'
+Add-Check ($manager -match [regex]::Escape('printf ''%s'' "$?" > "${runner_status_path}"')) 'The manager discards the ephemeral runner container exit status.'
+Add-Check ($manager -match 'status 137') 'The manager does not flag a SIGKILL/OOM runner exit distinctly from a clean job completion.'
+Add-Check ($manager -match 'exited cleanly') 'The manager does not log graceful runner job completion.'
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
 Add-Check ($manager -match [regex]::Escape('PITCREW_OBSERVED_STATE_INTERVAL:-30')) 'The manager does not bound observed-state heartbeat writes.'
 Add-Check ($manager -match [regex]::Escape(': > "${stopping_path}/drain"')) 'Manager shutdown does not drain slot supervisors before cleanup.'
@@ -895,6 +978,10 @@ Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/
 Add-Check ($compose -match 'stop_grace_period:\s*35s') 'Compose does not allow manager shutdown to complete bounded worker cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
+Add-Check ($compose -match [regex]::Escape('RUNNER_MEMORY_LIMIT: ${RUNNER_MEMORY_LIMIT:-}')) 'Compose does not expose the per-runner memory limit.'
+Add-Check ($compose -match [regex]::Escape('RUNNER_CPU_LIMIT: ${RUNNER_CPU_LIMIT:-}')) 'Compose does not expose the per-runner CPU limit.'
+Add-Check ($compose -match [regex]::Escape('RUNNER_PIDS_LIMIT: ${RUNNER_PIDS_LIMIT:-}')) 'Compose does not expose the per-runner PID limit.'
+Add-Check ($exampleEnvironment -match '(?m)^# RUNNER_MEMORY_LIMIT=') 'The example environment does not document the per-runner memory limit knob.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
 Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=6$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'

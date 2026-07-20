@@ -55,6 +55,15 @@ services:
       RUNNER_LABELS: ${RUNNER_LABELS:-}
       RUNNER_NO_DEFAULT_LABELS: ${RUNNER_NO_DEFAULT_LABELS:-}
       RUNNER_GROUP: ${RUNNER_GROUP:-}
+      # Optional per-runner resource limits. Empty = unlimited (historical
+      # behavior). Set these to stop one heavy CI job from starving the host and
+      # triggering a fleet-wide OOM-kill that drops multiple runners at once.
+      # memory/memory-swap accept Docker byte values (e.g. 6g, 512m); cpus is a
+      # decimal core count (e.g. 4, 1.5); pids is a positive integer.
+      RUNNER_MEMORY_LIMIT: ${RUNNER_MEMORY_LIMIT:-}
+      RUNNER_MEMORY_SWAP_LIMIT: ${RUNNER_MEMORY_SWAP_LIMIT:-}
+      RUNNER_CPU_LIMIT: ${RUNNER_CPU_LIMIT:-}
+      RUNNER_PIDS_LIMIT: ${RUNNER_PIDS_LIMIT:-}
       PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-6}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}

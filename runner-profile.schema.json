@@ -51,6 +51,29 @@
     "runnerGroup": {
       "type": "string"
     },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "description": "Optional per-runner Docker resource limits applied to every ephemeral worker container in this profile. Omitting a field leaves that dimension unlimited. Use these so one heavy CI job cannot exhaust the host and trigger a fleet-wide OOM-kill.",
+      "properties": {
+        "memory": {
+          "type": "string",
+          "pattern": "^[0-9]+[bBkKmMgG]?$"
+        },
+        "memorySwap": {
+          "type": "string",
+          "pattern": "^[0-9]+[bBkKmMgG]?$"
+        },
+        "cpus": {
+          "type": "string",
+          "pattern": "^[0-9]+(\\.[0-9]+)?$"
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
     "verificationCommands": {
       "type": "array",
       "items": {
