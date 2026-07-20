@@ -240,8 +240,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 6 ] || {
-    echo "Observed state did not report manager contract version six." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 7 ] || {
+    echo "Observed state did not report manager contract version seven." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
