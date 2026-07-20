@@ -345,6 +345,145 @@ function Wait-RunnerCapacityAcknowledgement {
     throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation within $TimeoutSeconds seconds.$detail"
 }
 
+function Get-RunnerObservedBusySlots {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    # Returns the number of slots that are still doing work (running a job or
+    # draining a job to completion), or -1 when the manager's observed state is
+    # missing/unreadable/unrecognised. The caller treats any non-zero result
+    # (including the -1 "unknown") as "not safe to recreate the manager", so an
+    # ambiguous state can never lead to interrupting an active job.
+    if (-not (Test-Path -LiteralPath $ProfileConfig.ObservedStatePath -PathType Leaf)) {
+        return -1
+    }
+
+    try {
+        $observed = Read-RunnerJsonFile -Path $ProfileConfig.ObservedStatePath
+        if ([int]$observed.schemaVersion -ne 1) {
+            return -1
+        }
+        if (-not $observed.PSObject.Properties['activeSlots']) {
+            return -1
+        }
+        $busy = [int]$observed.activeSlots
+        if ($observed.PSObject.Properties['drainingSlots']) {
+            $busy += [int]$observed.drainingSlots
+        }
+        return $busy
+    } catch {
+        return -1
+    }
+}
+
+function Invoke-RunnerManagerContractUpgrade {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$EnvironmentContent,
+
+        [Parameter(Mandatory)]
+        [object]$StaticProfileState,
+
+        [Parameter(Mandatory)]
+        [object]$DesiredState,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$Generation,
+
+        [Parameter(Mandatory)]
+        [int]$RunningContractVersion
+    )
+
+    $desiredContractVersion = [int]$ProfileConfig.ManagerContractVersion
+    $busySlots = Get-RunnerObservedBusySlots -ProfileConfig $ProfileConfig
+
+    if ($busySlots -ne 0) {
+        $reason = if ($busySlots -lt 0) {
+            'its live slot activity could not be determined'
+        } else {
+            "$busySlots runner slot(s) are still active or draining"
+        }
+        Write-Warning "[contract] Manager for profile '$($ProfileConfig.Name)' runs contract v$RunningContractVersion but the tooling provides v$desiredContractVersion. Deferring the coordinated upgrade because $reason; no runner was restarted and no job was interrupted. Re-run Setup-Runner once the pool is idle to refresh the manager onto the new contract."
+        return
+    }
+
+    Write-Host "[contract] Manager for profile '$($ProfileConfig.Name)' is idle; performing a drain-safe upgrade from contract v$RunningContractVersion to v$desiredContractVersion without force-removing any container."
+
+    $stagedFiles = [System.Collections.Generic.List[object]]::new()
+    try {
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerTextStagingFile `
+                -Path $ProfileConfig.EnvironmentPath `
+                -Value $EnvironmentContent
+            Path = $ProfileConfig.EnvironmentPath
+        })
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerJsonStagingFile `
+                -Path $ProfileConfig.StaticProfilePath `
+                -Value $StaticProfileState
+            Path = $ProfileConfig.StaticProfilePath
+        })
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerJsonStagingFile `
+                -Path $ProfileConfig.DesiredCapacityPath `
+                -Value $DesiredState
+            Path = $ProfileConfig.DesiredCapacityPath
+        })
+
+        foreach ($stagedFile in $stagedFiles) {
+            Complete-RunnerStagedFile `
+                -TemporaryPath $stagedFile.TemporaryPath `
+                -Path $stagedFile.Path
+            $stagedFile.TemporaryPath = $null
+        }
+
+        # Recreate ONLY the manager service so it loads the new baked-in
+        # contract code (for issue #8, the hardened exit-status capture). The
+        # ephemeral worker containers the manager spawns are NOT compose
+        # services, so `up -d --build --force-recreate` rebuilds and replaces
+        # the manager container in place without touching any worker; the idle
+        # guard above guarantees there is no active or draining job to lose.
+        # No `compose down` and no `docker rm -f` are issued.
+        Write-Host "[contract] Rebuilding and recreating the manager container"
+        Invoke-RunnerCompose `
+            -ProfileConfig $ProfileConfig `
+            -CommandArguments @('up', '-d', '--build', '--force-recreate')
+    }
+    catch {
+        foreach ($stagedFile in $stagedFiles) {
+            if ($stagedFile.TemporaryPath) {
+                Remove-Item `
+                    -LiteralPath $stagedFile.TemporaryPath `
+                    -Force `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+        throw
+    }
+
+    $acknowledgement = Wait-RunnerCapacityAcknowledgement `
+        -ProfileConfig $ProfileConfig `
+        -Generation $Generation `
+        -TimeoutSeconds 60
+
+    $acknowledgedContractVersion = 0
+    if ($acknowledgement.PSObject.Properties['managerContractVersion']) {
+        $acknowledgedContractVersion = [int]$acknowledgement.managerContractVersion
+    }
+    if ($acknowledgedContractVersion -lt $desiredContractVersion) {
+        Write-Warning "[contract] Manager acknowledged generation $Generation but still reports contract v$acknowledgedContractVersion (expected v$desiredContractVersion); the rebuilt manager image may be stale. Investigate the manager image before relying on the new contract behavior."
+    } else {
+        Write-Host "[done] Manager upgraded to contract v$acknowledgedContractVersion for profile '$($ProfileConfig.Name)'; no runner was restarted and no job was interrupted."
+    }
+}
+
 function Get-RunnerEnvironmentFileValue {
     param(
         [Parameter(Mandatory)]
@@ -554,6 +693,7 @@ try {
 
     $acknowledgedGeneration = 0
     $acknowledgementValid = $false
+    $runningManagerContractVersion = 0
     if (Test-Path -LiteralPath $profileConfig.CapacityAcknowledgementPath -PathType Leaf) {
         try {
             $storedAcknowledgement = Read-RunnerJsonFile -Path $profileConfig.CapacityAcknowledgementPath
@@ -565,9 +705,17 @@ try {
                 $acknowledgedGeneration = [int]$storedAcknowledgement.generation
                 $acknowledgementValid = $true
             }
+            # The running manager stamps its own baked-in contract version into
+            # every acknowledgement, so this is the authoritative signal of what
+            # code the live manager is actually running (independent of what the
+            # .env file on disk now claims).
+            if ($storedAcknowledgement.PSObject.Properties['managerContractVersion']) {
+                $runningManagerContractVersion = [int]$storedAcknowledgement.managerContractVersion
+            }
         } catch {
             $acknowledgedGeneration = 0
             $acknowledgementValid = $false
+            $runningManagerContractVersion = 0
         }
     }
     $currentGeneration = if ($currentDesiredState) {
@@ -611,6 +759,7 @@ try {
 
     $managerRunning = Test-RunnerManagerRunning -ProfileConfig $profileConfig
     $environmentMatches = $false
+    $environmentMatchesIgnoringContract = $false
     if (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) {
         $storedEnvironment = Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8
         # Compare through the migration normalizer so that upgrading a profile
@@ -620,6 +769,15 @@ try {
         $environmentMatches = (
             (ConvertTo-RunnerEnvironmentComparable -Content $storedEnvironment) -ceq
             (ConvertTo-RunnerEnvironmentComparable -Content $environmentContent)
+        )
+        # A second comparison that additionally ignores the contract-version line
+        # so a pure "manager is running old code" upgrade is distinguishable from
+        # a real configuration change. Both normalized forms equal => only the
+        # baked-in manager code differs, which we refresh via a drain-safe
+        # coordinated upgrade rather than a destructive replace.
+        $environmentMatchesIgnoringContract = (
+            (ConvertTo-RunnerEnvironmentComparable -Content $storedEnvironment -IgnoreManagerContractVersion) -ceq
+            (ConvertTo-RunnerEnvironmentComparable -Content $environmentContent -IgnoreManagerContractVersion)
         )
     }
     $staticProfileMatches = $false
@@ -634,14 +792,28 @@ try {
             $staticProfileMatches = $false
         }
     }
-    $capacityOnlyCompatible = (
-        $managerRunning -and
-        $environmentMatches -and
-        $staticProfileMatches -and
-        ($currentGeneration -gt 0 -or $acknowledgedGeneration -gt 0)
-    )
+    $hasGeneration = ($currentGeneration -gt 0 -or $acknowledgedGeneration -gt 0)
+    $reconcileAction = Get-RunnerManagerReconcileAction `
+        -ManagerRunning $managerRunning `
+        -EnvironmentMatches $environmentMatches `
+        -EnvironmentMatchesIgnoringContract $environmentMatchesIgnoringContract `
+        -StaticProfileMatches $staticProfileMatches `
+        -HasGeneration $hasGeneration `
+        -RunningContractVersion $runningManagerContractVersion `
+        -DesiredContractVersion ([int]$profileConfig.ManagerContractVersion)
 
-    if ($capacityOnlyCompatible) {
+    if ($reconcileAction -eq 'contract-upgrade') {
+        Invoke-RunnerManagerContractUpgrade `
+            -ProfileConfig $profileConfig `
+            -EnvironmentContent $environmentContent `
+            -StaticProfileState $staticProfileState `
+            -DesiredState $desiredState `
+            -Generation $nextGeneration `
+            -RunningContractVersion $runningManagerContractVersion
+        return
+    }
+
+    if ($reconcileAction -eq 'capacity-only') {
         if ($desiredStateChanged) {
             Write-Host "[capacity] Publishing desired-capacity generation $nextGeneration"
             Write-RunnerJsonAtomically `

@@ -104,14 +104,15 @@ function Set-TestCapacityAcknowledgement {
         [int]$DesiredSlots,
         [int]$AddedSlots,
         [int]$DrainingSlots,
-        [int]$UnchangedSlots
+        [int]$UnchangedSlots,
+        [int]$ManagerContractVersion = 7
     )
 
     [PSCustomObject][ordered]@{
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 6
+        managerContractVersion = $ManagerContractVersion
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -134,7 +135,8 @@ function Start-TestCapacityAcknowledgementWriter {
         [int]$DesiredSlots,
         [int]$AddedSlots,
         [int]$DrainingSlots,
-        [int]$UnchangedSlots
+        [int]$UnchangedSlots,
+        [int]$ManagerContractVersion = 7
     )
 
     return Start-Job -ArgumentList @(
@@ -144,7 +146,8 @@ function Start-TestCapacityAcknowledgementWriter {
         $DesiredSlots,
         $AddedSlots,
         $DrainingSlots,
-        $UnchangedSlots
+        $UnchangedSlots,
+        $ManagerContractVersion
     ) -ScriptBlock {
         param(
             $DesiredPath,
@@ -153,7 +156,8 @@ function Start-TestCapacityAcknowledgementWriter {
             $DesiredSlots,
             $AddedSlots,
             $DrainingSlots,
-            $UnchangedSlots
+            $UnchangedSlots,
+            $ManagerContractVersion
         )
 
         $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -167,7 +171,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 6
+                            managerContractVersion = $ManagerContractVersion
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -254,7 +258,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 6) 'The setup contract does not identify the observed-state manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 7) 'The setup contract does not identify the observed-state manager.'
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
@@ -399,7 +403,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=6$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=7$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -442,6 +446,130 @@ Add-ThrowsCheck `
     -Action { ConvertFrom-RunnerByteValue -Value '6gb' } `
     -ExpectedMessage 'not a Docker-compatible size' `
     -Failure 'ConvertFrom-RunnerByteValue accepted a malformed size.'
+
+# Issue #8 follow-up (3): enormous byte values must fail loudly instead of
+# overflowing Int64 into a lossy Double that slips past the size checks.
+Add-Check ((ConvertFrom-RunnerByteValue -Value '6g') -is [long]) 'ConvertFrom-RunnerByteValue must return an exact [long], not a floating-point value.'
+Add-ThrowsCheck `
+    -Action { ConvertFrom-RunnerByteValue -Value '9999999999g' } `
+    -ExpectedMessage "exceeds Docker's maximum" `
+    -Failure 'ConvertFrom-RunnerByteValue overflowed an enormous size instead of rejecting it.'
+
+# Issue #8 follow-up (3): CPU limits must be NanoCPU-compatible. Docker
+# converts --cpus to whole NanoCPUs (value x 1e9); zero means "unlimited",
+# more than nine decimals is "too precise", and huge values overflow Int64.
+Add-Check ((ConvertFrom-RunnerCpuValue -Value '4') -eq 4000000000) 'ConvertFrom-RunnerCpuValue miscomputed a whole-core NanoCPU value.'
+Add-Check ((ConvertFrom-RunnerCpuValue -Value '1.5') -eq 1500000000) 'ConvertFrom-RunnerCpuValue miscomputed a fractional NanoCPU value.'
+Add-Check ((ConvertFrom-RunnerCpuValue -Value '0.5') -eq 500000000) 'ConvertFrom-RunnerCpuValue miscomputed a sub-core NanoCPU value.'
+Add-Check ((ConvertFrom-RunnerCpuValue -Value '0.000000001') -eq 1) 'ConvertFrom-RunnerCpuValue rejected the smallest whole NanoCPU (nine decimals) that Docker accepts.'
+Add-ThrowsCheck `
+    -Action { ConvertFrom-RunnerCpuValue -Value '0' } `
+    -ExpectedMessage 'greater than zero' `
+    -Failure 'ConvertFrom-RunnerCpuValue accepted a zero cpu limit that Docker treats as unlimited.'
+Add-ThrowsCheck `
+    -Action { ConvertFrom-RunnerCpuValue -Value '0.0' } `
+    -ExpectedMessage 'greater than zero' `
+    -Failure 'ConvertFrom-RunnerCpuValue accepted a zero-valued cpu limit that Docker treats as unlimited.'
+Add-ThrowsCheck `
+    -Action { ConvertFrom-RunnerCpuValue -Value '1.0000000001' } `
+    -ExpectedMessage 'too precise' `
+    -Failure 'ConvertFrom-RunnerCpuValue accepted a cpu limit finer than one NanoCPU that Docker refuses to parse.'
+Add-ThrowsCheck `
+    -Action { ConvertFrom-RunnerCpuValue -Value '99999999999' } `
+    -ExpectedMessage 'maximum NanoCPU range' `
+    -Failure 'ConvertFrom-RunnerCpuValue accepted a cpu limit that overflows Docker NanoCPUs.'
+
+# Issue #8 follow-up (2): a running manager can carry stale baked-in contract
+# code (for issue #8, the hardened exit-status capture) even after its .env file
+# has already been rewritten with the new contract version. The reconcile
+# decision must therefore detect an outdated RUNNING manager and route it to a
+# drain-safe coordinated upgrade FIRST, before the capacity-only fast path,
+# otherwise a manager "normalized as compatible" would never receive new code.
+$contractIgnoringOne = ConvertTo-RunnerEnvironmentComparable `
+    -Content "RUNNER_PROFILE_ID=default`nPITCREW_MANAGER_CONTRACT_VERSION=6" `
+    -IgnoreManagerContractVersion
+$contractIgnoringTwo = ConvertTo-RunnerEnvironmentComparable `
+    -Content "RUNNER_PROFILE_ID=default`nPITCREW_MANAGER_CONTRACT_VERSION=7" `
+    -IgnoreManagerContractVersion
+Add-Check ($contractIgnoringOne -ceq $contractIgnoringTwo) 'The normalizer did not drop the contract-version line, so a pure manager-code upgrade is misread as configuration drift.'
+Add-Check ($contractIgnoringOne -notmatch 'PITCREW_MANAGER_CONTRACT_VERSION') 'The contract-ignoring normalizer left the manager contract-version line in place.'
+Add-Check (
+    (ConvertTo-RunnerEnvironmentComparable -Content "RUNNER_PROFILE_ID=default`nPITCREW_MANAGER_CONTRACT_VERSION=6") -match 'PITCREW_MANAGER_CONTRACT_VERSION=6'
+) 'The default normalizer must retain the contract-version line so a genuine version pin is still compared.'
+
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $true `
+        -EnvironmentMatches $true `
+        -EnvironmentMatchesIgnoringContract $true `
+        -StaticProfileMatches $true `
+        -HasGeneration $true `
+        -RunningContractVersion 6 `
+        -DesiredContractVersion 7) -eq 'contract-upgrade'
+) 'An outdated running manager whose env already shows the new version is not routed to a coordinated contract upgrade.'
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $true `
+        -EnvironmentMatches $false `
+        -EnvironmentMatchesIgnoringContract $true `
+        -StaticProfileMatches $true `
+        -HasGeneration $true `
+        -RunningContractVersion 6 `
+        -DesiredContractVersion 7) -eq 'contract-upgrade'
+) 'A manager on old code with only the contract-version line differing is not routed to a coordinated upgrade.'
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $true `
+        -EnvironmentMatches $true `
+        -EnvironmentMatchesIgnoringContract $true `
+        -StaticProfileMatches $true `
+        -HasGeneration $true `
+        -RunningContractVersion 7 `
+        -DesiredContractVersion 7) -eq 'capacity-only'
+) 'A current, running manager with matching environment is not treated as a capacity-only change.'
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $true `
+        -EnvironmentMatches $false `
+        -EnvironmentMatchesIgnoringContract $false `
+        -StaticProfileMatches $true `
+        -HasGeneration $true `
+        -RunningContractVersion 6 `
+        -DesiredContractVersion 7) -eq 'replace'
+) 'A real configuration change on an old manager is not routed through the full replace path.'
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $false `
+        -EnvironmentMatches $true `
+        -EnvironmentMatchesIgnoringContract $true `
+        -StaticProfileMatches $true `
+        -HasGeneration $true `
+        -RunningContractVersion 0 `
+        -DesiredContractVersion 7) -eq 'replace'
+) 'A stopped manager is not routed through the replace path that starts a fresh pool.'
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $true `
+        -EnvironmentMatches $true `
+        -EnvironmentMatchesIgnoringContract $true `
+        -StaticProfileMatches $false `
+        -HasGeneration $true `
+        -RunningContractVersion 6 `
+        -DesiredContractVersion 7) -eq 'replace'
+) 'A static-profile change is not routed through the replace path even when a contract upgrade is also pending.'
+Add-Check (
+    (Get-RunnerManagerReconcileAction `
+        -ManagerRunning $true `
+        -EnvironmentMatches $true `
+        -EnvironmentMatchesIgnoringContract $true `
+        -StaticProfileMatches $true `
+        -HasGeneration $true `
+        -RunningContractVersion 0 `
+        -DesiredContractVersion 7) -eq 'capacity-only'
+) 'A manager that never reported a contract version must not be force-upgraded; fall back to the capacity-only path.'
+Add-Check ($setupContent -match [regex]::Escape('Get-RunnerManagerReconcileAction')) 'Setup does not consult the reconcile decision, so an outdated manager would never receive a coordinated upgrade.'
+Add-Check ($setupContent -match [regex]::Escape('Invoke-RunnerManagerContractUpgrade')) 'Setup does not perform a coordinated manager contract upgrade.'
+
 
 $enterpriseEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
@@ -666,11 +794,43 @@ try {
     $validSwapProfile = Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $validSwapPath
     Add-Check ($validSwapProfile.ResourceMemorySwap -eq '128m') 'A memory-swap limit at or above the memory limit was rejected.'
 
+    # Issue #8 follow-up (3): reject CPU limits Docker treats as unlimited/too
+    # precise and memory magnitudes that overflow, at setup time.
+    $zeroCpuPath = New-ResourceManifestPath -FileName 'zero-cpu.json' -Resources @{ cpus = '0' }
+    Add-ThrowsCheck `
+        -Action { Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $zeroCpuPath } `
+        -ExpectedMessage 'greater than zero' `
+        -Failure 'A profile accepted a zero cpu limit that Docker treats as unlimited.'
+
+    $precisecpuPath = New-ResourceManifestPath -FileName 'too-precise-cpu.json' -Resources @{ cpus = '1.0000000001' }
+    Add-ThrowsCheck `
+        -Action { Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $precisecpuPath } `
+        -ExpectedMessage 'too precise' `
+        -Failure 'A profile accepted a cpu limit finer than one NanoCPU that Docker refuses to parse.'
+
+    $validFractionalCpuPath = New-ResourceManifestPath -FileName 'fractional-cpu.json' -Resources @{ cpus = '1.5' }
+    $validFractionalCpuProfile = Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $validFractionalCpuPath
+    Add-Check ($validFractionalCpuProfile.ResourceCpus -eq '1.5') 'A valid fractional cpu limit (1.5) was rejected.'
+
+    $overflowMemoryPath = New-ResourceManifestPath -FileName 'overflow-memory.json' -Resources @{ memory = '9999999999g' }
+    Add-ThrowsCheck `
+        -Action { Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $overflowMemoryPath } `
+        -ExpectedMessage "exceeds Docker's maximum" `
+        -Failure 'A profile accepted a memory limit that overflows Docker addressable bytes.'
+
     # Real-Docker validation (safe: failure-path only). Docker rejects these
     # specs during host-config validation BEFORE creating a container, so
     # nothing is created and nothing needs cleanup. Proves our setup-time
     # thresholds agree with Docker's own refusal. Skipped when Docker or a
     # local image is unavailable so the suite stays hermetic by default.
+    # Real-Docker validation (safe: failure-path only). Docker rejects these
+    # specs during flag parsing or host-config validation BEFORE creating a
+    # container, so nothing is created and nothing needs cleanup. Proves our
+    # setup-time thresholds agree with Docker's own refusal. Each probe uses a
+    # unique --name and asserts on that specific name (never a global container
+    # count) so the check is race-free against concurrent runners and does not
+    # trip StrictMode on a null/scalar .Count. Skipped when Docker or a local
+    # image is unavailable so the suite stays hermetic by default.
     $realDocker = Get-Command docker -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
     $localImageId = if ($realDocker) {
         & $realDocker.Source images -q 2>$null | Where-Object { $_ } | Select-Object -First 1
@@ -678,24 +838,27 @@ try {
         $null
     }
     if ($realDocker -and $localImageId) {
-        $containersBefore = (& $realDocker.Source ps -aq 2>$null | Where-Object { $_ }).Count
-
-        $belowMinCreate = & $realDocker.Source create --memory 5m $localImageId 2>&1
-        $belowMinExit = $LASTEXITCODE
-        if ($belowMinExit -eq 0 -and $belowMinCreate) {
-            & $realDocker.Source rm -f ($belowMinCreate | Select-Object -Last 1) 2>&1 | Out-Null
+        function Invoke-DockerRejectionProbe {
+            param([string[]]$CreateArguments, [string]$Because)
+            $probeName = "pitcrew-probe-$([guid]::NewGuid().ToString('N'))"
+            $null = & $realDocker.Source create --name $probeName @CreateArguments $localImageId 2>&1
+            $probeExit = $LASTEXITCODE
+            # Defensive: remove by our unique name in case Docker ever accepts it.
+            & $realDocker.Source rm -f $probeName 2>&1 | Out-Null
+            Add-Check ($probeExit -ne 0) $Because
+            $leaked = @(& $realDocker.Source ps -aq --filter "name=$probeName" 2>$null | Where-Object { $_ })
+            Add-Check ($leaked.Count -eq 0) "Real-Docker probe '$probeName' leaked a container; the check must only exercise the non-mutating failure path."
         }
-        Add-Check ($belowMinExit -ne 0) 'Real Docker accepted a 5m memory limit that Resolve-RunnerProfile rejects; the setup-time floor is misaligned with Docker.'
 
-        $swapCreate = & $realDocker.Source create --memory 64m --memory-swap 32m $localImageId 2>&1
-        $swapExit = $LASTEXITCODE
-        if ($swapExit -eq 0 -and $swapCreate) {
-            & $realDocker.Source rm -f ($swapCreate | Select-Object -Last 1) 2>&1 | Out-Null
-        }
-        Add-Check ($swapExit -ne 0) 'Real Docker accepted a memory-swap smaller than memory that Resolve-RunnerProfile rejects; the setup-time rule is misaligned with Docker.'
-
-        $containersAfter = (& $realDocker.Source ps -aq 2>$null | Where-Object { $_ }).Count
-        Add-Check ($containersBefore -eq $containersAfter) 'Real-Docker constraint validation created or removed a container; it must only exercise the non-mutating failure path.'
+        Invoke-DockerRejectionProbe `
+            -CreateArguments @('--memory', '5m') `
+            -Because 'Real Docker accepted a 5m memory limit that Resolve-RunnerProfile rejects; the setup-time floor is misaligned with Docker.'
+        Invoke-DockerRejectionProbe `
+            -CreateArguments @('--memory', '64m', '--memory-swap', '32m') `
+            -Because 'Real Docker accepted a memory-swap smaller than memory that Resolve-RunnerProfile rejects; the setup-time rule is misaligned with Docker.'
+        Invoke-DockerRejectionProbe `
+            -CreateArguments @('--cpus', '1.0000000001') `
+            -Because 'Real Docker accepted a too-precise cpu limit that Resolve-RunnerProfile rejects; the setup-time NanoCPU rule is misaligned with Docker.'
     } else {
         Write-Host '[skip] Real-Docker constraint validation skipped (docker or a local image is unavailable).' -ForegroundColor Yellow
     }
@@ -807,6 +970,20 @@ try {
             $env:PITCREW_TEST_MANAGER_RUNNING -eq '1'
         ) {
             Write-Output 'manager-container-id'
+        }
+        if (
+            $dockerArguments[0] -eq 'compose' -and
+            ($dockerArguments -contains 'up') -and
+            $env:PITCREW_TEST_UPGRADE_ACK_SOURCE -and
+            $env:PITCREW_TEST_UPGRADE_ACK_DEST -and
+            (Test-Path -LiteralPath $env:PITCREW_TEST_UPGRADE_ACK_SOURCE -PathType Leaf)
+        ) {
+            # Simulate the recreated manager coming up on the new contract and
+            # re-writing its acknowledgement with the upgraded contract version.
+            Copy-Item `
+                -LiteralPath $env:PITCREW_TEST_UPGRADE_ACK_SOURCE `
+                -Destination $env:PITCREW_TEST_UPGRADE_ACK_DEST `
+                -Force
         }
         $global:LASTEXITCODE = 0
     }
@@ -994,6 +1171,100 @@ try {
         Add-Check ($recoveredState.generation -eq 4) 'A stale acknowledgement did not force a recoverable generation.'
         Add-Check (-not ($recoveryCommands -match 'compose.*down')) 'Acknowledgement recovery restarted the manager.'
 
+        # Issue #8 follow-up (2): coordinated, non-destructive manager contract
+        # upgrade. The running manager reports an OLDER baked-in contract version
+        # than the tooling provides (it still carries the pre-fix exit-capture
+        # code). Setup must refresh it WITHOUT force-killing containers, and must
+        # DEFER entirely while any slot is still busy so no active job is lost.
+        $defaultObservedPath = Join-Path (Split-Path -Parent $defaultDesiredPath) 'observed-state.json'
+        $currentContractGeneration = [int](
+            (Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json -Depth 10).generation
+        )
+
+        # Case 1: a slot is still active/draining => DEFER; never recreate, never
+        # force-remove, and surface the deferral so the operator re-runs later.
+        Set-TestCapacityAcknowledgement `
+            -Path $defaultAcknowledgementPath `
+            -Generation $currentContractGeneration `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1 `
+            -ManagerContractVersion 6
+        [PSCustomObject][ordered]@{
+            schemaVersion = 1
+            activeSlots = 1
+            drainingSlots = 0
+        } |
+            ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath $defaultObservedPath -Encoding UTF8
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $contractDeferWarnLog = Join-Path $tempRoot 'contract-defer-warnings.log'
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Repos 'https://github.com/example/project=1' 3> $contractDeferWarnLog
+        $contractDeferCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $contractDeferWarnings = (@(Get-Content -LiteralPath $contractDeferWarnLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n")
+        $contractDeferAck = Get-Content -LiteralPath $defaultAcknowledgementPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check (-not ($contractDeferCommands -match 'compose.*up')) 'A contract upgrade recreated the manager while a runner slot was still active.'
+        Add-Check (-not ($contractDeferCommands -match 'compose.*down')) 'A deferred contract upgrade tore down the running manager.'
+        Add-Check (-not ($contractDeferCommands -match 'rm.*-f')) 'A deferred contract upgrade force-removed a runner container.'
+        Add-Check ($contractDeferWarnings -match 'Deferring the coordinated upgrade') 'A deferred contract upgrade did not surface the deferral to the operator.'
+        Add-Check ([int]$contractDeferAck.managerContractVersion -eq 6) 'A deferred contract upgrade changed the running manager acknowledgement.'
+
+        # Case 2: the pool is idle (no active or draining slots) => perform the
+        # drain-safe upgrade by recreating ONLY the manager (compose up
+        # --force-recreate), never a compose down or docker rm -f.
+        Set-TestCapacityAcknowledgement `
+            -Path $defaultAcknowledgementPath `
+            -Generation $currentContractGeneration `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1 `
+            -ManagerContractVersion 6
+        [PSCustomObject][ordered]@{
+            schemaVersion = 1
+            activeSlots = 0
+            drainingSlots = 0
+        } |
+            ConvertTo-Json -Depth 5 |
+            Set-Content -LiteralPath $defaultObservedPath -Encoding UTF8
+        $upgradeAckSource = Join-Path $tempRoot 'upgraded-acknowledgement.json'
+        Set-TestCapacityAcknowledgement `
+            -Path $upgradeAckSource `
+            -Generation $currentContractGeneration `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1 `
+            -ManagerContractVersion 7
+        $env:PITCREW_TEST_UPGRADE_ACK_SOURCE = $upgradeAckSource
+        $env:PITCREW_TEST_UPGRADE_ACK_DEST = $defaultAcknowledgementPath
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Repos 'https://github.com/example/project=1'
+        }
+        finally {
+            Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_SOURCE -ErrorAction SilentlyContinue
+            Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_DEST -ErrorAction SilentlyContinue
+        }
+        $contractUpgradeCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $contractUpgradeAck = Get-Content -LiteralPath $defaultAcknowledgementPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        $contractUpgradeState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($contractUpgradeCommands -match 'compose.*up.*--force-recreate') 'An idle contract upgrade did not recreate the manager onto the new contract code.'
+        Add-Check (-not ($contractUpgradeCommands -match 'compose.*down')) 'An idle contract upgrade tore down the profile instead of recreating the manager in place.'
+        Add-Check (-not ($contractUpgradeCommands -match 'rm.*-f')) 'An idle contract upgrade force-removed a runner container.'
+        Add-Check ([int]$contractUpgradeAck.managerContractVersion -eq 7) 'The manager did not re-acknowledge on the upgraded contract version.'
+        Add-Check ($contractUpgradeState.generation -eq $currentContractGeneration) 'A pure contract upgrade advanced the desired-capacity generation.'
+        Remove-Item -LiteralPath $defaultObservedPath -Force -ErrorAction SilentlyContinue
+
         if (-not $IsWindows) {
             $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
             & chmod 0555 $defaultStateDirectory
@@ -1076,6 +1347,8 @@ try {
         }
         Remove-Item Env:\PITCREW_RUNNER_DOCKER_LOG -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_RUNNING -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_SOURCE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_DEST -ErrorAction SilentlyContinue
     }
 }
 finally {
@@ -1108,6 +1381,7 @@ Add-Check ($manager -match [regex]::Escape('set -- "$@" --cpus "${RUNNER_CPU_LIM
 Add-Check ($manager -match [regex]::Escape('set -- "$@" --pids-limit "${RUNNER_PIDS_LIMIT}"')) 'The manager does not apply a per-runner PID limit to worker containers.'
 Add-Check ($manager -match [regex]::Escape('printf ''%s'' "$?" > "${runner_status_path}"')) 'The manager discards the ephemeral runner container exit status.'
 Add-Check ($manager -match [regex]::Escape('classify_runner_exit()')) 'The manager does not expose a testable runner-exit classifier.'
+Add-Check ($manager -match '(?m)^MANAGER_CONTRACT_VERSION=7$') 'The manager script does not bake the current contract version, so a coordinated upgrade cannot detect stale runtime code.'
 Add-Check ($manager -match [regex]::Escape("''|*[!0-9]*) printf 'unknown'")) 'The manager does not classify a missing/corrupt exit capture as unknown.'
 Add-Check ($manager -notmatch [regex]::Escape('runner_exit_status=0')) 'The manager still defaults a runner exit status to 0 (clean), masking an unobserved or killed runner.'
 Add-Check ($manager -match 'exit status is UNKNOWN') 'The manager does not surface an unknown/unobserved runner exit as an error.'
@@ -1139,7 +1413,7 @@ Add-Check ($compose -match [regex]::Escape('RUNNER_CPU_LIMIT: ${RUNNER_CPU_LIMIT
 Add-Check ($compose -match [regex]::Escape('RUNNER_PIDS_LIMIT: ${RUNNER_PIDS_LIMIT:-}')) 'Compose does not expose the per-runner PID limit.'
 Add-Check ($exampleEnvironment -match '(?m)^# RUNNER_MEMORY_LIMIT=') 'The example environment does not document the per-runner memory limit knob.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=6$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=7$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

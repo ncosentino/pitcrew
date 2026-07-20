@@ -3,7 +3,13 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 6
+# The manager contract version is bumped whenever the manager's runtime
+# behavior changes in a way a running manager must adopt (not just its config).
+# v7 adds the runner exit-status capture/classification introduced for issue #8;
+# a running v6 manager keeps the old code until it is coordinated-upgraded, so
+# the version bump is what lets Setup detect that an in-place, non-destructive
+# manager refresh is required.
+$script:RunnerManagerContractVersion = 7
 
 # Docker refuses to start a container whose --memory is below this floor
 # ("Minimum memory limit allowed is 6MB"). Validating against the same floor
@@ -32,16 +38,71 @@ function ConvertFrom-RunnerByteValue {
         throw "Byte value '$Value' is not a Docker-compatible size (expected digits with an optional b/k/m/g suffix)."
     }
 
-    $number = [long]$match.Groups[1].Value
+    # Scale with arbitrary-precision integers. A plain [long] * [long] silently
+    # overflows to a lossy [double] in PowerShell, so an enormous limit would
+    # slip past the minimum/relative size checks below (and Docker itself wraps
+    # such a value into a confusing "Minimum memory limit" error). BigInteger
+    # keeps the exact magnitude so we can reject it deterministically here.
+    $number = [System.Numerics.BigInteger]::Parse($match.Groups[1].Value)
     $multiplier = switch ($match.Groups[2].Value.ToLowerInvariant()) {
-        '' { [long]1 }
-        'b' { [long]1 }
-        'k' { [long]1024 }
-        'm' { [long]1024 * 1024 }
-        'g' { [long]1024 * 1024 * 1024 }
+        '' { [System.Numerics.BigInteger]1 }
+        'b' { [System.Numerics.BigInteger]1 }
+        'k' { [System.Numerics.BigInteger]1024 }
+        'm' { [System.Numerics.BigInteger]::Pow(1024, 2) }
+        'g' { [System.Numerics.BigInteger]::Pow(1024, 3) }
     }
 
-    return $number * $multiplier
+    $bytes = $number * $multiplier
+    if ($bytes -gt [System.Numerics.BigInteger]([long]::MaxValue)) {
+        throw "Byte value '$Value' exceeds Docker's maximum addressable size of $([long]::MaxValue) bytes."
+    }
+
+    return [long]$bytes
+}
+
+<#
+.SYNOPSIS
+    Validates a Docker --cpus value and returns its NanoCPU representation.
+
+.DESCRIPTION
+    Docker converts --cpus to an integer number of NanoCPUs (value x 1e9). It
+    rejects a value that is "too precise" (one whose NanoCPU form is not a whole
+    number, i.e. more than nine decimal places) and treats a zero cpu limit as
+    unlimited, which silently defeats the purpose of setting a limit. Enormous
+    values overflow Int64 NanoCPUs. This validator fails all three at setup time
+    -- before any destructive stop/replace -- using arbitrary-precision integers
+    so nothing overflows. Returns the NanoCPU count as a [bigint].
+#>
+function ConvertFrom-RunnerCpuValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    $match = [regex]::Match($Value, '^([0-9]+)(?:\.([0-9]+))?$')
+    if (-not $match.Success) {
+        throw "Runner resource cpus '$Value' must be a positive decimal core count such as 4 or 1.5."
+    }
+
+    $fraction = $match.Groups[2].Value
+    if ($fraction.Length -gt 9) {
+        throw "Runner resource cpus '$Value' is too precise; Docker converts --cpus to whole NanoCPUs (value x 1e9), which allows at most nine decimal places."
+    }
+
+    $nano = [System.Numerics.BigInteger]::Parse($match.Groups[1].Value) * [System.Numerics.BigInteger]::Pow(10, 9)
+    if ($fraction) {
+        $nano += [System.Numerics.BigInteger]::Parse($fraction) * [System.Numerics.BigInteger]::Pow(10, 9 - $fraction.Length)
+    }
+
+    if ($nano -le [System.Numerics.BigInteger]::Zero) {
+        throw "Runner resource cpus '$Value' must be greater than zero; Docker treats a zero cpu limit as unlimited."
+    }
+    if ($nano -gt [System.Numerics.BigInteger]([long]::MaxValue)) {
+        throw "Runner resource cpus '$Value' exceeds Docker's maximum NanoCPU range."
+    }
+
+    return $nano
 }
 
 <#
@@ -65,20 +126,82 @@ function ConvertTo-RunnerEnvironmentComparable {
     param(
         [Parameter(Mandatory)]
         [AllowEmptyString()]
-        [string]$Content
+        [string]$Content,
+
+        # Also strip the manager-contract-version line so a difference that is
+        # ONLY a contract-version bump is not misread as configuration drift.
+        # Used to distinguish a pure coordinated manager upgrade (safe, drain-
+        # based) from a real config change (destructive replace).
+        [switch]$IgnoreManagerContractVersion
     )
 
     $keyAlternation = ($script:RunnerOptionalLimitKeys -join '|')
     $emptyLimitPattern = "^($keyAlternation)=`r?$"
+    $contractPattern = "^PITCREW_MANAGER_CONTRACT_VERSION=.*`r?$"
     $lines = $Content -split "`n"
     $kept = foreach ($line in $lines) {
         if ($line -match $emptyLimitPattern) {
+            continue
+        }
+        if ($IgnoreManagerContractVersion -and $line -match $contractPattern) {
             continue
         }
         $line
     }
 
     return ($kept -join "`n")
+}
+
+<#
+.SYNOPSIS
+    Classifies how Setup must reconcile a profile against the running manager.
+
+.DESCRIPTION
+    Returns one of:
+      'contract-upgrade' - the running manager reports an OLDER contract version
+        than the tooling provides, but nothing else changed. The manager is
+        carrying stale runtime code (for issue #8, the exit-capture logic) and
+        must be refreshed WITHOUT force-killing active jobs. This is checked
+        first so that a manager still running old code is upgraded even when its
+        .env file has already been rewritten to the new version.
+      'capacity-only' - the manager is current and only desired capacity may
+        differ; publish new capacity, no restart.
+      'replace' - a real static/environment change (or a fresh install / stopped
+        manager) that goes through the full stop-and-replace path.
+#>
+function Get-RunnerManagerReconcileAction {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][bool]$ManagerRunning,
+        [Parameter(Mandatory)][bool]$EnvironmentMatches,
+        [Parameter(Mandatory)][bool]$EnvironmentMatchesIgnoringContract,
+        [Parameter(Mandatory)][bool]$StaticProfileMatches,
+        [Parameter(Mandatory)][bool]$HasGeneration,
+        [Parameter(Mandatory)][int]$RunningContractVersion,
+        [Parameter(Mandatory)][int]$DesiredContractVersion
+    )
+
+    if (
+        $ManagerRunning -and
+        $StaticProfileMatches -and
+        $EnvironmentMatchesIgnoringContract -and
+        $HasGeneration -and
+        $RunningContractVersion -gt 0 -and
+        $RunningContractVersion -lt $DesiredContractVersion
+    ) {
+        return 'contract-upgrade'
+    }
+
+    if (
+        $ManagerRunning -and
+        $EnvironmentMatches -and
+        $StaticProfileMatches -and
+        $HasGeneration
+    ) {
+        return 'capacity-only'
+    }
+
+    return 'replace'
 }
 
 function ConvertTo-RunnerLabelList {
@@ -315,6 +438,11 @@ function Resolve-RunnerProfile {
     }
     if ($resourceCpus -and $resourceCpus -notmatch '^[0-9]+(\.[0-9]+)?$') {
         throw "Runner resource cpus '$resourceCpus' must be a positive decimal core count such as 4 or 1.5."
+    }
+    if ($resourceCpus) {
+        # Reject zero (Docker reads it as "unlimited"), too-precise values Docker
+        # refuses to parse, and magnitudes that overflow its NanoCPU range.
+        $null = ConvertFrom-RunnerCpuValue -Value $resourceCpus
     }
     if ($resourcePids -and $resourcePids -notmatch '^[0-9]+$') {
         throw "Runner resource pids '$resourcePids' must be a positive integer process count."
