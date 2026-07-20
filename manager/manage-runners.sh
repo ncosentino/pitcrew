@@ -76,61 +76,123 @@ RUNNER_MEMORY_SWAP_LIMIT="${RUNNER_MEMORY_SWAP_LIMIT:-}"
 RUNNER_CPU_LIMIT="${RUNNER_CPU_LIMIT:-}"
 RUNNER_PIDS_LIMIT="${RUNNER_PIDS_LIMIT:-}"
 
-is_valid_memory_value() {
-    memory_value="$1"
-    case "${memory_value}" in
-        *[!0-9bBkKmMgG]*) return 1 ;;
+# >>> pitcrew:resource_limit_validators >>>
+# Direct-Compose (bootstrap) startup bypasses Setup-Runner's PowerShell
+# validators, so the manager MUST enforce the SAME Docker constraints here or an
+# operator who mis-sets a limit gets a silently-uncapped runner — the exact
+# fleet-wide OOM footgun issue #8 is about. These predicates mirror
+# Resolve-RunnerProfile: memory >= 6MB, memory-swap >= memory, cpu > 0 with at
+# most nine decimals (Docker NanoCPU), pids > 0. All conversions are
+# overflow-safe: a value is rejected before it could exceed Int64 (POSIX shell
+# arithmetic is 64-bit but wraps silently past that), so an enormous limit can
+# never wrap into a small one that slips past the minimum checks. Extracted
+# between sentinels so the contract suite exercises the real bytes under sh.
+RUNNER_MINIMUM_MEMORY_BYTES=6291456
+
+# Expand a Docker byte value (digits with an optional b/k/m/g suffix) to an exact
+# byte count. Prints the byte count on success; returns 1 for a malformed value
+# OR one large enough that the multiplication could overflow 64-bit arithmetic.
+# The per-suffix digit cap guarantees value*multiplier stays below Int64 max, so
+# the arithmetic below is always exact.
+runner_expand_bytes() {
+    case "$1" in
+        *[bB]) rb_unit=b; rb_num=${1%?} ;;
+        *[kK]) rb_unit=k; rb_num=${1%?} ;;
+        *[mM]) rb_unit=m; rb_num=${1%?} ;;
+        *[gG]) rb_unit=g; rb_num=${1%?} ;;
+        *)     rb_unit=b; rb_num=$1 ;;
     esac
-    case "${memory_value}" in
-        *[bBkKmMgG]) memory_value="${memory_value%?}" ;;
-    esac
-    case "${memory_value}" in
+    case "${rb_num}" in
         ''|*[!0-9]*) return 1 ;;
     esac
-    return 0
+    rb_stripped=${rb_num#"${rb_num%%[!0]*}"}
+    [ -n "${rb_stripped}" ] || rb_stripped=0
+    case "${rb_unit}" in
+        b) rb_mult=1;          rb_maxlen=18 ;;
+        k) rb_mult=1024;       rb_maxlen=15 ;;
+        m) rb_mult=1048576;    rb_maxlen=12 ;;
+        g) rb_mult=1073741824; rb_maxlen=9  ;;
+    esac
+    [ "${#rb_stripped}" -le "${rb_maxlen}" ] || return 1
+    printf '%s' "$(( rb_stripped * rb_mult ))"
+}
+
+is_valid_memory_value() {
+    mv_bytes=$(runner_expand_bytes "$1") || return 1
+    [ "${mv_bytes}" -ge "${RUNNER_MINIMUM_MEMORY_BYTES}" ]
+}
+
+# --memory-swap must be a byte value no smaller than --memory. $1 = swap, $2 =
+# memory. Both are expanded overflow-safe before an exact 64-bit comparison.
+is_valid_memory_swap_pair() {
+    sp_swap=$(runner_expand_bytes "$1") || return 1
+    sp_mem=$(runner_expand_bytes "$2") || return 1
+    [ "${sp_swap}" -ge "${sp_mem}" ]
 }
 
 is_valid_cpu_value() {
-    cpu_value="$1"
-    case "${cpu_value}" in
-        ''|.|*[!0-9.]*) return 1 ;;
+    case "$1" in
+        ''|.|*[!0-9.]*|*.*.*) return 1 ;;
     esac
-    case "${cpu_value}" in
-        *.*.*) return 1 ;;
+    cpu_int=${1%%.*}
+    case "$1" in
+        *.*) cpu_frac=${1#*.} ;;
+        *)   cpu_frac="" ;;
     esac
-    case "${cpu_value}" in
-        [0-9]*) ;;
-        *) return 1 ;;
+    case "${cpu_int}" in
+        ''|*[!0-9]*) return 1 ;;
     esac
-    return 0
+    # Docker converts --cpus to whole NanoCPUs (value * 1e9); more than nine
+    # decimals is "too precise" and rejected.
+    [ "${#cpu_frac}" -le 9 ] || return 1
+    cpu_int_stripped=${cpu_int#"${cpu_int%%[!0]*}"}
+    [ -n "${cpu_int_stripped}" ] || cpu_int_stripped=0
+    # Cap the integer core count so int*1e9 cannot overflow Int64 NanoCPUs.
+    [ "${#cpu_int_stripped}" -le 9 ] || return 1
+    cpu_frac_padded="${cpu_frac}000000000"
+    cpu_frac_padded=${cpu_frac_padded%"${cpu_frac_padded#?????????}"}
+    cpu_frac_nanos=${cpu_frac_padded#"${cpu_frac_padded%%[!0]*}"}
+    [ -n "${cpu_frac_nanos}" ] || cpu_frac_nanos=0
+    cpu_nano=$(( cpu_int_stripped * 1000000000 + cpu_frac_nanos ))
+    # Docker treats a zero cpu limit as unlimited, which defeats the cap.
+    [ "${cpu_nano}" -gt 0 ]
 }
 
 is_valid_pids_value() {
     case "$1" in
-        ''|*[!0-9]*|0) return 1 ;;
+        ''|*[!0-9]*) return 1 ;;
     esac
-    return 0
+    pids_stripped=${1#"${1%%[!0]*}"}
+    [ -n "${pids_stripped}" ] || pids_stripped=0
+    [ "${pids_stripped}" != "0" ] || return 1
+    [ "${#pids_stripped}" -le 18 ]
+}
+# <<< pitcrew:resource_limit_validators <<<
+
+reject_runner_limit() {
+    echo "[manager:${PROFILE_ID}] $1 Refusing to start with an unenforceable resource limit; fix the value and restart." >&2
+    exit 1
 }
 
 if [ -n "${RUNNER_MEMORY_LIMIT}" ] && ! is_valid_memory_value "${RUNNER_MEMORY_LIMIT}"; then
-    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_MEMORY_LIMIT='${RUNNER_MEMORY_LIMIT}' (expected a Docker byte value, e.g. 4g, 512m, or 2147483648)" >&2
-    RUNNER_MEMORY_LIMIT=""
+    reject_runner_limit "invalid RUNNER_MEMORY_LIMIT='${RUNNER_MEMORY_LIMIT}': expected a Docker byte value of at least 6MB (${RUNNER_MINIMUM_MEMORY_BYTES} bytes), e.g. 512m or 6g."
 fi
-if [ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ] && ! is_valid_memory_value "${RUNNER_MEMORY_SWAP_LIMIT}"; then
-    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_MEMORY_SWAP_LIMIT='${RUNNER_MEMORY_SWAP_LIMIT}' (expected a Docker byte value, e.g. 4g, 512m, or 2147483648)" >&2
-    RUNNER_MEMORY_SWAP_LIMIT=""
+if [ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ]; then
+    if [ -z "${RUNNER_MEMORY_LIMIT}" ]; then
+        reject_runner_limit "RUNNER_MEMORY_SWAP_LIMIT='${RUNNER_MEMORY_SWAP_LIMIT}' is set without RUNNER_MEMORY_LIMIT; Docker requires --memory alongside --memory-swap."
+    fi
+    if [ -z "$(runner_expand_bytes "${RUNNER_MEMORY_SWAP_LIMIT}")" ]; then
+        reject_runner_limit "invalid RUNNER_MEMORY_SWAP_LIMIT='${RUNNER_MEMORY_SWAP_LIMIT}': expected a Docker byte value, e.g. 512m or 6g."
+    fi
+    if ! is_valid_memory_swap_pair "${RUNNER_MEMORY_SWAP_LIMIT}" "${RUNNER_MEMORY_LIMIT}"; then
+        reject_runner_limit "RUNNER_MEMORY_SWAP_LIMIT='${RUNNER_MEMORY_SWAP_LIMIT}' is smaller than RUNNER_MEMORY_LIMIT='${RUNNER_MEMORY_LIMIT}'; Docker requires --memory-swap >= --memory."
+    fi
 fi
 if [ -n "${RUNNER_CPU_LIMIT}" ] && ! is_valid_cpu_value "${RUNNER_CPU_LIMIT}"; then
-    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_CPU_LIMIT='${RUNNER_CPU_LIMIT}' (expected a positive decimal core count, e.g. 2 or 1.5)" >&2
-    RUNNER_CPU_LIMIT=""
+    reject_runner_limit "invalid RUNNER_CPU_LIMIT='${RUNNER_CPU_LIMIT}': expected a core count greater than zero with at most nine decimals (Docker NanoCPU), e.g. 2 or 1.5. Docker treats 0 as unlimited."
 fi
 if [ -n "${RUNNER_PIDS_LIMIT}" ] && ! is_valid_pids_value "${RUNNER_PIDS_LIMIT}"; then
-    echo "[manager:${PROFILE_ID}] ignoring invalid RUNNER_PIDS_LIMIT='${RUNNER_PIDS_LIMIT}' (expected a positive integer process count)" >&2
-    RUNNER_PIDS_LIMIT=""
-fi
-if [ -n "${RUNNER_MEMORY_SWAP_LIMIT}" ] && [ -z "${RUNNER_MEMORY_LIMIT}" ]; then
-    echo "[manager:${PROFILE_ID}] ignoring RUNNER_MEMORY_SWAP_LIMIT because RUNNER_MEMORY_LIMIT is unset (Docker requires --memory alongside --memory-swap)" >&2
-    RUNNER_MEMORY_SWAP_LIMIT=""
+    reject_runner_limit "invalid RUNNER_PIDS_LIMIT='${RUNNER_PIDS_LIMIT}': expected a positive integer process count greater than zero."
 fi
 
 runner_resource_limits_summary=""

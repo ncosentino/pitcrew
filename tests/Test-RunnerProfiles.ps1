@@ -905,6 +905,59 @@ try {
         Write-Host '[skip] Behavioral runner-exit classifier test skipped (no POSIX shell available).' -ForegroundColor Yellow
     }
 
+    # Issue #8 follow-up (4): the direct-Compose (bootstrap) startup path bypasses
+    # Resolve-RunnerProfile, so the manager MUST enforce the same Docker resource
+    # constraints itself or an operator can boot a silently-uncapped runner — the
+    # fleet-wide OOM footgun. Exercise the REAL validator bytes under a POSIX
+    # shell by extracting them from between their sentinels and sourcing them.
+    if ($posixShell) {
+        $managerLines = Get-Content -LiteralPath $managerPath
+        $limitStart = $managerLines | Select-String -SimpleMatch '>>> pitcrew:resource_limit_validators >>>'
+        $limitEnd = $managerLines | Select-String -SimpleMatch '<<< pitcrew:resource_limit_validators <<<'
+        Add-Check ($limitStart -and $limitEnd -and $limitEnd.LineNumber -gt $limitStart.LineNumber) 'The manager resource-limit validators are not delimited for extraction.'
+        if ($limitStart -and $limitEnd -and $limitEnd.LineNumber -gt $limitStart.LineNumber) {
+            $limitFragment = ($managerLines[$limitStart.LineNumber..($limitEnd.LineNumber - 2)]) -join "`n"
+            $limitFragmentPath = Join-Path $resourcesDirectory 'resource-limit-fragment.sh'
+            Set-Content -LiteralPath $limitFragmentPath -Value $limitFragment -NoNewline -Encoding UTF8
+            $limitFragmentPosix = $limitFragmentPath -replace '\\', '/'
+
+            # Each case: predicate invocation -> expected boolean (accepted?).
+            $limitExpectations = @(
+                @{ Expr = 'is_valid_memory_value 5m';                  Accept = $false; Why = 'a 5MB memory limit below the 6MB Docker floor' },
+                @{ Expr = 'is_valid_memory_value 6m';                  Accept = $true;  Why = 'a 6MB memory limit at the Docker floor' },
+                @{ Expr = 'is_valid_memory_value 6291456';             Accept = $true;  Why = 'the exact 6291456-byte Docker floor' },
+                @{ Expr = 'is_valid_memory_value 6291455';             Accept = $false; Why = 'one byte below the 6291456-byte Docker floor' },
+                @{ Expr = 'is_valid_memory_value 06291456';            Accept = $true;  Why = 'a leading-zero-padded value at the Docker floor' },
+                @{ Expr = 'is_valid_memory_value 9999999999g';         Accept = $false; Why = 'an enormous value that would overflow 64-bit byte arithmetic' },
+                @{ Expr = 'is_valid_memory_value 512';                 Accept = $false; Why = 'a raw byte count below the 6MB floor' },
+                @{ Expr = 'is_valid_memory_value abc';                 Accept = $false; Why = 'a non-numeric memory value' },
+                @{ Expr = 'is_valid_memory_swap_pair 5m 6m';          Accept = $false; Why = 'a memory-swap smaller than memory' },
+                @{ Expr = 'is_valid_memory_swap_pair 6m 6m';          Accept = $true;  Why = 'a memory-swap equal to memory' },
+                @{ Expr = 'is_valid_memory_swap_pair 8m 6m';          Accept = $true;  Why = 'a memory-swap larger than memory' },
+                @{ Expr = 'is_valid_memory_swap_pair 9999999999g 6m'; Accept = $false; Why = 'an overflow-scale memory-swap value' },
+                @{ Expr = 'is_valid_cpu_value 0';                      Accept = $false; Why = 'a zero cpu limit Docker treats as unlimited' },
+                @{ Expr = 'is_valid_cpu_value 0.0';                    Accept = $false; Why = 'a fractional-zero cpu limit Docker treats as unlimited' },
+                @{ Expr = 'is_valid_cpu_value 2';                      Accept = $true;  Why = 'a whole-core cpu limit' },
+                @{ Expr = 'is_valid_cpu_value 1.5';                    Accept = $true;  Why = 'a fractional cpu limit within nine decimals' },
+                @{ Expr = 'is_valid_cpu_value 1.0000000001';          Accept = $false; Why = 'a cpu limit with more than nine decimals Docker calls too precise' },
+                @{ Expr = 'is_valid_cpu_value 0.000000001';           Accept = $true;  Why = 'the smallest nine-decimal cpu limit Docker accepts' },
+                @{ Expr = 'is_valid_cpu_value 0.000000008';           Accept = $true;  Why = 'a nine-decimal cpu fraction with a leading-zero run (no octal misparse)' },
+                @{ Expr = 'is_valid_cpu_value 1000000000';            Accept = $false; Why = 'a core count large enough to overflow Int64 NanoCPUs' },
+                @{ Expr = 'is_valid_cpu_value abc';                    Accept = $false; Why = 'a non-numeric cpu value' },
+                @{ Expr = 'is_valid_pids_value 0';                     Accept = $false; Why = 'a zero pids limit' },
+                @{ Expr = 'is_valid_pids_value 00';                    Accept = $false; Why = 'a leading-zero zero pids limit' },
+                @{ Expr = 'is_valid_pids_value 100';                   Accept = $true;  Why = 'a positive pids limit' }
+            )
+            foreach ($limitCase in $limitExpectations) {
+                $observed = & $posixShell -c ". '$limitFragmentPosix'; if $($limitCase.Expr); then echo accept; else echo reject; fi"
+                $expected = if ($limitCase.Accept) { 'accept' } else { 'reject' }
+                Add-Check ($observed -ceq $expected) "The direct-Compose validator '$($limitCase.Expr)' returned '$observed' for $($limitCase.Why); expected '$expected'."
+            }
+        }
+    } else {
+        Write-Host '[skip] Behavioral resource-limit validator test skipped (no POSIX shell available).' -ForegroundColor Yellow
+    }
+
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
     $secretManifest.build.args = [PSCustomObject]@{ API_TOKEN = 'not-a-real-token' }
