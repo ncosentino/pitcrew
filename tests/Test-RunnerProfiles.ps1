@@ -1043,12 +1043,17 @@ write_manager_observed_state "${work}/observed.json" "profile" "manager-1" 7 "ru
 cat "${work}/observed.json"
 kill "${probe_pid}" 2>/dev/null || true
 '@ -replace '__OBSERVABILITY__', $observabilityPosix
-        Set-Content -LiteralPath $busyProbePath -Value $busyProbeScript -NoNewline -Encoding UTF8
+        # The probe is executed by /bin/sh (dash on CI); this .ps1 may be checked
+        # out with CRLF, so strip CR to keep the emitted script strictly LF or the
+        # shell fails to source it (a trailing CR breaks the sourced path/`set`).
+        Set-Content -LiteralPath $busyProbePath -Value ($busyProbeScript -replace "`r", "") -NoNewline -Encoding UTF8
         $busyProbePosix = $busyProbePath -replace '\\', '/'
         $busyWorkPosix = ($busyProbeDir -replace '\\', '/')
 
         foreach ($probeMode in @('busy', 'idle')) {
-            $observedRaw = & $posixShell -c ". '$busyProbePosix' '$busyWorkPosix' '$probeMode'"
+            # Execute (not `. script args`): POSIX `.` ignores positional
+            # parameters under dash (/bin/sh on CI), which would blank $work/$mode.
+            $observedRaw = & $posixShell $busyProbePosix $busyWorkPosix $probeMode
             $observedJson = $null
             try { $observedJson = ($observedRaw -join "`n") | ConvertFrom-Json -Depth 10 } catch { $observedJson = $null }
             Add-Check ($null -ne $observedJson) "The observability rendering produced no valid observed-state JSON for the '$probeMode' slot."
@@ -1120,16 +1125,19 @@ fenced="no"
 printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
 [ -n "${probe_pid}" ] && kill "${probe_pid}" 2>/dev/null || true
 '@
-        Set-Content -LiteralPath $drainProbePath -Value $drainProbeScript -NoNewline -Encoding UTF8
+        # See the busy-probe note above: force LF so dash can source the fragment.
+        Set-Content -LiteralPath $drainProbePath -Value ($drainProbeScript -replace "`r", "") -NoNewline -Encoding UTF8
         $drainProbePosix = $drainProbePath -replace '\\', '/'
         $drainWorkPosix = ($drainProbeDir -replace '\\', '/')
 
-        $drainIdle = (& $posixShell -c ". '$drainProbePosix' '$drainWorkPosix' 'idle' '$managerPosix'") -join "`n"
+        # Execute the probe so dash passes the positional parameters (a sourced
+        # `. script args` drops them under POSIX /bin/sh).
+        $drainIdle = (& $posixShell $drainProbePosix $drainWorkPosix 'idle' $managerPosix) -join "`n"
         Add-Check ($drainIdle -match 'complete=yes') "The drain cycle did not report complete for an idle pool (dead supervisor, no job): '$drainIdle'."
         Add-Check ($drainIdle -match 'nonce=testnonce') "The drain-complete marker did not echo back the request nonce for an idle pool: '$drainIdle'."
         Add-Check ($drainIdle -match 'fenced=yes') "The drain cycle did not fence the slot for an idle pool: '$drainIdle'."
 
-        $drainBusy = (& $posixShell -c ". '$drainProbePosix' '$drainWorkPosix' 'busy' '$managerPosix'") -join "`n"
+        $drainBusy = (& $posixShell $drainProbePosix $drainWorkPosix 'busy' $managerPosix) -join "`n"
         Add-Check ($drainBusy -match 'complete=no') "The drain cycle wrongly reported complete while a job was still running (busy pool): '$drainBusy'. A busy runner must never be force-drained."
         Add-Check ($drainBusy -match 'fenced=yes') "The drain cycle did not fence the slot for a busy pool: '$drainBusy'. New assignments must be blocked even while the in-flight job finishes."
     } else {
