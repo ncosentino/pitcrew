@@ -1020,6 +1020,74 @@ kill "${probe_pid}" 2>/dev/null || true
         Write-Host '[skip] Behavioral job-busy observability test skipped (no POSIX shell or jq available).' -ForegroundColor Yellow
     }
 
+    # Issue #8 follow-up (1)+(2): the cooperative drain-and-fence protocol must
+    # fence every slot (block new assignments) and only answer drain-complete
+    # once no supervisor is alive AND no job is running. Exercise the real
+    # run_drain_cycle from the manager under a POSIX shell with jq: an idle pool
+    # (dead supervisor, no job-active) must be fenced and reported complete with
+    # the request nonce echoed back; a busy pool (live supervisor + job-active)
+    # must be fenced but must NOT report complete — proving the replacement waits
+    # for the real GitHub job to finish instead of force-killing it.
+    if ($posixShell -and $jqAvailable) {
+        $drainProbeDir = Join-Path $resourcesDirectory 'drain-protocol'
+        New-Item -ItemType Directory -Path $drainProbeDir -Force | Out-Null
+        $drainProbePath = Join-Path $drainProbeDir 'probe.sh'
+        $managerPosix = $managerPath -replace '\\', '/'
+        $drainProbeScript = @'
+set -u
+work="$1"
+mode="$2"
+manager="$3"
+awk '/>>> pitcrew:drain_protocol >>>/{f=1;next} /<<< pitcrew:drain_protocol <<</{f=0} f' "${manager}" > "${work}/frag.sh"
+mark_observed_state_dirty() { :; }
+wait_for_cleanup_commands() { return 0; }
+STATE_DIRECTORY="${work}/state"
+SLOT_DIRECTORY="${work}/slots"
+DRAIN_REQUEST_PATH="${STATE_DIRECTORY}/drain-request.json"
+DRAIN_COMPLETE_PATH="${STATE_DIRECTORY}/drain-complete.json"
+MANAGER_CONTRACT_VERSION=7
+RUNNER_STOP_TIMEOUT=5
+rm -rf "${STATE_DIRECTORY}" "${SLOT_DIRECTORY}"
+mkdir -p "${STATE_DIRECTORY}" "${SLOT_DIRECTORY}/slot-1"
+jq -n '{schemaVersion:1,nonce:"testnonce"}' > "${DRAIN_REQUEST_PATH}"
+. "${work}/frag.sh"
+probe_pid=""
+if [ "${mode}" = "busy" ]; then
+    sleep 30 &
+    probe_pid=$!
+    printf '%s\n' "${probe_pid}" > "${SLOT_DIRECTORY}/slot-1/pid"
+    : > "${SLOT_DIRECTORY}/slot-1/job-active"
+else
+    printf '999999\n' > "${SLOT_DIRECTORY}/slot-1/pid"
+fi
+run_drain_cycle
+complete="no"
+nonce=""
+if [ -f "${DRAIN_COMPLETE_PATH}" ]; then
+    complete="yes"
+    nonce=$(jq -r '.nonce // ""' "${DRAIN_COMPLETE_PATH}")
+fi
+fenced="no"
+[ -f "${SLOT_DIRECTORY}/slot-1/drain" ] && fenced="yes"
+printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
+[ -n "${probe_pid}" ] && kill "${probe_pid}" 2>/dev/null || true
+'@
+        Set-Content -LiteralPath $drainProbePath -Value $drainProbeScript -NoNewline -Encoding UTF8
+        $drainProbePosix = $drainProbePath -replace '\\', '/'
+        $drainWorkPosix = ($drainProbeDir -replace '\\', '/')
+
+        $drainIdle = (& $posixShell -c ". '$drainProbePosix' '$drainWorkPosix' 'idle' '$managerPosix'") -join "`n"
+        Add-Check ($drainIdle -match 'complete=yes') "The drain cycle did not report complete for an idle pool (dead supervisor, no job): '$drainIdle'."
+        Add-Check ($drainIdle -match 'nonce=testnonce') "The drain-complete marker did not echo back the request nonce for an idle pool: '$drainIdle'."
+        Add-Check ($drainIdle -match 'fenced=yes') "The drain cycle did not fence the slot for an idle pool: '$drainIdle'."
+
+        $drainBusy = (& $posixShell -c ". '$drainProbePosix' '$drainWorkPosix' 'busy' '$managerPosix'") -join "`n"
+        Add-Check ($drainBusy -match 'complete=no') "The drain cycle wrongly reported complete while a job was still running (busy pool): '$drainBusy'. A busy runner must never be force-drained."
+        Add-Check ($drainBusy -match 'fenced=yes') "The drain cycle did not fence the slot for a busy pool: '$drainBusy'. New assignments must be blocked even while the in-flight job finishes."
+    } else {
+        Write-Host '[skip] Behavioral drain-protocol test skipped (no POSIX shell or jq available).' -ForegroundColor Yellow
+    }
+
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
     $secretManifest.build.args = [PSCustomObject]@{ API_TOKEN = 'not-a-real-token' }
@@ -1511,6 +1579,17 @@ Add-Check ($manager -match [regex]::Escape('docker stop \')) 'Manager shutdown d
 Add-Check ($manager -match [regex]::Escape('--timeout "${RUNNER_STOP_TIMEOUT}"')) 'Manager shutdown does not bound graceful worker deregistration.'
 Add-Check ($manager -match [regex]::Escape('if ! remove_managed_strict; then')) 'Manager shutdown can publish stopped without confirming runner cleanup.'
 Add-Check ($manager -match [regex]::Escape('rm -f "${OBSERVED_STATE_DIRTY}"')) 'Observed-state publication does not preserve concurrent dirty notifications.'
+# Issue #8 follow-up (1)+(2): the manager must implement the cooperative
+# drain-and-fence protocol so a v7+ replacement can wait for real in-flight jobs
+# to finish instead of force-killing runners. Assert the wiring is present and
+# that the main loop consults the drain request before reconciling (reconcile
+# clears slot drains and respawns, which would defeat the fence).
+Add-Check ($manager -match [regex]::Escape('run_drain_cycle')) 'The manager does not implement a cooperative drain cycle.'
+Add-Check ($manager -match [regex]::Escape('drain_requested')) 'The manager does not detect a host-side drain request.'
+Add-Check ($manager -match [regex]::Escape('drain-request.json')) 'The manager does not read the drain-request marker.'
+Add-Check ($manager -match [regex]::Escape('drain-complete.json')) 'The manager does not answer with a drain-complete marker.'
+Add-Check ($manager -match '(?m)^\s*if drain_requested; then') 'The manager main loop does not check for a drain request before reconciling, so a fence could be undone by a respawn.'
+Add-Check ($manager -match [regex]::Escape('[ -f "${idle_path}/job-active" ] && continue')) 'The manager drain cycle does not skip busy runners, so an in-flight job could be force-stopped.'
 Add-Check ($managerDockerfile -match 'FROM docker:28-cli AS docker-cli') 'The manager does not isolate the Docker client build stage.'
 Add-Check ($managerDockerfile -match 'FROM alpine:3\.22') 'The manager runtime is not based on minimal Alpine.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker')) 'The manager runtime does not copy only the Docker client binary.'

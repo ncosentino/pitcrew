@@ -23,6 +23,12 @@ DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE_PATH="${STATE_DIRECTORY}/observed-state.json"
+# Cooperative drain markers (contract v7+). Host-side setup drops a
+# drain-request to fence the pool before a manager recreate; the manager answers
+# with a drain-complete once every job has finished and no runner is left
+# listening, so a static/contract replacement never interrupts an active job.
+DRAIN_REQUEST_PATH="${STATE_DIRECTORY}/drain-request.json"
+DRAIN_COMPLETE_PATH="${STATE_DIRECTORY}/drain-complete.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
 SLOT_DIRECTORY="/tmp/pitcrew-slots"
@@ -239,6 +245,7 @@ CURRENT_STATE_HASH=""
 LAST_DESIRED_DOCUMENT_HASH=""
 LAST_REJECTION=""
 STOPPING=0
+DRAINING=0
 MANAGER_STATUS="starting"
 LAST_OBSERVED_STATE_PUBLISH_EPOCH=0
 rand_hex() {
@@ -469,6 +476,7 @@ run_slot() {
         : > "${log_path}"
         rm -f "${slot_state_path}/connected"
         rm -f "${slot_state_path}/job-active"
+        rm -f "${slot_state_path}/container"
         write_slot_runtime_state \
             "${slot_state_path}" \
             "${OBSERVED_STATE_DIRTY}" \
@@ -511,6 +519,9 @@ run_slot() {
         fi
         set -- "$@" "${IMAGE}"
         rm -f "${runner_status_path}"
+        # Record the container name so a cooperative drain can gracefully stop an
+        # IDLE runner (no job-active marker) without touching a busy one.
+        printf '%s\n' "${name}" > "${slot_state_path}/container"
         # The reader loop is the last stage of the pipe, so a plain pipeline would
         # report the loop's exit status and discard the container's. Persist the
         # container status from inside the pipe so a killed runner (137 / SIGKILL,
@@ -561,6 +572,7 @@ run_slot() {
         # the busy marker unconditionally: a job-active flag must never outlive the
         # container it describes, or a drain would wait forever on a phantom job.
         rm -f "${slot_state_path}/job-active"
+        rm -f "${slot_state_path}/container"
         # A missing, empty, or non-numeric capture means the container's real
         # disposition could not be observed. It MUST NOT be coerced to 0/clean:
         # doing so would mask a killed/lost runner as a graceful completion —
@@ -784,6 +796,101 @@ reconcile_slots() {
     rm -f "${active_keys_path}" "${undesired_keys_path}"
 }
 
+# >>> pitcrew:drain_protocol >>>
+# Cooperative drain-and-fence (contract v7+). Host-side setup writes a
+# drain-request marker before recreating the manager (for a static/limit change
+# or a contract upgrade); the manager fences the pool so no NEW job can start,
+# lets any IN-FLIGHT job finish on its own, and only then answers with a
+# drain-complete marker. This is what lets a replacement wait for real GitHub
+# jobs to end instead of force-killing them — the fleet-loss failure mode of
+# issue #8. The whole cycle is recoverable: if the request disappears the
+# manager resumes normal reconciliation and respawns the pool.
+drain_requested() {
+    [ -f "${DRAIN_REQUEST_PATH}" ] || return 1
+    jq -e '.schemaVersion == 1 and (.nonce | type == "string" and length > 0)' \
+        "${DRAIN_REQUEST_PATH}" >/dev/null 2>&1
+}
+
+fence_all_slots() {
+    # Block new assignments: mark every slot draining so run_slot will not respawn
+    # a fresh ephemeral runner once the current one exits.
+    for fence_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${fence_path}" ] || continue
+        if [ ! -f "${fence_path}/drain" ]; then
+            : > "${fence_path}/drain"
+            mark_observed_state_dirty
+        fi
+    done
+}
+
+stop_idle_slot_containers() {
+    # Gracefully stop ONLY idle runners (no job-active marker) so their fenced
+    # supervisors can exit. A busy runner is never touched: its job finishes
+    # naturally, the ephemeral container exits, and the fenced slot then stops
+    # without respawning. This is the "wait for the job, kill nothing" guarantee.
+    idle_pids=""
+    for idle_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${idle_path}" ] || continue
+        [ -f "${idle_path}/job-active" ] && continue
+        [ -f "${idle_path}/container" ] || continue
+        idle_container=$(cat "${idle_path}/container" 2>/dev/null || printf '')
+        [ -n "${idle_container}" ] || continue
+        docker stop --timeout "${RUNNER_STOP_TIMEOUT}" "${idle_container}" \
+            >/dev/null 2>&1 &
+        idle_pids="${idle_pids} $!"
+    done
+    [ -n "${idle_pids}" ] && wait_for_cleanup_commands "${idle_pids}" || true
+}
+
+drain_is_complete() {
+    # Complete only when no supervisor is alive AND no job is running, so a
+    # replacement can proceed knowing nothing is left to interrupt.
+    for check_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${check_path}" ] || continue
+        if [ -f "${check_path}/pid" ]; then
+            check_pid=$(cat "${check_path}/pid")
+            if kill -0 "${check_pid}" 2>/dev/null; then
+                return 1
+            fi
+        fi
+        [ -f "${check_path}/job-active" ] && return 1
+    done
+    return 0
+}
+
+write_drain_complete() {
+    drain_nonce=$(jq -r '.nonce // ""' "${DRAIN_REQUEST_PATH}" 2>/dev/null || printf '')
+    [ -n "${drain_nonce}" ] || return 1
+    drain_complete_temporary="${STATE_DIRECTORY}/.drain-complete.$$.tmp"
+    if ! jq -n \
+        --argjson schemaVersion 1 \
+        --arg nonce "${drain_nonce}" \
+        --argjson managerContractVersion "${MANAGER_CONTRACT_VERSION}" \
+        --arg completedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        '{
+            schemaVersion: $schemaVersion,
+            nonce: $nonce,
+            managerContractVersion: $managerContractVersion,
+            completedAt: $completedAt
+        }' > "${drain_complete_temporary}"; then
+        rm -f "${drain_complete_temporary}"
+        return 1
+    fi
+    if ! mv -f "${drain_complete_temporary}" "${DRAIN_COMPLETE_PATH}"; then
+        rm -f "${drain_complete_temporary}"
+        return 1
+    fi
+}
+
+run_drain_cycle() {
+    fence_all_slots
+    stop_idle_slot_containers
+    if drain_is_complete; then
+        write_drain_complete || true
+    fi
+}
+# <<< pitcrew:drain_protocol <<<
+
 persist_accepted_state() {
     source_path="$1"
     accepted_temporary="${STATE_DIRECTORY}/.last-valid-capacity.$$.tmp"
@@ -947,6 +1054,10 @@ rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
 rm -f "${OBSERVED_STATE_DIRTY}"
+# Drop any drain markers left by a previous manager life. A freshly (re)created
+# manager must start reconciling normally, not immediately re-enter the drain
+# that setup requested against the manager it just replaced.
+rm -f "${DRAIN_REQUEST_PATH}" "${DRAIN_COMPLETE_PATH}"
 mark_observed_state_dirty
 
 echo "[manager:${PROFILE_ID}] clearing any leftover managed runners"
@@ -989,6 +1100,25 @@ mark_observed_state_dirty
 publish_observed_state 1
 
 while [ "${STOPPING}" -eq 0 ]; do
+    if drain_requested; then
+        if [ "${DRAINING}" -eq 0 ]; then
+            DRAINING=1
+            rm -f "${DRAIN_COMPLETE_PATH}"
+            echo "[manager:${PROFILE_ID}] drain requested; fencing new assignments and waiting for in-flight jobs to finish before any replacement"
+        fi
+        # While draining, skip reconcile entirely: reconcile clears slot drains
+        # and respawns runners, which would defeat the fence and let a new job
+        # start in the very window setup is trying to keep empty.
+        run_drain_cycle
+        publish_observed_state 0
+        sleep "${RECONCILE_INTERVAL}"
+        continue
+    fi
+    if [ "${DRAINING}" -eq 1 ]; then
+        DRAINING=0
+        rm -f "${DRAIN_COMPLETE_PATH}"
+        echo "[manager:${PROFILE_ID}] drain request cleared; resuming reconciliation"
+    fi
     process_desired_state
     if [ -f "${PENDING_ACKNOWLEDGEMENT}" ]; then
         publish_pending_acknowledgement || true
