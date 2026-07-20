@@ -85,6 +85,81 @@
           ]
         }
       }
+    },
+    "autoscalingState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode",
+        "status",
+        "minimumIdleSlots",
+        "maximumSlots",
+        "targetSlots",
+        "assignedJobs",
+        "runningJobs",
+        "availableJobs",
+        "idleRunners",
+        "busyRunners",
+        "scaleDownDelaySeconds",
+        "scaleDownAt",
+        "scaleSetCount",
+        "lastError"
+      ],
+      "properties": {
+        "mode": {
+          "const": "scale-set"
+        },
+        "status": {
+          "enum": ["starting", "running", "degraded", "stopping"]
+        },
+        "minimumIdleSlots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "maximumSlots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targetSlots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assignedJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runningJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "availableJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "idleRunners": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "busyRunners": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scaleDownDelaySeconds": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scaleDownAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "scaleSetCount": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "lastError": {
+          "type": ["string", "null"]
+        }
+      }
     }
   },
   "required": [
@@ -144,6 +219,10 @@
       "type": "integer",
       "minimum": 0
     },
+    "configuredSlots": {
+      "type": "integer",
+      "minimum": 0
+    },
     "activeSlots": {
       "type": "integer",
       "minimum": 0
@@ -156,6 +235,16 @@
       "oneOf": [
         {
           "$ref": "#/$defs/managerResourceTelemetry"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "autoscaling": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/autoscalingState"
         },
         {
           "type": "null"
@@ -215,6 +304,14 @@
                 "type": "null"
               }
             ]
+          },
+          "activity": {
+            "type": ["string", "null"],
+            "enum": ["starting", "idle", "busy", "draining", "unknown", null]
+          },
+          "target": {
+            "type": ["string", "null"],
+            "minLength": 1
           }
         }
       }
@@ -387,6 +484,24 @@
             }
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 8
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "configuredSlots",
+          "autoscaling"
+        ]
       }
     }
   ]

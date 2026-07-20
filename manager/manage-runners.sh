@@ -8,8 +8,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 . "${SCRIPT_DIRECTORY}/observability.sh"
 
-MANAGER_CONTRACT_VERSION=7
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-7}"
+MANAGER_CONTRACT_VERSION=8
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-8}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -526,6 +526,9 @@ write_acknowledgement() {
             desiredStateHash: $desiredStateHash,
             observedAt: $observedAt,
             desiredSlots: $desiredSlots,
+            activationMode: "fixed",
+            activeSlots: $desiredSlots,
+            minimumIdleSlots: $desiredSlots,
             addedSlots: $addedSlots,
             drainingSlots: $drainingSlots,
             unchangedSlots: $unchangedSlots,

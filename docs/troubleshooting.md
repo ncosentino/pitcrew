@@ -33,6 +33,19 @@ gh api repos/OWNER/REPOSITORY/actions/runners `
 GitHub does not automatically fall back to a hosted runner when local capacity
 is offline.
 
+For an autoscaled profile, inspect its demand state:
+
+```powershell
+Get-Content .pitcrew-state\PROFILE\observed-state.json |
+    ConvertFrom-Json |
+    Select-Object -ExpandProperty autoscaling
+```
+
+`maximumSlots` is the configured ceiling, `targetSlots` is current GitHub
+demand plus the warm idle floor, and `activeSlots` is the live container count.
+A `degraded` status or non-empty `lastError` identifies scale-set, JIT
+configuration, or Docker provisioning failures.
+
 ## A specialized profile receives routine jobs
 
 Inspect the manifest and runner labels. Named profiles should keep
@@ -67,6 +80,10 @@ Removed slots drain gracefully. A runner already executing a job finishes
 normally, and an idle ephemeral runner may accept one final job before its
 container exits. The slot disappears after that container exits and is not
 respawned.
+
+Autoscaled profiles intentionally retain excess idle JIT runners until
+`scaleDownDelaySeconds` elapses. Any renewed demand cancels that pending
+scale-down.
 
 ## Docker-dependent workflow steps fail
 

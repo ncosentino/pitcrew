@@ -69,8 +69,16 @@ For every refreshed profile, verify:
 - the checkout commit matches the selected release tag
 - the manager container was replaced and is running
 - `observed-state.json` is fresh and reports `managerStatus: running`
-- desired and active slots return to the configured counts
-- matching GitHub runners return online
+- the desired generation is accepted
+
+For fixed profiles, verify desired and active slots return to configured
+capacity and matching GitHub runners return online.
+
+For autoscaled profiles, verify `configuredSlots` and
+`autoscaling.maximumSlots` match the configured maximum,
+`desiredSlots == autoscaling.targetSlots <= autoscaling.maximumSlots`, and the
+autoscaling status is not degraded. Zero desired, active, idle, or online
+runners is valid when demand and `minimumIdleSlots` are zero.
 
 If a profile fails, stop and report the target release, previous commit, and
 which profiles completed. Do not automatically reset the checkout or claim the

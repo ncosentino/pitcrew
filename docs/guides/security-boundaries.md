@@ -30,6 +30,11 @@ PitCrew writes the runner-registration token to `.env` or `.env.<profile>`.
 Those files are gitignored and registration variables are removed before
 workflow steps begin.
 
+In scale-set mode, the administration token remains in the manager. Each worker
+receives only a one-time JIT configuration for its ephemeral registration.
+Treat that configuration as secret until the worker consumes it; Docker
+administrators can inspect container configuration.
+
 Use the minimum GitHub permissions required for the selected runner scope.
 
 ## Keep workload secrets in GitHub

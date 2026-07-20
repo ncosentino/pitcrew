@@ -38,6 +38,7 @@ Use `static-profile.json.configuration` to preserve:
 - labels
 - runner group
 - runner name prefix
+- autoscaling mode, minimum idle runners, and scale-down delay
 
 For the default profile, use `-Profile default`. For a built-in named profile,
 use `-Profile <name>` and confirm `profiles/<name>/profile.json` exists.

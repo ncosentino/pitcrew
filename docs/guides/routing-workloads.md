@@ -50,6 +50,10 @@ jobs:
 Do not add `self-hosted` to an isolated profile. That would make broad legacy
 jobs eligible for the specialized capacity.
 
+Autoscaled profiles publish the same effective label set through their GitHub
+runner scale sets. Enabling autoscaling therefore does not require changing a
+correctly labeled `runs-on` declaration.
+
 ## Route native operating systems
 
 PitCrew's container workers are Linux runners. Keep Windows and macOS jobs on

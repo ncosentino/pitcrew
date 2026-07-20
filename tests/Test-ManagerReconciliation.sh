@@ -375,7 +375,7 @@ write_manager_observed_state \
     "${observed_state_json}" \
     default \
     manager-instance \
-    7 \
+    8 \
     running \
     repo \
     9 \
@@ -386,6 +386,8 @@ write_manager_observed_state \
     "${resource_telemetry_json}"
 assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
 assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
+assert_equals "2" "$(jq -r '.configuredSlots' "${observed_state_json}")" "Observed state reported the wrong configured slot count."
+assert_equals "null" "$(jq -r '.autoscaling' "${observed_state_json}")" "Fixed observed state reported autoscaling metadata."
 assert_equals "1" "$(jq -r '.drainingSlots' "${observed_state_json}")" "Observed state reported the wrong draining slot count."
 assert_equals "online" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .state' "${observed_state_json}")" "Observed state lost an online slot."
 assert_equals "draining" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .state' "${observed_state_json}")" "Drain state did not override runtime backoff."
@@ -399,14 +401,18 @@ assert_false "Observed state exposed an access token field." contains_access_tok
 assert_false "Observed state exposed runner names or derived tags." contains_runner_identity_field "${observed_state_json}"
 
 invalid_resource_state="${TEMP_DIRECTORY}/invalid-resource-state.json"
+jq 'del(.configuredSlots)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract eight accepted missing configured capacity." observed_state_is_valid "${invalid_resource_state}"
+jq 'del(.autoscaling)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract eight accepted missing autoscaling mode state." observed_state_is_valid "${invalid_resource_state}"
 jq '.slots[0].resources.cpuCores = -1' "${observed_state_json}" > "${invalid_resource_state}"
 assert_false "Observed state accepted negative CPU telemetry." observed_state_is_valid "${invalid_resource_state}"
 jq 'del(.resourceTelemetry)' "${observed_state_json}" > "${invalid_resource_state}"
-assert_false "Manager contract seven accepted missing resource telemetry." observed_state_is_valid "${invalid_resource_state}"
+assert_false "Manager contract eight accepted missing resource telemetry." observed_state_is_valid "${invalid_resource_state}"
 jq '.resourceTelemetry = null' "${observed_state_json}" > "${invalid_resource_state}"
-assert_false "Manager contract seven accepted null resource telemetry." observed_state_is_valid "${invalid_resource_state}"
+assert_false "Manager contract eight accepted null resource telemetry." observed_state_is_valid "${invalid_resource_state}"
 jq 'del(.slots[0].resources)' "${observed_state_json}" > "${invalid_resource_state}"
-assert_false "Manager contract seven accepted a slot without a resources field." observed_state_is_valid "${invalid_resource_state}"
+assert_false "Manager contract eight accepted a slot without a resources field." observed_state_is_valid "${invalid_resource_state}"
 jq '.resourceTelemetry.host = null' "${observed_state_json}" > "${invalid_resource_state}"
 assert_false "Available telemetry accepted missing host capacity." observed_state_is_valid "${invalid_resource_state}"
 jq '

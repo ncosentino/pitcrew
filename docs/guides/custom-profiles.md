@@ -53,6 +53,10 @@ the current profile.
 
 If verification fails, the existing profile remains online.
 
+Autoscaled profiles must retain `/actions-runner/bin/Runner.Listener` and the
+`runner` user from the base image. JIT workers bypass the image's normal
+entrypoint, so runtime prerequisites must be installed during the image build.
+
 ## Route jobs to the profile
 
 Every named profile receives its profile name as a mandatory label:

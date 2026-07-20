@@ -26,6 +26,9 @@ profile without changing other profiles on the same host.
 | `-Image` | No | Overrides the profile's worker image. | Profile value |
 | `-PullImage` | No | Controls whether setup pulls a prebuilt image before verification. | Profile value |
 | `-RunnerGroup` | No | Organization or enterprise runner group. | Profile value |
+| `-Autoscale` | No | Enables GitHub Runner Scale Set demand-driven activation. Configured counts become maximum capacity. | Off |
+| `-MinimumIdle` | No | Warm idle runners retained per autoscaled target. | `0` |
+| `-ScaleDownDelaySeconds` | No | Stable low-demand period before excess idle JIT runners are removed. | `120` |
 | `-Down` | No | Stops only the selected profile and removes its managed workers. | Off |
 | `-Refresh` | No | Rebuilds the selected manager while requiring the worker profile configuration to remain unchanged. This stops that profile's workers and requires an idle maintenance window. | Off |
 | `-CapacityOnly` | No | Requires an in-place capacity update and fails rather than replacing a manager when the current profile cannot reconcile capacity safely. | Off |
@@ -59,8 +62,17 @@ Named profiles conform to
 | `pullImage` | No | Pull a prebuilt image before verification. |
 | `disableDefaultLabels` | No | Omit GitHub's broad default labels. Named profiles default to `true`. |
 | `runnerGroup` | No | Organization or enterprise runner group. |
+| `autoscaling` | No | Scale-set mode, minimum idle runners, and scale-down stabilization delay. |
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |
 | `build` | No | Local Docker build context, Dockerfile, and non-secret build arguments. |
+
+### Autoscaling policy
+
+| Field | Required | Description | Default |
+|-------|----------|-------------|---------|
+| `mode` | Yes | GitHub demand integration. `scale-set` is supported. | None |
+| `minimumIdle` | No | Warm idle JIT runners retained per target. | `0` |
+| `scaleDownDelaySeconds` | No | Stable low-demand period before idle removal. | `120` |
 
 ## Worker image shutdown contract
 
@@ -107,6 +119,8 @@ do not receive Docker access.
 Manager contract 7 introduces these additive fields. Older connectors continue
 to relay lifecycle state but discard fields they do not recognize, so update the
 optional connector and dashboard before expecting resource cards to appear.
+Manager contract 8 adds configured-maximum and autoscaling state while retaining
+the same credential-free connector boundary.
 
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify
@@ -119,6 +133,10 @@ count. Organization and enterprise scope record one shared replica count. The
 manager derives stable ordinal slot keys, so changing a repository from five
 workers to six starts only ordinal six. Changing it back to five drains only
 ordinal six.
+
+For autoscaled profiles, the same values are configured maximums. GitHub's
+assigned-job statistics determine current activation between the minimum idle
+floor and each maximum.
 
 ## Capacity reconciliation
 

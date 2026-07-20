@@ -51,6 +51,27 @@
     "runnerGroup": {
       "type": "string"
     },
+    "autoscaling": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "mode"
+      ],
+      "properties": {
+        "mode": {
+          "const": "scale-set"
+        },
+        "minimumIdle": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "scaleDownDelaySeconds": {
+          "type": "integer",
+          "minimum": 30,
+          "maximum": 3600
+        }
+      }
+    },
     "verificationCommands": {
       "type": "array",
       "items": {

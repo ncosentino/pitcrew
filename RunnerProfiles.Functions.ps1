@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 7
+$script:RunnerManagerContractVersion = 8
 
 function ConvertTo-RunnerLabelList {
     param(
@@ -83,6 +83,12 @@ function Resolve-RunnerProfile {
         [AllowEmptyString()]
         [string]$RunnerGroup,
 
+        [Nullable[bool]]$Autoscale,
+
+        [Nullable[int]]$MinimumIdle,
+
+        [Nullable[int]]$ScaleDownDelaySeconds,
+
         [string]$HostName = 'runner'
     )
 
@@ -112,6 +118,7 @@ function Resolve-RunnerProfile {
     $effectivePullImage = $true
     $verificationCommands = @()
     $build = $null
+    $effectiveAutoscaling = $null
 
     if ($manifestPath) {
         $schemaPath = Join-Path $resolvedRoot 'runner-profile.schema.json'
@@ -144,6 +151,21 @@ function Resolve-RunnerProfile {
             @($manifest.verificationCommands)
         } else {
             @()
+        }
+        if ($manifest.PSObject.Properties['autoscaling']) {
+            $effectiveAutoscaling = [PSCustomObject][ordered]@{
+                Mode = [string]$manifest.autoscaling.mode
+                MinimumIdle = if ($manifest.autoscaling.PSObject.Properties['minimumIdle']) {
+                    [int]$manifest.autoscaling.minimumIdle
+                } else {
+                    0
+                }
+                ScaleDownDelaySeconds = if ($manifest.autoscaling.PSObject.Properties['scaleDownDelaySeconds']) {
+                    [int]$manifest.autoscaling.scaleDownDelaySeconds
+                } else {
+                    120
+                }
+            }
         }
 
         if ($manifest.PSObject.Properties['build']) {
@@ -211,6 +233,41 @@ function Resolve-RunnerProfile {
         throw 'Runner group cannot contain a newline.'
     }
 
+    if ($PSBoundParameters.ContainsKey('Autoscale')) {
+        $effectiveAutoscaling = if ([bool]$Autoscale) {
+            [PSCustomObject][ordered]@{
+                Mode = 'scale-set'
+                MinimumIdle = 0
+                ScaleDownDelaySeconds = 120
+            }
+        } else {
+            $null
+        }
+    }
+    if ($PSBoundParameters.ContainsKey('MinimumIdle')) {
+        if ($null -eq $effectiveAutoscaling) {
+            throw '-MinimumIdle requires autoscaling to be enabled.'
+        }
+        $effectiveAutoscaling.MinimumIdle = [int]$MinimumIdle
+    }
+    if ($PSBoundParameters.ContainsKey('ScaleDownDelaySeconds')) {
+        if ($null -eq $effectiveAutoscaling) {
+            throw '-ScaleDownDelaySeconds requires autoscaling to be enabled.'
+        }
+        $effectiveAutoscaling.ScaleDownDelaySeconds = [int]$ScaleDownDelaySeconds
+    }
+    if ($effectiveAutoscaling) {
+        if ($effectiveAutoscaling.MinimumIdle -lt 0) {
+            throw 'Autoscaling minimum idle runners cannot be negative.'
+        }
+        if (
+            $effectiveAutoscaling.ScaleDownDelaySeconds -lt 30 -or
+            $effectiveAutoscaling.ScaleDownDelaySeconds -gt 3600
+        ) {
+            throw 'Autoscaling scale-down delay must be between 30 and 3600 seconds.'
+        }
+    }
+
     $requiredLabel = if ($profileName -eq 'default') { 'general-purpose' } else { $profileName }
     $labelList = ConvertTo-RunnerLabelList `
         -Labels $effectiveLabels `
@@ -271,6 +328,7 @@ function Resolve-RunnerProfile {
         LabelsValue = $labelList -join ','
         DisableDefaultLabels = $disableDefaultLabels
         RunnerGroup = $effectiveRunnerGroup
+        Autoscaling = $effectiveAutoscaling
         NamePrefix = $effectiveNamePrefix
         VerificationCommands = @($verificationCommands)
         Build = $build
@@ -451,6 +509,23 @@ function New-RunnerDesiredCapacityState {
             ) {
                 throw 'Repository URLs in desired capacity must be canonical absolute HTTP(S) URLs without credentials, whitespace, query strings, or fragments.'
             }
+            $canonicalPath = $parsedUrl.AbsolutePath.TrimEnd('/')
+            if ($canonicalPath.EndsWith('.git', [StringComparison]::OrdinalIgnoreCase)) {
+                $canonicalPath = $canonicalPath.Substring(0, $canonicalPath.Length - 4)
+            }
+            if ([string]::IsNullOrWhiteSpace($canonicalPath.Trim('/'))) {
+                throw "Repository URL '$url' does not identify a repository."
+            }
+            $canonicalBuilder = [UriBuilder]::new($parsedUrl)
+            $canonicalBuilder.Scheme = $parsedUrl.Scheme.ToLowerInvariant()
+            $canonicalBuilder.Host = $parsedUrl.Host.ToLowerInvariant()
+            if ($parsedUrl.IsDefaultPort) {
+                $canonicalBuilder.Port = -1
+            }
+            $canonicalBuilder.Path = $canonicalPath
+            $canonicalBuilder.Query = ''
+            $canonicalBuilder.Fragment = ''
+            $url = $canonicalBuilder.Uri.AbsoluteUri.TrimEnd('/')
             if ($workers -lt 1) {
                 throw "Repository '$url' must request at least one worker."
             }
@@ -606,6 +681,15 @@ function New-RunnerStaticProfileState {
         organization = $OrgName
         enterprise = $EnterpriseName
         runnerGroup = [string]$Profile.RunnerGroup
+        autoscaling = if ($Profile.Autoscaling) {
+            [PSCustomObject][ordered]@{
+                mode = [string]$Profile.Autoscaling.Mode
+                minimumIdle = [int]$Profile.Autoscaling.MinimumIdle
+                scaleDownDelaySeconds = [int]$Profile.Autoscaling.ScaleDownDelaySeconds
+            }
+        } else {
+            $null
+        }
         namePrefix = [string]$Profile.NamePrefix
     }
     $configurationJson = $staticConfiguration | ConvertTo-Json -Depth 20 -Compress
@@ -781,6 +865,13 @@ function New-RunnerEnvironmentContent {
     }
 
     $disableDefaultLabels = if ($Profile.DisableDefaultLabels) { '1' } else { '' }
+    $autoscalingMode = if ($Profile.Autoscaling) { [string]$Profile.Autoscaling.Mode } else { '' }
+    $minimumIdle = if ($Profile.Autoscaling) { [string]$Profile.Autoscaling.MinimumIdle } else { '' }
+    $scaleDownDelay = if ($Profile.Autoscaling) {
+        [string]$Profile.Autoscaling.ScaleDownDelaySeconds
+    } else {
+        ''
+    }
     return @(
         "ACCESS_TOKEN=$AccessToken"
         "RUNNER_SCOPE=$Scope"
@@ -793,6 +884,9 @@ function New-RunnerEnvironmentContent {
         "RUNNER_LABELS=$($Profile.LabelsValue)"
         "RUNNER_NO_DEFAULT_LABELS=$disableDefaultLabels"
         "RUNNER_GROUP=$($Profile.RunnerGroup)"
+        "PITCREW_AUTOSCALING_MODE=$autoscalingMode"
+        "PITCREW_AUTOSCALING_MIN_IDLE=$minimumIdle"
+        "PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$scaleDownDelay"
         "PITCREW_STATE_DIR=$($Profile.StateVolumePath)"
         "PITCREW_MANAGER_CONTRACT_VERSION=$($Profile.ManagerContractVersion)"
     ) -join "`n"

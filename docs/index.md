@@ -9,7 +9,8 @@ description: Run isolated, ephemeral GitHub Actions worker pools with profile-sp
 </p>
 
 PitCrew orchestrates containerized GitHub Actions runners that are destroyed
-after one job and immediately replaced. It is designed for teams and individual
+after one job and replaced when fixed capacity or current demand requires
+another. It is designed for teams and individual
 developers who want self-hosted capacity without carrying workspace state or
 partially installed tools between jobs.
 
@@ -51,6 +52,9 @@ actual workers after every job.
 Named profiles also let one host provide separate capacity for routine builds
 and specialized workloads without allowing broad `self-hosted` jobs to consume
 the specialized pool.
+
+Optional demand-driven profiles retain only a configured idle floor and use
+GitHub runner scale-set demand to return toward their operator-defined maximum.
 
 ## About
 

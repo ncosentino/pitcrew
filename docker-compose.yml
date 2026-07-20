@@ -25,7 +25,7 @@ services:
     # Keep the babysitter alive across crashes and reboots; on start it clears any
     # runners orphaned by a previous incarnation, so the pool self-recovers.
     restart: unless-stopped
-    stop_grace_period: 35s
+    stop_grace_period: 60s
     environment:
       RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}
       # The runner image each slot launches. The default base already ships
@@ -55,7 +55,10 @@ services:
       RUNNER_LABELS: ${RUNNER_LABELS:-}
       RUNNER_NO_DEFAULT_LABELS: ${RUNNER_NO_DEFAULT_LABELS:-}
       RUNNER_GROUP: ${RUNNER_GROUP:-}
-      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-7}
+      PITCREW_AUTOSCALING_MODE: ${PITCREW_AUTOSCALING_MODE:-}
+      PITCREW_AUTOSCALING_MIN_IDLE: ${PITCREW_AUTOSCALING_MIN_IDLE:-0}
+      PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS: ${PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS:-120}
+      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-8}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
     volumes:

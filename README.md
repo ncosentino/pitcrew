@@ -14,7 +14,8 @@
 
 PitCrew orchestrates profile-driven pools of isolated, ephemeral GitHub Actions
 runners on any machine with Docker. Each worker accepts one job, is destroyed,
-and is immediately replaced with a clean container.
+and is replaced with a clean container when fixed capacity or current demand
+requires it.
 
 ## Why PitCrew
 
@@ -28,6 +29,8 @@ and is immediately replaced with a clean container.
   Compose project, capacity, and cleanup boundary.
 - **In-place capacity changes:** add slots immediately or drain removed slots
   after their current runner exits without restarting the manager.
+- **Optional demand-driven pools:** shrink autoscaled profiles to a configurable
+  idle floor and restore workers from GitHub's assigned-job signal.
 - **Repository, organization, and enterprise scope:** dedicate workers to
   repositories or share capacity through supported GitHub scopes.
 - **No credentials in images:** registration state stays in gitignored local
@@ -97,6 +100,26 @@ jobs:
 Specialized profiles omit the broad `self-hosted` label by default, so routine
 jobs cannot consume their capacity accidentally.
 
+## Demand-driven autoscaling
+
+Treat a configured worker count as a maximum instead of an always-running
+allocation:
+
+```powershell
+.\Setup-Runner.ps1 `
+    -Profile copilot-cli `
+    -Autoscale `
+    -MinimumIdle 0 `
+    -ScaleDownDelaySeconds 120 `
+    -Repos https://github.com/you/agentic-project=30
+```
+
+PitCrew uses GitHub's outbound Runner Scale Set demand stream to launch JIT
+workers immediately for assigned jobs. Excess idle runners are removed only
+after demand remains lower for the stabilization delay.
+
+See [Demand-Driven Autoscaling](https://www.devleader.ca/projects/pitcrew/guides/autoscaling).
+
 ## How it works
 
 ```text
@@ -109,7 +132,8 @@ Setup-Runner.ps1
         v
 profile manager (Docker socket)
         |
-        +-- desired slot -> docker run --rm -> one job -> replace
+        +-- fixed desired slot -> docker run --rm -> one job -> replace
+        +-- autoscaled demand -> JIT docker run --rm -> one job -> retire
         +-- draining slot -> current docker run exits -> stop
 ```
 

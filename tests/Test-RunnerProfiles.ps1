@@ -25,6 +25,8 @@ $observedStateSchemaPath = Join-Path $runnerRoot 'observed-state.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
+$managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
+$autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
 $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
@@ -113,7 +115,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 7
+        managerContractVersion = 8
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -169,7 +171,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 7
+                            managerContractVersion = 8
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -203,6 +205,8 @@ $requiredPaths = @(
     $copilotProfilePath,
     $copilotDockerfilePath,
     $managerPath,
+    $managerEntrypointPath,
+    $autoscalerModulePath,
     $managerDockerfilePath,
     $observabilityPath,
     $reconciliationPath,
@@ -221,6 +225,16 @@ if ($errors.Count -gt 0) {
 
 $profileJson = Get-Content -LiteralPath $copilotProfilePath -Raw -Encoding UTF8
 Add-Check ($profileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Copilot CLI profile does not conform to runner-profile.schema.json.'
+$autoscalingManifest = $profileJson | ConvertFrom-Json -Depth 20
+$autoscalingManifest | Add-Member -NotePropertyName autoscaling -NotePropertyValue ([PSCustomObject]@{
+    mode = 'scale-set'
+    minimumIdle = 0
+    scaleDownDelaySeconds = 120
+})
+Add-Check (
+    ($autoscalingManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath
+) 'The profile schema rejects a valid scale-set autoscaling policy.'
 $observedStateV7 = [PSCustomObject][ordered]@{
     schemaVersion = 1
     managerContractVersion = 7
@@ -285,6 +299,59 @@ Add-Check (
     ($observedStateV7 | ConvertTo-Json -Depth 8) |
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract seven does not conform to observed-state.schema.json.'
+$observedStateV8 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$observedStateV8.managerContractVersion = 8
+$observedStateV8 | Add-Member -NotePropertyName configuredSlots -NotePropertyValue 1
+$observedStateV8 | Add-Member -NotePropertyName autoscaling -NotePropertyValue $null
+Add-Check (
+    ($observedStateV8 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eight fixed-mode state does not conform to observed-state.schema.json.'
+$autoscaledStateV8 = (
+    $observedStateV8 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$autoscaledStateV8.desiredSlots = 0
+$autoscaledStateV8.configuredSlots = 30
+$autoscaledStateV8.activeSlots = 0
+$autoscaledStateV8.slots = @()
+$autoscaledStateV8.autoscaling = [PSCustomObject][ordered]@{
+    mode = 'scale-set'
+    status = 'running'
+    minimumIdleSlots = 0
+    maximumSlots = 30
+    targetSlots = 0
+    assignedJobs = 0
+    runningJobs = 0
+    availableJobs = 0
+    idleRunners = 0
+    busyRunners = 0
+    scaleDownDelaySeconds = 120
+    scaleDownAt = $null
+    scaleSetCount = 1
+    lastError = $null
+}
+Add-Check (
+    ($autoscaledStateV8 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eight autoscaling state does not conform to observed-state.schema.json.'
+$missingConfiguredV8 = (
+    $observedStateV8 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$missingConfiguredV8.PSObject.Properties.Remove('configuredSlots')
+Add-Check (-not (
+    ($missingConfiguredV8 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract eight accepts missing configured capacity.'
 Add-Check (
     ($observedStateV6 | ConvertTo-Json -Depth 8) |
         Test-Json -SchemaFile $observedStateSchemaPath
@@ -374,6 +441,36 @@ $localDefaultProfile = Resolve-RunnerProfile `
     -PullImage:$false
 Add-Check (-not $localDefaultProfile.PullImage) 'The command line cannot disable pulls for a local default-profile image.'
 
+$autoscaledProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile default `
+    -Autoscale $true `
+    -MinimumIdle 1 `
+    -ScaleDownDelaySeconds 180 `
+    -HostName 'test-host'
+Add-Check ($autoscaledProfile.Autoscaling.Mode -eq 'scale-set') 'Autoscaling mode did not resolve to scale-set.'
+Add-Check ($autoscaledProfile.Autoscaling.MinimumIdle -eq 1) 'Autoscaling minimum idle override was not applied.'
+Add-Check ($autoscaledProfile.Autoscaling.ScaleDownDelaySeconds -eq 180) 'Autoscaling scale-down delay override was not applied.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -MinimumIdle 1
+    } `
+    -ExpectedMessage 'requires autoscaling' `
+    -Failure 'A minimum-idle override was accepted without autoscaling.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -Autoscale $true `
+            -ScaleDownDelaySeconds 10
+    } `
+    -ExpectedMessage 'between 30 and 3600' `
+    -Failure 'An unsafe autoscaling scale-down delay was accepted.'
+
 Add-Check (-not $copilotProfile.IsDefault) 'The Copilot CLI profile is incorrectly marked as default.'
 Add-Check ($copilotProfile.DisableDefaultLabels) 'Specialized profiles must disable GitHub default labels by default.'
 Add-Check ($copilotProfile.Labels -contains 'copilot-cli') 'The profile name is not enforced as a routing label.'
@@ -391,7 +488,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 7) 'The setup contract does not identify the resource-telemetry manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 8) 'The setup contract does not identify the autoscaling-capable manager.'
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
@@ -478,6 +575,39 @@ Add-ThrowsCheck `
     -ExpectedMessage 'canonical absolute HTTP' `
     -Failure 'Desired capacity accepted leading URL whitespace.'
 
+$cloneStyleState = New-RunnerDesiredCapacityState `
+    -Generation 1 `
+    -Scope repo `
+    -Repositories @(
+        [PSCustomObject]@{
+            Url = 'https://GitHub.com/example/project.git/'
+            Workers = 1
+        }
+    ) `
+    -Replicas $null
+Add-Check (
+    $cloneStyleState.repositories[0].url -eq 'https://github.com/example/project'
+) 'Desired capacity did not canonicalize a clone-style repository URL.'
+Add-ThrowsCheck `
+    -Action {
+        New-RunnerDesiredCapacityState `
+            -Generation 1 `
+            -Scope repo `
+            -Repositories @(
+                [PSCustomObject]@{
+                    Url = 'https://github.com/example/project'
+                    Workers = 1
+                },
+                [PSCustomObject]@{
+                    Url = 'https://github.com/example/project.git/'
+                    Workers = 1
+                }
+            ) `
+            -Replicas $null
+    } `
+    -ExpectedMessage 'duplicate repository URL' `
+    -Failure 'Desired capacity accepted duplicate canonical repository URLs.'
+
 $defaultStaticProfile = New-RunnerStaticProfileState `
     -Profile $defaultProfile `
     -Scope repo `
@@ -508,12 +638,20 @@ $imageOverrideStaticProfile = New-RunnerStaticProfileState `
     -Scope repo `
     -OrgName '' `
     -EnterpriseName ''
+$autoscaledStaticProfile = New-RunnerStaticProfileState `
+    -Profile $autoscaledProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName ''
 Add-Check (
     $defaultStaticProfile.fingerprint -eq $replicaOverrideStaticProfile.fingerprint
 ) 'Mutable capacity is included in the static profile fingerprint.'
 Add-Check (
     $defaultStaticProfile.fingerprint -ne $imageOverrideStaticProfile.fingerprint
 ) 'Worker image changes do not select full profile replacement.'
+Add-Check (
+    $defaultStaticProfile.fingerprint -ne $autoscaledStaticProfile.fingerprint
+) 'Autoscaling mode changes do not select full profile replacement.'
 Add-Check (
     $copilotStaticProfile.configuration.build.contextSha256 -match '^[0-9a-f]{64}$'
 ) 'Locally built profiles do not fingerprint their complete build context.'
@@ -530,13 +668,20 @@ $defaultEnvironment = New-RunnerEnvironmentContent `
 $copilotEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
     -AccessToken 'test-registration-token'
+$autoscaledEnvironment = New-RunnerEnvironmentContent `
+    -Profile $autoscaledProfile `
+    -AccessToken 'test-registration-token'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PROFILE_ID=default$') 'The default environment does not identify its profile.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_LABELS=general-purpose$') 'The default environment does not emit the general-purpose label.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The default environment unexpectedly disables GitHub default labels.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=7$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=8$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=$') 'Fixed profiles unexpectedly enable autoscaling.'
+Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Autoscaling mode is missing from the manager environment.'
+Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_MIN_IDLE=1$') 'Autoscaling minimum idle is missing from the manager environment.'
+Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=180$') 'Autoscaling scale-down delay is missing from the manager environment.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -682,6 +827,9 @@ try {
         'RUNNER_PROFILE_ID',
         'RUNNER_REPLICAS',
         'RUNNER_IMAGE',
+        'PITCREW_AUTOSCALING_MODE',
+        'PITCREW_AUTOSCALING_MIN_IDLE',
+        'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
         'PITCREW_STATE_DIR',
         'PITCREW_MANAGER_CONTRACT_VERSION'
     )
@@ -699,6 +847,9 @@ try {
     $env:RUNNER_PROFILE_ID = 'ambient-profile'
     $env:RUNNER_REPLICAS = '99'
     $env:RUNNER_IMAGE = 'ambient/image:wrong'
+    $env:PITCREW_AUTOSCALING_MODE = 'ambient-mode'
+    $env:PITCREW_AUTOSCALING_MIN_IDLE = '99'
+    $env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS = '999'
     $env:PITCREW_STATE_DIR = 'ambient-state'
     $env:PITCREW_MANAGER_CONTRACT_VERSION = '99'
     $env:PITCREW_TEST_MANAGER_RUNNING = '0'
@@ -712,7 +863,7 @@ try {
         if ($dockerArguments[0] -eq 'compose') {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
-                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
         }
         if (
             $dockerArguments[0] -eq 'ps' -and
@@ -851,7 +1002,7 @@ try {
         Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
-        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
         Set-TestCapacityAcknowledgement `
@@ -1096,6 +1247,21 @@ try {
         Add-Check ($immutableCommands -match 'compose.*down') 'An immutable profile change did not replace the manager.'
         Add-Check ($immutableCommands -match 'compose.*up') 'An immutable profile change did not restart the profile.'
 
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Autoscale `
+            -MinimumIdle 0 `
+            -ScaleDownDelaySeconds 120 `
+            -Repos 'https://github.com/example/project=1'
+        $autoscalingCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $autoscalingEnvironment = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
+        Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Setup did not persist scale-set mode.'
+        Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_MIN_IDLE=0$') 'Setup did not persist autoscaling minimum idle.'
+        Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=120$') 'Setup did not persist autoscaling scale-down delay.'
+        Add-Check ($autoscalingCommands -match 'run.*Runner\.Listener.*id runner') 'Setup did not verify the JIT runner image contract.'
+        Add-Check ($autoscalingCommands -match 'compose.*down') 'Enabling autoscaling did not replace the fixed manager.'
+
         $defaultDesiredBeforeNamed = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup `
@@ -1154,6 +1320,8 @@ finally {
 }
 
 $manager = Get-Content -LiteralPath $managerPath -Raw -Encoding UTF8
+$managerEntrypoint = Get-Content -LiteralPath $managerEntrypointPath -Raw -Encoding UTF8
+$autoscalerModule = Get-Content -LiteralPath $autoscalerModulePath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
 $observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
@@ -1174,6 +1342,9 @@ Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Wo
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
 Add-Check ($manager -match [regex]::Escape('PITCREW_OBSERVED_STATE_INTERVAL:-30')) 'The manager does not bound observed-state heartbeat writes.'
 Add-Check ($manager -match [regex]::Escape('collect_resource_telemetry')) 'The manager does not collect resource telemetry through observed state.'
+Add-Check ($managerEntrypoint -match [regex]::Escape('PITCREW_AUTOSCALING_MODE')) 'The manager entrypoint does not select autoscaling mode.'
+Add-Check ($managerEntrypoint -match [regex]::Escape('exec /usr/local/bin/pitcrew-autoscaler')) 'The manager entrypoint does not launch the scale-set autoscaler.'
+Add-Check ($autoscalerModule -match 'github\.com/actions/scaleset v0\.4\.0') 'The autoscaler does not pin the reviewed scale-set client version.'
 Add-Check ($manager -match [regex]::Escape('if [ "${STOPPING}" -eq 1 ]; then')) 'Manager shutdown can block on a fresh resource-telemetry sample.'
 Add-Check ($manager -match [regex]::Escape(': > "${stopping_path}/drain"')) 'Manager shutdown does not drain slot supervisors before cleanup.'
 Add-Check ($manager -match [regex]::Escape('docker stop \')) 'Manager shutdown does not signal worker entry points before force removal.'
@@ -1181,6 +1352,8 @@ Add-Check ($manager -match [regex]::Escape('--timeout "${RUNNER_STOP_TIMEOUT}"')
 Add-Check ($manager -match [regex]::Escape('if ! remove_managed_strict; then')) 'Manager shutdown can publish stopped without confirming runner cleanup.'
 Add-Check ($manager -match [regex]::Escape('rm -f "${OBSERVED_STATE_DIRTY}"')) 'Observed-state publication does not preserve concurrent dirty notifications.'
 Add-Check ($managerDockerfile -match 'FROM docker:28-cli AS docker-cli') 'The manager does not isolate the Docker client build stage.'
+Add-Check ($managerDockerfile -match 'FROM golang:1\.25\.3-alpine AS autoscaler-build') 'The manager does not pin the autoscaler Go build stage.'
+Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=autoscaler-build /out/pitcrew-autoscaler /usr/local/bin/pitcrew-autoscaler')) 'The manager runtime does not include the scale-set autoscaler.'
 Add-Check ($managerDockerfile -match 'FROM alpine:3\.22') 'The manager runtime is not based on minimal Alpine.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker')) 'The manager runtime does not copy only the Docker client binary.'
 Add-Check ($managerDockerfile -match 'ARG JQ_VERSION=1\.8\.2') 'The manager does not pin its jq release.'
@@ -1189,6 +1362,7 @@ Add-Check ($managerDockerfile -match 'JQ_SHA256_ARM64=[0-9a-f]{64}') 'The manage
 Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The manager does not verify the downloaded jq binary.'
 Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
+Add-Check ($managerDockerfile -match [regex]::Escape('ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]')) 'The manager image does not use the mode-selecting entrypoint.'
 Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
 Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'
 Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'
@@ -1196,11 +1370,11 @@ Add-Check ($observability -match [regex]::Escape('memoryWorkingSetBytes')) 'Reso
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
 Add-Check ($compose -match [regex]::Escape('image: ephemeral-runner-manager:profile-${RUNNER_PROFILE_ID:-default}')) 'Manager image tags are not isolated by profile.'
 Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
-Add-Check ($compose -match 'stop_grace_period:\s*35s') 'Compose does not allow manager shutdown to complete bounded worker cleanup.'
+Add-Check ($compose -match 'stop_grace_period:\s*60s') 'Compose does not allow autoscaling manager shutdown to complete bounded cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=7$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=8$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'
