@@ -123,7 +123,7 @@ start_legacy_compose() {
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="6" \
+        PITCREW_MANAGER_CONTRACT_VERSION="7" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
