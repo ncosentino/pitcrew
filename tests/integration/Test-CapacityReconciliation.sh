@@ -19,8 +19,17 @@ OBSERVED_STATE="${STATE_DIRECTORY}/observed-state.json"
 LEGACY_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${LEGACY_PROFILE_NAME}"
 LEGACY_DESIRED_STATE="${LEGACY_STATE_DIRECTORY}/desired-capacity.json"
 LEGACY_COMPOSE_PROJECT="self-hosted-runner-${LEGACY_PROFILE_NAME}"
+UPGRADE_PROFILE_NAME="upgrade-${RUN_ID}"
+UPGRADE_PROFILE_LABEL="ephemeral-managed-runner-profile=${UPGRADE_PROFILE_NAME}"
+UPGRADE_MANAGER_LABEL="ephemeral-runner-manager-profile=${UPGRADE_PROFILE_NAME}"
+UPGRADE_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${UPGRADE_PROFILE_NAME}"
+UPGRADE_OBSERVED_STATE="${UPGRADE_STATE_DIRECTORY}/observed-state.json"
+UPGRADE_ACK="${UPGRADE_STATE_DIRECTORY}/acknowledged-capacity.json"
+UPGRADE_COMPOSE_PROJECT="self-hosted-runner-${UPGRADE_PROFILE_NAME}"
 FIXTURE_DIRECTORY=$(mktemp -d)
 PROFILE_PATH="${FIXTURE_DIRECTORY}/profile.json"
+UPGRADE_PROFILE_PATH="${FIXTURE_DIRECTORY}/upgrade-profile.json"
+V6_ROOT=""
 MANAGER_ID=""
 
 worker_ids() {
@@ -171,14 +180,24 @@ cleanup() {
     fi
     pwsh -NoProfile -Command \
         "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Down" >/dev/null 2>&1 || true
+    if [ -f "${UPGRADE_PROFILE_PATH}" ]; then
+        pwsh -NoProfile -Command \
+            "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${UPGRADE_PROFILE_PATH}' -Down" >/dev/null 2>&1 || true
+    fi
     stop_legacy_compose >/dev/null 2>&1 || true
     docker ps -aq --filter "label=${PROFILE_LABEL}" |
         xargs -r docker rm -f >/dev/null 2>&1 || true
     docker ps -aq --filter "label=${LEGACY_PROFILE_LABEL}" |
         xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker ps -aq --filter "label=${UPGRADE_PROFILE_LABEL}" |
+        xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker ps -aq --filter "label=${UPGRADE_MANAGER_LABEL}" |
+        xargs -r docker rm -f >/dev/null 2>&1 || true
     docker image rm -f "${FAKE_IMAGE}" >/dev/null 2>&1 || true
-    rm -f "${ROOT}/.env.${PROFILE_NAME}"
-    rm -rf "${STATE_DIRECTORY}" "${LEGACY_STATE_DIRECTORY}" "${FIXTURE_DIRECTORY}"
+    rm -f "${ROOT}/.env.${PROFILE_NAME}" "${ROOT}/.env.${UPGRADE_PROFILE_NAME}"
+    rm -rf "${STATE_DIRECTORY}" "${LEGACY_STATE_DIRECTORY}" \
+        "${UPGRADE_STATE_DIRECTORY}" "${FIXTURE_DIRECTORY}"
+    [ -n "${V6_ROOT}" ] && rm -rf "${V6_ROOT}"
     rmdir "${ROOT}/.pitcrew-state" >/dev/null 2>&1 || true
     trap - EXIT
     exit "${status}"
@@ -388,3 +407,153 @@ mapfile -t workers_after_invalid_state < <(worker_ids)
 }
 
 echo "Real Docker capacity reconciliation passed."
+
+# ===== Issue #8 follow-up (1): genuine real-Docker v6 -> v7 manager upgrade =====
+# The reviewer's blocking concern was that the earlier idle signal counted the
+# persistent slot supervisors, so a v6->v7 upgrade could never observe an idle
+# pool and would churn (lose) workers. This scenario proves the fix end to end
+# against real Docker: a genuine v6 manager (built from the v6 commit) supervises
+# a real worker container, and the current (v7) tooling upgrades it IN PLACE via
+# the drain-and-fence path, recreating ONLY the manager while the worker
+# container survives with an unchanged id.
+cat > "${UPGRADE_PROFILE_PATH}" <<EOF
+{
+  "schemaVersion": 1,
+  "name": "${UPGRADE_PROFILE_NAME}",
+  "description": "Isolated real-Docker v6 to v7 upgrade profile.",
+  "image": "${FAKE_IMAGE}",
+  "labels": ["integration"],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true
+}
+EOF
+
+V6_ROOT=$(mktemp -d)
+V6_COMMIT="f053db1"
+if ! git -C "${ROOT}" cat-file -e "${V6_COMMIT}^{commit}" 2>/dev/null; then
+    git -C "${ROOT}" fetch --depth 1 origin "${V6_COMMIT}" 2>/dev/null || true
+fi
+if ! git -C "${ROOT}" cat-file -e "${V6_COMMIT}^{commit}" 2>/dev/null; then
+    echo "ERROR: v6 baseline commit ${V6_COMMIT} is not available; a full-history checkout (fetch-depth: 0) is required for the v6->v7 upgrade scenario." >&2
+    exit 1
+fi
+git -C "${ROOT}" archive "${V6_COMMIT}" | tar -x -C "${V6_ROOT}"
+
+run_upgrade_setup() {
+    pwsh -NoProfile -Command \
+        "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${UPGRADE_PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=1'"
+}
+
+upgrade_manager_id() { docker ps -q --filter "label=${UPGRADE_MANAGER_LABEL}"; }
+upgrade_worker_ids() { docker ps -q --filter "label=${UPGRADE_PROFILE_LABEL}" | sort; }
+upgrade_worker_count() { upgrade_worker_ids | awk 'END { print NR + 0 }'; }
+
+wait_for_upgrade_worker_count() {
+    expected="$1"
+    deadline=$((SECONDS + 90))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ "$(upgrade_worker_count)" -eq "${expected}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for ${expected} upgrade workers; found $(upgrade_worker_count)." >&2
+    return 1
+}
+
+wait_for_upgrade_contract() {
+    expected="$1"
+    deadline=$((SECONDS + 90))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${UPGRADE_OBSERVED_STATE}" ] &&
+            [ "$(jq -r '.managerContractVersion // 0' "${UPGRADE_OBSERVED_STATE}" 2>/dev/null || echo 0)" -eq "${expected}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for upgrade manager contract ${expected}." >&2
+    return 1
+}
+
+# 1. Provision with the CURRENT (v7) tooling: writes a v7 static-profile.json +
+#    environment file + desired-capacity and boots a v7 manager supervising one
+#    worker. This establishes the v7-fingerprinted static contract the later
+#    upgrade matches against.
+run_upgrade_setup
+wait_for_upgrade_worker_count 1
+wait_for_upgrade_contract 7
+v7_manager_before=$(upgrade_manager_id)
+[ -n "${v7_manager_before}" ] || {
+    echo "The v7 upgrade-profile manager did not start." >&2
+    exit 1
+}
+
+# 2. Replace ONLY the manager container with a genuine v6 manager built from the
+#    v6 commit, over the SAME Compose project and state directory. The worker is
+#    not a Compose service, so it keeps running; the v6 manager reconciles the
+#    existing desired-capacity and republishes the pool as contract six.
+docker rm -f "${v7_manager_before}" >/dev/null
+(
+    cd "${V6_ROOT}"
+    ACCESS_TOKEN="integration-token" \
+    REPO_URLS="${REPOSITORY_URL}=1" \
+    REPO_URL="" \
+    RUNNER_SCOPE="repo" \
+    ORG_NAME="" \
+    ENTERPRISE_NAME="" \
+    RUNNER_REPLICAS="1" \
+    RUNNER_IMAGE="${FAKE_IMAGE}" \
+    RUNNER_PULL_IMAGE="0" \
+    RUNNER_PROFILE_ID="${UPGRADE_PROFILE_NAME}" \
+    RUNNER_NAME_PREFIX="${UPGRADE_PROFILE_NAME}" \
+    RUNNER_LABELS="integration" \
+    RUNNER_NO_DEFAULT_LABELS="1" \
+    RUNNER_GROUP="" \
+    PITCREW_STATE_DIR="${UPGRADE_STATE_DIRECTORY}" \
+        docker compose \
+            --file docker-compose.yml \
+            --project-name "${UPGRADE_COMPOSE_PROJECT}" \
+            up -d --build
+)
+wait_for_upgrade_contract 6
+v6_manager=$(upgrade_manager_id)
+[ -n "${v6_manager}" ] || {
+    echo "The genuine v6 manager did not take over the upgrade profile." >&2
+    exit 1
+}
+wait_for_upgrade_worker_count 1
+[ "$(jq -r '.managerContractVersion // 0' "${UPGRADE_ACK}" 2>/dev/null || echo 0)" -eq 6 ] || {
+    echo "The v6 manager did not acknowledge contract six." >&2
+    exit 1
+}
+mapfile -t worker_under_v6 < <(upgrade_worker_ids)
+[ "${#worker_under_v6[@]}" -eq 1 ] || {
+    echo "The v6 manager did not stabilize on a single worker." >&2
+    exit 1
+}
+
+# 3. Re-run the CURRENT (v7) tooling. It observes a running manager reporting
+#    contract six with a matching v7 static contract, so it takes the drain-safe
+#    IN-PLACE upgrade: the host-side idle probe confirms the worker is not
+#    running a job, then only the manager is recreated (compose up
+#    --force-recreate). The worker container MUST survive with its id unchanged.
+run_upgrade_setup
+wait_for_upgrade_contract 7
+upgraded_manager=$(upgrade_manager_id)
+[ -n "${upgraded_manager}" ] || {
+    echo "The upgraded manager did not start." >&2
+    exit 1
+}
+[ "${upgraded_manager}" != "${v6_manager}" ] || {
+    echo "The v6->v7 upgrade did not recreate the manager onto the new contract." >&2
+    exit 1
+}
+wait_for_upgrade_worker_count 1
+mapfile -t worker_after_upgrade < <(upgrade_worker_ids)
+[ "${worker_under_v6[*]}" = "${worker_after_upgrade[*]}" ] || {
+    echo "The v6->v7 in-place upgrade churned the worker container (worker-loss regression)." >&2
+    exit 1
+}
+assert_running "${worker_after_upgrade[0]}"
+echo "Real Docker v6->v7 in-place manager upgrade preserved the worker pool."
