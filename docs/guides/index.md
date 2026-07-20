@@ -11,6 +11,8 @@ Use these guides after completing [Getting Started](../getting-started.md):
 - [Routing Workloads](routing-workloads.md) - target the correct pool from GitHub Actions.
 - [Demand-Driven Autoscaling](autoscaling.md) - shrink idle pools and
   automatically restore capacity for queued work.
+- [Rolling Updates](rolling-updates.md) - replace managers immediately, roll
+  safe idle workers, and preserve active jobs.
 - [Security Boundaries](security-boundaries.md) - protect the Docker host and workflow credentials.
 - [Copilot CLI Operations](copilot-operations.md) - install repeatable capacity
   and version-update skills.

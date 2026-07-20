@@ -47,6 +47,7 @@ nav:
       - Custom Profiles: guides/custom-profiles.md
       - Routing Workloads: guides/routing-workloads.md
       - Demand-Driven Autoscaling: guides/autoscaling.md
+      - Rolling Updates: guides/rolling-updates.md
       - Security Boundaries: guides/security-boundaries.md
       - Copilot CLI Operations: guides/copilot-operations.md
 

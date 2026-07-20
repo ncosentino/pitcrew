@@ -119,6 +119,11 @@ run_setup() {
         "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
 }
 
+run_refresh() {
+    pwsh -NoProfile -Command \
+        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Refresh -Repos '${REPOSITORY_URL}=5'"
+}
+
 start_legacy_compose() {
     (
         cd "${ROOT}"
@@ -136,8 +141,11 @@ start_legacy_compose() {
         RUNNER_LABELS="integration" \
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
+        PITCREW_WORKER_REVISION="0000000000000000000000000000000000000000000000000000000000000000" \
+        PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
+        PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="8" \
+        PITCREW_MANAGER_CONTRACT_VERSION="9" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -233,6 +241,9 @@ wait_for_legacy_worker_count 2
     exit 1
 }
 stop_legacy_compose
+wait_for_legacy_worker_count 2
+docker ps -q --filter "label=${LEGACY_PROFILE_LABEL}" |
+    xargs -r docker rm -f >/dev/null
 wait_for_legacy_worker_count 0
 
 run_setup 5
@@ -255,8 +266,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 8 ] || {
-    echo "Observed state did not report manager contract version eight." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 9 ] || {
+    echo "Observed state did not report manager contract version nine." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
@@ -357,6 +368,7 @@ jq '.generation = 2' "${ACKNOWLEDGEMENT}" > "${ACKNOWLEDGEMENT}.stale"
 mv -f "${ACKNOWLEDGEMENT}.stale" "${ACKNOWLEDGEMENT}"
 graceful_shutdowns_before=$(docker logs "${MANAGER_ID}" 2>&1 |
     grep -c 'Graceful runner deregistration' || true)
+mapfile -t workers_before_manager_restart < <(worker_ids)
 docker restart --timeout 60 "${MANAGER_ID}" >/dev/null
 wait_for_acknowledgement 3
 restart_deadline=$((SECONDS + 60))
@@ -386,12 +398,34 @@ fi
     echo "Docker restart replaced the manager container." >&2
     exit 1
 }
-graceful_shutdowns_after=$(docker logs "${MANAGER_ID}" 2>&1 |
-    grep -c 'Graceful runner deregistration' || true)
-[ $((graceful_shutdowns_after - graceful_shutdowns_before)) -eq 5 ] || {
-    echo "Manager restart did not gracefully deregister all five workers." >&2
+mapfile -t workers_after_manager_restart < <(worker_ids)
+[ "${workers_before_manager_restart[*]}" = "${workers_after_manager_restart[*]}" ] || {
+    echo "Manager restart replaced workers instead of adopting them." >&2
     exit 1
 }
+graceful_shutdowns_after=$(docker logs "${MANAGER_ID}" 2>&1 |
+    grep -c 'Graceful runner deregistration' || true)
+[ $((graceful_shutdowns_after - graceful_shutdowns_before)) -eq 0 ] || {
+    echo "Manager restart deregistered workers during handoff." >&2
+    exit 1
+}
+
+mapfile -t workers_before_refresh < <(worker_ids)
+manager_before_refresh=$(manager_id)
+run_refresh
+wait_for_acknowledgement 3
+wait_for_worker_count 5
+manager_after_refresh=$(manager_id)
+[ -n "${manager_after_refresh}" ] && [ "${manager_after_refresh}" != "${manager_before_refresh}" ] || {
+    echo "Manager refresh did not replace the manager container." >&2
+    exit 1
+}
+mapfile -t workers_after_refresh < <(worker_ids)
+[ "${workers_before_refresh[*]}" = "${workers_after_refresh[*]}" ] || {
+    echo "Manager refresh replaced workers instead of handing them off." >&2
+    exit 1
+}
+MANAGER_ID="${manager_after_refresh}"
 
 mapfile -t workers_before_invalid_state < <(worker_ids)
 printf '{"schemaVersion":1,"generation":4' > "${DESIRED_STATE}"

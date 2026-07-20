@@ -71,6 +71,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	cfg := config{
 		profileID:      "profile-a",
+		workerRevision: testWorkerRevision,
 		scope:          "org",
 		minimumIdle:    1,
 		scaleDownDelay: 120 * time.Second,
@@ -85,7 +86,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		nil,
 		now,
 	)
-	if state.ManagerContractVersion != 8 || state.DesiredSlots != 3 ||
+	if state.ManagerContractVersion != 9 || state.DesiredSlots != 3 ||
 		state.ConfiguredSlots != 4 || state.ActiveSlots != 3 ||
 		state.DrainingSlots != 1 {
 		t.Fatalf("unexpected observed capacity fields: %#v", state)
@@ -99,6 +100,12 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		state.Autoscaling.IdleRunners != 1 ||
 		state.Autoscaling.BusyRunners != 1 {
 		t.Fatalf("unexpected autoscaling projection: %#v", state.Autoscaling)
+	}
+	if state.Update.Status != "current" ||
+		state.Update.TargetRevision != testWorkerRevision ||
+		state.Update.CurrentWorkers != 3 ||
+		state.Update.StaleWorkers != 0 {
+		t.Fatalf("unexpected update projection: %#v", state.Update)
 	}
 	if state.ResourceTelemetry.Status != "unavailable" ||
 		state.ResourceTelemetry.Host != nil ||
@@ -162,6 +169,7 @@ func TestObservedStateAggregatesPerTargetMinimumIdle(t *testing.T) {
 	state := buildObservedState(
 		config{
 			profileID:      "profile-a",
+			workerRevision: testWorkerRevision,
 			scope:          "repo",
 			minimumIdle:    2,
 			scaleDownDelay: 120 * time.Second,
@@ -211,6 +219,7 @@ func TestObservedStateExpandsMaximumToCoverAppliedControllerTarget(t *testing.T)
 	state := buildObservedState(
 		config{
 			profileID:      "profile-a",
+			workerRevision: testWorkerRevision,
 			scope:          "repo",
 			scaleDownDelay: 120 * time.Second,
 		},
@@ -246,7 +255,11 @@ func TestObservedStateExpandsMaximumToCoverAppliedControllerTarget(t *testing.T)
 func TestObservedRecoveredRunnerUsesSafeActivity(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	state := buildObservedState(
-		config{profileID: "profile-a", scope: "repo"},
+		config{
+			profileID:      "profile-a",
+			workerRevision: testWorkerRevision,
+			scope:          "repo",
+		},
 		"instance-a",
 		"running",
 		nil,

@@ -554,7 +554,7 @@ func (m *autoscalerManager) startDesiredController(
 		handle,
 		m.docker,
 		m.clock,
-		m.instanceID,
+		m.cfg.sessionOwner,
 		m.recovered[target.key],
 		m.logger,
 		m.markDirty,
@@ -706,7 +706,7 @@ func (m *autoscalerManager) startRetiringController(
 		existing,
 		m.docker,
 		m.clock,
-		m.instanceID,
+		m.cfg.sessionOwner,
 		m.recovered[target.key],
 		m.logger,
 		m.markDirty,
@@ -1220,6 +1220,10 @@ func (m *autoscalerManager) shutdown() error {
 	if err := m.publishObserved(); err != nil {
 		shutdownErrors = append(shutdownErrors, err)
 	}
+	fullStop, requestErr := m.fullStopRequested()
+	if requestErr != nil {
+		shutdownErrors = append(shutdownErrors, requestErr)
+	}
 
 	allControllers := make(map[string]*targetController)
 	for key, controller := range m.controllers {
@@ -1247,6 +1251,13 @@ func (m *autoscalerManager) shutdown() error {
 			return controller.closeSession(shutdownContext)
 		})...,
 	)
+	if !fullStop {
+		m.managerStatus = "stopped"
+		if err := m.publishObserved(); err != nil {
+			shutdownErrors = append(shutdownErrors, err)
+		}
+		return errors.Join(shutdownErrors...)
+	}
 	shutdownErrors = append(
 		shutdownErrors,
 		runControllerOperations(keys, allControllers, func(

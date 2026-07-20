@@ -119,7 +119,7 @@ write_repo_state \
     '[{"url":"https://github.com/example/alpha","workers":3},{"url":"https://github.com/example/beta","workers":1}]'
 write_repo_state \
     "${multi_removed}" \
-    8 \
+    9 \
     '[{"url":"https://github.com/example/alpha","workers":3}]'
 render_desired_slots "${multi_initial}" "${multi_initial_slots}"
 render_desired_slots "${multi_changed}" "${multi_changed_slots}"
@@ -375,7 +375,7 @@ write_manager_observed_state \
     "${observed_state_json}" \
     default \
     manager-instance \
-    8 \
+    9 \
     running \
     repo \
     9 \
@@ -383,11 +383,16 @@ write_manager_observed_state \
     accepted \
     2 \
     "${observed_slots_json}" \
-    "${resource_telemetry_json}"
+    "${resource_telemetry_json}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1
 assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
+assert_equals "9" "$(jq -r '.managerContractVersion' "${observed_state_json}")" "Observed state reported the wrong manager contract."
 assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
 assert_equals "2" "$(jq -r '.configuredSlots' "${observed_state_json}")" "Observed state reported the wrong configured slot count."
 assert_equals "null" "$(jq -r '.autoscaling' "${observed_state_json}")" "Fixed observed state reported autoscaling metadata."
+assert_equals "rolling" "$(jq -r '.update.status' "${observed_state_json}")" "Fixed observed state lost rolling-update status."
+assert_equals "1" "$(jq -r '.update.staleWorkers' "${observed_state_json}")" "Fixed observed state reported the wrong stale-worker count."
 assert_equals "1" "$(jq -r '.drainingSlots' "${observed_state_json}")" "Observed state reported the wrong draining slot count."
 assert_equals "online" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .state' "${observed_state_json}")" "Observed state lost an online slot."
 assert_equals "draining" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .state' "${observed_state_json}")" "Drain state did not override runtime backoff."
@@ -413,6 +418,8 @@ jq '.resourceTelemetry = null' "${observed_state_json}" > "${invalid_resource_st
 assert_false "Manager contract eight accepted null resource telemetry." observed_state_is_valid "${invalid_resource_state}"
 jq 'del(.slots[0].resources)' "${observed_state_json}" > "${invalid_resource_state}"
 assert_false "Manager contract eight accepted a slot without a resources field." observed_state_is_valid "${invalid_resource_state}"
+jq 'del(.update)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract nine accepted missing rolling-update state." observed_state_is_valid "${invalid_resource_state}"
 jq '.resourceTelemetry.host = null' "${observed_state_json}" > "${invalid_resource_state}"
 assert_false "Available telemetry accepted missing host capacity." observed_state_is_valid "${invalid_resource_state}"
 jq '

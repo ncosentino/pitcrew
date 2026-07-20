@@ -382,12 +382,77 @@ func TestGracefulShutdownDeletesUnattachedRetiringScaleSet(t *testing.T) {
 	)
 	manager.retirementRecords[record.Key] = record
 	manager.writeObserved = func(string, any) error { return nil }
+	requestFullStop(t, manager)
 
 	if err := manager.shutdown(); err != nil {
 		t.Fatal(err)
 	}
 	if len(service.deletedScaleSet) != 1 {
 		t.Fatal("graceful shutdown left an unattached retiring scale set")
+	}
+}
+
+func TestManagerHandoffClosesSessionWithoutDestroyingPool(t *testing.T) {
+	directory := projectTestDirectory(t)
+	cfg := managerTestConfig(directory)
+	service := newFakeScaleSetService(nil)
+	session := newFakeMessageSession()
+	service.sessionFactory = func() messageSession { return session }
+	docker := newFakeDockerClient(nil)
+	ctx := context.Background()
+	controller, err := startTargetController(
+		ctx,
+		cfg,
+		targetSpec{
+			key:             "repo-one",
+			registrationURL: "https://github.com/example/one",
+			repository:      "https://github.com/example/one",
+			maximum:         1,
+			scaleSetName:    "pitcrew-profile-a-one",
+		},
+		service,
+		service.ensureHandle,
+		docker,
+		&fakeClock{current: time.Now()},
+		cfg.sessionOwner,
+		[]recoveredContainer{{
+			containerID: "live-container",
+			name:        "live-container",
+			runnerName:  "live-runner",
+			runnerID:    77,
+			targetKey:   "repo-one",
+			slotKey:     "repo-one-77",
+			revision:    testWorkerRevision,
+			createdAt:   time.Now().Add(-time.Minute),
+		}},
+		testLogger(),
+		nil,
+		func(error) {},
+		func(string, error) {},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manager := newAutoscalerManager(
+		cfg,
+		newFakeScaleSetServiceFactory(),
+		docker,
+		&fakeClock{current: time.Now()},
+		testLogger(),
+		"instance",
+	)
+	manager.controllers["repo-one"] = controller
+	manager.writeObserved = func(string, any) error { return nil }
+
+	if err := manager.shutdown(); err != nil {
+		t.Fatal(err)
+	}
+	if session.closeCalls == 0 {
+		t.Fatal("manager handoff did not close the scale-set session")
+	}
+	if len(docker.stopRemove) != 0 || len(docker.stops) != 0 ||
+		len(service.deletedScaleSet) != 0 {
+		t.Fatal("manager handoff destructively modified the worker pool")
 	}
 }
 
@@ -1019,6 +1084,7 @@ func TestManagerShutdownDeadlineBoundsHungScalingOperation(t *testing.T) {
 	}
 
 	manager.shutdownTimeout = 40 * time.Millisecond
+	requestFullStop(t, manager)
 	startedAt := time.Now()
 	err = manager.shutdown()
 	elapsed := time.Since(startedAt)
@@ -1103,6 +1169,9 @@ func managerTestConfig(directory string) config {
 		accessToken:       "pat-value",
 		profileID:         "profile-a",
 		runnerImage:       "example/runner:latest",
+		workerRevision:    testWorkerRevision,
+		sessionOwner:      "pitcrew-profile-a",
+		assumeUnversioned: true,
 		scope:             "repo",
 		namePrefix:        "pitcrew-runner",
 		runnerGroup:       "default",
@@ -1110,6 +1179,22 @@ func managerTestConfig(directory string) config {
 		scaleDownDelay:    30 * time.Second,
 		observedInterval:  time.Second,
 		architectureLabel: "x64",
+	}
+}
+
+func requestFullStop(t *testing.T, manager *autoscalerManager) {
+	t.Helper()
+	containerID, err := os.Hostname()
+	if err != nil {
+		t.Fatalf("resolve test manager container identity: %v", err)
+	}
+	request := shutdownRequest{
+		SchemaVersion:      1,
+		ManagerContainerID: containerID,
+		RequestedAt:        time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := writeJSONAtomically(manager.paths.shutdownRequest, request); err != nil {
+		t.Fatalf("write manager shutdown request: %v", err)
 	}
 }
 

@@ -8,8 +8,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 . "${SCRIPT_DIRECTORY}/observability.sh"
 
-MANAGER_CONTRACT_VERSION=8
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-8}"
+MANAGER_CONTRACT_VERSION=9
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-9}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -17,12 +17,15 @@ fi
 
 PREFIX="${RUNNER_NAME_PREFIX:-runner}"
 IMAGE="${RUNNER_IMAGE:-myoung34/github-runner:ubuntu-noble}"
+WORKER_REVISION="${PITCREW_WORKER_REVISION:-}"
+ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
 DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE_PATH="${STATE_DIRECTORY}/observed-state.json"
+SHUTDOWN_REQUEST_PATH="${STATE_DIRECTORY}/manager-shutdown.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
 RESOURCE_TELEMETRY_PATH="/tmp/pitcrew-resource-telemetry.json"
@@ -35,6 +38,7 @@ MANAGED_LABEL_KEY="ephemeral-managed-runner-profile"
 MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"
 MANAGER_LABEL="ephemeral-runner-manager-profile=${PROFILE_ID}"
 SLOT_LABEL_KEY="ephemeral-managed-runner-slot"
+WORKER_REVISION_LABEL_KEY="pitcrew-worker-revision"
 
 case "${RECONCILE_INTERVAL}" in
     ''|*[!0-9]*|0)
@@ -45,6 +49,23 @@ esac
 case "${OBSERVED_STATE_INTERVAL}" in
     ''|*[!0-9]*|0)
         echo "[manager:${PROFILE_ID}] PITCREW_OBSERVED_STATE_INTERVAL must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${WORKER_REVISION}" in
+    ''|*[!0-9a-f]*)
+        echo "[manager:${PROFILE_ID}] PITCREW_WORKER_REVISION must be a lowercase SHA-256 digest." >&2
+        exit 1
+        ;;
+esac
+[ "${#WORKER_REVISION}" -eq 64 ] || {
+    echo "[manager:${PROFILE_ID}] PITCREW_WORKER_REVISION must be a lowercase SHA-256 digest." >&2
+    exit 1
+}
+case "${ASSUME_UNVERSIONED_CURRENT}" in
+    0|1) ;;
+    *)
+        echo "[manager:${PROFILE_ID}] PITCREW_ASSUME_UNVERSIONED_CURRENT must be 0 or 1." >&2
         exit 1
         ;;
 esac
@@ -183,6 +204,12 @@ publish_observed_state() {
     if [ -f "${CURRENT_DESIRED_SLOTS}" ]; then
         observed_desired_count=$(count_lines "${CURRENT_DESIRED_SLOTS}")
     fi
+    observed_stale_count=0
+    for observed_slot_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${observed_slot_path}" ] || continue
+        [ -f "${observed_slot_path}/stale" ] &&
+            observed_stale_count=$((observed_stale_count + 1))
+    done
 
     if write_manager_observed_state \
         "${OBSERVED_STATE_PATH}" \
@@ -196,7 +223,9 @@ publish_observed_state() {
         "${observed_desired_status}" \
         "${observed_desired_count}" \
         "${observed_slots_path}" \
-        "${RESOURCE_TELEMETRY_PATH}"; then
+        "${RESOURCE_TELEMETRY_PATH}" \
+        "${WORKER_REVISION}" \
+        "${observed_stale_count}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty
@@ -251,9 +280,24 @@ remove_managed_strict() {
 }
 
 shutdown() {
-    echo "[manager:${PROFILE_ID}] received stop signal — stopping managed runner containers"
     STOPPING=1
     MANAGER_STATUS="stopping"
+    if ! jq -e \
+        --arg managerContainerId "${HOSTNAME:-}" \
+        '
+            .schemaVersion == 1
+            and ($managerContainerId | length > 0)
+            and (.managerContainerId | type == "string")
+            and (.managerContainerId | startswith($managerContainerId))
+            and (.requestedAt | type == "string" and length > 0)
+        ' "${SHUTDOWN_REQUEST_PATH}" >/dev/null 2>&1; then
+        echo "[manager:${PROFILE_ID}] received manager handoff signal; preserving managed runner containers"
+        mark_observed_state_dirty
+        publish_observed_state 1
+        exit 0
+    fi
+
+    echo "[manager:${PROFILE_ID}] received explicit shutdown request; stopping managed runner containers"
     for stopping_path in "${SLOT_DIRECTORY}"/*; do
         [ -d "${stopping_path}" ] || continue
         : > "${stopping_path}/drain"
@@ -344,6 +388,46 @@ remove_slot_registry() {
     [ "${removed_registry}" -eq 1 ] && mark_observed_state_dirty
 }
 
+monitor_runner_container() {
+    monitored_slot_path="$1"
+    monitored_name="$2"
+    monitored_id="$3"
+    monitored_log_path="$4"
+
+    : > "${monitored_log_path}"
+    docker logs --follow "${monitored_id}" 2>&1 |
+        while IFS= read -r output_line || [ -n "${output_line:-}" ]; do
+            printf '%s\n' "${output_line}"
+            printf '%s\n' "${output_line}" >> "${monitored_log_path}"
+            case "${output_line}" in
+                *"${CONNECT_MARKER}"*)
+                    if [ ! -f "${monitored_slot_path}/connected" ]; then
+                        : > "${monitored_slot_path}/connected"
+                        write_slot_runtime_state \
+                            "${monitored_slot_path}" \
+                            "${OBSERVED_STATE_DIRTY}" \
+                            "online" \
+                            "${monitored_name}" \
+                            0 \
+                            0 || true
+                    fi
+                    ;;
+            esac
+        done &
+    logs_pid=$!
+
+    wait_output=$(docker wait "${monitored_id}" 2>/dev/null || true)
+    wait "${logs_pid}" 2>/dev/null || true
+    case "${wait_output}" in
+        ''|*[!0-9]*) runner_exit_status=0 ;;
+        *) runner_exit_status="${wait_output}" ;;
+    esac
+    rm -f \
+        "${monitored_slot_path}/container-id" \
+        "${monitored_slot_path}/container-name"
+    return "${runner_exit_status}"
+}
+
 run_slot() {
     slot_key="$1"
     repo="$2"
@@ -351,6 +435,37 @@ run_slot() {
     slot_state_path=$(slot_path "${slot_key}")
     failures=0
     log_path="/tmp/slot-${slot_key}.log"
+
+    if [ -f "${slot_state_path}/recovered-container-id" ]; then
+        recovered_id=$(cat "${slot_state_path}/recovered-container-id")
+        recovered_name=$(cat "${slot_state_path}/recovered-container-name")
+        rm -f "${slot_state_path}/connected"
+        printf '%s\n' "${recovered_id}" > "${slot_state_path}/container-id"
+        printf '%s\n' "${recovered_name}" > "${slot_state_path}/container-name"
+        write_slot_runtime_state \
+            "${slot_state_path}" \
+            "${OBSERVED_STATE_DIRTY}" \
+            "starting" \
+            "${recovered_name}" \
+            0 \
+            0 || true
+        if docker inspect "${recovered_id}" >/dev/null 2>&1; then
+            monitor_runner_container \
+                "${slot_state_path}" \
+                "${recovered_name}" \
+                "${recovered_id}" \
+                "${log_path}" || true
+        fi
+        rm -f \
+            "${slot_state_path}/recovered-container-id" \
+            "${slot_state_path}/recovered-container-name" \
+            "${slot_state_path}/stale"
+        if [ -f "${slot_state_path}/drain" ]; then
+            echo "[slot ${slot_key}] recovered runner exited; drained slot will not respawn"
+            rm -f "${log_path}"
+            return
+        fi
+    fi
 
     while [ ! -f "${slot_state_path}/drain" ]; do
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
@@ -364,9 +479,10 @@ run_slot() {
             "${name}" \
             "${failures}" \
             0 || true
-        set -- docker run --rm \
+        set -- docker run --rm --detach \
             --label "${MANAGED_LABEL}" \
             --label "${SLOT_LABEL_KEY}=${slot_key}" \
+            --label "${WORKER_REVISION_LABEL_KEY}=${WORKER_REVISION}" \
             --name "${name}" \
             -e REPO_URL="${repo}" \
             -e ACCESS_TOKEN="${ACCESS_TOKEN:-}" \
@@ -386,25 +502,21 @@ run_slot() {
             set -- "$@" -e RUNNER_GROUP="${RUNNER_GROUP}"
         fi
         set -- "$@" "${IMAGE}"
-        "$@" 2>&1 |
-            while IFS= read -r output_line || [ -n "${output_line:-}" ]; do
-                printf '%s\n' "${output_line}"
-                printf '%s\n' "${output_line}" >> "${log_path}"
-                case "${output_line}" in
-                    *"${CONNECT_MARKER}"*)
-                        if [ ! -f "${slot_state_path}/connected" ]; then
-                            : > "${slot_state_path}/connected"
-                            write_slot_runtime_state \
-                                "${slot_state_path}" \
-                                "${OBSERVED_STATE_DIRTY}" \
-                                "online" \
-                                "${name}" \
-                                0 \
-                                0 || true
-                        fi
-                        ;;
-                esac
-            done
+        launch_output=$("$@" 2>&1)
+        launch_status=$?
+        if [ "${launch_status}" -eq 0 ] && [ -n "${launch_output}" ]; then
+            container_id=$(printf '%s\n' "${launch_output}" | tail -n 1)
+            printf '%s\n' "${container_id}" > "${slot_state_path}/container-id"
+            printf '%s\n' "${name}" > "${slot_state_path}/container-name"
+            printf '%s\n' "${WORKER_REVISION}" > "${slot_state_path}/worker-revision"
+            monitor_runner_container \
+                "${slot_state_path}" \
+                "${name}" \
+                "${container_id}" \
+                "${log_path}" || true
+        else
+            printf '%s\n' "${launch_output}" | tee -a "${log_path}" >&2
+        fi
 
         if [ -f "${slot_state_path}/drain" ]; then
             echo "[slot ${slot_key}] current runner exited; drained slot will not respawn"
@@ -468,6 +580,110 @@ start_slot() {
         0 || true
     run_slot "${started_key}" "${started_repo}" "${started_tag}" &
     printf '%s\n' "$!" > "${started_path}/pid"
+}
+
+start_recovered_slot() {
+    recovered_key="$1"
+    recovered_repo="$2"
+    recovered_tag="$3"
+    recovered_id="$4"
+    recovered_name="$5"
+    recovered_revision="$6"
+    recovered_desired="$7"
+    recovered_path=$(slot_path "${recovered_key}")
+
+    if [ -d "${recovered_path}" ]; then
+        echo "[manager:${PROFILE_ID}] duplicate recovered slot ${recovered_key}" >&2
+        return 1
+    fi
+    mkdir -p "${recovered_path}"
+    printf '%s\n' "${recovered_repo}" > "${recovered_path}/repo"
+    printf '%s\n' "${recovered_tag}" > "${recovered_path}/tag"
+    printf '%s\n' "${recovered_id}" > "${recovered_path}/recovered-container-id"
+    printf '%s\n' "${recovered_name}" > "${recovered_path}/recovered-container-name"
+    effective_revision="${recovered_revision}"
+    if [ -z "${effective_revision}" ] && [ "${ASSUME_UNVERSIONED_CURRENT}" = "1" ]; then
+        effective_revision="${WORKER_REVISION}"
+    fi
+    printf '%s\n' "${effective_revision}" > "${recovered_path}/worker-revision"
+    if [ "${effective_revision}" != "${WORKER_REVISION}" ]; then
+        : > "${recovered_path}/stale"
+    fi
+    if [ "${recovered_desired}" != "1" ]; then
+        : > "${recovered_path}/drain"
+    fi
+    run_slot "${recovered_key}" "${recovered_repo}" "${recovered_tag}" &
+    printf '%s\n' "$!" > "${recovered_path}/pid"
+}
+
+restore_managed_slots() {
+    recovered_ids=$(docker ps -q --filter "label=${MANAGED_LABEL}") || return 1
+    [ -n "${recovered_ids}" ] || return 0
+
+    recovered_inventory="/tmp/pitcrew-recovered.$$"
+    if ! docker inspect ${recovered_ids} |
+        jq -r \
+            --arg profile "${PROFILE_ID}" \
+            --arg managedLabel "${MANAGED_LABEL_KEY}" \
+            --arg slotLabel "${SLOT_LABEL_KEY}" \
+            --arg revisionLabel "${WORKER_REVISION_LABEL_KEY}" \
+            '
+                .[]
+                | select(.State.Running == true)
+                | select(.Config.Labels[$managedLabel] == $profile)
+                | [
+                    .Id,
+                    (.Name | ltrimstr("/")),
+                    (.Config.Labels[$slotLabel] // ""),
+                    (.Config.Labels[$revisionLabel] // ""),
+                    (
+                        [
+                            .Config.Env[]
+                            | select(startswith("REPO_URL="))
+                            | ltrimstr("REPO_URL=")
+                        ][0] // ""
+                    )
+                ]
+                | @tsv
+            ' > "${recovered_inventory}"; then
+        rm -f "${recovered_inventory}"
+        return 1
+    fi
+
+    tab=$(printf '\t')
+    while IFS="${tab}" read -r recovered_id recovered_name recovered_key recovered_revision recovered_repo; do
+        [ -n "${recovered_id}" ] || continue
+        if [ -z "${recovered_key}" ]; then
+            echo "[manager:${PROFILE_ID}] recovered container ${recovered_id} has no slot label" >&2
+            rm -f "${recovered_inventory}"
+            return 1
+        fi
+        desired_record=$(
+            awk -F "${tab}" -v key="${recovered_key}" '
+                $1 == key { print $2 "\t" $3; exit }
+            ' "${CURRENT_DESIRED_SLOTS}"
+        )
+        recovered_desired=0
+        recovered_tag="retired"
+        if [ -n "${desired_record}" ]; then
+            recovered_desired=1
+            recovered_repo=$(printf '%s\n' "${desired_record}" | cut -f1)
+            recovered_tag=$(printf '%s\n' "${desired_record}" | cut -f2)
+            [ "${recovered_repo}" = "-" ] && recovered_repo=""
+        fi
+        if ! start_recovered_slot \
+            "${recovered_key}" \
+            "${recovered_repo}" \
+            "${recovered_tag}" \
+            "${recovered_id}" \
+            "${recovered_name}" \
+            "${recovered_revision}" \
+            "${recovered_desired}"; then
+            rm -f "${recovered_inventory}"
+            return 1
+        fi
+    done < "${recovered_inventory}"
+    rm -f "${recovered_inventory}"
 }
 
 count_lines() {
@@ -546,10 +762,12 @@ acknowledgement_matches_current() {
     [ -f "${ACKNOWLEDGEMENT_PATH}" ] || return 1
     jq -e \
         --argjson generation "${CURRENT_GENERATION}" \
+        --argjson managerContractVersion "${MANAGER_CONTRACT_VERSION}" \
         '
             .schemaVersion == 1
             and .status == "accepted"
             and .generation == $generation
+            and .managerContractVersion == $managerContractVersion
         ' "${ACKNOWLEDGEMENT_PATH}" >/dev/null 2>&1
 }
 
@@ -774,12 +992,6 @@ mkdir -p "${SLOT_DIRECTORY}"
 rm -f "${OBSERVED_STATE_DIRTY}" "${RESOURCE_TELEMETRY_PATH}"
 mark_observed_state_dirty
 
-echo "[manager:${PROFILE_ID}] clearing any leftover managed runners"
-if ! stop_managed_gracefully; then
-    echo "[manager:${PROFILE_ID}] one or more leftover runners did not stop gracefully; forcing cleanup" >&2
-fi
-remove_managed
-
 if [ "${RUNNER_PULL_IMAGE:-1}" = "1" ]; then
     echo "[manager:${PROFILE_ID}] pre-pulling runner image ${IMAGE}"
     docker pull "${IMAGE}" >/dev/null 2>&1 ||
@@ -790,6 +1002,11 @@ fi
 
 bootstrap_legacy_desired_state
 load_accepted_state
+echo "[manager:${PROFILE_ID}] adopting any managed runners left by the previous manager"
+if ! restore_managed_slots; then
+    echo "[manager:${PROFILE_ID}] managed runner recovery failed; preserving containers and stopping" >&2
+    exit 1
+fi
 if [ "${CURRENT_GENERATION}" -gt 0 ]; then
     startup_added="/tmp/pitcrew-startup-added.$$"
     startup_draining="/tmp/pitcrew-startup-draining.$$"

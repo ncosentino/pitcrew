@@ -59,10 +59,10 @@ Use the pitcrew-capacity skill to change the autoscaled copilot-cli profile to
 two minimum idle workers without changing its configured maximum.
 ```
 
-Maximum-only updates require `-CapacityOnly` and must leave the manager
-untouched. Enabling, disabling, or tuning autoscaling is a static policy change;
-the skill verifies matching GitHub runners are idle before replacing the
-selected manager. It never uses `-Down` or edits desired state directly.
+Maximum-only updates require `-CapacityOnly` and leave the manager untouched.
+Scale-set tuning hot-swaps the manager without interrupting workers. Enabling
+or disabling scale-set mode requires an explicit idle profile stop because it
+changes registration topology.
 
 ## Pool update skill
 
@@ -75,9 +75,16 @@ PitCrew release.
 ```
 
 The skill refuses to substitute `main` when no release exists. A profile
-refresh rebuilds and replaces that profile, so the skill checks GitHub runner
-state and stops when matching workers are busy. Hosts with continuous workflow
-traffic require an operator-arranged maintenance window.
+refresh builds the replacement manager first, stops only that manager, and
+adopts its existing workers. Scale-set profiles replace stale idle workers
+immediately and preserve assigned workers until completion. Fixed workers use
+their new image on natural ephemeral turnover because GitHub's classic runner
+deletion API is not an idle-only fence.
+
+`update.status: rolling` is a successful manager update with worker convergence
+still in progress. The skill reports stale workers instead of waiting for an
+all-idle maintenance window. Dashboard updates run independently and are never
+blocked by that rollout.
 
 `Setup-Runner.ps1` reuses the selected profile's stored registration token when
 `-Token` is omitted. Copilot never needs to display or place that token in a
