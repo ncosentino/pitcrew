@@ -476,6 +476,20 @@ wait_for_upgrade_contract() {
     return 1
 }
 
+wait_for_upgrade_ack() {
+    expected="$1"
+    deadline=$((SECONDS + 90))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${UPGRADE_ACK}" ] &&
+            [ "$(jq -r '.managerContractVersion // 0' "${UPGRADE_ACK}" 2>/dev/null || echo 0)" -eq "${expected}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for upgrade manager to acknowledge contract ${expected}." >&2
+    return 1
+}
+
 # 1. Provision with the CURRENT (v7) tooling: writes a v7 static-profile.json +
 #    environment file + desired-capacity and boots a v7 manager supervising one
 #    worker. This establishes the v7-fingerprinted static contract the later
@@ -493,7 +507,16 @@ v7_manager_before=$(upgrade_manager_id)
 #    v6 commit, over the SAME Compose project and state directory. The worker is
 #    not a Compose service, so it keeps running; the v6 manager reconciles the
 #    existing desired-capacity and republishes the pool as contract six.
+#
+#    The outgoing v7 manager already wrote an acknowledgement for the current
+#    generation. v6's acknowledgement_matches_current only checks schemaVersion,
+#    status and generation (NOT managerContractVersion), so it would treat that
+#    v7 ack as still-current and never republish contract six. Remove the stale
+#    ack so the v6 manager writes a fresh contract-six acknowledgement on its
+#    boot reconcile -- which is also what the v7 upgrade path reads to detect the
+#    running contract in step 3.
 docker rm -f "${v7_manager_before}" >/dev/null
+rm -f "${UPGRADE_ACK}"
 (
     cd "${V6_ROOT}"
     ACCESS_TOKEN="integration-token" \
@@ -523,7 +546,7 @@ v6_manager=$(upgrade_manager_id)
     exit 1
 }
 wait_for_upgrade_worker_count 1
-[ "$(jq -r '.managerContractVersion // 0' "${UPGRADE_ACK}" 2>/dev/null || echo 0)" -eq 6 ] || {
+wait_for_upgrade_ack 6 || {
     echo "The v6 manager did not acknowledge contract six." >&2
     exit 1
 }
