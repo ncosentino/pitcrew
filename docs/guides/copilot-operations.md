@@ -32,9 +32,9 @@ copilot plugin update pitcrew-operations@pitcrew
 ## Capacity skill
 
 `pitcrew-capacity` adds, removes, or resizes workers through
-`Setup-Runner.ps1`. It reads only non-secret generated state, preserves the
-selected profile, requires `-CapacityOnly`, and verifies the manager's capacity
-acknowledgement.
+`Setup-Runner.ps1`. It also enables, disables, or tunes autoscaling without
+introducing another skill. It reads only non-secret generated state and verifies
+the manager's acknowledgement and observed policy.
 
 Example prompts:
 
@@ -48,8 +48,21 @@ Use the pitcrew-capacity skill to remove
 https://github.com/example/retired-project from the default pool.
 ```
 
-Capacity updates must leave the existing manager container untouched. The skill
-does not use `-Down`, directly edit desired state, or attempt scale-to-zero.
+```text
+Use the pitcrew-capacity skill to enable autoscaling for the copilot-cli
+profile, keep zero idle workers, wait 120 seconds before scaling down, and keep
+the current configured maximums.
+```
+
+```text
+Use the pitcrew-capacity skill to change the autoscaled copilot-cli profile to
+two minimum idle workers without changing its configured maximum.
+```
+
+Maximum-only updates require `-CapacityOnly` and must leave the manager
+untouched. Enabling, disabling, or tuning autoscaling is a static policy change;
+the skill verifies matching GitHub runners are idle before replacing the
+selected manager. It never uses `-Down` or edits desired state directly.
 
 ## Pool update skill
 
