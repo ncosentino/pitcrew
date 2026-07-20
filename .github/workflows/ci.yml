@@ -42,6 +42,10 @@ jobs:
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
 
+      - name: Validate Copilot operations plugin
+        shell: pwsh
+        run: ./tests/Test-CopilotPlugin.ps1
+
       - name: Validate manager shell syntax
         run: |
           sh -n manager/manage-runners.sh

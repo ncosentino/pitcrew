@@ -116,7 +116,7 @@ wait_for_slot_replacement() {
 run_setup() {
     workers="$1"
     pwsh -NoProfile -Command \
-        "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
+        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
 }
 
 start_legacy_compose() {
@@ -243,7 +243,7 @@ wait_for_resource_slot_count 5
 manager_image_kib=$(docker run \
     --rm \
     --entrypoint /bin/sh \
-    ephemeral-runner-manager:local \
+    "ephemeral-runner-manager:profile-${PROFILE_NAME}" \
     -c "du -sk / 2>/dev/null | awk '{ print \$1 }'")
 [ "${manager_image_kib}" -le 61440 ] || {
     echo "Manager filesystem is ${manager_image_kib} KiB; expected at most 60 MiB." >&2

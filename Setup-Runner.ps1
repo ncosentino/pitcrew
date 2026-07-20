@@ -16,8 +16,9 @@
 
 .PARAMETER Token
     Fine-grained PAT with Administration: Read and write on every target. If
-    omitted, uses the authenticated gh CLI token. Written only to the selected
-    profile's gitignored environment file.
+    omitted, reuses the selected profile's stored token before trying the
+    authenticated gh CLI token. Written only to the selected profile's
+    gitignored environment file.
 
 .PARAMETER Replicas
     Override the profile's default workers per repo. Pass 0 to auto-size to half
@@ -70,6 +71,16 @@
 .PARAMETER Down
     Stop only the selected profile.
 
+.PARAMETER Refresh
+    Rebuild the selected profile manager while preserving an otherwise
+    unchanged worker profile. This stops that profile's workers and must be
+    used only when no jobs are active.
+
+.PARAMETER CapacityOnly
+    Require an in-place capacity reconciliation. Setup fails instead of
+    replacing the selected profile when its manager or static configuration is
+    not compatible with a capacity-only update.
+
 .EXAMPLE
     .\Setup-Runner.ps1 -Repos https://github.com/me/repo-a
 
@@ -78,6 +89,12 @@
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -Down
+
+.EXAMPLE
+    .\Setup-Runner.ps1 -Profile copilot-cli -Repos https://github.com/me/repo-a -Refresh
+
+.EXAMPLE
+    .\Setup-Runner.ps1 -Profile copilot-cli -AddRepos https://github.com/me/repo-a=4 -CapacityOnly
 #>
 [CmdletBinding()]
 param(
@@ -105,7 +122,9 @@ param(
     [string]$RunnerGroup,
     [string]$Profile = 'default',
     [string]$ProfilePath = '',
-    [switch]$Down
+    [switch]$Down,
+    [switch]$Refresh,
+    [switch]$CapacityOnly
 )
 $ErrorActionPreference = 'Stop'
 
@@ -364,6 +383,125 @@ function Get-RunnerEnvironmentFileValue {
     return $line.Substring($prefix.Length)
 }
 
+function Get-RunnerRegistrationAccessValidation {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Token,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('repo', 'org', 'ent')]
+        [string]$Scope,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Repositories,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$OrgName,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$EnterpriseName
+    )
+
+    $targets = switch ($Scope) {
+        'repo' {
+            foreach ($repository in $Repositories) {
+                $repositoryUri = [Uri][string]$repository.Url
+                if (
+                    $repositoryUri.Scheme -ne 'https' -or
+                    $repositoryUri.Host -ne 'github.com'
+                ) {
+                    return [PSCustomObject]@{
+                        IsValid = $false
+                        Target = [string]$repository.Url
+                        Reason = 'Automatic registration-token validation accepts only HTTPS github.com repository URLs.'
+                    }
+                }
+                $pathSegments = @(
+                    $repositoryUri.AbsolutePath.Trim('/') -split '/' |
+                        Where-Object { $_ }
+                )
+                if ($pathSegments.Count -ne 2) {
+                    return [PSCustomObject]@{
+                        IsValid = $false
+                        Target = [string]$repository.Url
+                        Reason = 'Repository URLs must identify one owner and repository.'
+                    }
+                }
+                $owner = [Uri]::EscapeDataString($pathSegments[0])
+                $repositoryName = [Uri]::EscapeDataString(
+                    ($pathSegments[1] -replace '\.git$', ''))
+                [PSCustomObject]@{
+                    Name = [string]$repository.Url
+                    Uri = "https://api.github.com/repos/$owner/$repositoryName/actions/runners/registration-token"
+                }
+            }
+        }
+        'org' {
+            [PSCustomObject]@{
+                Name = "organization '$OrgName'"
+                Uri = "https://api.github.com/orgs/$([Uri]::EscapeDataString($OrgName))/actions/runners/registration-token"
+            }
+        }
+        'ent' {
+            [PSCustomObject]@{
+                Name = "enterprise '$EnterpriseName'"
+                Uri = "https://api.github.com/enterprises/$([Uri]::EscapeDataString($EnterpriseName))/actions/runners/registration-token"
+            }
+        }
+    }
+
+    $headers = @{
+        Accept = 'application/vnd.github+json'
+        Authorization = "Bearer $Token"
+        'X-GitHub-Api-Version' = '2022-11-28'
+        'User-Agent' = 'PitCrew'
+    }
+    foreach ($target in $targets) {
+        try {
+            $response = Invoke-RestMethod `
+                -Method Post `
+                -Uri $target.Uri `
+                -Headers $headers `
+                -ErrorAction Stop
+            if ([string]::IsNullOrWhiteSpace([string]$response.token)) {
+                return [PSCustomObject]@{
+                    IsValid = $false
+                    Target = $target.Name
+                    Reason = 'GitHub returned no registration token.'
+                }
+            }
+        } catch {
+            return [PSCustomObject]@{
+                IsValid = $false
+                Target = $target.Name
+                Reason = $_.Exception.Message
+            }
+        }
+    }
+
+    return [PSCustomObject]@{
+        IsValid = $true
+        Target = ''
+        Reason = ''
+    }
+}
+
+function Get-RunnerRefreshConfigurationSignature {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Configuration
+    )
+
+    $copy = $Configuration |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+    $copy.PSObject.Properties.Remove('managerContractVersion')
+    return $copy | ConvertTo-Json -Depth 20 -Compress
+}
+
 Push-Location $here
 $profileLock = $null
 try {
@@ -371,6 +509,9 @@ try {
     $profileLock = Enter-RunnerProfileLock -Path $profileConfig.LockPath -TimeoutSeconds 30
 
     if ($Down) {
+        if ($Refresh -or $CapacityOnly) {
+            Write-Error '-Down cannot be combined with -Refresh or -CapacityOnly.'
+        }
         Write-Host "[stop] Stopping profile '$($profileConfig.Name)'"
         Stop-RunnerProfile -ProfileConfig $profileConfig
         Write-Host "[done] Profile '$($profileConfig.Name)' stopped. Other profiles were not changed."
@@ -378,6 +519,7 @@ try {
     }
 
     Write-Host "[resolve] Resolving workers, targets, and registration credentials"
+    $tokenSource = if ($Token) { 'parameter' } else { '' }
     if ($profileConfig.Replicas -eq 0) {
         $profileConfig.Replicas = [math]::Max(2, [math]::Floor([Environment]::ProcessorCount / 2))
     }
@@ -393,8 +535,20 @@ try {
     if ($Scope -eq 'repo' -and $profileConfig.RunnerGroup) {
         Write-Error '-RunnerGroup requires org or ent scope.'
     }
+    if (-not $Token) {
+        $Token = Get-RunnerEnvironmentFileValue `
+            -Path $profileConfig.EnvironmentPath `
+            -Name 'ACCESS_TOKEN'
+        if ($Token) {
+            $tokenSource = 'stored'
+            Write-Host '  Reusing the selected profile registration token.'
+        }
+    }
     if (-not $Token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
         $Token = gh auth token 2>$null
+        if ($Token) {
+            $tokenSource = 'gh'
+        }
     }
     if (-not $Token) {
         Write-Error 'No token: pass -Token <PAT>, or authenticate gh so Setup-Runner can use that token.'
@@ -541,6 +695,21 @@ try {
         -Scope $Scope `
         -Repositories $desiredRepositories `
         -Replicas $desiredReplicas
+    $registrationAccess = Get-RunnerRegistrationAccessValidation `
+        -Token $Token `
+        -Scope $Scope `
+        -Repositories @($desiredDraft.repositories) `
+        -OrgName $OrgName `
+        -EnterpriseName $EnterpriseName
+    if (-not $registrationAccess.IsValid) {
+        $sourceDescription = if ($tokenSource -eq 'stored') {
+            'The selected profile stored token'
+        } else {
+            'The supplied registration token'
+        }
+        throw "$sourceDescription does not have runner registration access for $($registrationAccess.Target). Pass a valid -Token or update GitHub CLI authentication. $($registrationAccess.Reason)"
+    }
+
     $desiredSignature = Get-RunnerDesiredCapacitySignature -State $desiredDraft
     $currentDesiredSignature = if ($currentDesiredState) {
         Get-RunnerDesiredCapacitySignature -State $currentDesiredState
@@ -610,7 +779,9 @@ try {
         (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) -and
         (Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8) -ceq $environmentContent
     )
+    $storedStaticProfile = $null
     $staticProfileMatches = $false
+    $refreshConfigurationMatches = $false
     if (Test-Path -LiteralPath $profileConfig.StaticProfilePath -PathType Leaf) {
         try {
             $storedStaticProfile = Read-RunnerJsonFile -Path $profileConfig.StaticProfilePath
@@ -621,13 +792,43 @@ try {
         } catch {
             $staticProfileMatches = $false
         }
+        $refreshConfigurationMatches = (
+            $null -ne $storedStaticProfile -and
+            $storedStaticProfile.PSObject.Properties['configuration'] -and
+            (
+                Get-RunnerRefreshConfigurationSignature `
+                    -Configuration $storedStaticProfile.configuration
+            ) -ceq (
+                Get-RunnerRefreshConfigurationSignature `
+                    -Configuration $staticProfileState.configuration
+            )
+        )
+    }
+    if ($Refresh -and $CapacityOnly) {
+        throw '-Refresh and -CapacityOnly cannot be used together.'
+    }
+    if ($Refresh -and -not $refreshConfigurationMatches) {
+        throw '-Refresh can update the manager only when the worker profile configuration is otherwise unchanged. Apply worker image, labels, scope, or other static changes separately.'
+    }
+    if ($Refresh -and -not $managerRunning) {
+        throw "Profile '$($profileConfig.Name)' is not running. Refresh will not start a stopped profile."
+    }
+    if ($Refresh) {
+        & docker image inspect $profileConfig.Image 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Runner image '$($profileConfig.Image)' is not available. Run the complete setup command without -Refresh to prepare it."
+        }
     }
     $capacityOnlyCompatible = (
+        -not $Refresh -and
         $managerRunning -and
         $environmentMatches -and
         $staticProfileMatches -and
         ($currentGeneration -gt 0 -or $acknowledgedGeneration -gt 0)
     )
+    if ($CapacityOnly -and -not $capacityOnlyCompatible) {
+        throw "Capacity-only update cannot proceed for profile '$($profileConfig.Name)' because its manager, environment, static configuration, or acknowledged state is not current."
+    }
 
     if ($capacityOnlyCompatible) {
         if ($desiredStateChanged) {
@@ -657,43 +858,47 @@ try {
         return
     }
 
-    Write-Host "[image] Preparing runner image '$($profileConfig.Image)'"
-    if ($profileConfig.Build) {
-        $buildArguments = @(
-            'build',
-            '--file', $profileConfig.Build.Dockerfile,
-            '--tag', $profileConfig.Image
-        )
-        foreach ($argument in $profileConfig.Build.Arguments.GetEnumerator()) {
-            $buildArguments += @('--build-arg', "$($argument.Key)=$($argument.Value)")
-        }
-        $buildArguments += $profileConfig.Build.Context
-        & docker @buildArguments
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Runner image build failed for profile '$($profileConfig.Name)'."
-        }
-    } elseif ($profileConfig.PullImage) {
-        & docker pull $profileConfig.Image
-        if ($LASTEXITCODE -ne 0) {
-            & docker image inspect $profileConfig.Image 2>&1 | Out-Null
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "Runner image '$($profileConfig.Image)' could not be pulled and is not available locally."
-            }
-            Write-Warning "Pull failed for '$($profileConfig.Image)'; using the locally available image."
-        }
+    if ($Refresh) {
+        Write-Host "[image] Reusing the unchanged runner image '$($profileConfig.Image)'"
     } else {
-        Write-Host '  Profile uses a locally available prebuilt runner image.'
-    }
-
-    Write-Host "[verify] Verifying runner image contract"
-    foreach ($command in $profileConfig.VerificationCommands) {
-        & docker run --rm --entrypoint /bin/sh $profileConfig.Image -lc $command
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Runner image verification failed for profile '$($profileConfig.Name)': $command"
+        Write-Host "[image] Preparing runner image '$($profileConfig.Image)'"
+        if ($profileConfig.Build) {
+            $buildArguments = @(
+                'build',
+                '--file', $profileConfig.Build.Dockerfile,
+                '--tag', $profileConfig.Image
+            )
+            foreach ($argument in $profileConfig.Build.Arguments.GetEnumerator()) {
+                $buildArguments += @('--build-arg', "$($argument.Key)=$($argument.Value)")
+            }
+            $buildArguments += $profileConfig.Build.Context
+            & docker @buildArguments
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Runner image build failed for profile '$($profileConfig.Name)'."
+            }
+        } elseif ($profileConfig.PullImage) {
+            & docker pull $profileConfig.Image
+            if ($LASTEXITCODE -ne 0) {
+                & docker image inspect $profileConfig.Image 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Runner image '$($profileConfig.Image)' could not be pulled and is not available locally."
+                }
+                Write-Warning "Pull failed for '$($profileConfig.Image)'; using the locally available image."
+            }
+        } else {
+            Write-Host '  Profile uses a locally available prebuilt runner image.'
         }
-    }
-    if ($profileConfig.VerificationCommands.Count -eq 0) {
-        Write-Host '  Profile defines no runtime verification commands.'
+
+        Write-Host "[verify] Verifying runner image contract"
+        foreach ($command in $profileConfig.VerificationCommands) {
+            & docker run --rm --entrypoint /bin/sh $profileConfig.Image -lc $command
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Runner image verification failed for profile '$($profileConfig.Name)': $command"
+            }
+        }
+        if ($profileConfig.VerificationCommands.Count -eq 0) {
+            Write-Host '  Profile defines no runtime verification commands.'
+        }
     }
 
     Write-Host "[state] Staging static profile and desired capacity (workers=$total, scope=$Scope)"
@@ -722,7 +927,11 @@ try {
             Write-Warning "Profile '$($profileConfig.Name)' retains GitHub's default labels, so jobs targeting only 'self-hosted' can run on it."
         }
 
-        Write-Host "[replace] Replacing existing profile '$($profileConfig.Name)'"
+        if ($Refresh) {
+            Write-Host "[refresh] Rebuilding and replacing profile '$($profileConfig.Name)'"
+        } else {
+            Write-Host "[replace] Replacing existing profile '$($profileConfig.Name)'"
+        }
         Stop-RunnerProfile -ProfileConfig $profileConfig
 
         foreach ($stagedFile in $stagedFiles) {
