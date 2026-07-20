@@ -64,7 +64,10 @@ services:
       RUNNER_MEMORY_SWAP_LIMIT: ${RUNNER_MEMORY_SWAP_LIMIT:-}
       RUNNER_CPU_LIMIT: ${RUNNER_CPU_LIMIT:-}
       RUNNER_PIDS_LIMIT: ${RUNNER_PIDS_LIMIT:-}
-      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-6}
+      # Default to the current manager contract so a direct `docker compose up`
+      # without an explicit override boots a manager that satisfies its own
+      # contract guard. Setup-Runner always sets this explicitly per profile.
+      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-7}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
     volumes:

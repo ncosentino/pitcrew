@@ -123,7 +123,6 @@ start_legacy_compose() {
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="7" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -216,6 +215,23 @@ wait_for_legacy_worker_count 2
 }
 [ "$(jq -r '.repositories[0].workers' "${LEGACY_DESIRED_STATE}")" -eq 2 ] || {
     echo "Legacy direct-Compose capacity did not preserve worker count." >&2
+    exit 1
+}
+# Issue #8 follow-up (3): the direct-Compose path above sets no
+# PITCREW_MANAGER_CONTRACT_VERSION override, so the manager booted only because
+# docker-compose.yml defaults it to the current contract. A stale default would
+# have tripped the manager's contract guard and no workers would exist.
+LEGACY_OBSERVED_STATE="${LEGACY_STATE_DIRECTORY}/observed-state.json"
+legacy_observed_deadline=$((SECONDS + 60))
+while [ "${SECONDS}" -lt "${legacy_observed_deadline}" ]; do
+    if [ -f "${LEGACY_OBSERVED_STATE}" ] &&
+        [ "$(jq -r '.managerContractVersion // 0' "${LEGACY_OBSERVED_STATE}" 2>/dev/null || echo 0)" -eq 7 ]; then
+        break
+    fi
+    sleep 1
+done
+[ "$(jq -r '.managerContractVersion // 0' "${LEGACY_OBSERVED_STATE}" 2>/dev/null || echo 0)" -eq 7 ] || {
+    echo "Direct-Compose startup without an explicit contract override did not default to manager contract seven." >&2
     exit 1
 }
 stop_legacy_compose

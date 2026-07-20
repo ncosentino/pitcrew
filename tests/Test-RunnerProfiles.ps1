@@ -1404,6 +1404,21 @@ Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The man
 Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
+# Issue #8 follow-up (3): a direct `docker compose up` with no explicit
+# PITCREW_MANAGER_CONTRACT_VERSION override must default to a version the
+# manager's own contract guard accepts. If the Compose default lags the baked
+# manager contract, the guard aborts and the pool never starts.
+$composeContractMatch = [regex]::Match(
+    $compose,
+    'PITCREW_MANAGER_CONTRACT_VERSION:\s*\$\{PITCREW_MANAGER_CONTRACT_VERSION:-(?<version>\d+)\}')
+$managerBakedContractMatch = [regex]::Match($manager, '(?m)^MANAGER_CONTRACT_VERSION=(?<version>\d+)$')
+Add-Check $composeContractMatch.Success 'Compose does not default the manager contract version for direct startup.'
+Add-Check ($composeContractMatch.Groups['version'].Value -eq '7') 'The Compose default manager contract version is not the current version 7; a direct `docker compose up` would fail the manager contract guard.'
+Add-Check (
+    $composeContractMatch.Success -and
+    $managerBakedContractMatch.Success -and
+    $composeContractMatch.Groups['version'].Value -eq $managerBakedContractMatch.Groups['version'].Value
+) 'The Compose default manager contract version does not match the baked manager contract, so a direct `docker compose up` without an override would abort on the contract guard.'
 Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
 Add-Check ($compose -match 'stop_grace_period:\s*35s') 'Compose does not allow manager shutdown to complete bounded worker cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
