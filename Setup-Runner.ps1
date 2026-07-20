@@ -61,6 +61,17 @@
 .PARAMETER RunnerGroup
     Override the optional organization or enterprise runner group.
 
+.PARAMETER Autoscale
+    Enable demand-driven GitHub runner scale-set mode for the selected profile.
+    Configured worker counts become maximums rather than always-running slots.
+
+.PARAMETER MinimumIdle
+    Warm idle runners retained by an autoscaled target. Defaults to zero.
+
+.PARAMETER ScaleDownDelaySeconds
+    Time demand must remain below active capacity before excess idle runners are
+    removed. Defaults to 120 seconds.
+
 .PARAMETER Profile
     Built-in profile name. Defaults to the backward-compatible default profile.
 
@@ -95,6 +106,9 @@
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -AddRepos https://github.com/me/repo-a=4 -CapacityOnly
+
+.EXAMPLE
+    .\Setup-Runner.ps1 -Profile copilot-cli -Autoscale -MinimumIdle 0 -Repos https://github.com/me/repo-a=30
 #>
 [CmdletBinding()]
 param(
@@ -120,6 +134,9 @@ param(
     [AllowNull()]
     [AllowEmptyString()]
     [string]$RunnerGroup,
+    [switch]$Autoscale,
+    [Nullable[int]]$MinimumIdle,
+    [Nullable[int]]$ScaleDownDelaySeconds,
     [string]$Profile = 'default',
     [string]$ProfilePath = '',
     [switch]$Down,
@@ -137,7 +154,17 @@ $resolveArguments = @{
     ProfilePath = $ProfilePath
     HostName = [Environment]::MachineName
 }
-foreach ($parameterName in @('Replicas', 'Labels', 'NamePrefix', 'Image', 'PullImage', 'RunnerGroup')) {
+foreach ($parameterName in @(
+    'Replicas',
+    'Labels',
+    'NamePrefix',
+    'Image',
+    'PullImage',
+    'RunnerGroup',
+    'Autoscale',
+    'MinimumIdle',
+    'ScaleDownDelaySeconds'
+)) {
     if ($PSBoundParameters.ContainsKey($parameterName)) {
         $resolveArguments[$parameterName] = Get-Variable -Name $parameterName -ValueOnly
     }
@@ -165,6 +192,9 @@ $composeEnvironmentNames = @(
     'RUNNER_LABELS',
     'RUNNER_NO_DEFAULT_LABELS',
     'RUNNER_GROUP',
+    'PITCREW_AUTOSCALING_MODE',
+    'PITCREW_AUTOSCALING_MIN_IDLE',
+    'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
     'PITCREW_STATE_DIR',
     'PITCREW_MANAGER_CONTRACT_VERSION'
 )
@@ -847,13 +877,29 @@ try {
             if ([int]$acknowledgement.desiredSlots -ne $total) {
                 throw "Manager acknowledged $($acknowledgement.desiredSlots) desired slots, but setup requested $total."
             }
-            Write-Host "[done] Capacity-only change: adding $added worker(s), draining $draining worker(s), $unchanged unchanged; manager restart not required."
+            if (
+                $acknowledgement.PSObject.Properties['activationMode'] -and
+                [string]$acknowledgement.activationMode -eq 'autoscaled'
+            ) {
+                $active = [int]$acknowledgement.activeSlots
+                $minimumIdle = [int]$acknowledgement.minimumIdleSlots
+                Write-Host "[done] Autoscaling maximum updated to $total worker(s): $active active, minimum idle $minimumIdle; manager restart not required."
+            } else {
+                Write-Host "[done] Capacity-only change: adding $added worker(s), draining $draining worker(s), $unchanged unchanged; manager restart not required."
+            }
         } else {
-            Wait-RunnerCapacityAcknowledgement `
+            $acknowledgement = Wait-RunnerCapacityAcknowledgement `
                 -ProfileConfig $profileConfig `
                 -Generation $nextGeneration `
-                -TimeoutSeconds 30 | Out-Null
-            Write-Host "[done] Capacity unchanged: 0 added, 0 draining, $total unchanged; manager restart not required."
+                -TimeoutSeconds 30
+            if (
+                $acknowledgement.PSObject.Properties['activationMode'] -and
+                [string]$acknowledgement.activationMode -eq 'autoscaled'
+            ) {
+                Write-Host "[done] Autoscaling maximum unchanged at $total worker(s): $([int]$acknowledgement.activeSlots) active; manager restart not required."
+            } else {
+                Write-Host "[done] Capacity unchanged: 0 added, 0 draining, $total unchanged; manager restart not required."
+            }
         }
         return
     }
@@ -898,6 +944,16 @@ try {
         }
         if ($profileConfig.VerificationCommands.Count -eq 0) {
             Write-Host '  Profile defines no runtime verification commands.'
+        }
+        if ($profileConfig.Autoscaling) {
+            & docker run `
+                --rm `
+                --entrypoint /bin/sh `
+                $profileConfig.Image `
+                -lc 'test -x /actions-runner/bin/Runner.Listener && id runner >/dev/null'
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Runner image '$($profileConfig.Image)' does not satisfy the scale-set JIT runtime contract."
+            }
         }
     }
 
@@ -965,7 +1021,11 @@ try {
         }
     }
 
-    Write-Host "[done] $total worker(s) + 1 manager for profile '$($profileConfig.Name)'."
+    if ($profileConfig.Autoscaling) {
+        Write-Host "[done] Autoscaling manager for profile '$($profileConfig.Name)': maximum $total worker(s), minimum idle $($profileConfig.Autoscaling.MinimumIdle)."
+    } else {
+        Write-Host "[done] $total worker(s) + 1 manager for profile '$($profileConfig.Name)'."
+    }
     Write-Host "  logs: docker compose --project-name $($profileConfig.ComposeProjectName) --env-file $([IO.Path]::GetFileName($profileConfig.EnvironmentPath)) logs -f"
     $stopSelector = if ($ProfilePath) {
         "-ProfilePath `"$ProfilePath`""

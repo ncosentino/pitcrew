@@ -137,7 +137,7 @@ start_legacy_compose() {
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="7" \
+        PITCREW_MANAGER_CONTRACT_VERSION="8" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -255,8 +255,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 7 ] || {
-    echo "Observed state did not report manager contract version seven." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 8 ] || {
+    echo "Observed state did not report manager contract version eight." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
@@ -357,7 +357,7 @@ jq '.generation = 2' "${ACKNOWLEDGEMENT}" > "${ACKNOWLEDGEMENT}.stale"
 mv -f "${ACKNOWLEDGEMENT}.stale" "${ACKNOWLEDGEMENT}"
 graceful_shutdowns_before=$(docker logs "${MANAGER_ID}" 2>&1 |
     grep -c 'Graceful runner deregistration' || true)
-docker restart --timeout 35 "${MANAGER_ID}" >/dev/null
+docker restart --timeout 60 "${MANAGER_ID}" >/dev/null
 wait_for_acknowledgement 3
 restart_deadline=$((SECONDS + 60))
 while [ "${SECONDS}" -lt "${restart_deadline}" ]; do

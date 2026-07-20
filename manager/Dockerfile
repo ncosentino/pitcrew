@@ -1,12 +1,25 @@
+FROM golang:1.25.3-alpine AS autoscaler-build
+
+WORKDIR /src
+COPY autoscaler/go.mod autoscaler/go.sum ./
+RUN go mod download
+COPY autoscaler/ ./
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/pitcrew-autoscaler \
+    .
+
 # The manager needs only the Docker client binary, not the CLI image's Compose
-# and Buildx plugins. Keep the runtime layer to Alpine plus Docker, jq, and the
-# manager scripts.
+# and Buildx plugins. Keep the runtime layer to Alpine plus Docker, jq, the
+# autoscaler binary, and manager scripts.
 FROM docker:28-cli AS docker-cli
 
 FROM alpine:3.22
 
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=autoscaler-build /out/pitcrew-autoscaler /usr/local/bin/pitcrew-autoscaler
 
 ARG JQ_VERSION=1.8.2
 ARG TARGETARCH
@@ -47,9 +60,12 @@ RUN set -eu; \
 COPY reconciliation.sh /usr/local/bin/reconciliation.sh
 COPY observability.sh /usr/local/bin/observability.sh
 COPY manage-runners.sh /usr/local/bin/manage-runners.sh
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN chmod +x \
+    /usr/local/bin/entrypoint.sh \
     /usr/local/bin/manage-runners.sh \
     /usr/local/bin/observability.sh \
-    /usr/local/bin/reconciliation.sh
+    /usr/local/bin/reconciliation.sh \
+    /usr/local/bin/pitcrew-autoscaler
 
-ENTRYPOINT ["/usr/local/bin/manage-runners.sh"]
+ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]

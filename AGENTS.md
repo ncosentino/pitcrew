@@ -9,6 +9,7 @@ PowerShell, Docker Compose, and a POSIX shell manager.
 - `RunnerProfiles.Functions.ps1` resolves and validates profile manifests.
 - `runner-profile.schema.json` defines the public profile contract.
 - `manager/` contains the socket-owning babysitter container.
+- `manager/autoscaler/` contains the opt-in GitHub Runner Scale Set controller.
 - `manager/reconciliation.sh` validates desired capacity and derives stable slot
   keys for the manager.
 - `profiles/` contains built-in specialized worker images.
@@ -25,6 +26,8 @@ PowerShell, Docker Compose, and a POSIX shell manager.
   cleanup selectors.
 - Capacity-only updates leave existing workers and the manager untouched;
   removed slots drain after their current runner exits.
+- Autoscaled profiles treat configured capacity as a maximum and use GitHub's
+  scale-set statistics as the only demand count.
 - Named profiles omit GitHub's broad default labels unless explicitly opted in.
 - Validate new images before replacing a live profile.
 - Never put credentials in manifests, Docker build arguments, images, examples,
@@ -44,6 +47,8 @@ pwsh tests/Test-CopilotPlugin.ps1
 
 ```bash
 sh -n manager/manage-runners.sh
+go -C manager/autoscaler test ./...
+go -C manager/autoscaler vet ./...
 docker compose --file docker-compose.yml config --quiet
 python -m mkdocs build --strict
 ```

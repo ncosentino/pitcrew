@@ -46,9 +46,22 @@ jobs:
         shell: pwsh
         run: ./tests/Test-CopilotPlugin.ps1
 
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: manager/autoscaler/go.mod
+          cache-dependency-path: manager/autoscaler/go.sum
+
+      - name: Run autoscaler tests
+        working-directory: manager/autoscaler
+        run: |
+          go test ./...
+          go vet ./...
+
       - name: Validate manager shell syntax
         run: |
           sh -n manager/manage-runners.sh
+          sh -n manager/entrypoint.sh
           sh -n manager/observability.sh
           sh -n manager/reconciliation.sh
           sh -n tests/Test-ManagerReconciliation.sh

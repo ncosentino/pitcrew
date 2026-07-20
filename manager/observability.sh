@@ -25,6 +25,27 @@ observed_state_is_valid() {
             )
             and (.host == null or (.host | valid_host_capacity))
             and (.manager == null or (.manager | valid_resource_usage));
+        def valid_autoscaling:
+            type == "object"
+            and .mode == "scale-set"
+            and (
+                .status == "starting"
+                or .status == "running"
+                or .status == "degraded"
+                or .status == "stopping"
+            )
+            and (.minimumIdleSlots | nonnegative_integer)
+            and (.maximumSlots | nonnegative_integer)
+            and (.targetSlots | nonnegative_integer)
+            and (.assignedJobs | nonnegative_integer)
+            and (.runningJobs | nonnegative_integer)
+            and (.availableJobs | nonnegative_integer)
+            and (.idleRunners | nonnegative_integer)
+            and (.busyRunners | nonnegative_integer)
+            and (.scaleDownDelaySeconds | nonnegative_integer)
+            and (.scaleDownAt == null or (.scaleDownAt | type == "string" and length > 0))
+            and (.scaleSetCount | nonnegative_integer)
+            and (.lastError == null or (.lastError | type == "string"));
         def valid_slot:
             type == "object"
             and (.key | type == "string" and length > 0)
@@ -42,7 +63,16 @@ observed_state_is_valid() {
             and (.failureCount | nonnegative_integer)
             and (.backoffSeconds | nonnegative_integer)
             and (.updatedAt == null or (.updatedAt | type == "string" and length > 0))
-            and (.resources == null or (.resources | valid_resource_usage));
+            and (.resources == null or (.resources | valid_resource_usage))
+            and (
+                .activity == null
+                or .activity == "starting"
+                or .activity == "idle"
+                or .activity == "busy"
+                or .activity == "draining"
+                or .activity == "unknown"
+            )
+            and (.target == null or (.target | type == "string" and length > 0));
         type == "object"
         and .schemaVersion == 1
         and (.managerContractVersion | nonnegative_integer and . >= 1)
@@ -66,6 +96,7 @@ observed_state_is_valid() {
             or .desiredStateStatus == "conflict"
         )
         and (.desiredSlots | nonnegative_integer)
+        and (.configuredSlots == null or (.configuredSlots | nonnegative_integer))
         and (.activeSlots | nonnegative_integer)
         and (.drainingSlots | nonnegative_integer)
         and (.slots | type == "array")
@@ -78,6 +109,15 @@ observed_state_is_valid() {
                 and all(.slots[]; has("resources"))
             else
                 (.resourceTelemetry == null or (.resourceTelemetry | valid_resource_telemetry))
+            end
+        )
+        and (
+            if .managerContractVersion >= 8 then
+                has("configuredSlots")
+                and has("autoscaling")
+                and (.autoscaling == null or (.autoscaling | valid_autoscaling))
+            else
+                true
             end
         )
         and (
@@ -521,10 +561,12 @@ write_manager_observed_state() {
             desiredStateHash: (if $desiredStateHash == "" then null else $desiredStateHash end),
             desiredStateStatus: $desiredStateStatus,
             desiredSlots: $desiredSlots,
+            configuredSlots: $desiredSlots,
             activeSlots: ($slots[0] | map(select(.processRunning)) | length),
             drainingSlots: ($slots[0] | map(select(.state == "draining")) | length),
             slots: $slots[0],
-            resourceTelemetry: ($resourceTelemetry[0] | del(.slots))
+            resourceTelemetry: ($resourceTelemetry[0] | del(.slots)),
+            autoscaling: null
         }' > "${observed_temporary}"; then
         rm -f "${observed_temporary}"
         return 1

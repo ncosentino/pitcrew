@@ -4,12 +4,13 @@ description: Validate PitCrew's PowerShell, shell, Docker Compose, profile contr
 
 # Building from Source
 
-PitCrew is composed of PowerShell, POSIX shell, Dockerfiles, JSON, and MkDocs
-content. It does not produce a compiled package.
+PitCrew is composed of PowerShell, POSIX shell, a Go scale-set autoscaler,
+Dockerfiles, JSON, and MkDocs content.
 
 ## Requirements
 
-Install PowerShell 7, Docker with Compose, Python 3, and `pip`.
+Install PowerShell 7, Go 1.25 or later, Docker with Compose, Python 3, and
+`pip`.
 
 ## Validate runner contracts
 
@@ -27,7 +28,15 @@ Check the manager script and Compose model:
 
 ```bash
 sh -n manager/manage-runners.sh
+sh -n manager/entrypoint.sh
 docker compose --file docker-compose.yml config --quiet
+```
+
+## Validate the autoscaler
+
+```bash
+go -C manager/autoscaler test ./...
+go -C manager/autoscaler vet ./...
 ```
 
 ## Build the default asserted image
