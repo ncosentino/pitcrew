@@ -953,12 +953,28 @@ try {
     $sessionOwner = Get-RunnerSessionOwner `
         -ProfileConfig $profileConfig `
         -ObservedManager $observedManager
+    $storedWorkerRevision = Get-RunnerEnvironmentFileValue `
+        -Path $profileConfig.EnvironmentPath `
+        -Name 'PITCREW_WORKER_REVISION'
+    $storedAssumeUnversioned = Get-RunnerEnvironmentFileValue `
+        -Path $profileConfig.EnvironmentPath `
+        -Name 'PITCREW_ASSUME_UNVERSIONED_CURRENT'
+    $assumeUnversionedCurrent = (
+        (
+            $storedAssumeUnversioned -eq '1' -and
+            $storedWorkerRevision -ceq [string]$staticProfileState.workerRevision
+        ) -or (
+            $Refresh -and
+            $managerRunning -and
+            [string]::IsNullOrWhiteSpace($storedWorkerRevision)
+        )
+    )
     $environmentContent = New-RunnerEnvironmentContent `
         -Profile $profileConfig `
         -AccessToken $Token `
         -WorkerRevision ([string]$staticProfileState.workerRevision) `
         -SessionOwner $sessionOwner `
-        -AssumeUnversionedCurrent ($Refresh -and $managerRunning) `
+        -AssumeUnversionedCurrent $assumeUnversionedCurrent `
         -Scope $Scope `
         -OrgName $OrgName `
         -EnterpriseName $EnterpriseName
