@@ -408,6 +408,41 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_MEMORY_SWAP_LIMIT=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_CPU_LIMIT=$') 'The default environment does not emit an unset per-runner CPU limit.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PIDS_LIMIT=$') 'The default environment does not emit an unset per-runner PID limit.'
 
+# Issue #8 follow-up (1): upgrading a profile that was provisioned before the
+# optional per-runner resource-limit knobs existed must NOT be misdetected as
+# environment drift. Setup compares the on-disk .env to freshly generated
+# content to decide whether to destructively stop/replace the active pool; the
+# migration normalizer treats an absent limit line and an unset (empty) limit
+# line as equivalent so a mere tooling upgrade never tears down healthy runners.
+$legacyDefaultEnvironment = (
+    $defaultEnvironment -split "`n" |
+        Where-Object { $_ -notmatch '^RUNNER_(MEMORY_LIMIT|MEMORY_SWAP_LIMIT|CPU_LIMIT|PIDS_LIMIT)=' }
+) -join "`n"
+Add-Check ($legacyDefaultEnvironment -cne $defaultEnvironment) 'The legacy environment fixture is identical to current output, so the upgrade-drift test is not exercising the migration path.'
+Add-Check (
+    (ConvertTo-RunnerEnvironmentComparable -Content $legacyDefaultEnvironment) -ceq
+    (ConvertTo-RunnerEnvironmentComparable -Content $defaultEnvironment)
+) 'Upgrading a pre-limits profile with limits unset is treated as environment drift, which would destructively replace an active runner pool.'
+Add-Check (
+    (ConvertTo-RunnerEnvironmentComparable -Content $defaultEnvironment) -notmatch '(?m)^RUNNER_MEMORY_LIMIT=$'
+) 'The environment comparison normalizer did not drop an unset per-runner memory limit line.'
+$limitedDefaultEnvironment = $defaultEnvironment -replace '(?m)^RUNNER_MEMORY_LIMIT=$', 'RUNNER_MEMORY_LIMIT=6g'
+Add-Check (
+    (ConvertTo-RunnerEnvironmentComparable -Content $legacyDefaultEnvironment) -cne
+    (ConvertTo-RunnerEnvironmentComparable -Content $limitedDefaultEnvironment)
+) 'Setting a real per-runner memory limit is not detected as an environment change, so the manager would never receive the new constraint.'
+$setupContent = Get-Content -LiteralPath $setupPath -Raw -Encoding UTF8
+Add-Check ($setupContent -match [regex]::Escape('ConvertTo-RunnerEnvironmentComparable')) 'Setup does not normalize the environment before deciding whether to replace the active pool, so an unset-limits upgrade would be misread as drift.'
+
+Add-Check ((ConvertFrom-RunnerByteValue -Value '6g') -eq 6442450944) 'ConvertFrom-RunnerByteValue miscomputed a gibibyte value.'
+Add-Check ((ConvertFrom-RunnerByteValue -Value '6m') -eq 6291456) 'ConvertFrom-RunnerByteValue miscomputed a mebibyte value.'
+Add-Check ((ConvertFrom-RunnerByteValue -Value '1024k') -eq 1048576) 'ConvertFrom-RunnerByteValue miscomputed a kibibyte value.'
+Add-Check ((ConvertFrom-RunnerByteValue -Value '2147483648') -eq 2147483648) 'ConvertFrom-RunnerByteValue miscomputed a bare byte count.'
+Add-ThrowsCheck `
+    -Action { ConvertFrom-RunnerByteValue -Value '6gb' } `
+    -ExpectedMessage 'not a Docker-compatible size' `
+    -Failure 'ConvertFrom-RunnerByteValue accepted a malformed size.'
+
 $enterpriseEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
     -AccessToken 'test-registration-token' `
@@ -589,6 +624,123 @@ try {
         } `
         -ExpectedMessage 'memorySwap requires memory' `
         -Failure 'A profile accepted a memory-swap limit without a memory limit.'
+
+    # Issue #8 follow-up (2): validate Docker's semantic constraints at setup
+    # time (before any destructive stop/replace), not just the value format.
+    function New-ResourceManifestPath {
+        param([string]$FileName, [hashtable]$Resources)
+        $manifestPath = Join-Path $resourcesDirectory $FileName
+        @{
+            schemaVersion = 1
+            name = 'heavy-dotnet'
+            description = 'Docker constraint contract test.'
+            image = 'example/heavy:1.0.0'
+            labels = @('heavy-dotnet')
+            replicas = 1
+            resources = $Resources
+        } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $manifestPath -Encoding UTF8
+        return $manifestPath
+    }
+
+    foreach ($belowMinimum in @('5m', '1048576')) {
+        $belowMinimumPath = New-ResourceManifestPath `
+            -FileName "below-min-$belowMinimum.json" `
+            -Resources @{ memory = $belowMinimum }
+        Add-ThrowsCheck `
+            -Action { Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $belowMinimumPath } `
+            -ExpectedMessage "below Docker's minimum" `
+            -Failure "A profile accepted a memory limit ($belowMinimum) below Docker's 6MB floor."
+    }
+
+    $minimumMemoryPath = New-ResourceManifestPath -FileName 'min-memory.json' -Resources @{ memory = '6m' }
+    $minimumMemoryProfile = Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $minimumMemoryPath
+    Add-Check ($minimumMemoryProfile.ResourceMemory -eq '6m') "Docker's exact minimum memory limit (6m) was rejected."
+
+    $swapTooSmallPath = New-ResourceManifestPath -FileName 'swap-too-small.json' -Resources @{ memory = '64m'; memorySwap = '32m' }
+    Add-ThrowsCheck `
+        -Action { Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $swapTooSmallPath } `
+        -ExpectedMessage 'greater than or equal to memory' `
+        -Failure 'A profile accepted a memory-swap limit smaller than its memory limit.'
+
+    $validSwapPath = New-ResourceManifestPath -FileName 'valid-swap.json' -Resources @{ memory = '64m'; memorySwap = '128m' }
+    $validSwapProfile = Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $validSwapPath
+    Add-Check ($validSwapProfile.ResourceMemorySwap -eq '128m') 'A memory-swap limit at or above the memory limit was rejected.'
+
+    # Real-Docker validation (safe: failure-path only). Docker rejects these
+    # specs during host-config validation BEFORE creating a container, so
+    # nothing is created and nothing needs cleanup. Proves our setup-time
+    # thresholds agree with Docker's own refusal. Skipped when Docker or a
+    # local image is unavailable so the suite stays hermetic by default.
+    $realDocker = Get-Command docker -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $localImageId = if ($realDocker) {
+        & $realDocker.Source images -q 2>$null | Where-Object { $_ } | Select-Object -First 1
+    } else {
+        $null
+    }
+    if ($realDocker -and $localImageId) {
+        $containersBefore = (& $realDocker.Source ps -aq 2>$null | Where-Object { $_ }).Count
+
+        $belowMinCreate = & $realDocker.Source create --memory 5m $localImageId 2>&1
+        $belowMinExit = $LASTEXITCODE
+        if ($belowMinExit -eq 0 -and $belowMinCreate) {
+            & $realDocker.Source rm -f ($belowMinCreate | Select-Object -Last 1) 2>&1 | Out-Null
+        }
+        Add-Check ($belowMinExit -ne 0) 'Real Docker accepted a 5m memory limit that Resolve-RunnerProfile rejects; the setup-time floor is misaligned with Docker.'
+
+        $swapCreate = & $realDocker.Source create --memory 64m --memory-swap 32m $localImageId 2>&1
+        $swapExit = $LASTEXITCODE
+        if ($swapExit -eq 0 -and $swapCreate) {
+            & $realDocker.Source rm -f ($swapCreate | Select-Object -Last 1) 2>&1 | Out-Null
+        }
+        Add-Check ($swapExit -ne 0) 'Real Docker accepted a memory-swap smaller than memory that Resolve-RunnerProfile rejects; the setup-time rule is misaligned with Docker.'
+
+        $containersAfter = (& $realDocker.Source ps -aq 2>$null | Where-Object { $_ }).Count
+        Add-Check ($containersBefore -eq $containersAfter) 'Real-Docker constraint validation created or removed a container; it must only exercise the non-mutating failure path.'
+    } else {
+        Write-Host '[skip] Real-Docker constraint validation skipped (docker or a local image is unavailable).' -ForegroundColor Yellow
+    }
+
+    # Issue #8 follow-up (3): the manager's runner-exit classifier must map a
+    # missing/empty/corrupt capture to 'unknown' (an error), never to a clean
+    # exit. Exercise the REAL function bytes under a POSIX shell by extracting
+    # it from between its sentinels and sourcing it.
+    $posixShellCommand = Get-Command sh -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+    $posixShell = if ($posixShellCommand) { $posixShellCommand.Source } else { $null }
+    if (-not $posixShell) {
+        foreach ($candidate in @(
+            (Join-Path $env:ProgramFiles 'Git\usr\bin\sh.exe'),
+            (Join-Path ${env:ProgramFiles(x86)} 'Git\usr\bin\sh.exe')
+        )) {
+            if ($candidate -and (Test-Path -LiteralPath $candidate)) { $posixShell = $candidate; break }
+        }
+    }
+    if ($posixShell) {
+        $managerLines = Get-Content -LiteralPath $managerPath
+        $startMatch = $managerLines | Select-String -SimpleMatch '>>> pitcrew:classify_runner_exit >>>'
+        $endMatch = $managerLines | Select-String -SimpleMatch '<<< pitcrew:classify_runner_exit <<<'
+        Add-Check ($startMatch -and $endMatch -and $endMatch.LineNumber -gt $startMatch.LineNumber) 'The manager exit classifier is not delimited for extraction.'
+        if ($startMatch -and $endMatch -and $endMatch.LineNumber -gt $startMatch.LineNumber) {
+            $fragment = ($managerLines[$startMatch.LineNumber..($endMatch.LineNumber - 2)]) -join "`n"
+            $fragmentPath = Join-Path $resourcesDirectory 'classify-fragment.sh'
+            Set-Content -LiteralPath $fragmentPath -Value $fragment -NoNewline -Encoding UTF8
+            $fragmentPosix = $fragmentPath -replace '\\', '/'
+            $classifyExpectations = [ordered]@{
+                ''    = 'unknown'
+                'abc' = 'unknown'
+                '  '  = 'unknown'
+                '0'   = 'clean'
+                '137' = 'oom-kill'
+                '139' = 'signal:11'
+                '3'   = 'error:3'
+            }
+            foreach ($classifyInput in $classifyExpectations.Keys) {
+                $observed = & $posixShell -c ". '$fragmentPosix'; classify_runner_exit '$classifyInput'"
+                Add-Check ($observed -ceq $classifyExpectations[$classifyInput]) "The real runner-exit classifier mapped '$classifyInput' to '$observed' instead of '$($classifyExpectations[$classifyInput])'."
+            }
+        }
+    } else {
+        Write-Host '[skip] Behavioral runner-exit classifier test skipped (no POSIX shell available).' -ForegroundColor Yellow
+    }
 
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
@@ -955,6 +1107,10 @@ Add-Check ($manager -match [regex]::Escape('set -- "$@" --memory-swap "${RUNNER_
 Add-Check ($manager -match [regex]::Escape('set -- "$@" --cpus "${RUNNER_CPU_LIMIT}"')) 'The manager does not apply a per-runner CPU limit to worker containers.'
 Add-Check ($manager -match [regex]::Escape('set -- "$@" --pids-limit "${RUNNER_PIDS_LIMIT}"')) 'The manager does not apply a per-runner PID limit to worker containers.'
 Add-Check ($manager -match [regex]::Escape('printf ''%s'' "$?" > "${runner_status_path}"')) 'The manager discards the ephemeral runner container exit status.'
+Add-Check ($manager -match [regex]::Escape('classify_runner_exit()')) 'The manager does not expose a testable runner-exit classifier.'
+Add-Check ($manager -match [regex]::Escape("''|*[!0-9]*) printf 'unknown'")) 'The manager does not classify a missing/corrupt exit capture as unknown.'
+Add-Check ($manager -notmatch [regex]::Escape('runner_exit_status=0')) 'The manager still defaults a runner exit status to 0 (clean), masking an unobserved or killed runner.'
+Add-Check ($manager -match 'exit status is UNKNOWN') 'The manager does not surface an unknown/unobserved runner exit as an error.'
 Add-Check ($manager -match 'status 137') 'The manager does not flag a SIGKILL/OOM runner exit distinctly from a clean job completion.'
 Add-Check ($manager -match 'exited cleanly') 'The manager does not log graceful runner job completion.'
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'

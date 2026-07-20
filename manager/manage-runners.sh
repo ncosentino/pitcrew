@@ -144,6 +144,30 @@ else
     echo "[manager:${PROFILE_ID}] per-runner resource limits: none (set RUNNER_MEMORY_LIMIT/RUNNER_CPU_LIMIT/RUNNER_PIDS_LIMIT to cap heavy jobs)"
 fi
 
+# >>> pitcrew:classify_runner_exit >>>
+# Maps a captured container exit-status string to a stable classification token.
+# A missing, empty, or non-numeric capture is 'unknown' (an error): the
+# container's real disposition could not be observed and MUST NOT be reported as
+# a clean job completion. This function is extracted between sentinels so the
+# contract suite can source and exercise it under a real POSIX shell.
+classify_runner_exit() {
+    classify_input="$1"
+    case "${classify_input}" in
+        ''|*[!0-9]*) printf 'unknown'; return 0 ;;
+    esac
+    if [ "${classify_input}" -eq 0 ]; then
+        printf 'clean'
+    elif [ "${classify_input}" -eq 137 ]; then
+        printf 'oom-kill'
+    elif [ "${classify_input}" -ge 128 ]; then
+        printf 'signal:%s' "$((classify_input - 128))"
+    else
+        printf 'error:%s' "${classify_input}"
+    fi
+    return 0
+}
+# <<< pitcrew:classify_runner_exit <<<
+
 CONNECT_MARKER="Listening for Jobs"
 MAX_BACKOFF="${RUNNER_MAX_BACKOFF:-120}"
 RUNNER_STOP_TIMEOUT=20
@@ -448,23 +472,33 @@ run_slot() {
                 esac
             done
 
-        runner_exit_status=0
+        runner_exit_status=""
         if [ -f "${runner_status_path}" ]; then
-            runner_exit_status=$(cat "${runner_status_path}")
+            runner_exit_status=$(cat "${runner_status_path}" 2>/dev/null || printf '')
             rm -f "${runner_status_path}"
         fi
-        case "${runner_exit_status}" in
-            ''|*[!0-9]*) runner_exit_status=0 ;;
+        # A missing, empty, or non-numeric capture means the container's real
+        # disposition could not be observed. It MUST NOT be coerced to 0/clean:
+        # doing so would mask a killed/lost runner as a graceful completion —
+        # exactly the ambiguity this diagnostic exists to remove.
+        runner_exit_class=$(classify_runner_exit "${runner_exit_status}")
+        case "${runner_exit_class}" in
+            unknown)
+                echo "[slot ${slot_key}] runner ${name} exit status is UNKNOWN (capture missing/empty/corrupt: '${runner_exit_status}') — treating as ERROR, not a clean exit. The container's real disposition could not be observed; inspect the host for OOM-kills or a crashed supervisor." >&2
+                ;;
+            clean)
+                echo "[slot ${slot_key}] runner ${name} exited cleanly (status 0) — job completed"
+                ;;
+            oom-kill)
+                echo "[slot ${slot_key}] runner ${name} was KILLED (status 137 / SIGKILL) — likely host OOM-kill or 'docker kill'. Inspect host memory/CPU pressure and set RUNNER_MEMORY_LIMIT/RUNNER_CPU_LIMIT/RUNNER_PIDS_LIMIT to keep one job from starving the fleet." >&2
+                ;;
+            signal:*)
+                echo "[slot ${slot_key}] runner ${name} terminated by signal ${runner_exit_class#signal:} (status ${runner_exit_status})" >&2
+                ;;
+            *)
+                echo "[slot ${slot_key}] runner ${name} exited with status ${runner_exit_status}" >&2
+                ;;
         esac
-        if [ "${runner_exit_status}" -eq 0 ]; then
-            echo "[slot ${slot_key}] runner ${name} exited cleanly (status 0) — job completed"
-        elif [ "${runner_exit_status}" -eq 137 ]; then
-            echo "[slot ${slot_key}] runner ${name} was KILLED (status 137 / SIGKILL) — likely host OOM-kill or 'docker kill'. Inspect host memory/CPU pressure and set RUNNER_MEMORY_LIMIT/RUNNER_CPU_LIMIT/RUNNER_PIDS_LIMIT to keep one job from starving the fleet." >&2
-        elif [ "${runner_exit_status}" -ge 128 ]; then
-            echo "[slot ${slot_key}] runner ${name} terminated by signal $((runner_exit_status - 128)) (status ${runner_exit_status})" >&2
-        else
-            echo "[slot ${slot_key}] runner ${name} exited with status ${runner_exit_status}" >&2
-        fi
 
         if [ -f "${slot_state_path}/drain" ]; then
             echo "[slot ${slot_key}] current runner exited; drained slot will not respawn"

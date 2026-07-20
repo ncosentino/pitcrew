@@ -5,6 +5,82 @@ $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerManagerContractVersion = 6
 
+# Docker refuses to start a container whose --memory is below this floor
+# ("Minimum memory limit allowed is 6MB"). Validating against the same floor
+# here fails a bad profile at setup time instead of after a destructive
+# stop/replace of the active pool.
+$script:RunnerMinimumMemoryBytes = 6 * 1024 * 1024
+
+# Optional per-runner resource-limit keys added by the runner-loss hardening
+# change. They are emitted (empty when unset) by New-RunnerEnvironmentContent.
+$script:RunnerOptionalLimitKeys = @(
+    'RUNNER_MEMORY_LIMIT',
+    'RUNNER_MEMORY_SWAP_LIMIT',
+    'RUNNER_CPU_LIMIT',
+    'RUNNER_PIDS_LIMIT'
+)
+
+function ConvertFrom-RunnerByteValue {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    $match = [regex]::Match($Value, '^([0-9]+)([bBkKmMgG]?)$')
+    if (-not $match.Success) {
+        throw "Byte value '$Value' is not a Docker-compatible size (expected digits with an optional b/k/m/g suffix)."
+    }
+
+    $number = [long]$match.Groups[1].Value
+    $multiplier = switch ($match.Groups[2].Value.ToLowerInvariant()) {
+        '' { [long]1 }
+        'b' { [long]1 }
+        'k' { [long]1024 }
+        'm' { [long]1024 * 1024 }
+        'g' { [long]1024 * 1024 * 1024 }
+    }
+
+    return $number * $multiplier
+}
+
+<#
+.SYNOPSIS
+    Normalizes a runner .env body so that pre-hardening profiles compare equal
+    to freshly generated content when no resource limits are configured.
+
+.DESCRIPTION
+    The optional per-runner resource-limit knobs emit an empty line when unset.
+    A profile provisioned before those knobs existed has no such line at all.
+    Setup compares the on-disk .env byte-for-byte to decide whether a change
+    requires a destructive stop/replace of the running pool; without this
+    normalization, merely upgrading the tooling (limits still unset) would look
+    like drift and needlessly tear down healthy, active runners. Removing unset
+    limit lines from both sides makes "absent" and "present but empty"
+    equivalent, while a limit that is actually set keeps its line and is still
+    detected as a real change.
+#>
+function ConvertTo-RunnerEnvironmentComparable {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$Content
+    )
+
+    $keyAlternation = ($script:RunnerOptionalLimitKeys -join '|')
+    $emptyLimitPattern = "^($keyAlternation)=`r?$"
+    $lines = $Content -split "`n"
+    $kept = foreach ($line in $lines) {
+        if ($line -match $emptyLimitPattern) {
+            continue
+        }
+        $line
+    }
+
+    return ($kept -join "`n")
+}
+
 function ConvertTo-RunnerLabelList {
     param(
         [string[]]$Labels,
@@ -245,6 +321,19 @@ function Resolve-RunnerProfile {
     }
     if ($resourceMemorySwap -and -not $resourceMemory) {
         throw 'Runner resource memorySwap requires memory to be set because Docker rejects --memory-swap without --memory.'
+    }
+    if ($resourceMemory) {
+        $memoryBytes = ConvertFrom-RunnerByteValue -Value $resourceMemory
+        if ($memoryBytes -lt $script:RunnerMinimumMemoryBytes) {
+            throw "Runner resource memory '$resourceMemory' is below Docker's minimum of 6m ($($script:RunnerMinimumMemoryBytes) bytes); Docker refuses to start a container with less."
+        }
+    }
+    if ($resourceMemorySwap) {
+        $swapBytes = ConvertFrom-RunnerByteValue -Value $resourceMemorySwap
+        $memoryBytes = ConvertFrom-RunnerByteValue -Value $resourceMemory
+        if ($swapBytes -lt $memoryBytes) {
+            throw "Runner resource memorySwap '$resourceMemorySwap' must be greater than or equal to memory '$resourceMemory' because Docker requires --memory-swap to be at least --memory."
+        }
     }
 
     $requiredLabel = if ($profileName -eq 'default') { 'general-purpose' } else { $profileName }

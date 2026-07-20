@@ -610,10 +610,18 @@ try {
         -EnterpriseName $EnterpriseName
 
     $managerRunning = Test-RunnerManagerRunning -ProfileConfig $profileConfig
-    $environmentMatches = (
-        (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) -and
-        (Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8) -ceq $environmentContent
-    )
+    $environmentMatches = $false
+    if (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) {
+        $storedEnvironment = Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8
+        # Compare through the migration normalizer so that upgrading a profile
+        # provisioned before the optional resource-limit knobs existed (limits
+        # still unset) is not misread as drift, which would destructively
+        # stop/replace the healthy, active runner pool below.
+        $environmentMatches = (
+            (ConvertTo-RunnerEnvironmentComparable -Content $storedEnvironment) -ceq
+            (ConvertTo-RunnerEnvironmentComparable -Content $environmentContent)
+        )
+    }
     $staticProfileMatches = $false
     if (Test-Path -LiteralPath $profileConfig.StaticProfilePath -PathType Leaf) {
         try {
