@@ -639,6 +639,35 @@ Add-ThrowsCheck `
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "pitcrew-runner-profile-tests-$([guid]::NewGuid().ToString('N'))"
 New-Item -ItemType Directory -Path $tempRoot -Force | Out-Null
 try {
+    # Backward compatibility: without a minimum contract requirement an
+    # acknowledgement is current as soon as its generation matches.
+    $legacyAck = [PSCustomObject]@{ schemaVersion = 1; status = 'accepted'; generation = 3; managerContractVersion = 6 }
+    Add-Check (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $legacyAck -Generation 3) 'A matching-generation acknowledgement was rejected without a contract requirement.'
+    Add-Check (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $legacyAck -Generation 3 -MinimumContractVersion 6) 'An acknowledgement meeting the contract minimum was rejected.'
+
+    # A drain-fenced contract upgrade must not confirm on the outgoing manager's
+    # stale acknowledgement: a matching-generation contract-6 acknowledgement does
+    # not satisfy a minimum contract of 7.
+    Add-Check (-not (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $legacyAck -Generation 3 -MinimumContractVersion 7)) 'A stale sub-contract acknowledgement satisfied an upgrade contract requirement.'
+
+    # Once the recreated manager republishes on the upgraded contract, the same
+    # requirement is satisfied.
+    $upgradedAck = [PSCustomObject]@{ schemaVersion = 1; status = 'accepted'; generation = 3; managerContractVersion = 7 }
+    Add-Check (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $upgradedAck -Generation 3 -MinimumContractVersion 7) 'A republished upgraded-contract acknowledgement was not recognized as current.'
+
+    # An acknowledgement without the contract field counts as contract 0, so it
+    # never satisfies a positive contract requirement but still matches when none
+    # is required.
+    $legacyNoContractAck = [PSCustomObject]@{ schemaVersion = 1; status = 'accepted'; generation = 3 }
+    Add-Check (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $legacyNoContractAck -Generation 3) 'A pre-contract acknowledgement was rejected when no contract was required.'
+    Add-Check (-not (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $legacyNoContractAck -Generation 3 -MinimumContractVersion 7)) 'A pre-contract acknowledgement satisfied a positive contract requirement.'
+
+    # Non-current generations and rejected/unsupported states are never current.
+    Add-Check (-not (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $upgradedAck -Generation 4 -MinimumContractVersion 7)) 'An older-generation acknowledgement was treated as current.'
+    $rejectedAck = [PSCustomObject]@{ schemaVersion = 1; status = 'rejected'; generation = 3; managerContractVersion = 7 }
+    Add-Check (-not (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $rejectedAck -Generation 3 -MinimumContractVersion 7)) 'A rejected acknowledgement was treated as current.'
+    Add-Check (-not (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $null -Generation 3)) 'A missing acknowledgement was treated as current.'
+
     $fingerprintContext = Join-Path $tempRoot 'fingerprint-context'
     $excludedContextState = Join-Path $fingerprintContext '.pitcrew-state'
     New-Item -ItemType Directory -Path $excludedContextState -Force | Out-Null

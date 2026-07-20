@@ -38,6 +38,25 @@ desired_state_hash() {
     jq -S -c '.' "$1" | sha256sum | awk '{ print $1 }'
 }
 
+# True when the acknowledgement document at $1 accepts generation $2 and was
+# written by a manager of contract version $3. The contract predicate is what
+# lets a drain-fenced contract upgrade converge: after the manager is recreated
+# onto a new contract the desired generation is unchanged, so without comparing
+# the acknowledged contract the new manager would treat the outgoing manager's
+# acknowledgement as current and never republish its own contract -- leaving
+# setup unable to confirm the upgrade landed.
+acknowledgement_is_current() {
+    jq -e \
+        --argjson generation "$2" \
+        --argjson managerContractVersion "$3" \
+        '
+            .schemaVersion == 1
+            and .status == "accepted"
+            and .generation == $generation
+            and .managerContractVersion == $managerContractVersion
+        ' "$1" >/dev/null 2>&1
+}
+
 classify_desired_state() {
     state_path="$1"
     current_generation="$2"

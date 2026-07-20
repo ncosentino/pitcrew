@@ -310,7 +310,10 @@ function Wait-RunnerCapacityAcknowledgement {
 
         [Parameter(Mandatory)]
         [ValidateRange(1, 300)]
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$MinimumContractVersion = 0
     )
 
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -327,13 +330,26 @@ function Wait-RunnerCapacityAcknowledgement {
                 }
 
                 $acknowledgedGeneration = [int]$acknowledgement.generation
-                if ($acknowledgedGeneration -eq $Generation) {
-                    return $acknowledgement
-                }
                 if ($acknowledgedGeneration -gt $Generation) {
                     throw "Manager acknowledged generation $acknowledgedGeneration while setup was waiting for generation $Generation."
                 }
-                $lastReadError = $null
+                if (Test-RunnerAcknowledgementIsCurrent -Acknowledgement $acknowledgement -Generation $Generation -MinimumContractVersion $MinimumContractVersion) {
+                    return $acknowledgement
+                }
+                if ($acknowledgedGeneration -eq $Generation) {
+                    $acknowledgedContractVersion = 0
+                    if ($acknowledgement.PSObject.Properties['managerContractVersion']) {
+                        $acknowledgedContractVersion = [int]$acknowledgement.managerContractVersion
+                    }
+                    # The desired generation is acknowledged, but a manager that was
+                    # just recreated for a contract upgrade has not yet republished the
+                    # upgraded contract version. Keep waiting so setup confirms the
+                    # upgrade only once the new contract is live, instead of returning
+                    # on the outgoing manager's stale acknowledgement.
+                    $lastReadError = "acknowledged generation $Generation on contract v$acknowledgedContractVersion while awaiting contract v$MinimumContractVersion"
+                } else {
+                    $lastReadError = $null
+                }
             } catch {
                 $lastReadError = $_.Exception.Message
             }
@@ -590,17 +606,14 @@ function Invoke-RunnerManagerContractUpgrade {
     $acknowledgement = Wait-RunnerCapacityAcknowledgement `
         -ProfileConfig $ProfileConfig `
         -Generation $Generation `
-        -TimeoutSeconds 60
+        -TimeoutSeconds 60 `
+        -MinimumContractVersion $desiredContractVersion
 
     $acknowledgedContractVersion = 0
     if ($acknowledgement.PSObject.Properties['managerContractVersion']) {
         $acknowledgedContractVersion = [int]$acknowledgement.managerContractVersion
     }
-    if ($acknowledgedContractVersion -lt $desiredContractVersion) {
-        Write-Warning "[contract] Manager acknowledged generation $Generation but still reports contract v$acknowledgedContractVersion (expected v$desiredContractVersion); the rebuilt manager image may be stale. Investigate the manager image before relying on the new contract behavior."
-    } else {
-        Write-Host "[done] Manager upgraded to contract v$acknowledgedContractVersion for profile '$($ProfileConfig.Name)'; no runner was restarted and no job was interrupted."
-    }
+    Write-Host "[done] Manager upgraded to contract v$acknowledgedContractVersion for profile '$($ProfileConfig.Name)'; no runner was restarted and no job was interrupted."
 }
 
 function Get-RunnerEnvironmentFileValue {

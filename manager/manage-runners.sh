@@ -729,15 +729,17 @@ write_acknowledgement() {
     publish_pending_acknowledgement
 }
 
+# A stored acknowledgement only counts as current when it was written by a
+# manager of THIS contract version. After a drain-fenced contract upgrade the
+# desired generation is unchanged, so without the contract check the newly
+# recreated manager would treat the outgoing manager's acknowledgement as
+# current and never republish its own contract -- leaving setup unable to
+# confirm the upgrade landed.
 acknowledgement_matches_current() {
-    [ -f "${ACKNOWLEDGEMENT_PATH}" ] || return 1
-    jq -e \
-        --argjson generation "${CURRENT_GENERATION}" \
-        '
-            .schemaVersion == 1
-            and .status == "accepted"
-            and .generation == $generation
-        ' "${ACKNOWLEDGEMENT_PATH}" >/dev/null 2>&1
+    acknowledgement_is_current \
+        "${ACKNOWLEDGEMENT_PATH}" \
+        "${CURRENT_GENERATION}" \
+        "${MANAGER_CONTRACT_VERSION}"
 }
 
 reconcile_slots() {

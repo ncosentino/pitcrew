@@ -914,6 +914,67 @@ function Read-RunnerJsonFile {
 
 <#
 .SYNOPSIS
+    Determines whether a capacity acknowledgement reflects the current desired
+    generation and at least the required manager contract version.
+
+.DESCRIPTION
+    Setup treats an acknowledgement as current only when it is an accepted,
+    schema-1 document for the exact desired generation. When a minimum contract
+    version is supplied (a coordinated manager contract upgrade), the
+    acknowledgement must also report at least that contract version; a
+    matching-generation acknowledgement from the outgoing manager on an older
+    contract is deliberately NOT current so setup keeps waiting for the recreated
+    manager to republish rather than confirming the upgrade prematurely. An
+    acknowledgement without the contract field counts as contract 0, so it never
+    satisfies a positive requirement but still matches when none is required.
+
+.PARAMETER Acknowledgement
+    Parsed acknowledgement object (or $null when none has been written yet).
+
+.PARAMETER Generation
+    Desired-capacity generation setup is waiting for.
+
+.PARAMETER MinimumContractVersion
+    Lowest manager contract version that satisfies the wait. Defaults to 0 so
+    capacity-only reconciliations remain contract-agnostic.
+#>
+function Test-RunnerAcknowledgementIsCurrent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$Acknowledgement,
+
+        [Parameter(Mandatory)]
+        [int]$Generation,
+
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$MinimumContractVersion = 0
+    )
+
+    if ($null -eq $Acknowledgement) {
+        return $false
+    }
+    if ([int]$Acknowledgement.schemaVersion -ne 1) {
+        return $false
+    }
+    if ([string]$Acknowledgement.status -ne 'accepted') {
+        return $false
+    }
+    if ([int]$Acknowledgement.generation -ne $Generation) {
+        return $false
+    }
+
+    $acknowledgedContractVersion = 0
+    if ($Acknowledgement.PSObject.Properties['managerContractVersion']) {
+        $acknowledgedContractVersion = [int]$Acknowledgement.managerContractVersion
+    }
+
+    return $acknowledgedContractVersion -ge $MinimumContractVersion
+}
+
+<#
+.SYNOPSIS
     Atomically replaces a JSON state file.
 
 .DESCRIPTION

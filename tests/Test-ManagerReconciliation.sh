@@ -264,4 +264,55 @@ assert_equals "https://example.com/example/project" "$(jq -r '.slots[] | select(
 assert_false "Observed state exposed an access token field." contains_access_token_field "${observed_state_json}"
 assert_false "Observed state exposed runner names or derived tags." contains_runner_identity_field "${observed_state_json}"
 
+# acknowledgement_is_current underpins the drain-fenced contract upgrade: a
+# manager only skips republishing its acknowledgement when the stored document
+# accepts the current generation AND records this manager's contract version.
+ack_document="${TEMP_DIRECTORY}/ack.json"
+write_ack() {
+    cat > "${ack_document}" <<EOF
+{
+  "schemaVersion": 1,
+  "status": "accepted",
+  "generation": $1,
+  "managerContractVersion": $2
+}
+EOF
+}
+
+write_ack 4 7
+assert_true "A matching-generation, matching-contract ack was not treated as current." \
+    acknowledgement_is_current "${ack_document}" 4 7
+assert_false "An ack from a different contract at the same generation was treated as current." \
+    acknowledgement_is_current "${ack_document}" 4 6
+assert_false "An ack from an older generation was treated as current." \
+    acknowledgement_is_current "${ack_document}" 5 7
+
+# A pre-contract-version ack (no managerContractVersion field) must never be
+# treated as current by a contract-aware manager, forcing a republish.
+cat > "${ack_document}" <<EOF
+{
+  "schemaVersion": 1,
+  "status": "accepted",
+  "generation": 4
+}
+EOF
+assert_false "A legacy ack without a contract version was treated as current." \
+    acknowledgement_is_current "${ack_document}" 4 7
+
+# A rejected/pending ack is never current regardless of generation or contract.
+cat > "${ack_document}" <<EOF
+{
+  "schemaVersion": 1,
+  "status": "rejected",
+  "generation": 4,
+  "managerContractVersion": 7
+}
+EOF
+assert_false "A non-accepted ack was treated as current." \
+    acknowledgement_is_current "${ack_document}" 4 7
+
+# A missing ack document is never current.
+assert_false "A missing ack document was treated as current." \
+    acknowledgement_is_current "${TEMP_DIRECTORY}/does-not-exist.json" 4 7
+
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."
