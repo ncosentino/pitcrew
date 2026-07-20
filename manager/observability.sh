@@ -10,6 +10,7 @@ observed_state_is_valid() {
             and (.repository == null or (.repository | type == "string"))
             and (.desired | type == "boolean")
             and (.processRunning | type == "boolean")
+            and (.jobRunning | type == "boolean")
             and (
                 .state == "starting"
                 or .state == "online"
@@ -45,6 +46,7 @@ observed_state_is_valid() {
         )
         and (.desiredSlots | nonnegative_integer)
         and (.activeSlots | nonnegative_integer)
+        and (.busySlots | nonnegative_integer)
         and (.drainingSlots | nonnegative_integer)
         and (.slots | type == "array")
         and all(.slots[]; valid_slot)
@@ -124,6 +126,16 @@ render_observed_slots() {
                 fi
             fi
 
+            # jobRunning is the REAL busy signal: this slot's live supervisor is
+            # currently running a GitHub job (its runner printed "Running job:" and
+            # not yet "completed with result"). It is gated on process_running so a
+            # marker left behind by a crashed supervisor is never mistaken for a
+            # live job. Drains must wait on this, never on supervisor liveness.
+            job_running=false
+            if [ "${process_running}" = "true" ] && [ -f "${candidate_path}/job-active" ]; then
+                job_running=true
+            fi
+
             runtime_state="starting"
             failure_count=0
             backoff_seconds=0
@@ -158,6 +170,7 @@ render_observed_slots() {
                 --arg repository "${repository}" \
                 --argjson desired "${desired}" \
                 --argjson processRunning "${process_running}" \
+                --argjson jobRunning "${job_running}" \
                 --arg state "${runtime_state}" \
                 --argjson failureCount "${failure_count}" \
                 --argjson backoffSeconds "${backoff_seconds}" \
@@ -167,6 +180,7 @@ render_observed_slots() {
                     repository: (if $repository == "" then null else $repository end),
                     desired: $desired,
                     processRunning: $processRunning,
+                    jobRunning: $jobRunning,
                     state: $state,
                     failureCount: $failureCount,
                     backoffSeconds: $backoffSeconds,
@@ -225,6 +239,7 @@ write_manager_observed_state() {
             desiredStateStatus: $desiredStateStatus,
             desiredSlots: $desiredSlots,
             activeSlots: ($slots[0] | map(select(.processRunning)) | length),
+            busySlots: ($slots[0] | map(select(.jobRunning)) | length),
             drainingSlots: ($slots[0] | map(select(.state == "draining")) | length),
             slots: $slots[0]
         }' > "${observed_temporary}"; then

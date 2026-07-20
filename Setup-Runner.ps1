@@ -351,11 +351,17 @@ function Get-RunnerObservedBusySlots {
         [PSCustomObject]$ProfileConfig
     )
 
-    # Returns the number of slots that are still doing work (running a job or
-    # draining a job to completion), or -1 when the manager's observed state is
-    # missing/unreadable/unrecognised. The caller treats any non-zero result
+    # Returns the number of slots that are still running a real GitHub job, or -1
+    # when the manager's observed state is missing/unreadable/unrecognised or does
+    # not expose the busy signal at all. The caller treats any non-zero result
     # (including the -1 "unknown") as "not safe to recreate the manager", so an
     # ambiguous state can never lead to interrupting an active job.
+    #
+    # This MUST read busySlots (slots whose runner printed "Running job:"), NOT
+    # activeSlots (live supervisors). A pool at rest always has live supervisors,
+    # so keying idle-detection off activeSlots meant a v6->v7 upgrade could never
+    # observe an idle pool and either deferred forever or risked a destructive
+    # replace — the exact defect issue #8's drain path exposed.
     if (-not (Test-Path -LiteralPath $ProfileConfig.ObservedStatePath -PathType Leaf)) {
         return -1
     }
@@ -365,10 +371,13 @@ function Get-RunnerObservedBusySlots {
         if ([int]$observed.schemaVersion -ne 1) {
             return -1
         }
-        if (-not $observed.PSObject.Properties['activeSlots']) {
+        # A manager that does not publish busySlots predates the job-busy signal
+        # (contract < 7). Its idleness cannot be trusted from observed state, so
+        # report "unknown" and let the caller take the coordinated v6 path.
+        if (-not $observed.PSObject.Properties['busySlots']) {
             return -1
         }
-        $busy = [int]$observed.activeSlots
+        $busy = [int]$observed.busySlots
         if ($observed.PSObject.Properties['drainingSlots']) {
             $busy += [int]$observed.drainingSlots
         }

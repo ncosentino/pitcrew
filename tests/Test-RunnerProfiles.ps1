@@ -958,6 +958,68 @@ try {
         Write-Host '[skip] Behavioral resource-limit validator test skipped (no POSIX shell available).' -ForegroundColor Yellow
     }
 
+    # Issue #8 follow-up (1): the manager must publish a REAL job-busy signal
+    # (busySlots / per-slot jobRunning) so a drain waits for actual GitHub jobs to
+    # finish rather than for the always-alive slot supervisor to exit. Exercise the
+    # real observability rendering under a POSIX shell with jq and assert that a
+    # slot carrying a "Running job:" marker is reported busy, and an unmarked slot
+    # is reported idle even while its supervisor process is alive.
+    $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
+    $jqAvailable = $false
+    if ($posixShell) {
+        & $posixShell -c 'command -v jq >/dev/null 2>&1'
+        $jqAvailable = ($LASTEXITCODE -eq 0)
+    }
+    if ($posixShell -and $jqAvailable -and (Test-Path -LiteralPath $observabilityPath -PathType Leaf)) {
+        $busyProbeDir = Join-Path $resourcesDirectory 'busy-signal'
+        New-Item -ItemType Directory -Path $busyProbeDir -Force | Out-Null
+        $busyProbePath = Join-Path $busyProbeDir 'probe.sh'
+        $observabilityPosix = $observabilityPath -replace '\\', '/'
+        $busyProbeScript = @'
+. "__OBSERVABILITY__"
+work="$1"
+mode="$2"
+slots="${work}/slots"
+rm -rf "${slots}"
+mkdir -p "${slots}/slot-1"
+printf 'https://github.com/example/project\n' > "${slots}/slot-1/repo"
+sleep 30 &
+probe_pid=$!
+printf '%s\n' "${probe_pid}" > "${slots}/slot-1/pid"
+jq -n '{state:"online",runnerName:"runner-1",failureCount:0,backoffSeconds:0,updatedAt:"2020-01-01T00:00:00Z"}' > "${slots}/slot-1/runtime-state.json"
+if [ "${mode}" = "busy" ]; then
+    : > "${slots}/slot-1/job-active"
+fi
+render_observed_slots "${slots}" "${work}/slots.json" || { kill "${probe_pid}" 2>/dev/null; exit 1; }
+write_manager_observed_state "${work}/observed.json" "profile" "manager-1" 7 "running" "repo" 1 "hash" "accepted" 1 "${work}/slots.json" || { kill "${probe_pid}" 2>/dev/null; exit 1; }
+cat "${work}/observed.json"
+kill "${probe_pid}" 2>/dev/null || true
+'@ -replace '__OBSERVABILITY__', $observabilityPosix
+        Set-Content -LiteralPath $busyProbePath -Value $busyProbeScript -NoNewline -Encoding UTF8
+        $busyProbePosix = $busyProbePath -replace '\\', '/'
+        $busyWorkPosix = ($busyProbeDir -replace '\\', '/')
+
+        foreach ($probeMode in @('busy', 'idle')) {
+            $observedRaw = & $posixShell -c ". '$busyProbePosix' '$busyWorkPosix' '$probeMode'"
+            $observedJson = $null
+            try { $observedJson = ($observedRaw -join "`n") | ConvertFrom-Json -Depth 10 } catch { $observedJson = $null }
+            Add-Check ($null -ne $observedJson) "The observability rendering produced no valid observed-state JSON for the '$probeMode' slot."
+            if ($observedJson) {
+                $expectedBusy = if ($probeMode -eq 'busy') { 1 } else { 0 }
+                Add-Check ($observedJson.PSObject.Properties['busySlots'] -and [int]$observedJson.busySlots -eq $expectedBusy) "The observed state reported busySlots=$($observedJson.busySlots) for a '$probeMode' slot; expected $expectedBusy."
+                # The supervisor process is alive in both modes, so activeSlots must
+                # stay 1 regardless — proving busySlots is a distinct, real signal
+                # and not just a rename of supervisor liveness.
+                Add-Check ($observedJson.PSObject.Properties['activeSlots'] -and [int]$observedJson.activeSlots -eq 1) "The observed state reported activeSlots=$($observedJson.activeSlots) for a '$probeMode' slot; expected 1 (the supervisor is alive in both modes)."
+                $slotRecord = @($observedJson.slots)[0]
+                $expectedJobRunning = ($probeMode -eq 'busy')
+                Add-Check ($slotRecord -and $slotRecord.PSObject.Properties['jobRunning'] -and [bool]$slotRecord.jobRunning -eq $expectedJobRunning) "The '$probeMode' slot reported jobRunning=$($slotRecord.jobRunning); expected $expectedJobRunning."
+            }
+        }
+    } else {
+        Write-Host '[skip] Behavioral job-busy observability test skipped (no POSIX shell or jq available).' -ForegroundColor Yellow
+    }
+
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
     $secretManifest.build.args = [PSCustomObject]@{ API_TOKEN = 'not-a-real-token' }
@@ -1248,6 +1310,7 @@ try {
         [PSCustomObject][ordered]@{
             schemaVersion = 1
             activeSlots = 1
+            busySlots = 1
             drainingSlots = 0
         } |
             ConvertTo-Json -Depth 5 |
@@ -1281,6 +1344,7 @@ try {
         [PSCustomObject][ordered]@{
             schemaVersion = 1
             activeSlots = 0
+            busySlots = 0
             drainingSlots = 0
         } |
             ConvertTo-Json -Depth 5 |

@@ -468,6 +468,7 @@ run_slot() {
         echo "[slot ${slot_key}] starting fresh ephemeral runner: ${name} -> ${repo:-<scope>}"
         : > "${log_path}"
         rm -f "${slot_state_path}/connected"
+        rm -f "${slot_state_path}/job-active"
         write_slot_runtime_state \
             "${slot_state_path}" \
             "${OBSERVED_STATE_DIRTY}" \
@@ -531,6 +532,23 @@ run_slot() {
                                 0 || true
                         fi
                         ;;
+                    *"Running job:"*)
+                        # The GitHub runner prints "Running job: <name>" the moment
+                        # it picks up work. This is the ONLY reliable signal that a
+                        # slot is truly busy — the supervisor process is always
+                        # alive, so process/supervisor liveness must never be used
+                        # as a job-busy proxy (that is the v6->v7 idle-detection bug
+                        # issue #8's drain path tripped over). A drain must wait for
+                        # this marker to clear, not for the supervisor to exit.
+                        : > "${slot_state_path}/job-active"
+                        [ -n "${OBSERVED_STATE_DIRTY}" ] && : > "${OBSERVED_STATE_DIRTY}"
+                        ;;
+                    *"completed with result"*)
+                        # "Job <name> completed with result: <...>" — the ephemeral
+                        # runner has finished its single job and is exiting.
+                        rm -f "${slot_state_path}/job-active"
+                        [ -n "${OBSERVED_STATE_DIRTY}" ] && : > "${OBSERVED_STATE_DIRTY}"
+                        ;;
                 esac
             done
 
@@ -539,6 +557,10 @@ run_slot() {
             runner_exit_status=$(cat "${runner_status_path}" 2>/dev/null || printf '')
             rm -f "${runner_status_path}"
         fi
+        # The container is gone, so no job can still be running on this slot. Clear
+        # the busy marker unconditionally: a job-active flag must never outlive the
+        # container it describes, or a drain would wait forever on a phantom job.
+        rm -f "${slot_state_path}/job-active"
         # A missing, empty, or non-numeric capture means the container's real
         # disposition could not be observed. It MUST NOT be coerced to 0/clean:
         # doing so would mask a killed/lost runner as a graceful completion —
