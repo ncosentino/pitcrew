@@ -43,8 +43,10 @@ $marketplacePlugin = @($marketplace.plugins)[0]
 Add-Check ($marketplacePlugin.name -eq 'pitcrew-operations') 'The marketplace plugin name is incorrect.'
 Add-Check ($marketplacePlugin.source -eq './plugins/pitcrew-operations') 'The marketplace plugin source is incorrect.'
 Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plugin versions do not match.'
+Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
+Add-Check ($plugin.version -eq '1.1.0') 'The operations plugin version was not advanced for the autoscaling skill update.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
