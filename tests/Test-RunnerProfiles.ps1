@@ -197,6 +197,54 @@ function Start-TestCapacityAcknowledgementWriter {
     }
 }
 
+function Start-TestDrainCompleteWriter {
+    param(
+        [string]$DrainRequestPath,
+        [string]$DrainCompletePath
+    )
+
+    # Simulate a cooperative (contract v7+) manager: watch for the nonce'd
+    # drain-request Setup writes, then stamp drain-complete echoing the same
+    # nonce. This is the responder Invoke-RunnerDrainAndFence polls for, so a
+    # destructive/static replacement or contract upgrade can proceed only after
+    # the manager confirms the pool is fenced and idle.
+    return Start-Job -ArgumentList @(
+        $DrainRequestPath,
+        $DrainCompletePath
+    ) -ScriptBlock {
+        param(
+            $DrainRequestPath,
+            $DrainCompletePath
+        )
+
+        $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        do {
+            if (Test-Path -LiteralPath $DrainRequestPath -PathType Leaf) {
+                try {
+                    $request = Get-Content -LiteralPath $DrainRequestPath -Raw -Encoding UTF8 |
+                        ConvertFrom-Json -Depth 10 -ErrorAction Stop
+                    $nonce = [string]$request.nonce
+                    if ($nonce) {
+                        $payload = [PSCustomObject][ordered]@{
+                            schemaVersion = 1
+                            nonce = $nonce
+                        } | ConvertTo-Json -Depth 10
+                        $temporary = "$DrainCompletePath.tmp"
+                        Set-Content -LiteralPath $temporary -Value $payload -Encoding UTF8 -NoNewline
+                        Move-Item -LiteralPath $temporary -Destination $DrainCompletePath -Force
+                        return
+                    }
+                } catch {
+                    Start-Sleep -Milliseconds 50
+                }
+            }
+            Start-Sleep -Milliseconds 50
+        } while ([DateTime]::UtcNow -lt $deadline)
+
+        throw "No drain-request nonce was observed at $DrainRequestPath."
+    }
+}
+
 $requiredPaths = @(
     $functionsPath,
     $setupPath,
@@ -1135,6 +1183,11 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
     $env:PITCREW_STATE_DIR = 'ambient-state'
     $env:PITCREW_MANAGER_CONTRACT_VERSION = '99'
     $env:PITCREW_TEST_MANAGER_RUNNING = '0'
+    # Bound every drain wait in the unit suite so a defer path (no cooperative
+    # responder / a persistently busy worker) fails fast instead of blocking on
+    # the production default. Fixtures that expect a successful drain simulate
+    # the manager writing drain-complete or expose an idle worker within this.
+    $env:PITCREW_DRAIN_TIMEOUT_SECONDS = '3'
 
     function global:docker {
         $dockerArguments = @($args)
@@ -1153,6 +1206,27 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
             $env:PITCREW_TEST_MANAGER_RUNNING -eq '1'
         ) {
             Write-Output 'manager-container-id'
+        }
+        # Legacy host-side job-busy probe: enumerate managed worker containers and
+        # replay their logs so Test-RunnerLegacyWorkerBusy can classify idle/busy.
+        if (
+            $dockerArguments[0] -eq 'ps' -and
+            ($dockerArguments -contains '-q') -and
+            ($dockerArguments -contains 'label=ephemeral-managed-runner-profile=default') -and
+            $env:PITCREW_TEST_MANAGED_WORKERS
+        ) {
+            foreach ($workerId in ($env:PITCREW_TEST_MANAGED_WORKERS -split ',')) {
+                if (-not [string]::IsNullOrWhiteSpace($workerId)) {
+                    Write-Output $workerId.Trim()
+                }
+            }
+        }
+        if ($dockerArguments[0] -eq 'logs') {
+            if ($env:PITCREW_TEST_WORKER_LOG) {
+                foreach ($logLine in ($env:PITCREW_TEST_WORKER_LOG -split "`n")) {
+                    Write-Output $logLine
+                }
+            }
         }
         if (
             $dockerArguments[0] -eq 'compose' -and
@@ -1365,8 +1439,11 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
                 ConvertFrom-Json -Depth 10).generation
         )
 
-        # Case 1: a slot is still active/draining => DEFER; never recreate, never
+        # Case 1: a worker is still running a job => DEFER; never recreate, never
         # force-remove, and surface the deferral so the operator re-runs later.
+        # The v6 running manager predates the cooperative drain protocol, so setup
+        # falls back to a host-side job-busy probe: a worker whose log shows a
+        # "Running job:" with no later completion is BUSY.
         Set-TestCapacityAcknowledgement `
             -Path $defaultAcknowledgementPath `
             -Generation $currentContractGeneration `
@@ -1375,32 +1452,32 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
             -DrainingSlots 0 `
             -UnchangedSlots 1 `
             -ManagerContractVersion 6
-        [PSCustomObject][ordered]@{
-            schemaVersion = 1
-            activeSlots = 1
-            busySlots = 1
-            drainingSlots = 0
-        } |
-            ConvertTo-Json -Depth 5 |
-            Set-Content -LiteralPath $defaultObservedPath -Encoding UTF8
+        $env:PITCREW_TEST_MANAGED_WORKERS = 'worker-busy-1'
+        $env:PITCREW_TEST_WORKER_LOG = "Listening for Jobs`nRunning job: build-and-test"
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         $contractDeferWarnLog = Join-Path $tempRoot 'contract-defer-warnings.log'
-        & $fixtureSetup `
-            -Token 'test-registration-token' `
-            -Repos 'https://github.com/example/project=1' 3> $contractDeferWarnLog
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Repos 'https://github.com/example/project=1' 3> $contractDeferWarnLog
+        }
+        finally {
+            Remove-Item Env:\PITCREW_TEST_MANAGED_WORKERS -ErrorAction SilentlyContinue
+            Remove-Item Env:\PITCREW_TEST_WORKER_LOG -ErrorAction SilentlyContinue
+        }
         $contractDeferCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         $contractDeferWarnings = (@(Get-Content -LiteralPath $contractDeferWarnLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n")
         $contractDeferAck = Get-Content -LiteralPath $defaultAcknowledgementPath -Raw -Encoding UTF8 |
             ConvertFrom-Json -Depth 10
-        Add-Check (-not ($contractDeferCommands -match 'compose.*up')) 'A contract upgrade recreated the manager while a runner slot was still active.'
+        Add-Check (-not ($contractDeferCommands -match 'compose.*up')) 'A contract upgrade recreated the manager while a runner was still running a job.'
         Add-Check (-not ($contractDeferCommands -match 'compose.*down')) 'A deferred contract upgrade tore down the running manager.'
         Add-Check (-not ($contractDeferCommands -match 'rm.*-f')) 'A deferred contract upgrade force-removed a runner container.'
         Add-Check ($contractDeferWarnings -match 'Deferring the coordinated upgrade') 'A deferred contract upgrade did not surface the deferral to the operator.'
         Add-Check ([int]$contractDeferAck.managerContractVersion -eq 6) 'A deferred contract upgrade changed the running manager acknowledgement.'
 
-        # Case 2: the pool is idle (no active or draining slots) => perform the
-        # drain-safe upgrade by recreating ONLY the manager (compose up
-        # --force-recreate), never a compose down or docker rm -f.
+        # Case 2: the pool is idle (host-side probe sees a completed job as the
+        # last activity) => perform the drain-safe upgrade by recreating ONLY the
+        # manager (compose up --force-recreate), never a compose down or rm -f.
         Set-TestCapacityAcknowledgement `
             -Path $defaultAcknowledgementPath `
             -Generation $currentContractGeneration `
@@ -1409,14 +1486,8 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
             -DrainingSlots 0 `
             -UnchangedSlots 1 `
             -ManagerContractVersion 6
-        [PSCustomObject][ordered]@{
-            schemaVersion = 1
-            activeSlots = 0
-            busySlots = 0
-            drainingSlots = 0
-        } |
-            ConvertTo-Json -Depth 5 |
-            Set-Content -LiteralPath $defaultObservedPath -Encoding UTF8
+        $env:PITCREW_TEST_MANAGED_WORKERS = 'worker-idle-1'
+        $env:PITCREW_TEST_WORKER_LOG = "Running job: build-and-test`nJob build-and-test completed with result: Succeeded`nListening for Jobs"
         $upgradeAckSource = Join-Path $tempRoot 'upgraded-acknowledgement.json'
         Set-TestCapacityAcknowledgement `
             -Path $upgradeAckSource `
@@ -1437,6 +1508,8 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
         finally {
             Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_SOURCE -ErrorAction SilentlyContinue
             Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_DEST -ErrorAction SilentlyContinue
+            Remove-Item Env:\PITCREW_TEST_MANAGED_WORKERS -ErrorAction SilentlyContinue
+            Remove-Item Env:\PITCREW_TEST_WORKER_LOG -ErrorAction SilentlyContinue
         }
         $contractUpgradeCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         $contractUpgradeAck = Get-Content -LiteralPath $defaultAcknowledgementPath -Raw -Encoding UTF8 |
@@ -1478,14 +1551,63 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
         }
 
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
-        & $fixtureSetup `
-            -Token 'test-registration-token' `
-            -Labels 'additional-capability' `
-            -Repos 'https://github.com/example/project=1'
+        $immutableDrainRequestPath = Join-Path (Split-Path -Parent $defaultDesiredPath) 'drain-request.json'
+        $immutableDrainCompletePath = Join-Path (Split-Path -Parent $defaultDesiredPath) 'drain-complete.json'
+        $immutableDrainResponder = Start-TestDrainCompleteWriter `
+            -DrainRequestPath $immutableDrainRequestPath `
+            -DrainCompletePath $immutableDrainCompletePath
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Labels 'additional-capability' `
+                -Repos 'https://github.com/example/project=1'
+        }
+        finally {
+            Stop-Job -Job $immutableDrainResponder -ErrorAction SilentlyContinue
+            Remove-Job -Job $immutableDrainResponder -Force -ErrorAction SilentlyContinue
+        }
         $immutableCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($immutableCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'An immutable profile change skipped image preparation.'
         Add-Check ($immutableCommands -match 'compose.*down') 'An immutable profile change did not replace the manager.'
         Add-Check ($immutableCommands -match 'compose.*up') 'An immutable profile change did not restart the profile.'
+        Add-Check (-not (Test-Path -LiteralPath $immutableDrainRequestPath)) 'A completed drain-safe replacement left the drain-request marker behind.'
+        Add-Check (-not (Test-Path -LiteralPath $immutableDrainCompletePath)) 'A completed drain-safe replacement left the drain-complete marker behind.'
+
+        # Issue #8 follow-up (2): a static/resource replacement against a running
+        # cooperative (v7+) manager that NEVER confirms drain-complete must DEFER,
+        # never tear the pool down. With no responder the drain request times out;
+        # Setup must not issue compose down / rm -f / compose up, must surface the
+        # deferral, must clear the drain markers so the still-running manager
+        # resumes reconciliation, and must leave the desired document untouched.
+        $deferGeneration = [int](
+            (Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+                ConvertFrom-Json -Depth 10).generation
+        )
+        Set-TestCapacityAcknowledgement `
+            -Path $defaultAcknowledgementPath `
+            -Generation $deferGeneration `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1 `
+            -ManagerContractVersion 7
+        $desiredBeforeDeferredReplace = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $replaceDeferWarnLog = Join-Path $tempRoot 'replace-defer-warnings.log'
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Labels 'yet-another-capability' `
+            -Repos 'https://github.com/example/project=1' 3> $replaceDeferWarnLog
+        $replaceDeferCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $replaceDeferWarnings = (@(Get-Content -LiteralPath $replaceDeferWarnLog -Encoding UTF8 -ErrorAction SilentlyContinue) -join "`n")
+        Add-Check (-not ($replaceDeferCommands -match 'compose.*down')) 'A cooperative static replacement that never drained tore down the running manager.'
+        Add-Check (-not ($replaceDeferCommands -match 'rm.*-f')) 'A cooperative static replacement that never drained force-removed a runner container.'
+        Add-Check (-not ($replaceDeferCommands -match 'compose.*up')) 'A cooperative static replacement that never drained restarted the profile.'
+        Add-Check ($replaceDeferWarnings -match 'Deferring the static/resource replacement') 'A deferred static replacement did not surface the deferral to the operator.'
+        Add-Check (-not (Test-Path -LiteralPath $immutableDrainRequestPath)) 'A deferred static replacement left the drain-request marker behind.'
+        Add-Check (
+            (Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8) -eq $desiredBeforeDeferredReplace
+        ) 'A deferred static replacement changed the visible desired document.'
 
         $defaultDesiredBeforeNamed = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
@@ -1532,6 +1654,9 @@ printf 'complete=%s nonce=%s fenced=%s\n' "${complete}" "${nonce}" "${fenced}"
         }
         Remove-Item Env:\PITCREW_RUNNER_DOCKER_LOG -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_RUNNING -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_DRAIN_TIMEOUT_SECONDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGED_WORKERS -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_WORKER_LOG -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_SOURCE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_UPGRADE_ACK_DEST -ErrorAction SilentlyContinue
     }

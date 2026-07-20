@@ -513,6 +513,8 @@ function Resolve-RunnerProfile {
         AcceptedCapacityPath = Join-Path $stateDirectory 'last-valid-capacity.json'
         CapacityAcknowledgementPath = Join-Path $stateDirectory 'acknowledged-capacity.json'
         ObservedStatePath = Join-Path $stateDirectory 'observed-state.json'
+        DrainRequestPath = Join-Path $stateDirectory 'drain-request.json'
+        DrainCompletePath = Join-Path $stateDirectory 'drain-complete.json'
         StaticProfilePath = Join-Path $stateDirectory 'static-profile.json'
         LockPath = Join-Path $stateDirectory 'setup.lock'
         ComposeProjectName = $composeProjectName

@@ -345,45 +345,156 @@ function Wait-RunnerCapacityAcknowledgement {
     throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation within $TimeoutSeconds seconds.$detail"
 }
 
-function Get-RunnerObservedBusySlots {
+function Get-RunnerDrainTimeoutSeconds {
+    # Operator-tunable upper bound (seconds) on how long a drain waits for
+    # in-flight jobs to finish before setup gives up and DEFERS — it never
+    # force-stops the pool, so an active job is never lost (issue #8).
+    $default = 600
+    $raw = $env:PITCREW_DRAIN_TIMEOUT_SECONDS
+    if ([string]::IsNullOrWhiteSpace($raw)) {
+        return $default
+    }
+    $parsed = 0
+    if ([int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 1 -and $parsed -le 3600) {
+        return $parsed
+    }
+    return $default
+}
+
+function Remove-RunnerDrainMarkers {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$ProfileConfig
     )
 
-    # Returns the number of slots that are still running a real GitHub job, or -1
-    # when the manager's observed state is missing/unreadable/unrecognised or does
-    # not expose the busy signal at all. The caller treats any non-zero result
-    # (including the -1 "unknown") as "not safe to recreate the manager", so an
-    # ambiguous state can never lead to interrupting an active job.
-    #
-    # This MUST read busySlots (slots whose runner printed "Running job:"), NOT
-    # activeSlots (live supervisors). A pool at rest always has live supervisors,
-    # so keying idle-detection off activeSlots meant a v6->v7 upgrade could never
-    # observe an idle pool and either deferred forever or risked a destructive
-    # replace — the exact defect issue #8's drain path exposed.
-    if (-not (Test-Path -LiteralPath $ProfileConfig.ObservedStatePath -PathType Leaf)) {
-        return -1
+    foreach ($markerPath in @($ProfileConfig.DrainRequestPath, $ProfileConfig.DrainCompletePath)) {
+        if (Test-Path -LiteralPath $markerPath -PathType Leaf) {
+            Remove-Item -LiteralPath $markerPath -Force -ErrorAction SilentlyContinue
+        }
+    }
+}
+
+function Test-RunnerLegacyWorkerBusy {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    # Host-side, best-effort job-busy probe for a running manager that predates
+    # the cooperative drain protocol (contract < 7). Such a manager cannot be
+    # told to stop accepting jobs, so setup inspects the managed worker
+    # containers directly: a worker is BUSY when its log shows a "Running job:"
+    # line with no later "completed with result" line. If ANY worker is busy, or
+    # its log cannot be read, the pool is reported busy so the caller DEFERS
+    # rather than risk interrupting an active job.
+    $workerIds = @(
+        docker ps -q --filter "label=$($ProfileConfig.ManagedRunnerLabel)" 2>$null |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    foreach ($workerId in $workerIds) {
+        $logLines = @(docker logs --tail 400 $workerId 2>&1 | ForEach-Object { [string]$_ })
+        if ($LASTEXITCODE -ne 0) {
+            return $true
+        }
+        $lastRunning = -1
+        $lastCompleted = -1
+        for ($index = 0; $index -lt $logLines.Count; $index++) {
+            if ($logLines[$index] -match 'Running job:') {
+                $lastRunning = $index
+            }
+            if ($logLines[$index] -match 'completed with result') {
+                $lastCompleted = $index
+            }
+        }
+        if ($lastRunning -gt $lastCompleted) {
+            return $true
+        }
+    }
+    return $false
+}
+
+function Invoke-RunnerDrainAndFence {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [int]$RunningContractVersion
+    )
+
+    # Gate every destructive/static replacement (a compose down / rm -f, or a
+    # manager recreate) behind a drain so no NEW job can start between the
+    # idle confirmation and the replacement, and any IN-FLIGHT job finishes
+    # first. Returns { Safe; Mechanism; Reason }. A non-Safe result MUST make the
+    # caller DEFER — never force-stop the pool — which is the whole point of
+    # issue #8's fleet-loss hardening.
+    $timeoutSeconds = Get-RunnerDrainTimeoutSeconds
+
+    if ($RunningContractVersion -ge 7) {
+        # Cooperative drain: the running manager understands the marker protocol.
+        # Setup writes a nonce'd drain-request; the manager fences every slot
+        # (blocking NEW assignments), lets any in-flight job finish, and only
+        # then stamps drain-complete with the same nonce. This closes the
+        # time-of-check/time-of-use gap a bare "is it idle right now?" probe
+        # leaves open. On a Safe result the caller performs the replacement and
+        # then clears the markers itself (the replacement manager's boot cleanup
+        # is a belt-and-suspenders backup); the actual worker fencing is the
+        # per-slot /drain files the running manager already wrote, which survive
+        # until the replacement manager reconciles.
+        $nonce = [guid]::NewGuid().ToString('N')
+        Write-RunnerJsonAtomically `
+            -Path $ProfileConfig.DrainRequestPath `
+            -Value ([PSCustomObject]@{ schemaVersion = 1; nonce = $nonce })
+        Write-Host "[drain] Requested cooperative drain (nonce $nonce); waiting up to $timeoutSeconds s for in-flight jobs to finish and the pool to be fenced."
+        $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+        do {
+            if (Test-Path -LiteralPath $ProfileConfig.DrainCompletePath -PathType Leaf) {
+                try {
+                    $complete = Read-RunnerJsonFile -Path $ProfileConfig.DrainCompletePath
+                    if (
+                        [int]$complete.schemaVersion -eq 1 -and
+                        [string]$complete.nonce -eq $nonce
+                    ) {
+                        return [PSCustomObject]@{
+                            Safe = $true
+                            Mechanism = 'cooperative'
+                            Reason = 'the manager confirmed drain-complete; the pool is fenced and no job is running'
+                        }
+                    }
+                } catch {
+                }
+            }
+            Start-Sleep -Milliseconds 500
+        } while ($stopwatch.Elapsed.TotalSeconds -lt $timeoutSeconds)
+        return [PSCustomObject]@{
+            Safe = $false
+            Mechanism = 'cooperative'
+            Reason = "the manager did not confirm drain-complete within $timeoutSeconds s (a job may still be running)"
+        }
     }
 
-    try {
-        $observed = Read-RunnerJsonFile -Path $ProfileConfig.ObservedStatePath
-        if ([int]$observed.schemaVersion -ne 1) {
-            return -1
+    # Legacy path: a contract <7 manager cannot be cooperatively fenced. Poll the
+    # host-side job-busy probe so a job that finishes during the window flips the
+    # pool to idle; if it is still busy at the timeout, DEFER. NOTE: because the
+    # legacy manager keeps accepting work, a new job could in principle start in
+    # the small window between the idle confirmation and the replacement — an
+    # unavoidable residual race for pre-protocol managers, documented as such.
+    Write-Host "[drain] Manager predates the drain protocol (contract v$RunningContractVersion); waiting up to $timeoutSeconds s for the pool to become idle (host-side, best-effort) before any replacement."
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    do {
+        if (-not (Test-RunnerLegacyWorkerBusy -ProfileConfig $ProfileConfig)) {
+            return [PSCustomObject]@{
+                Safe = $true
+                Mechanism = 'legacy-host-side'
+                Reason = 'no managed worker is running a job (host-side, best-effort)'
+            }
         }
-        # A manager that does not publish busySlots predates the job-busy signal
-        # (contract < 7). Its idleness cannot be trusted from observed state, so
-        # report "unknown" and let the caller take the coordinated v6 path.
-        if (-not $observed.PSObject.Properties['busySlots']) {
-            return -1
-        }
-        $busy = [int]$observed.busySlots
-        if ($observed.PSObject.Properties['drainingSlots']) {
-            $busy += [int]$observed.drainingSlots
-        }
-        return $busy
-    } catch {
-        return -1
+        Start-Sleep -Milliseconds 500
+    } while ($stopwatch.Elapsed.TotalSeconds -lt $timeoutSeconds)
+    return [PSCustomObject]@{
+        Safe = $false
+        Mechanism = 'legacy-host-side'
+        Reason = "a managed worker was still running a job after $timeoutSeconds s"
     }
 }
 
@@ -411,19 +522,17 @@ function Invoke-RunnerManagerContractUpgrade {
     )
 
     $desiredContractVersion = [int]$ProfileConfig.ManagerContractVersion
-    $busySlots = Get-RunnerObservedBusySlots -ProfileConfig $ProfileConfig
+    $drain = Invoke-RunnerDrainAndFence `
+        -ProfileConfig $ProfileConfig `
+        -RunningContractVersion $RunningContractVersion
 
-    if ($busySlots -ne 0) {
-        $reason = if ($busySlots -lt 0) {
-            'its live slot activity could not be determined'
-        } else {
-            "$busySlots runner slot(s) are still active or draining"
-        }
-        Write-Warning "[contract] Manager for profile '$($ProfileConfig.Name)' runs contract v$RunningContractVersion but the tooling provides v$desiredContractVersion. Deferring the coordinated upgrade because $reason; no runner was restarted and no job was interrupted. Re-run Setup-Runner once the pool is idle to refresh the manager onto the new contract."
+    if (-not $drain.Safe) {
+        Remove-RunnerDrainMarkers -ProfileConfig $ProfileConfig
+        Write-Warning "[contract] Manager for profile '$($ProfileConfig.Name)' runs contract v$RunningContractVersion but the tooling provides v$desiredContractVersion. Deferring the coordinated upgrade because $($drain.Reason); no runner was restarted and no job was interrupted. Re-run Setup-Runner once the pool is idle to refresh the manager onto the new contract."
         return
     }
 
-    Write-Host "[contract] Manager for profile '$($ProfileConfig.Name)' is idle; performing a drain-safe upgrade from contract v$RunningContractVersion to v$desiredContractVersion without force-removing any container."
+    Write-Host "[contract] Manager for profile '$($ProfileConfig.Name)' is drained and fenced ($($drain.Mechanism)); performing a drain-safe upgrade from contract v$RunningContractVersion to v$desiredContractVersion without force-removing any container."
 
     $stagedFiles = [System.Collections.Generic.List[object]]::new()
     try {
@@ -464,6 +573,7 @@ function Invoke-RunnerManagerContractUpgrade {
         Invoke-RunnerCompose `
             -ProfileConfig $ProfileConfig `
             -CommandArguments @('up', '-d', '--build', '--force-recreate')
+        Remove-RunnerDrainMarkers -ProfileConfig $ProfileConfig
     }
     catch {
         foreach ($stagedFile in $stagedFiles) {
@@ -889,6 +999,24 @@ try {
         Write-Host '  Profile defines no runtime verification commands.'
     }
 
+    # Issue #8 follow-up (2): a static/resource change requires a destructive
+    # replacement (compose down + rm -f + up). If a manager is already running it
+    # is protecting live workers, so route the replacement through the SAME
+    # drain-and-fence workflow the contract upgrade uses: block new assignments,
+    # wait for any in-flight job to finish, and only then tear the pool down. A
+    # non-Safe drain DEFERS the change rather than force-stopping an active job.
+    if ($managerRunning) {
+        $replaceDrain = Invoke-RunnerDrainAndFence `
+            -ProfileConfig $profileConfig `
+            -RunningContractVersion $runningManagerContractVersion
+        if (-not $replaceDrain.Safe) {
+            Remove-RunnerDrainMarkers -ProfileConfig $profileConfig
+            Write-Warning "[replace] Deferring the static/resource replacement for profile '$($profileConfig.Name)' because $($replaceDrain.Reason); no runner was restarted and no job was interrupted. Re-run Setup-Runner once the pool is idle to apply the change."
+            return
+        }
+        Write-Host "[replace] Pool drained and fenced ($($replaceDrain.Mechanism)); no new job can start before the replacement."
+    }
+
     Write-Host "[state] Staging static profile and desired capacity (workers=$total, scope=$Scope)"
     $stagedFiles = [System.Collections.Generic.List[object]]::new()
     try {
@@ -937,6 +1065,9 @@ try {
         Invoke-RunnerCompose `
             -ProfileConfig $profileConfig `
             -CommandArguments @('up', '-d', '--build')
+        if ($managerRunning) {
+            Remove-RunnerDrainMarkers -ProfileConfig $profileConfig
+        }
     }
     finally {
         foreach ($stagedFile in $stagedFiles) {
