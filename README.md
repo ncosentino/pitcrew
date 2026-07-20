@@ -104,7 +104,7 @@ Setup-Runner.ps1
         |
         +-- static profile environment (token, image, labels, scope)
         +-- atomic desired-capacity state
-        +-- credential-free observed-state projection
+        +-- credential-free lifecycle and resource projection
         |
         v
 profile manager (Docker socket)
@@ -117,6 +117,10 @@ One lightweight manager runs per profile. Worker containers are siblings on the
 host Docker daemon rather than nested containers. Reapplying setup with only
 worker-count changes updates mounted state in place; image, label, scope,
 runner-group, and naming changes retain full profile replacement.
+
+The manager also samples host capacity and current manager and worker CPU,
+memory, and PID usage into the observed-state projection. Connectors and
+dashboards remain read-only consumers and never receive the Docker socket.
 
 Manager stop and restart send `SIGTERM` to all profile workers concurrently so
 compatible runner images can deregister from GitHub before their containers are

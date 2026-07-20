@@ -45,6 +45,7 @@ jobs:
       - name: Validate manager shell syntax
         run: |
           sh -n manager/manage-runners.sh
+          sh -n manager/observability.sh
           sh -n manager/reconciliation.sh
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/integration/fake-runner/fake-runner.sh

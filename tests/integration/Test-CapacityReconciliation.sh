@@ -84,6 +84,20 @@ wait_for_observed_generation() {
     return 1
 }
 
+wait_for_resource_slot_count() {
+    expected="$1"
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${OBSERVED_STATE}" ] &&
+            [ "$(jq '[.slots[].resources | select(. != null)] | length' "${OBSERVED_STATE}" 2>/dev/null || echo 0)" -eq "${expected}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for resource telemetry for ${expected} worker slots." >&2
+    return 1
+}
+
 wait_for_slot_replacement() {
     slot_key="$1"
     previous_id="$2"
@@ -123,7 +137,7 @@ start_legacy_compose() {
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="6" \
+        PITCREW_MANAGER_CONTRACT_VERSION="7" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -225,6 +239,7 @@ run_setup 5
 wait_for_acknowledgement 1
 wait_for_observed_generation 1 accepted
 wait_for_worker_count 5
+wait_for_resource_slot_count 5
 manager_image_kib=$(docker run \
     --rm \
     --entrypoint /bin/sh \
@@ -240,8 +255,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 6 ] || {
-    echo "Observed state did not report manager contract version six." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 7 ] || {
+    echo "Observed state did not report manager contract version seven." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
@@ -250,6 +265,22 @@ MANAGER_ID=$(manager_id)
 }
 [ "$(jq -r '.desiredSlots' "${OBSERVED_STATE}")" -eq 5 ] || {
     echo "Observed state did not report five desired slots." >&2
+    exit 1
+}
+[ "$(jq -r '.resourceTelemetry.status' "${OBSERVED_STATE}")" = "available" ] || {
+    echo "Observed state did not report available resource telemetry." >&2
+    exit 1
+}
+[ "$(jq -r '.resourceTelemetry.host.logicalProcessorCount' "${OBSERVED_STATE}")" -gt 0 ] || {
+    echo "Observed state did not report host processor capacity." >&2
+    exit 1
+}
+[ "$(jq -r '.resourceTelemetry.manager.memoryWorkingSetBytes' "${OBSERVED_STATE}")" -gt 0 ] || {
+    echo "Observed state did not report manager memory usage." >&2
+    exit 1
+}
+[ "$(jq '[.slots[].resources | select(. != null)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
+    echo "Observed state did not report resources for every live worker." >&2
     exit 1
 }
 mapfile -t original_workers < <(worker_ids)

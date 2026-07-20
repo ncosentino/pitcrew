@@ -8,8 +8,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 . "${SCRIPT_DIRECTORY}/observability.sh"
 
-MANAGER_CONTRACT_VERSION=6
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-6}"
+MANAGER_CONTRACT_VERSION=7
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-7}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -25,12 +25,15 @@ ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE_PATH="${STATE_DIRECTORY}/observed-state.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
+RESOURCE_TELEMETRY_PATH="/tmp/pitcrew-resource-telemetry.json"
+RESOURCE_TELEMETRY_COMMAND_TIMEOUT=3
 SLOT_DIRECTORY="/tmp/pitcrew-slots"
 CURRENT_DESIRED_SLOTS="/tmp/pitcrew-current-desired-slots.tsv"
 PENDING_ACKNOWLEDGEMENT="/tmp/pitcrew-pending-acknowledgement.json"
 OBSERVED_STATE_DIRTY="/tmp/pitcrew-observed-state-dirty"
 MANAGED_LABEL_KEY="ephemeral-managed-runner-profile"
 MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"
+MANAGER_LABEL="ephemeral-runner-manager-profile=${PROFILE_ID}"
 SLOT_LABEL_KEY="ephemeral-managed-runner-slot"
 
 case "${RECONCILE_INTERVAL}" in
@@ -75,6 +78,8 @@ LAST_REJECTION=""
 STOPPING=0
 MANAGER_STATUS="starting"
 LAST_OBSERVED_STATE_PUBLISH_EPOCH=0
+LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH=0
+LAST_RESOURCE_TELEMETRY_STATUS=""
 rand_hex() {
     tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 6
 }
@@ -94,18 +99,68 @@ mark_observed_state_dirty() {
     : > "${OBSERVED_STATE_DIRTY}"
 }
 
+report_resource_telemetry_status() {
+    resource_status="$1"
+    [ "${resource_status}" = "${LAST_RESOURCE_TELEMETRY_STATUS}" ] && return
+    if [ "${resource_status}" = "available" ]; then
+        if [ -n "${LAST_RESOURCE_TELEMETRY_STATUS}" ]; then
+            echo "[manager:${PROFILE_ID}] resource telemetry is available"
+        fi
+    else
+        echo "[manager:${PROFILE_ID}] resource telemetry is ${resource_status}" >&2
+    fi
+    LAST_RESOURCE_TELEMETRY_STATUS="${resource_status}"
+}
+
 publish_observed_state() {
     force="${1:-0}"
     observed_now=$(date +%s)
     if [ "${force}" != "1" ] &&
         [ ! -f "${OBSERVED_STATE_DIRTY}" ] &&
-        [ $((observed_now - LAST_OBSERVED_STATE_PUBLISH_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ]; then
+        [ $((observed_now - LAST_OBSERVED_STATE_PUBLISH_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ] &&
+        [ -f "${RESOURCE_TELEMETRY_PATH}" ] &&
+        [ $((observed_now - LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ]; then
         return
     fi
 
     rm -f "${OBSERVED_STATE_DIRTY}"
+    resource_now=$(date +%s)
+    if [ "${STOPPING}" -eq 1 ]; then
+        if [ ! -f "${RESOURCE_TELEMETRY_PATH}" ]; then
+            if ! write_unavailable_resource_telemetry "${RESOURCE_TELEMETRY_PATH}"; then
+                mark_observed_state_dirty
+                echo "[manager:${PROFILE_ID}] could not write shutdown resource telemetry" >&2
+                return
+            fi
+            report_resource_telemetry_status "unavailable"
+        fi
+    elif [ ! -f "${RESOURCE_TELEMETRY_PATH}" ] ||
+        [ $((resource_now - LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH)) -ge "${OBSERVED_STATE_INTERVAL}" ]; then
+        if collect_resource_telemetry \
+            "${RESOURCE_TELEMETRY_PATH}" \
+            "${MANAGED_LABEL}" \
+            "${MANAGER_LABEL}" \
+            "${SLOT_LABEL_KEY}" \
+            "${RESOURCE_TELEMETRY_COMMAND_TIMEOUT}"; then
+            LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH="${resource_now}"
+            resource_status=$(jq -r '.status' "${RESOURCE_TELEMETRY_PATH}")
+            report_resource_telemetry_status "${resource_status}"
+        else
+            if ! write_unavailable_resource_telemetry "${RESOURCE_TELEMETRY_PATH}"; then
+                mark_observed_state_dirty
+                echo "[manager:${PROFILE_ID}] could not write unavailable resource telemetry" >&2
+                return
+            fi
+            LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH="${resource_now}"
+            report_resource_telemetry_status "unavailable"
+        fi
+    fi
+
     observed_slots_path="/tmp/pitcrew-observed-slots.json"
-    if ! render_observed_slots "${SLOT_DIRECTORY}" "${observed_slots_path}"; then
+    if ! render_observed_slots \
+        "${SLOT_DIRECTORY}" \
+        "${observed_slots_path}" \
+        "${RESOURCE_TELEMETRY_PATH}"; then
         rm -f "${observed_slots_path}"
         mark_observed_state_dirty
         echo "[manager:${PROFILE_ID}] could not render observed slot state" >&2
@@ -140,7 +195,8 @@ publish_observed_state() {
         "${CURRENT_STATE_HASH}" \
         "${observed_desired_status}" \
         "${observed_desired_count}" \
-        "${observed_slots_path}"; then
+        "${observed_slots_path}" \
+        "${RESOURCE_TELEMETRY_PATH}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty
@@ -712,7 +768,7 @@ fi
 rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
-rm -f "${OBSERVED_STATE_DIRTY}"
+rm -f "${OBSERVED_STATE_DIRTY}" "${RESOURCE_TELEMETRY_PATH}"
 mark_observed_state_dirty
 
 echo "[manager:${PROFILE_ID}] clearing any leftover managed runners"

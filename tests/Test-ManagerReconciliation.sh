@@ -43,7 +43,9 @@ contains_access_token_field() {
 }
 
 contains_runner_identity_field() {
-    jq -e '[.slots[] | has("tag") or has("runnerName")] | any' "$1" >/dev/null
+    jq -e \
+        '[.. | objects | has("tag") or has("runnerName") or has("containerId") or has("containerName")] | any' \
+        "$1" >/dev/null
 }
 
 write_repo_state() {
@@ -215,9 +217,100 @@ assert_false \
     'https://github.com/example/project=0' \
     1
 
+fake_docker_directory="${TEMP_DIRECTORY}/fake-docker"
+collected_resources="${TEMP_DIRECTORY}/collected-resources.json"
+partial_resources="${TEMP_DIRECTORY}/partial-resources.json"
+timed_resources="${TEMP_DIRECTORY}/timed-resources.json"
+host_partial_resources="${TEMP_DIRECTORY}/host-partial-resources.json"
+mkdir -p "${fake_docker_directory}"
+cat > "${fake_docker_directory}/docker" <<'EOF'
+#!/bin/sh
+case "$1" in
+    info)
+        if [ "${PITCREW_TEST_INFO_FAIL:-0}" = "1" ]; then
+            exit 1
+        fi
+        printf '%s\n' '{"logicalProcessorCount":16,"memoryBytes":34359738368}'
+        ;;
+    ps)
+        printf '%s\n' 'worker123 slot-one runner-one'
+        ;;
+    stats)
+        if [ "${PITCREW_TEST_STATS_SLEEP:-0}" != "0" ]; then
+            sleep "${PITCREW_TEST_STATS_SLEEP}"
+        fi
+        if [ "${PITCREW_TEST_STATS_FAIL:-0}" = "1" ]; then
+            exit 1
+        fi
+        printf '%s\n' \
+            '{"CPUPerc":"1.25%","ID":"manager123","MemUsage":"32MiB / 32GiB","PIDs":"7"}' \
+            '{"CPUPerc":"25.00%","ID":"worker123","MemUsage":"128MiB / 32GiB","PIDs":"12"}'
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "${fake_docker_directory}/docker"
+
+HOSTNAME=manager123 \
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_resource_telemetry \
+        "${collected_resources}" \
+        'ephemeral-managed-runner-profile=default' \
+        'ephemeral-runner-manager-profile=default' \
+        'ephemeral-managed-runner-slot' \
+        1
+assert_equals "available" "$(jq -r '.status' "${collected_resources}")" "Complete Docker stats did not produce available resource telemetry."
+assert_equals "0.0125" "$(jq -r '.manager.cpuCores' "${collected_resources}")" "Manager CPU telemetry was normalized incorrectly."
+assert_equals "134217728" "$(jq -r '.slots["slot-one"].usage.memoryWorkingSetBytes' "${collected_resources}")" "Worker memory telemetry was normalized incorrectly."
+
+PITCREW_TEST_STATS_FAIL=1 \
+HOSTNAME=manager123 \
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_resource_telemetry \
+        "${partial_resources}" \
+        'ephemeral-managed-runner-profile=default' \
+        'ephemeral-runner-manager-profile=default' \
+        'ephemeral-managed-runner-slot' \
+        1
+assert_equals "partial" "$(jq -r '.status' "${partial_resources}")" "A Docker stats failure was not surfaced as partial telemetry."
+assert_equals "null" "$(jq -r '.manager' "${partial_resources}")" "A failed stats sample emitted success-shaped manager usage."
+
+PITCREW_TEST_INFO_FAIL=1 \
+HOSTNAME=manager123 \
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_resource_telemetry \
+        "${host_partial_resources}" \
+        'ephemeral-managed-runner-profile=default' \
+        'ephemeral-runner-manager-profile=default' \
+        'ephemeral-managed-runner-slot' \
+        1
+assert_equals "partial" "$(jq -r '.status' "${host_partial_resources}")" "Missing host capacity was not surfaced as partial telemetry."
+assert_equals "null" "$(jq -r '.host' "${host_partial_resources}")" "A failed host-capacity sample emitted success-shaped capacity."
+assert_equals "0.0125" "$(jq -r '.manager.cpuCores' "${host_partial_resources}")" "Host-capacity failure discarded valid manager telemetry."
+assert_equals "134217728" "$(jq -r '.slots["slot-one"].usage.memoryWorkingSetBytes' "${host_partial_resources}")" "Host-capacity failure discarded valid worker telemetry."
+
+timeout_started=$(date +%s)
+PITCREW_TEST_STATS_SLEEP=5 \
+HOSTNAME=manager123 \
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_resource_telemetry \
+        "${timed_resources}" \
+        'ephemeral-managed-runner-profile=default' \
+        'ephemeral-runner-manager-profile=default' \
+        'ephemeral-managed-runner-slot' \
+        1
+timeout_elapsed=$(($(date +%s) - timeout_started))
+assert_true \
+    "A stalled Docker stats request blocked telemetry collection for ${timeout_elapsed} seconds." \
+    test "${timeout_elapsed}" -lt 4
+assert_equals "partial" "$(jq -r '.status' "${timed_resources}")" "A timed-out stats sample was not surfaced as partial telemetry."
+
 observed_slots_directory="${TEMP_DIRECTORY}/observed-slots"
 observed_slots_json="${TEMP_DIRECTORY}/observed-slots.json"
 observed_state_json="${TEMP_DIRECTORY}/observed-state.json"
+resource_telemetry_json="${TEMP_DIRECTORY}/resource-telemetry.json"
 observed_dirty="${TEMP_DIRECTORY}/observed-dirty"
 mkdir -p \
     "${observed_slots_directory}/repo-example-000001" \
@@ -241,19 +334,56 @@ write_slot_runtime_state \
     2 \
     12
 : > "${observed_slots_directory}/repo-example-000002/drain"
-render_observed_slots "${observed_slots_directory}" "${observed_slots_json}"
+cat > "${resource_telemetry_json}" <<'EOF'
+{
+  "sampledAt": "2026-01-01T00:00:00Z",
+  "status": "available",
+  "host": {
+    "logicalProcessorCount": 16,
+    "memoryBytes": 34359738368
+  },
+  "manager": {
+    "cpuCores": 0.01,
+    "memoryWorkingSetBytes": 33554432,
+    "pids": 7
+  },
+  "slots": {
+    "repo-example-000001": {
+      "runnerName": "runner-project-1",
+      "usage": {
+        "cpuCores": 0.25,
+        "memoryWorkingSetBytes": 134217728,
+        "pids": 12
+      }
+    },
+    "repo-example-000002": {
+      "runnerName": "runner-project-2",
+      "usage": {
+        "cpuCores": 0.5,
+        "memoryWorkingSetBytes": 268435456,
+        "pids": 20
+      }
+    }
+  }
+}
+EOF
+render_observed_slots \
+    "${observed_slots_directory}" \
+    "${observed_slots_json}" \
+    "${resource_telemetry_json}"
 write_manager_observed_state \
     "${observed_state_json}" \
     default \
     manager-instance \
-    5 \
+    7 \
     running \
     repo \
     9 \
     state-hash \
     accepted \
     2 \
-    "${observed_slots_json}"
+    "${observed_slots_json}" \
+    "${resource_telemetry_json}"
 assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
 assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
 assert_equals "1" "$(jq -r '.drainingSlots' "${observed_state_json}")" "Observed state reported the wrong draining slot count."
@@ -261,7 +391,63 @@ assert_equals "online" "$(jq -r '.slots[] | select(.key == "repo-example-000001"
 assert_equals "draining" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .state' "${observed_state_json}")" "Drain state did not override runtime backoff."
 assert_equals "2" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .failureCount' "${observed_state_json}")" "Observed state lost the slot failure count."
 assert_equals "https://example.com/example/project" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .repository' "${observed_state_json}")" "Observed state did not strip repository credentials and query parameters."
+assert_equals "16" "$(jq -r '.resourceTelemetry.host.logicalProcessorCount' "${observed_state_json}")" "Observed state lost host processor capacity."
+assert_equals "33554432" "$(jq -r '.resourceTelemetry.manager.memoryWorkingSetBytes' "${observed_state_json}")" "Observed state lost manager memory telemetry."
+assert_equals "0.25" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .resources.cpuCores' "${observed_state_json}")" "Observed state lost online slot CPU telemetry."
+assert_equals "0.5" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .resources.cpuCores' "${observed_state_json}")" "Observed state lost draining slot CPU telemetry."
 assert_false "Observed state exposed an access token field." contains_access_token_field "${observed_state_json}"
 assert_false "Observed state exposed runner names or derived tags." contains_runner_identity_field "${observed_state_json}"
+
+invalid_resource_state="${TEMP_DIRECTORY}/invalid-resource-state.json"
+jq '.slots[0].resources.cpuCores = -1' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Observed state accepted negative CPU telemetry." observed_state_is_valid "${invalid_resource_state}"
+jq 'del(.resourceTelemetry)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract seven accepted missing resource telemetry." observed_state_is_valid "${invalid_resource_state}"
+jq '.resourceTelemetry = null' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract seven accepted null resource telemetry." observed_state_is_valid "${invalid_resource_state}"
+jq 'del(.slots[0].resources)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract seven accepted a slot without a resources field." observed_state_is_valid "${invalid_resource_state}"
+jq '.resourceTelemetry.host = null' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Available telemetry accepted missing host capacity." observed_state_is_valid "${invalid_resource_state}"
+jq '
+    .resourceTelemetry.status = "partial"
+    | .resourceTelemetry.host = null
+    | .resourceTelemetry.manager = null
+    | .slots |= map(.resources = null)
+' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Partial telemetry accepted an empty resource sample." observed_state_is_valid "${invalid_resource_state}"
+jq '
+    .resourceTelemetry.status = "unavailable"
+    | .resourceTelemetry.host = null
+    | .resourceTelemetry.manager = null
+' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Unavailable telemetry accepted worker resource values." observed_state_is_valid "${invalid_resource_state}"
+jq '
+    .resourceTelemetry.status = "unavailable"
+    | .resourceTelemetry.host = null
+    | .resourceTelemetry.manager = null
+    | .slots |= map(.resources = null)
+    | del(.resourceTelemetry.host)
+' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Unavailable telemetry accepted a missing host field." observed_state_is_valid "${invalid_resource_state}"
+jq '
+    .resourceTelemetry.status = "unavailable"
+    | .resourceTelemetry.host = null
+    | .resourceTelemetry.manager = null
+    | .slots |= map(.resources = null)
+    | del(.resourceTelemetry.manager)
+' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Unavailable telemetry accepted a missing manager field." observed_state_is_valid "${invalid_resource_state}"
+legacy_observed_state="${TEMP_DIRECTORY}/legacy-observed-state.json"
+jq '
+    .managerContractVersion = 6
+    | del(.resourceTelemetry)
+    | .slots |= map(del(.resources))
+' "${observed_state_json}" > "${legacy_observed_state}"
+assert_true "Observed-state validation rejected a pre-telemetry manager contract." observed_state_is_valid "${legacy_observed_state}"
+
+assert_equals "0" "$(parse_size_bytes '0B')" "Byte parsing changed zero bytes."
+assert_equals "44312822" "$(parse_size_bytes '42.26MiB')" "Byte parsing did not preserve Docker binary units."
+assert_equals "0.125" "$(parse_cpu_cores '12.5%')" "CPU parsing did not convert Docker percent to cores."
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

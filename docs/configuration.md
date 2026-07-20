@@ -91,9 +91,26 @@ Each manager also projects credential-free operational status to
 `.pitcrew-state/<profile>/observed-state.json`. The manager replaces this file
 atomically after slot lifecycle changes and on a low-frequency heartbeat. It
 contains the manager instance, accepted generation, desired-state health, and
-per-slot lifecycle state, but no registration token, environment values, job
-logs, or Docker socket details. Consumers must use `observedAt` to reject stale
-status after an ungraceful manager exit.
+per-slot lifecycle state. Every 30 seconds, the same projection samples host
+capacity plus manager and worker CPU cores, memory working-set bytes, and PID
+counts. A CPU value of `1.0` represents one fully utilized logical processor and
+can exceed `1.0` for a multi-core workload.
+
+Resource telemetry is marked `available`, `partial`, or `unavailable`; missing
+measurements remain `null` rather than appearing as zero usage. The manager
+collects these values through its existing Docker socket. Connectors and
+dashboard services continue to consume only the read-only state projection and
+do not receive Docker access.
+
+Manager contract 7 introduces these additive fields. Older connectors continue
+to relay lifecycle state but discard fields they do not recognize, so update the
+optional connector and dashboard before expecting resource cards to appear.
+
+The projection contains no registration token, environment values, job logs,
+container identity, or Docker socket details. Resource usage does not identify
+whether a runner is busy, so consumers must not infer job state from CPU or
+memory activity. Consumers must use `observedAt` and the resource
+`sampledAt` value to reject stale status after an ungraceful manager exit.
 
 For repository scope, desired state records each repository URL and worker
 count. Organization and enterprise scope record one shared replica count. The

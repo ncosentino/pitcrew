@@ -21,10 +21,12 @@ $runnerRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 $functionsPath = Join-Path $runnerRoot 'RunnerProfiles.Functions.ps1'
 $setupPath = Join-Path $runnerRoot 'Setup-Runner.ps1'
 $schemaPath = Join-Path $runnerRoot 'runner-profile.schema.json'
+$observedStateSchemaPath = Join-Path $runnerRoot 'observed-state.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
+$observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
@@ -111,7 +113,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 6
+        managerContractVersion = 7
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -167,7 +169,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 6
+                            managerContractVersion = 7
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -197,10 +199,12 @@ $requiredPaths = @(
     $functionsPath,
     $setupPath,
     $schemaPath,
+    $observedStateSchemaPath,
     $copilotProfilePath,
     $copilotDockerfilePath,
     $managerPath,
     $managerDockerfilePath,
+    $observabilityPath,
     $reconciliationPath,
     $composePath,
     $routingPath
@@ -217,6 +221,139 @@ if ($errors.Count -gt 0) {
 
 $profileJson = Get-Content -LiteralPath $copilotProfilePath -Raw -Encoding UTF8
 Add-Check ($profileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Copilot CLI profile does not conform to runner-profile.schema.json.'
+$observedStateV7 = [PSCustomObject][ordered]@{
+    schemaVersion = 1
+    managerContractVersion = 7
+    profileId = 'default'
+    managerInstanceId = 'manager-instance'
+    managerStatus = 'running'
+    observedAt = '2026-01-01T00:00:00Z'
+    scope = 'repo'
+    generation = 1
+    desiredStateHash = 'hash'
+    desiredStateStatus = 'accepted'
+    desiredSlots = 1
+    activeSlots = 1
+    drainingSlots = 0
+    slots = @(
+        [PSCustomObject][ordered]@{
+            key = 'repo-example-000001'
+            repository = 'https://github.com/example/project'
+            desired = $true
+            processRunning = $true
+            state = 'online'
+            failureCount = 0
+            backoffSeconds = 0
+            updatedAt = '2026-01-01T00:00:00Z'
+            resources = [PSCustomObject][ordered]@{
+                cpuCores = 0.25
+                memoryWorkingSetBytes = 134217728
+                pids = 12
+            }
+        }
+    )
+    resourceTelemetry = [PSCustomObject][ordered]@{
+        sampledAt = '2026-01-01T00:00:00Z'
+        status = 'available'
+        host = [PSCustomObject][ordered]@{
+            logicalProcessorCount = 16
+            memoryBytes = 34359738368
+        }
+        manager = [PSCustomObject][ordered]@{
+            cpuCores = 0.01
+            memoryWorkingSetBytes = 33554432
+            pids = 7
+        }
+    }
+}
+$observedStateV6 = $observedStateV7.PSObject.Copy()
+$observedStateV6.managerContractVersion = 6
+$observedStateV6.PSObject.Properties.Remove('resourceTelemetry')
+$observedStateV6.slots = @(
+    [PSCustomObject][ordered]@{
+        key = 'repo-example-000001'
+        repository = 'https://github.com/example/project'
+        desired = $true
+        processRunning = $true
+        state = 'online'
+        failureCount = 0
+        backoffSeconds = 0
+        updatedAt = '2026-01-01T00:00:00Z'
+    }
+)
+Add-Check (
+    ($observedStateV7 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract seven does not conform to observed-state.schema.json.'
+Add-Check (
+    ($observedStateV6 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'The observed-state schema no longer accepts pre-telemetry managers.'
+$nullTelemetryV7 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$nullTelemetryV7.resourceTelemetry = $null
+Add-Check (-not (
+    ($nullTelemetryV7 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts null telemetry for manager contract seven.'
+$missingSlotResourcesV7 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$missingSlotResourcesV7.slots[0].PSObject.Properties.Remove('resources')
+Add-Check (-not (
+    ($missingSlotResourcesV7 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts a contract-seven slot without resources.'
+$availableWithoutHostV7 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$availableWithoutHostV7.resourceTelemetry.host = $null
+Add-Check (-not (
+    ($availableWithoutHostV7 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts available telemetry without host capacity.'
+$emptyPartialV7 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$emptyPartialV7.resourceTelemetry.status = 'partial'
+$emptyPartialV7.resourceTelemetry.host = $null
+$emptyPartialV7.resourceTelemetry.manager = $null
+$emptyPartialV7.slots[0].resources = $null
+Add-Check (-not (
+    ($emptyPartialV7 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts an empty partial telemetry sample.'
+$unavailableWithSlotV7 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$unavailableWithSlotV7.resourceTelemetry.status = 'unavailable'
+$unavailableWithSlotV7.resourceTelemetry.host = $null
+$unavailableWithSlotV7.resourceTelemetry.manager = $null
+Add-Check (-not (
+    ($unavailableWithSlotV7 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts worker resources in unavailable telemetry.'
 
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
@@ -254,7 +391,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 6) 'The setup contract does not identify the observed-state manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 7) 'The setup contract does not identify the resource-telemetry manager.'
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
@@ -399,7 +536,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=6$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=7$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -859,6 +996,7 @@ finally {
 
 $manager = Get-Content -LiteralPath $managerPath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
+$observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
 $exampleEnvironment = Get-Content -LiteralPath (Join-Path $runnerRoot '.env.example') -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
@@ -876,6 +1014,8 @@ Add-Check ($manager -match [regex]::Escape('/drain')) 'The manager does not repr
 Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Worker containers do not expose stable slot identity.'
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
 Add-Check ($manager -match [regex]::Escape('PITCREW_OBSERVED_STATE_INTERVAL:-30')) 'The manager does not bound observed-state heartbeat writes.'
+Add-Check ($manager -match [regex]::Escape('collect_resource_telemetry')) 'The manager does not collect resource telemetry through observed state.'
+Add-Check ($manager -match [regex]::Escape('if [ "${STOPPING}" -eq 1 ]; then')) 'Manager shutdown can block on a fresh resource-telemetry sample.'
 Add-Check ($manager -match [regex]::Escape(': > "${stopping_path}/drain"')) 'Manager shutdown does not drain slot supervisors before cleanup.'
 Add-Check ($manager -match [regex]::Escape('docker stop \')) 'Manager shutdown does not signal worker entry points before force removal.'
 Add-Check ($manager -match [regex]::Escape('--timeout "${RUNNER_STOP_TIMEOUT}"')) 'Manager shutdown does not bound graceful worker deregistration.'
@@ -890,13 +1030,17 @@ Add-Check ($managerDockerfile -match 'JQ_SHA256_ARM64=[0-9a-f]{64}') 'The manage
 Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The manager does not verify the downloaded jq binary.'
 Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
+Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
+Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'
+Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'
+Add-Check ($observability -match [regex]::Escape('memoryWorkingSetBytes')) 'Resource telemetry does not expose memory working-set bytes.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
 Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
 Add-Check ($compose -match 'stop_grace_period:\s*35s') 'Compose does not allow manager shutdown to complete bounded worker cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=6$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=7$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'
