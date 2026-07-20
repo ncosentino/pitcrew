@@ -19,6 +19,8 @@ PowerShell, Docker Compose, and a POSIX shell manager.
 
 - A worker handles one job and is destroyed with `--rm`.
 - Only the manager mounts the host Docker socket.
+- Resource telemetry is collected by the manager and published through
+  credential-free observed state; connectors remain read-only consumers.
 - Named profiles have isolated Compose projects, state files, labels, and
   cleanup selectors.
 - Capacity-only updates leave existing workers and the manager untouched;

@@ -5,6 +5,88 @@
   "description": "Credential-free operational status projected by one PitCrew profile manager.",
   "type": "object",
   "additionalProperties": false,
+  "$defs": {
+    "resourceUsage": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "cpuCores",
+        "memoryWorkingSetBytes",
+        "pids"
+      ],
+      "properties": {
+        "cpuCores": {
+          "type": "number",
+          "minimum": 0
+        },
+        "memoryWorkingSetBytes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "hostResourceCapacity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "logicalProcessorCount",
+        "memoryBytes"
+      ],
+      "properties": {
+        "logicalProcessorCount": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "memoryBytes": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "managerResourceTelemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sampledAt",
+        "status",
+        "host",
+        "manager"
+      ],
+      "properties": {
+        "sampledAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "status": {
+          "enum": ["available", "partial", "unavailable"]
+        },
+        "host": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/hostResourceCapacity"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "manager": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/resourceUsage"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
+    }
+  },
   "required": [
     "schemaVersion",
     "managerContractVersion",
@@ -70,6 +152,16 @@
       "type": "integer",
       "minimum": 0
     },
+    "resourceTelemetry": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/managerResourceTelemetry"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "slots": {
       "type": "array",
       "items": {
@@ -113,9 +205,189 @@
           "updatedAt": {
             "type": ["string", "null"],
             "format": "date-time"
+          },
+          "resources": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/resourceUsage"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       }
     }
-  }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 7
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "resourceTelemetry"
+        ],
+        "properties": {
+          "resourceTelemetry": {
+            "$ref": "#/$defs/managerResourceTelemetry"
+          },
+          "slots": {
+            "items": {
+              "required": [
+                "resources"
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "resourceTelemetry": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "available"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "resourceTelemetry"
+        ]
+      },
+      "then": {
+        "properties": {
+          "resourceTelemetry": {
+            "properties": {
+              "host": {
+                "$ref": "#/$defs/hostResourceCapacity"
+              },
+              "manager": {
+                "$ref": "#/$defs/resourceUsage"
+              }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "resourceTelemetry": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "partial"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "resourceTelemetry"
+        ]
+      },
+      "then": {
+        "anyOf": [
+          {
+            "properties": {
+              "resourceTelemetry": {
+                "properties": {
+                  "host": {
+                    "$ref": "#/$defs/hostResourceCapacity"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "resourceTelemetry": {
+                "properties": {
+                  "manager": {
+                    "$ref": "#/$defs/resourceUsage"
+                  }
+                }
+              }
+            }
+          },
+          {
+            "properties": {
+              "slots": {
+                "contains": {
+                  "properties": {
+                    "resources": {
+                      "$ref": "#/$defs/resourceUsage"
+                    }
+                  },
+                  "required": [
+                    "resources"
+                  ]
+                }
+              }
+            }
+          }
+        ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "resourceTelemetry": {
+            "type": "object",
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          }
+        },
+        "required": [
+          "resourceTelemetry"
+        ]
+      },
+      "then": {
+        "properties": {
+          "resourceTelemetry": {
+            "properties": {
+              "host": {
+                "type": "null"
+              },
+              "manager": {
+                "type": "null"
+              }
+            }
+          },
+          "slots": {
+            "items": {
+              "properties": {
+                "resources": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ]
 }
