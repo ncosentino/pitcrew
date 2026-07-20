@@ -47,6 +47,7 @@ nav:
       - Custom Profiles: guides/custom-profiles.md
       - Routing Workloads: guides/routing-workloads.md
       - Security Boundaries: guides/security-boundaries.md
+      - Copilot CLI Operations: guides/copilot-operations.md
 
 plugins:
   - search

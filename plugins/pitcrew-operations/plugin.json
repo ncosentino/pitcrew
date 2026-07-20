@@ -1,0 +1,20 @@
+{
+  "name": "pitcrew-operations",
+  "description": "Safely manage PitCrew capacity and update PitCrew or its optional dashboard using the repositories' supported commands.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Nick Cosentino",
+    "url": "https://www.devleader.ca"
+  },
+  "homepage": "https://www.devleader.ca/projects/pitcrew",
+  "repository": "https://github.com/ncosentino/pitcrew",
+  "license": "MIT",
+  "keywords": [
+    "pitcrew",
+    "github-actions",
+    "self-hosted-runners",
+    "operations",
+    "docker-compose"
+  ],
+  "skills": "skills/"
+}

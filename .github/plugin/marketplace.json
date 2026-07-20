@@ -1,0 +1,29 @@
+{
+  "name": "pitcrew",
+  "owner": {
+    "name": "Nick Cosentino",
+    "url": "https://www.devleader.ca"
+  },
+  "metadata": {
+    "description": "Operational skills for safely managing PitCrew runner pools and dashboards.",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "pitcrew-operations",
+      "description": "Use PitCrew's existing scripts and scoped Docker Compose commands for capacity and version updates.",
+      "version": "1.0.0",
+      "source": "./plugins/pitcrew-operations",
+      "homepage": "https://www.devleader.ca/projects/pitcrew",
+      "repository": "https://github.com/ncosentino/pitcrew",
+      "license": "MIT",
+      "keywords": [
+        "pitcrew",
+        "github-actions",
+        "self-hosted-runners",
+        "operations",
+        "docker-compose"
+      ]
+    }
+  ]
+}

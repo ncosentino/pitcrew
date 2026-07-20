@@ -673,6 +673,7 @@ try {
     $dockerLog = Join-Path $tempRoot 'docker.log'
 
     $previousDockerFunction = Get-Item Function:\global:docker -ErrorAction SilentlyContinue
+    $previousInvokeRestMethodFunction = Get-Item Function:\global:Invoke-RestMethod -ErrorAction SilentlyContinue
     $env:PITCREW_RUNNER_DOCKER_LOG = $dockerLog
     $ambientNames = @(
         'ACCESS_TOKEN',
@@ -720,7 +721,34 @@ try {
         ) {
             Write-Output 'manager-container-id'
         }
+        if (
+            $dockerArguments[0] -eq 'image' -and
+            $dockerArguments[1] -eq 'inspect' -and
+            $env:PITCREW_TEST_IMAGE_MISSING -eq '1'
+        ) {
+            $global:LASTEXITCODE = 1
+            return
+        }
         $global:LASTEXITCODE = 0
+    }
+
+    function global:Invoke-RestMethod {
+        param(
+            [object]$Method,
+            [object]$Uri,
+            [hashtable]$Headers,
+            [object]$ErrorAction
+        )
+
+        if (
+            $env:PITCREW_TEST_REJECT_TOKEN -and
+            $Headers.Authorization -eq "Bearer $env:PITCREW_TEST_REJECT_TOKEN"
+        ) {
+            throw 'Test registration token rejected.'
+        }
+        return [PSCustomObject]@{
+            token = 'short-lived-registration-token'
+        }
     }
 
     try {
@@ -749,6 +777,30 @@ try {
             -Failure 'Setup accepted a zero repository worker count.'
         $invalidCountCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check (-not ($invalidCountCommands -match 'compose.*down')) 'An invalid repository count tore down the running pool.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Repos 'http://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'only HTTPS github.com repository URLs' `
+            -Failure 'Setup sent a registration token to a plaintext repository host.'
+        $plaintextHostCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($plaintextHostCommands -match 'compose.*down')) 'A plaintext repository URL stopped a running profile.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Repos 'https://example.com/example/project=1'
+            } `
+            -ExpectedMessage 'only HTTPS github.com repository URLs' `
+            -Failure 'Setup sent a registration token to an untrusted repository host.'
+        $untrustedHostCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($untrustedHostCommands -match 'compose.*down')) 'An untrusted repository URL stopped a running profile.'
 
         @(
             'ACCESS_TOKEN=legacy-registration-token'
@@ -789,6 +841,7 @@ try {
         $defaultEnvironmentState = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
         $defaultDesiredPath = Join-Path $fixtureRoot '.pitcrew-state' 'default' 'desired-capacity.json'
         $defaultAcknowledgementPath = Join-Path $fixtureRoot '.pitcrew-state' 'default' 'acknowledged-capacity.json'
+        $defaultStaticProfilePath = Join-Path $fixtureRoot '.pitcrew-state' 'default' 'static-profile.json'
         $defaultDesiredState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
             ConvertFrom-Json -Depth 10
         Add-Check ($defaultEnvironmentState -match '(?m)^RUNNER_PROFILE_ID=default$') 'Default setup did not write the default profile environment.'
@@ -808,7 +861,69 @@ try {
             -AddedSlots 1 `
             -DrainingSlots 0 `
             -UnchangedSlots 0
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -CapacityOnly `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Capacity-only update cannot proceed' `
+            -Failure 'A required capacity-only update fell back to profile replacement.'
+        $capacityGuardCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($capacityGuardCommands -match 'compose.*down')) 'A failed capacity-only guard stopped the selected profile.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Refresh will not start a stopped profile' `
+            -Failure 'Refresh started an intentionally stopped profile.'
+        $stoppedRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($stoppedRefreshCommands -match 'compose.*up')) 'A stopped profile refresh started a manager.'
+
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
+        $savedStaticProfile = Get-Content -LiteralPath $defaultStaticProfilePath -Raw -Encoding UTF8
+        Remove-Item -LiteralPath $defaultStaticProfilePath -Force
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'worker profile configuration is otherwise unchanged' `
+            -Failure 'Refresh accepted missing prior static profile state.'
+        $missingStaticRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($missingStaticRefreshCommands -match 'compose.*down')) 'A refresh with missing static state stopped the selected profile.'
+        Set-Content `
+            -LiteralPath $defaultStaticProfilePath `
+            -Value $savedStaticProfile `
+            -NoNewline `
+            -Encoding UTF8
+
+        $env:PITCREW_TEST_IMAGE_MISSING = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Runner image.*is not available' `
+            -Failure 'Refresh stopped a profile without an available worker image.'
+        $missingImageRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($missingImageRefreshCommands -match 'compose.*down')) 'A refresh with a missing worker image stopped the selected profile.'
+        Remove-Item Env:\PITCREW_TEST_IMAGE_MISSING -ErrorAction SilentlyContinue
+
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         $scaleUpAcknowledgement = Start-TestCapacityAcknowledgementWriter `
             -DesiredPath $defaultDesiredPath `
@@ -821,6 +936,7 @@ try {
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
+                -CapacityOnly `
                 -Repos 'https://github.com/example/project=2'
         }
         finally {
@@ -849,6 +965,7 @@ try {
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
+                -CapacityOnly `
                 -Repos 'https://github.com/example/project=1'
         }
         finally {
@@ -874,6 +991,27 @@ try {
         Add-Check ($idempotentState.generation -eq 3) 'Reapplying identical capacity advanced its generation.'
         Add-Check (-not ($idempotentCommands -match 'compose.*down')) 'Reapplying identical capacity restarted the manager.'
 
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -CapacityOnly `
+            -Repos 'https://github.com/example/project=1'
+        $storedTokenCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($storedTokenCommands -match 'compose.*down')) 'Reusing the stored profile token changed an otherwise identical profile.'
+
+        $env:PITCREW_TEST_REJECT_TOKEN = 'test-registration-token'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -CapacityOnly `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'stored token does not have runner registration access' `
+            -Failure 'Setup accepted a rejected stored registration token.'
+        $rejectedTokenCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($rejectedTokenCommands -match 'compose.*down')) 'A rejected stored token stopped the selected profile.'
+        Remove-Item Env:\PITCREW_TEST_REJECT_TOKEN -ErrorAction SilentlyContinue
+
         Set-TestCapacityAcknowledgement `
             -Path $defaultAcknowledgementPath `
             -Generation 2 `
@@ -893,6 +1031,7 @@ try {
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
+                -CapacityOnly `
                 -Repos 'https://github.com/example/project=1'
         }
         finally {
@@ -906,6 +1045,19 @@ try {
         Add-Check ($recoveredState.generation -eq 4) 'A stale acknowledgement did not force a recoverable generation.'
         Add-Check (-not ($recoveryCommands -match 'compose.*down')) 'Acknowledgement recovery restarted the manager.'
 
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Refresh `
+            -Repos 'https://github.com/example/project=1'
+        $refreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $refreshedState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check (-not ($refreshCommands -match '(^|\t)(pull|build|run)(\t|$)')) 'An explicit manager refresh mutated or reverified the shared runner image.'
+        Add-Check ($refreshCommands -match 'compose.*down') 'An explicit profile refresh did not stop the selected profile.'
+        Add-Check ($refreshCommands -match 'compose.*up.*--build') 'An explicit profile refresh did not rebuild and restart the selected manager.'
+        Add-Check ($refreshedState.generation -eq 4) 'An explicit profile refresh changed identical desired capacity.'
+
         if (-not $IsWindows) {
             $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
             & chmod 0555 $defaultStateDirectory
@@ -916,6 +1068,7 @@ try {
                     -Action {
                         & $fixtureSetup `
                             -Token 'test-registration-token' `
+                            -CapacityOnly `
                             -Repos 'https://github.com/example/project=2'
                     } `
                     -ExpectedMessage '(denied|permission|read-only)' `
@@ -979,6 +1132,10 @@ try {
         if ($previousDockerFunction) {
             Set-Item Function:\global:docker -Value $previousDockerFunction.ScriptBlock
         }
+        Remove-Item Function:\global:Invoke-RestMethod -ErrorAction SilentlyContinue
+        if ($previousInvokeRestMethodFunction) {
+            Set-Item Function:\global:Invoke-RestMethod -Value $previousInvokeRestMethodFunction.ScriptBlock
+        }
         foreach ($name in $ambientNames) {
             if ($savedAmbient[$name].Exists) {
                 Set-Item -LiteralPath "Env:$name" -Value $savedAmbient[$name].Value
@@ -988,6 +1145,8 @@ try {
         }
         Remove-Item Env:\PITCREW_RUNNER_DOCKER_LOG -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_RUNNING -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_REJECT_TOKEN -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_IMAGE_MISSING -ErrorAction SilentlyContinue
     }
 }
 finally {
@@ -1035,6 +1194,7 @@ Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')
 Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'
 Add-Check ($observability -match [regex]::Escape('memoryWorkingSetBytes')) 'Resource telemetry does not expose memory working-set bytes.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'
+Add-Check ($compose -match [regex]::Escape('image: ephemeral-runner-manager:profile-${RUNNER_PROFILE_ID:-default}')) 'Manager image tags are not isolated by profile.'
 Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/default}:/var/lib/pitcrew')) 'Compose does not mount the mutable state directory.'
 Add-Check ($compose -match 'stop_grace_period:\s*35s') 'Compose does not allow manager shutdown to complete bounded worker cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'

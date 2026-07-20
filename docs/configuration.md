@@ -11,7 +11,7 @@ profile without changing other profiles on the same host.
 
 | Parameter | Required | Description | Default |
 |-----------|----------|-------------|---------|
-| `-Token` | No | Fine-grained PAT used only to register runners. When omitted, PitCrew uses `gh auth token`. | Authenticated `gh` token |
+| `-Token` | No | Fine-grained PAT used only to register runners. When omitted for an existing profile, PitCrew reuses its stored token before trying `gh auth token`. | Stored profile token, then authenticated `gh` token |
 | `-Profile` | No | Built-in profile name. | `default` |
 | `-ProfilePath` | No | Path to an external profile manifest. Relative image-build paths resolve from the manifest directory. | None |
 | `-Scope` | No | GitHub runner scope: `repo`, `org`, or `ent`. | `repo` |
@@ -27,6 +27,8 @@ profile without changing other profiles on the same host.
 | `-PullImage` | No | Controls whether setup pulls a prebuilt image before verification. | Profile value |
 | `-RunnerGroup` | No | Organization or enterprise runner group. | Profile value |
 | `-Down` | No | Stops only the selected profile and removes its managed workers. | Off |
+| `-Refresh` | No | Rebuilds the selected manager while requiring the worker profile configuration to remain unchanged. This stops that profile's workers and requires an idle maintenance window. | Off |
+| `-CapacityOnly` | No | Requires an in-place capacity update and fails rather than replacing a manager when the current profile cannot reconcile capacity safely. | Off |
 
 ## Repository worker counts
 
@@ -138,6 +140,12 @@ Changes to image, labels, default-label behavior, scope, organization or
 enterprise identity, runner group, name prefix, registration token, build or
 verification contract, or manager runtime contract continue to replace the
 selected profile.
+
+Use `-Refresh` after switching an installation checkout to a new PitCrew
+release when the manager implementation changed without changing its runtime
+contract number. Refresh is intentionally disruptive to the selected profile;
+confirm its GitHub runners are idle before invoking it. Apply worker image,
+label, scope, or other static profile changes separately.
 
 Locally built profiles also fingerprint their complete build-context inventory.
 Generated PitCrew state and the selected secret environment are excluded. The

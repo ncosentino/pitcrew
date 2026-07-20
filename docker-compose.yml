@@ -21,7 +21,7 @@
 services:
   runner-manager:
     build: ./manager
-    image: ephemeral-runner-manager:local
+    image: ephemeral-runner-manager:profile-${RUNNER_PROFILE_ID:-default}
     # Keep the babysitter alive across crashes and reboots; on start it clears any
     # runners orphaned by a previous incarnation, so the pool self-recovers.
     restart: unless-stopped
