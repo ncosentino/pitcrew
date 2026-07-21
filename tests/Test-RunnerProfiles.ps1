@@ -138,7 +138,9 @@ function Start-TestCapacityAcknowledgementWriter {
         [int]$DesiredSlots,
         [int]$AddedSlots,
         [int]$DrainingSlots,
-        [int]$UnchangedSlots
+        [int]$UnchangedSlots,
+        [ValidateSet(0, 1)]
+        [int]$WaitForAcknowledgementRemoval
     )
 
     return Start-Job -ArgumentList @(
@@ -148,7 +150,8 @@ function Start-TestCapacityAcknowledgementWriter {
         $DesiredSlots,
         $AddedSlots,
         $DrainingSlots,
-        $UnchangedSlots
+        $UnchangedSlots,
+        $WaitForAcknowledgementRemoval
     ) -ScriptBlock {
         param(
             $DesiredPath,
@@ -157,15 +160,33 @@ function Start-TestCapacityAcknowledgementWriter {
             $DesiredSlots,
             $AddedSlots,
             $DrainingSlots,
-            $UnchangedSlots
+            $UnchangedSlots,
+            $WaitForAcknowledgementRemoval
         )
 
         $deadline = [DateTime]::UtcNow.AddSeconds(60)
+        $lastObservedGeneration = 'missing'
+        $lastReadError = ''
+        $acknowledgementRemovalObserved = -not (
+            Test-Path -LiteralPath $AcknowledgementPath -PathType Leaf
+        )
         do {
+            if (
+                $WaitForAcknowledgementRemoval -eq 1 -and
+                -not $acknowledgementRemovalObserved
+            ) {
+                $acknowledgementRemovalObserved = -not (
+                    Test-Path -LiteralPath $AcknowledgementPath -PathType Leaf
+                )
+                Start-Sleep -Milliseconds 50
+                continue
+            }
             if (Test-Path -LiteralPath $DesiredPath -PathType Leaf) {
                 try {
                     $desired = Get-Content -LiteralPath $DesiredPath -Raw -Encoding UTF8 |
                         ConvertFrom-Json -Depth 10 -ErrorAction Stop
+                    $lastObservedGeneration = [string]$desired.generation
+                    $lastReadError = ''
                     if ([int]$desired.generation -eq $Generation) {
                         [PSCustomObject][ordered]@{
                             schemaVersion = 1
@@ -187,13 +208,14 @@ function Start-TestCapacityAcknowledgementWriter {
                         return
                     }
                 } catch {
+                    $lastReadError = $_.Exception.Message
                     Start-Sleep -Milliseconds 50
                 }
             }
             Start-Sleep -Milliseconds 50
         } while ([DateTime]::UtcNow -lt $deadline)
 
-        throw "Desired generation $Generation was not observed."
+        throw "Desired generation $Generation was not observed. Last generation: $lastObservedGeneration. Last read error: $lastReadError"
     }
 }
 
@@ -898,6 +920,14 @@ try {
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
                 -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
             if (
+                $dockerArguments -contains 'build' -and
+                $dockerArguments -contains 'runner-manager' -and
+                $env:PITCREW_TEST_MANAGER_BUILD_FAILURE -eq '1'
+            ) {
+                $global:LASTEXITCODE = 1
+                return
+            }
+            if (
                 $dockerArguments -contains 'up' -and
                 $env:PITCREW_TEST_MANAGER_START_FAILURE -eq '1' -and
                 $env:PITCREW_TEST_MANAGER_START_FAILURE_USED -ne '1'
@@ -921,6 +951,13 @@ try {
         ) {
             $global:LASTEXITCODE = 1
             return
+        }
+        if (
+            $dockerArguments[0] -eq 'image' -and
+            $dockerArguments[1] -eq 'inspect' -and
+            $dockerArguments -contains '{{.Id}}'
+        ) {
+            Write-Output 'sha256:worker-image'
         }
         if (
             $dockerArguments[0] -eq 'inspect' -and
@@ -1143,7 +1180,8 @@ try {
             -DesiredSlots 2 `
             -AddedSlots 1 `
             -DrainingSlots 0 `
-            -UnchangedSlots 1
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 0
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
@@ -1172,7 +1210,8 @@ try {
             -DesiredSlots 1 `
             -AddedSlots 0 `
             -DrainingSlots 1 `
-            -UnchangedSlots 1
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 0
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
@@ -1238,7 +1277,8 @@ try {
             -DesiredSlots 1 `
             -AddedSlots 0 `
             -DrainingSlots 0 `
-            -UnchangedSlots 1
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 0
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
@@ -1279,7 +1319,8 @@ try {
             -DesiredSlots 1 `
             -AddedSlots 0 `
             -DrainingSlots 0 `
-            -UnchangedSlots 1
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 1
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
@@ -1307,7 +1348,8 @@ try {
             -DesiredSlots 1 `
             -AddedSlots 0 `
             -DrainingSlots 0 `
-            -UnchangedSlots 1
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 1
         try {
             & $fixtureSetup `
                 -Token 'test-registration-token' `
@@ -1329,6 +1371,24 @@ try {
         Add-Check ($refreshCommands -match 'compose.*up.*--force-recreate.*runner-manager') 'An explicit profile refresh did not recreate only the selected manager.'
         Add-Check ($refreshedState.generation -eq 4) 'An explicit profile refresh changed identical desired capacity.'
 
+        $env:PITCREW_TEST_MANAGER_BUILD_FAILURE = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'docker compose build failed' `
+            -Failure 'A failed replacement-manager build was not surfaced.'
+        Remove-Item Env:\PITCREW_TEST_MANAGER_BUILD_FAILURE -ErrorAction SilentlyContinue
+        $managerBuildFailureCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8
+        )
+        Add-Check ($managerBuildFailureCommands -match 'tag.*sha256:worker-image.*myoung34/github-runner:ubuntu-noble') 'A pre-handoff manager-build failure did not restore the previous worker image.'
+        Add-Check (-not ($managerBuildFailureCommands -match '^stop\t')) 'A failed replacement-manager build stopped the live manager.'
+
         $preRollbackEnvironment = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
         $preRollbackStatic = Get-Content -LiteralPath $defaultStaticProfilePath -Raw -Encoding UTF8
         $preRollbackDesired = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
@@ -1347,8 +1407,12 @@ try {
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_BUILD_FAILURE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_BUILD_FAILURE -ErrorAction SilentlyContinue
         $rollbackCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($rollbackCommands -match 'tag.*sha256:manager-image.*ephemeral-runner-manager:profile-default') 'A failed manager start did not restore the previous manager image.'
+        Add-Check ($rollbackCommands -match 'tag.*sha256:worker-image.*myoung34/github-runner:ubuntu-noble') 'A failed manager start did not restore the previous worker image.'
         Add-Check (
             (Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8) -ceq
             $preRollbackEnvironment

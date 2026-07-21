@@ -22,6 +22,11 @@ The replacement manager discovers workers by exact profile and slot labels,
 adopts them, and resumes reconciliation. Busy jobs and idle registrations remain
 connected throughout the handoff.
 
+If a contract-9 replacement fails to start or acknowledge its generation, setup
+stops the partial replacement, restores the previous environment and state,
+retags both the previous manager image and previous worker image, and restarts
+the prior manager without touching worker containers.
+
 The first upgrade from a pre-contract-9 manager removes that exact legacy
 manager without sending its destructive shutdown signal. A stable scale-set
 session owner is persisted so the replacement listener can reconnect to the
@@ -30,7 +35,8 @@ existing scale set.
 If that first replacement fails after the legacy manager is removed, PitCrew
 leaves workers running and reports the failure. It does not restart the legacy
 manager because its startup cleanup would destroy those preserved workers.
-Correct the manager startup problem and rerun the same setup command.
+The previous worker image tag is restored before setup returns. Correct the
+manager startup problem and rerun the same setup command.
 
 Manager termination defaults to preservation. Use `Setup-Runner.ps1 -Down` for
 an intentional full profile shutdown; setup publishes a container-targeted
