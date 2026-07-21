@@ -450,6 +450,21 @@ function Stop-RunnerManagerForHandoff {
     }
 }
 
+function Restore-RunnerImageTag {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ImageId,
+
+        [Parameter(Mandatory)]
+        [string]$Image
+    )
+
+    & docker tag $ImageId $Image
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to restore worker image '$Image' to '$ImageId'."
+    }
+}
+
 function New-RunnerTextStagingFile {
     param(
         [Parameter(Mandatory)]
@@ -1103,56 +1118,94 @@ try {
         return
     }
 
+    $previousWorkerImage = if (
+        $storedStaticProfile -and
+        $storedStaticProfile.PSObject.Properties['configuration']
+    ) {
+        [string]$storedStaticProfile.configuration.image
+    } else {
+        ''
+    }
+    $previousWorkerImageId = $null
+    if (
+        $managerRunning -and
+        -not [string]::IsNullOrWhiteSpace($previousWorkerImage)
+    ) {
+        $workerImageOutput = & docker image inspect `
+            --format '{{.Id}}' `
+            $previousWorkerImage 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            $previousWorkerImageId = ([string]$workerImageOutput).Trim()
+        } elseif ($previousWorkerImage -ceq [string]$profileConfig.Image) {
+            throw "Cannot record the current worker image '$previousWorkerImage' before replacing its tag."
+        }
+    }
+
     if ($Refresh) {
         Write-Host "[image] Reusing the unchanged runner image '$($profileConfig.Image)'"
     } else {
-        Write-Host "[image] Preparing runner image '$($profileConfig.Image)'"
-        if ($profileConfig.Build) {
-            $buildArguments = @(
-                'build',
-                '--file', $profileConfig.Build.Dockerfile,
-                '--tag', $profileConfig.Image
-            )
-            foreach ($argument in $profileConfig.Build.Arguments.GetEnumerator()) {
-                $buildArguments += @('--build-arg', "$($argument.Key)=$($argument.Value)")
-            }
-            $buildArguments += $profileConfig.Build.Context
-            & docker @buildArguments
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "Runner image build failed for profile '$($profileConfig.Name)'."
-            }
-        } elseif ($profileConfig.PullImage) {
-            & docker pull $profileConfig.Image
-            if ($LASTEXITCODE -ne 0) {
-                & docker image inspect $profileConfig.Image 2>&1 | Out-Null
-                if ($LASTEXITCODE -ne 0) {
-                    Write-Error "Runner image '$($profileConfig.Image)' could not be pulled and is not available locally."
+        try {
+            Write-Host "[image] Preparing runner image '$($profileConfig.Image)'"
+            if ($profileConfig.Build) {
+                $buildArguments = @(
+                    'build',
+                    '--file', $profileConfig.Build.Dockerfile,
+                    '--tag', $profileConfig.Image
+                )
+                foreach ($argument in $profileConfig.Build.Arguments.GetEnumerator()) {
+                    $buildArguments += @('--build-arg', "$($argument.Key)=$($argument.Value)")
                 }
-                Write-Warning "Pull failed for '$($profileConfig.Image)'; using the locally available image."
+                $buildArguments += $profileConfig.Build.Context
+                & docker @buildArguments
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Runner image build failed for profile '$($profileConfig.Name)'."
+                }
+            } elseif ($profileConfig.PullImage) {
+                & docker pull $profileConfig.Image
+                if ($LASTEXITCODE -ne 0) {
+                    & docker image inspect $profileConfig.Image 2>&1 | Out-Null
+                    if ($LASTEXITCODE -ne 0) {
+                        Write-Error "Runner image '$($profileConfig.Image)' could not be pulled and is not available locally."
+                    }
+                    Write-Warning "Pull failed for '$($profileConfig.Image)'; using the locally available image."
+                }
+            } else {
+                Write-Host '  Profile uses a locally available prebuilt runner image.'
             }
-        } else {
-            Write-Host '  Profile uses a locally available prebuilt runner image.'
-        }
 
-        Write-Host "[verify] Verifying runner image contract"
-        foreach ($command in $profileConfig.VerificationCommands) {
-            & docker run --rm --entrypoint /bin/sh $profileConfig.Image -lc $command
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "Runner image verification failed for profile '$($profileConfig.Name)': $command"
+            Write-Host "[verify] Verifying runner image contract"
+            foreach ($command in $profileConfig.VerificationCommands) {
+                & docker run --rm --entrypoint /bin/sh $profileConfig.Image -lc $command
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Runner image verification failed for profile '$($profileConfig.Name)': $command"
+                }
+            }
+            if ($profileConfig.VerificationCommands.Count -eq 0) {
+                Write-Host '  Profile defines no runtime verification commands.'
+            }
+            if ($profileConfig.Autoscaling) {
+                & docker run `
+                    --rm `
+                    --entrypoint /bin/sh `
+                    $profileConfig.Image `
+                    -lc 'test -x /actions-runner/bin/Runner.Listener && id runner >/dev/null'
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Error "Runner image '$($profileConfig.Image)' does not satisfy the scale-set JIT runtime contract."
+                }
             }
         }
-        if ($profileConfig.VerificationCommands.Count -eq 0) {
-            Write-Host '  Profile defines no runtime verification commands.'
-        }
-        if ($profileConfig.Autoscaling) {
-            & docker run `
-                --rm `
-                --entrypoint /bin/sh `
-                $profileConfig.Image `
-                -lc 'test -x /actions-runner/bin/Runner.Listener && id runner >/dev/null'
-            if ($LASTEXITCODE -ne 0) {
-                Write-Error "Runner image '$($profileConfig.Image)' does not satisfy the scale-set JIT runtime contract."
+        catch {
+            $imagePreparationError = $_
+            if ($previousWorkerImageId) {
+                try {
+                    Restore-RunnerImageTag `
+                        -ImageId $previousWorkerImageId `
+                        -Image $previousWorkerImage
+                } catch {
+                    throw "Worker image preparation failed: $($imagePreparationError.Exception.Message) Worker image rollback also failed: $($_.Exception.Message)"
+                }
             }
+            throw
         }
     }
 
@@ -1278,6 +1331,15 @@ try {
     }
     catch {
         $updateError = $_
+        if ($previousWorkerImageId -and -not $managerStoppedForHandoff) {
+            try {
+                Restore-RunnerImageTag `
+                    -ImageId $previousWorkerImageId `
+                    -Image $previousWorkerImage
+            } catch {
+                throw "Manager update failed before handoff: $($updateError.Exception.Message) Worker image rollback also failed: $($_.Exception.Message)"
+            }
+        }
         if ($managerRunning -and $managerStoppedForHandoff) {
             if ($previousManagerContract -ge 9 -and $previousManagerImageId) {
                 $rollbackError = $null
@@ -1287,6 +1349,11 @@ try {
                         Stop-RunnerManagerForHandoff `
                             -ProfileConfig $profileConfig `
                             -ContainerId $currentManagerId
+                    }
+                    if ($previousWorkerImageId) {
+                        Restore-RunnerImageTag `
+                            -ImageId $previousWorkerImageId `
+                            -Image $previousWorkerImage
                     }
                     foreach ($rollbackFile in $rollbackFiles) {
                         if ($rollbackFile.Exists) {
@@ -1322,6 +1389,15 @@ try {
                     throw "Manager update failed: $($updateError.Exception.Message) Rollback also failed: $rollbackError"
                 }
             } else {
+                if ($previousWorkerImageId) {
+                    try {
+                        Restore-RunnerImageTag `
+                            -ImageId $previousWorkerImageId `
+                            -Image $previousWorkerImage
+                    } catch {
+                        throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, and worker image rollback also failed: $($_.Exception.Message)"
+                    }
+                }
                 throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, but the legacy manager was not restarted because its startup cleanup would remove them."
             }
         }
