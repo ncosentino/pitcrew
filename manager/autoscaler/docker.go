@@ -30,6 +30,7 @@ type recoveredContainer struct {
 	runnerID    int64
 	targetKey   string
 	slotKey     string
+	revision    string
 	createdAt   time.Time
 }
 
@@ -308,6 +309,7 @@ func (d *dockerCLI) listManaged(
 			runnerID:    runnerID,
 			targetKey:   targetKey,
 			slotKey:     slotKey,
+			revision:    labels[workerRevisionLabelKey],
 			createdAt:   record.Created,
 		})
 	}

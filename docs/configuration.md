@@ -30,7 +30,7 @@ profile without changing other profiles on the same host.
 | `-MinimumIdle` | No | Warm idle runners retained per autoscaled target. | `0` |
 | `-ScaleDownDelaySeconds` | No | Stable low-demand period before excess idle JIT runners are removed. | `120` |
 | `-Down` | No | Stops only the selected profile and removes its managed workers. | Off |
-| `-Refresh` | No | Rebuilds the selected manager while requiring the worker profile configuration to remain unchanged. This stops that profile's workers and requires an idle maintenance window. | Off |
+| `-Refresh` | No | Builds and hot-swaps only the selected manager while preserving compatible workers and active jobs. | Off |
 | `-CapacityOnly` | No | Requires an in-place capacity update and fails rather than replacing a manager when the current profile cannot reconcile capacity safely. | Off |
 
 ## Repository worker counts
@@ -121,6 +121,9 @@ to relay lifecycle state but discard fields they do not recognize, so update the
 optional connector and dashboard before expecting resource cards to appear.
 Manager contract 8 adds configured-maximum and autoscaling state while retaining
 the same credential-free connector boundary.
+Manager contract 9 adds worker revision and rolling-convergence state. Manager
+replacement preserves sibling workers; scale-set profiles safely replace stale
+idle JIT runners through GitHub's service-side removal fence.
 
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify
@@ -161,9 +164,10 @@ selected profile.
 
 Use `-Refresh` after switching an installation checkout to a new PitCrew
 release when the manager implementation changed without changing its runtime
-contract number. Refresh is intentionally disruptive to the selected profile;
-confirm its GitHub runners are idle before invoking it. Apply worker image,
-label, scope, or other static profile changes separately.
+worker configuration. Refresh builds the replacement first and hands off
+existing workers without requiring them to be idle. Apply rolling-compatible
+worker image changes with the complete setup command; stop explicitly before
+routing or registration-topology changes.
 
 Locally built profiles also fingerprint their complete build-context inventory.
 Generated PitCrew state and the selected secret environment are excluded. The
@@ -176,10 +180,16 @@ When neither desired nor last-valid state exists, the manager can import
 `REPO_URLS` or `REPO_URL` for repository scope, or `RUNNER_REPLICAS` for
 organization and enterprise scope. This is a one-time adapter for
 pre-reconciliation `.env` files and direct `docker compose up` usage.
+Direct Compose requires a stable `PITCREW_SESSION_OWNER` and a 64-character
+`PITCREW_WORKER_REVISION`.
 
 After the adapter creates generation one, environment changes do not alter
 capacity. Use `Setup-Runner.ps1` for every subsequent update so generation,
 locking, atomic publication, and acknowledgement remain enforced.
+
+Manager termination without a container-targeted shutdown request preserves
+workers for handoff. Use `Setup-Runner.ps1 -Down` rather than routine
+`docker compose down` when the intent is to remove the complete profile.
 
 The mounted directory contains no credentials. If Docker creates a missing bind
 source as root, the manager makes that directory host-writable so a later setup

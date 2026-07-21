@@ -46,6 +46,13 @@ observed_state_is_valid() {
             and (.scaleDownAt == null or (.scaleDownAt | type == "string" and length > 0))
             and (.scaleSetCount | nonnegative_integer)
             and (.lastError == null or (.lastError | type == "string"));
+        def valid_update:
+            type == "object"
+            and (.status == "current" or .status == "rolling" or .status == "degraded")
+            and (.targetRevision | type == "string" and test("^[0-9a-f]{64}$"))
+            and (.currentWorkers | nonnegative_integer)
+            and (.staleWorkers | nonnegative_integer)
+            and (.lastError == null or (.lastError | type == "string"));
         def valid_slot:
             type == "object"
             and (.key | type == "string" and length > 0)
@@ -116,6 +123,14 @@ observed_state_is_valid() {
                 has("configuredSlots")
                 and has("autoscaling")
                 and (.autoscaling == null or (.autoscaling | valid_autoscaling))
+            else
+                true
+            end
+        )
+        and (
+            if .managerContractVersion >= 9 then
+                has("update")
+                and (.update | valid_update)
             else
                 true
             end
@@ -533,6 +548,8 @@ write_manager_observed_state() {
     desired_slots="${10}"
     slots_path="${11}"
     resource_telemetry_path="${12}"
+    worker_revision="${13}"
+    stale_workers="${14}"
 
     observed_temporary="${output_path%/*}/.observed-state.$$.tmp"
     if ! jq -n \
@@ -549,6 +566,8 @@ write_manager_observed_state() {
         --argjson desiredSlots "${desired_slots}" \
         --slurpfile slots "${slots_path}" \
         --slurpfile resourceTelemetry "${resource_telemetry_path}" \
+        --arg workerRevision "${worker_revision}" \
+        --argjson staleWorkers "${stale_workers}" \
         '{
             schemaVersion: $schemaVersion,
             managerContractVersion: $managerContractVersion,
@@ -566,7 +585,17 @@ write_manager_observed_state() {
             drainingSlots: ($slots[0] | map(select(.state == "draining")) | length),
             slots: $slots[0],
             resourceTelemetry: ($resourceTelemetry[0] | del(.slots)),
-            autoscaling: null
+            autoscaling: null,
+            update: {
+                status: (if $staleWorkers > 0 then "rolling" else "current" end),
+                targetRevision: $workerRevision,
+                currentWorkers: (
+                    (($slots[0] | map(select(.processRunning)) | length) - $staleWorkers)
+                    | if . < 0 then 0 else . end
+                ),
+                staleWorkers: $staleWorkers,
+                lastError: null
+            }
         }' > "${observed_temporary}"; then
         rm -f "${observed_temporary}"
         return 1

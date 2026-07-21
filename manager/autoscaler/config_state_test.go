@@ -16,6 +16,8 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 		"ACCESS_TOKEN":             "pat-value",
 		"RUNNER_PROFILE_ID":        "profile-a",
 		"RUNNER_IMAGE":             "example/runner:latest",
+		"PITCREW_WORKER_REVISION":  testWorkerRevision,
+		"PITCREW_SESSION_OWNER":    "pitcrew-profile-a",
 		"RUNNER_SCOPE":             "repo",
 		"RUNNER_NAME_PREFIX":       "runner",
 		"RUNNER_LABELS":            "copilot, specialized",
@@ -49,11 +51,13 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	base := map[string]string{
-		"ACCESS_TOKEN":       "pat-value",
-		"RUNNER_PROFILE_ID":  "profile-a",
-		"RUNNER_IMAGE":       "example/runner:latest",
-		"RUNNER_SCOPE":       "repo",
-		"RUNNER_NAME_PREFIX": "runner",
+		"ACCESS_TOKEN":            "pat-value",
+		"RUNNER_PROFILE_ID":       "profile-a",
+		"RUNNER_IMAGE":            "example/runner:latest",
+		"PITCREW_WORKER_REVISION": testWorkerRevision,
+		"PITCREW_SESSION_OWNER":   "pitcrew-profile-a",
+		"RUNNER_SCOPE":            "repo",
+		"RUNNER_NAME_PREFIX":      "runner",
 	}
 	tests := []struct {
 		name   string
@@ -68,6 +72,8 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		{name: "scale down delay below minimum", key: "PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS", value: "29"},
 		{name: "scale down delay above maximum", key: "PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS", value: "3601"},
 		{name: "contract mismatch", key: "PITCREW_MANAGER_CONTRACT_VERSION", value: "7"},
+		{name: "invalid worker revision", key: "PITCREW_WORKER_REVISION", value: "not-a-digest"},
+		{name: "invalid session owner", key: "PITCREW_SESSION_OWNER", value: "bad owner"},
 		{name: "invalid no-default flag", key: "RUNNER_NO_DEFAULT_LABELS", value: "true"},
 		{name: "empty custom label", key: "RUNNER_LABELS", value: "one,,two"},
 	}
@@ -98,11 +104,13 @@ func TestLoadConfigAcceptsScaleDownDelayBounds(t *testing.T) {
 	for _, seconds := range []int{30, 3600} {
 		t.Run(strconv.Itoa(seconds), func(t *testing.T) {
 			values := map[string]string{
-				"ACCESS_TOKEN":       "pat-value",
-				"RUNNER_PROFILE_ID":  "profile-a",
-				"RUNNER_IMAGE":       "example/runner:latest",
-				"RUNNER_SCOPE":       "repo",
-				"RUNNER_NAME_PREFIX": "runner",
+				"ACCESS_TOKEN":            "pat-value",
+				"RUNNER_PROFILE_ID":       "profile-a",
+				"RUNNER_IMAGE":            "example/runner:latest",
+				"PITCREW_WORKER_REVISION": testWorkerRevision,
+				"PITCREW_SESSION_OWNER":   "pitcrew-profile-a",
+				"RUNNER_SCOPE":            "repo",
+				"RUNNER_NAME_PREFIX":      "runner",
 				"PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS": strconv.Itoa(seconds),
 			}
 			cfg, err := loadConfig(func(name string) (string, bool) {

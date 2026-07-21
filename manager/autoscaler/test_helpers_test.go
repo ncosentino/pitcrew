@@ -14,6 +14,8 @@ import (
 	"github.com/google/uuid"
 )
 
+const testWorkerRevision = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+
 type fakeClock struct {
 	mu      sync.Mutex
 	current time.Time
@@ -511,12 +513,15 @@ func newTestScaler(
 	api := newFakeScaleSetService(events)
 	docker := newFakeDockerClient(events)
 	cfg := config{
-		profileID:       "profile-a",
-		runnerImage:     "example/runner:latest",
-		namePrefix:      "pitcrew-runner",
-		minimumIdle:     minimumIdle,
-		scaleDownDelay:  scaleDownDelay,
-		noDefaultLabels: false,
+		profileID:         "profile-a",
+		runnerImage:       "example/runner:latest",
+		workerRevision:    testWorkerRevision,
+		sessionOwner:      "pitcrew-profile-a",
+		assumeUnversioned: true,
+		namePrefix:        "pitcrew-runner",
+		minimumIdle:       minimumIdle,
+		scaleDownDelay:    scaleDownDelay,
+		noDefaultLabels:   false,
 	}
 	target := targetSpec{
 		key:             "repo-1234",

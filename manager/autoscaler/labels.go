@@ -18,6 +18,7 @@ const (
 	targetKeyLabelKey      = "pitcrew-autoscaler-target-key"
 	runnerNameLabelKey     = "pitcrew-autoscaler-runner-name"
 	runnerIDLabelKey       = "pitcrew-autoscaler-runner-id"
+	workerRevisionLabelKey = "pitcrew-worker-revision"
 )
 
 type targetSpec struct {

@@ -83,9 +83,8 @@
     Stop only the selected profile.
 
 .PARAMETER Refresh
-    Rebuild the selected profile manager while preserving an otherwise
-    unchanged worker profile. This stops that profile's workers and must be
-    used only when no jobs are active.
+    Build and hot-swap the selected profile manager while preserving an
+    otherwise unchanged worker profile and any active jobs.
 
 .PARAMETER CapacityOnly
     Require an in-place capacity reconciliation. Setup fails instead of
@@ -192,6 +191,9 @@ $composeEnvironmentNames = @(
     'RUNNER_LABELS',
     'RUNNER_NO_DEFAULT_LABELS',
     'RUNNER_GROUP',
+    'PITCREW_WORKER_REVISION',
+    'PITCREW_SESSION_OWNER',
+    'PITCREW_ASSUME_UNVERSIONED_CURRENT',
     'PITCREW_AUTOSCALING_MODE',
     'PITCREW_AUTOSCALING_MIN_IDLE',
     'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
@@ -260,27 +262,58 @@ function Stop-RunnerProfile {
         [PSCustomObject]$ProfileConfig
     )
 
-    Invoke-RunnerCompose `
-        -ProfileConfig $ProfileConfig `
-        -CommandArguments @('down', '--remove-orphans') `
-        -DiscardOutput
+    $shutdownRequestWritten = $false
+    try {
+        $managerContainerId = Get-RunnerManagerContainerId -ProfileConfig $ProfileConfig
+        $managerContract = if ($managerContainerId) {
+            Get-RunnerManagerContractVersion -ContainerId $managerContainerId
+        } else {
+            0
+        }
+        if (
+            $managerContract -ge 9 -and
+            -not [string]::IsNullOrWhiteSpace($managerContainerId)
+        ) {
+            Write-RunnerJsonAtomically `
+                -Path $ProfileConfig.ShutdownRequestPath `
+                -Value ([PSCustomObject][ordered]@{
+                    schemaVersion = 1
+                    managerContainerId = $managerContainerId
+                    requestedAt = [DateTime]::UtcNow.ToString('o')
+                })
+            $shutdownRequestWritten = $true
+        }
 
-    $ids = @(docker ps -aq --filter "label=$($ProfileConfig.ManagedRunnerLabel)" 2>$null)
-    if ($ProfileConfig.IsDefault) {
-        $ids += foreach ($label in $legacyLabels) {
-            docker ps -aq --filter "label=$label" 2>$null
+        Invoke-RunnerCompose `
+            -ProfileConfig $ProfileConfig `
+            -CommandArguments @('down', '--remove-orphans') `
+            -DiscardOutput
+
+        $ids = @(docker ps -aq --filter "label=$($ProfileConfig.ManagedRunnerLabel)" 2>$null)
+        if ($ProfileConfig.IsDefault) {
+            $ids += foreach ($label in $legacyLabels) {
+                docker ps -aq --filter "label=$label" 2>$null
+            }
+        }
+
+        foreach ($id in (@($ids) | Where-Object { $_ } | Select-Object -Unique)) {
+            docker rm -f $id 2>&1 | Out-Null
+            if ($LASTEXITCODE -ne 0) {
+                Write-Error "Failed to remove managed runner container '$id'."
+            }
         }
     }
-
-    foreach ($id in (@($ids) | Where-Object { $_ } | Select-Object -Unique)) {
-        docker rm -f $id 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            Write-Error "Failed to remove managed runner container '$id'."
+    finally {
+        if ($shutdownRequestWritten -or (Test-Path -LiteralPath $ProfileConfig.ShutdownRequestPath)) {
+            Remove-Item `
+                -LiteralPath $ProfileConfig.ShutdownRequestPath `
+                -Force `
+                -ErrorAction SilentlyContinue
         }
     }
 }
 
-function Test-RunnerManagerRunning {
+function Get-RunnerManagerContainerId {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$ProfileConfig
@@ -293,7 +326,128 @@ function Test-RunnerManagerRunning {
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to inspect the manager for profile '$($ProfileConfig.Name)'."
     }
-    return $managerIds.Count -gt 0
+    if ($managerIds.Count -gt 1) {
+        throw "Profile '$($ProfileConfig.Name)' has multiple running manager containers."
+    }
+    if ($managerIds.Count -eq 0) {
+        return $null
+    }
+    return [string]$managerIds[0]
+}
+
+function Get-RunnerManagerContractVersion {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ContainerId
+    )
+
+    $contractOutput = & docker inspect `
+        --format '{{ index .Config.Labels "pitcrew-manager-contract-version" }}' `
+        $ContainerId 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return 0
+    }
+    $managerContract = 0
+    [void][int]::TryParse(([string]$contractOutput).Trim(), [ref]$managerContract)
+    return $managerContract
+}
+
+function Test-RunnerManagerRunning {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    return -not [string]::IsNullOrWhiteSpace(
+        (Get-RunnerManagerContainerId -ProfileConfig $ProfileConfig)
+    )
+}
+
+function Get-RunnerObservedManager {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    if (-not (Test-Path -LiteralPath $ProfileConfig.ObservedStatePath -PathType Leaf)) {
+        return $null
+    }
+    try {
+        $observed = Read-RunnerJsonFile -Path $ProfileConfig.ObservedStatePath
+        if (
+            [int]$observed.schemaVersion -ne 1 -or
+            [string]$observed.profileId -cne [string]$ProfileConfig.Name
+        ) {
+            return $null
+        }
+        return $observed
+    } catch {
+        return $null
+    }
+}
+
+function Get-RunnerSessionOwner {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$ObservedManager
+    )
+
+    if (Test-Path -LiteralPath $ProfileConfig.SessionOwnerPath -PathType Leaf) {
+        $stored = (
+            Get-Content -LiteralPath $ProfileConfig.SessionOwnerPath -Raw -Encoding UTF8
+        ).Trim()
+        if ($stored -notmatch '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$') {
+            throw "Stored manager session owner for profile '$($ProfileConfig.Name)' is invalid."
+        }
+        return $stored
+    }
+
+    if (
+        $ObservedManager -and
+        -not [string]::IsNullOrWhiteSpace([string]$ObservedManager.managerInstanceId)
+    ) {
+        $legacyOwner = [string]$ObservedManager.managerInstanceId
+        if ($legacyOwner -match '^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$') {
+            return $legacyOwner
+        }
+    }
+
+    return "pitcrew-$($ProfileConfig.Name)-$([guid]::NewGuid().ToString('N'))"
+}
+
+function Stop-RunnerManagerForHandoff {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [string]$ContainerId
+    )
+
+    $managerContract = Get-RunnerManagerContractVersion -ContainerId $ContainerId
+    $supportsHandoff = $managerContract -ge 9
+    if ($supportsHandoff) {
+        Write-Host "[handoff] Stopping manager '$ContainerId' while preserving profile workers"
+        & docker stop --time 60 $ContainerId 2>&1 | Out-Null
+        if ($LASTEXITCODE -ne 0) {
+            throw "Manager '$ContainerId' did not stop cleanly for handoff."
+        }
+        return
+    }
+
+    Write-Host "[handoff] Removing legacy manager '$ContainerId' without signaling its destructive shutdown path"
+    & docker update --restart=no $ContainerId 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to disable restart policy for legacy manager '$ContainerId'."
+    }
+    & docker rm -f $ContainerId 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to remove legacy manager '$ContainerId' for handoff."
+    }
 }
 
 function New-RunnerTextStagingFile {
@@ -355,7 +509,11 @@ function Wait-RunnerCapacityAcknowledgement {
 
         [Parameter(Mandatory)]
         [ValidateRange(1, 300)]
-        [int]$TimeoutSeconds
+        [int]$TimeoutSeconds,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$MinimumManagerContractVersion
     )
 
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
@@ -372,7 +530,11 @@ function Wait-RunnerCapacityAcknowledgement {
                 }
 
                 $acknowledgedGeneration = [int]$acknowledgement.generation
-                if ($acknowledgedGeneration -eq $Generation) {
+                $acknowledgedContract = [int]$acknowledgement.managerContractVersion
+                if (
+                    $acknowledgedGeneration -eq $Generation -and
+                    $acknowledgedContract -ge $MinimumManagerContractVersion
+                ) {
                     return $acknowledgement
                 }
                 if ($acknowledgedGeneration -gt $Generation) {
@@ -387,7 +549,7 @@ function Wait-RunnerCapacityAcknowledgement {
     } while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
 
     $detail = if ($lastReadError) { " Last acknowledgement error: $lastReadError" } else { '' }
-    throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation within $TimeoutSeconds seconds.$detail"
+    throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation with contract $MinimumManagerContractVersion or newer within $TimeoutSeconds seconds.$detail"
 }
 
 function Get-RunnerEnvironmentFileValue {
@@ -517,19 +679,6 @@ function Get-RunnerRegistrationAccessValidation {
         Target = ''
         Reason = ''
     }
-}
-
-function Get-RunnerRefreshConfigurationSignature {
-    param(
-        [Parameter(Mandatory)]
-        [object]$Configuration
-    )
-
-    $copy = $Configuration |
-        ConvertTo-Json -Depth 20 |
-        ConvertFrom-Json -Depth 20
-    $copy.PSObject.Properties.Remove('managerContractVersion')
-    return $copy | ConvertTo-Json -Depth 20 -Compress
 }
 
 Push-Location $here
@@ -792,19 +941,44 @@ try {
         -Repositories $desiredRepositories `
         -Replicas $desiredReplicas
 
-    $environmentContent = New-RunnerEnvironmentContent `
-        -Profile $profileConfig `
-        -AccessToken $Token `
-        -Scope $Scope `
-        -OrgName $OrgName `
-        -EnterpriseName $EnterpriseName
     $staticProfileState = New-RunnerStaticProfileState `
         -Profile $profileConfig `
         -Scope $Scope `
         -OrgName $OrgName `
         -EnterpriseName $EnterpriseName
 
-    $managerRunning = Test-RunnerManagerRunning -ProfileConfig $profileConfig
+    $managerContainerId = Get-RunnerManagerContainerId -ProfileConfig $profileConfig
+    $managerRunning = -not [string]::IsNullOrWhiteSpace($managerContainerId)
+    $observedManager = Get-RunnerObservedManager -ProfileConfig $profileConfig
+    $sessionOwner = Get-RunnerSessionOwner `
+        -ProfileConfig $profileConfig `
+        -ObservedManager $observedManager
+    $storedWorkerRevision = Get-RunnerEnvironmentFileValue `
+        -Path $profileConfig.EnvironmentPath `
+        -Name 'PITCREW_WORKER_REVISION'
+    $storedAssumeUnversioned = Get-RunnerEnvironmentFileValue `
+        -Path $profileConfig.EnvironmentPath `
+        -Name 'PITCREW_ASSUME_UNVERSIONED_CURRENT'
+    $assumeUnversionedCurrent = (
+        (
+            $storedAssumeUnversioned -eq '1' -and
+            $storedWorkerRevision -ceq [string]$staticProfileState.workerRevision
+        ) -or (
+            $Refresh -and
+            $managerRunning -and
+            [string]::IsNullOrWhiteSpace($storedWorkerRevision)
+        )
+    )
+    $environmentContent = New-RunnerEnvironmentContent `
+        -Profile $profileConfig `
+        -AccessToken $Token `
+        -WorkerRevision ([string]$staticProfileState.workerRevision) `
+        -SessionOwner $sessionOwner `
+        -AssumeUnversionedCurrent $assumeUnversionedCurrent `
+        -Scope $Scope `
+        -OrgName $OrgName `
+        -EnterpriseName $EnterpriseName
+
     $environmentMatches = (
         (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) -and
         (Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8) -ceq $environmentContent
@@ -812,6 +986,7 @@ try {
     $storedStaticProfile = $null
     $staticProfileMatches = $false
     $refreshConfigurationMatches = $false
+    $rollingConfigurationMatches = $false
     if (Test-Path -LiteralPath $profileConfig.StaticProfilePath -PathType Leaf) {
         try {
             $storedStaticProfile = Read-RunnerJsonFile -Path $profileConfig.StaticProfilePath
@@ -826,11 +1001,25 @@ try {
             $null -ne $storedStaticProfile -and
             $storedStaticProfile.PSObject.Properties['configuration'] -and
             (
-                Get-RunnerRefreshConfigurationSignature `
-                    -Configuration $storedStaticProfile.configuration
+                Get-RunnerObjectFingerprint -Value (
+                    Get-RunnerWorkerConfiguration `
+                        -Configuration $storedStaticProfile.configuration
+                )
+            ) -ceq [string]$staticProfileState.workerRevision
+        )
+        $rollingConfigurationMatches = (
+            $null -ne $storedStaticProfile -and
+            $storedStaticProfile.PSObject.Properties['configuration'] -and
+            (
+                Get-RunnerObjectFingerprint -Value (
+                    Get-RunnerRollingCompatibilityConfiguration `
+                        -Configuration $storedStaticProfile.configuration
+                )
             ) -ceq (
-                Get-RunnerRefreshConfigurationSignature `
-                    -Configuration $staticProfileState.configuration
+                Get-RunnerObjectFingerprint -Value (
+                    Get-RunnerRollingCompatibilityConfiguration `
+                        -Configuration $staticProfileState.configuration
+                )
             )
         )
     }
@@ -842,6 +1031,14 @@ try {
     }
     if ($Refresh -and -not $managerRunning) {
         throw "Profile '$($profileConfig.Name)' is not running. Refresh will not start a stopped profile."
+    }
+    if (
+        -not $Refresh -and
+        $managerRunning -and
+        -not $staticProfileMatches -and
+        -not $rollingConfigurationMatches
+    ) {
+        throw "Profile '$($profileConfig.Name)' changes registration topology or routing that cannot roll safely. Stop the profile explicitly with -Down before applying this configuration."
     }
     if ($Refresh) {
         & docker image inspect $profileConfig.Image 2>&1 | Out-Null
@@ -869,7 +1066,8 @@ try {
             $acknowledgement = Wait-RunnerCapacityAcknowledgement `
                 -ProfileConfig $profileConfig `
                 -Generation $nextGeneration `
-                -TimeoutSeconds 30
+                -TimeoutSeconds 30 `
+                -MinimumManagerContractVersion 1
 
             $added = [int]$acknowledgement.addedSlots
             $draining = [int]$acknowledgement.drainingSlots
@@ -891,7 +1089,8 @@ try {
             $acknowledgement = Wait-RunnerCapacityAcknowledgement `
                 -ProfileConfig $profileConfig `
                 -Generation $nextGeneration `
-                -TimeoutSeconds 30
+                -TimeoutSeconds 30 `
+                -MinimumManagerContractVersion 1
             if (
                 $acknowledgement.PSObject.Properties['activationMode'] -and
                 [string]$acknowledgement.activationMode -eq 'autoscaled'
@@ -959,6 +1158,40 @@ try {
 
     Write-Host "[state] Staging static profile and desired capacity (workers=$total, scope=$Scope)"
     $stagedFiles = [System.Collections.Generic.List[object]]::new()
+    $rollbackFiles = [System.Collections.Generic.List[object]]::new()
+    foreach ($rollbackPath in @(
+        $profileConfig.EnvironmentPath,
+        $profileConfig.StaticProfilePath,
+        $profileConfig.DesiredCapacityPath,
+        $profileConfig.SessionOwnerPath,
+        $profileConfig.CapacityAcknowledgementPath
+    )) {
+        $exists = Test-Path -LiteralPath $rollbackPath -PathType Leaf
+        $rollbackFiles.Add([PSCustomObject]@{
+            Path = $rollbackPath
+            Exists = $exists
+            Content = if ($exists) {
+                Get-Content -LiteralPath $rollbackPath -Raw -Encoding UTF8
+            } else {
+                $null
+            }
+        })
+    }
+    $previousManagerContract = if ($managerRunning) {
+        Get-RunnerManagerContractVersion -ContainerId $managerContainerId
+    } else {
+        0
+    }
+    $previousManagerImageId = $null
+    if ($managerRunning -and $previousManagerContract -ge 9) {
+        $previousManagerImageId = (
+            & docker inspect --format '{{.Image}}' $managerContainerId 2>$null
+        ).Trim()
+        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($previousManagerImageId)) {
+            throw "Cannot record the current manager image for profile '$($profileConfig.Name)' before handoff."
+        }
+    }
+    $managerStoppedForHandoff = $false
     try {
         $stagedFiles.Add([PSCustomObject]@{
             TemporaryPath = New-RunnerTextStagingFile `
@@ -978,17 +1211,37 @@ try {
                 -Value $desiredState
             Path = $profileConfig.DesiredCapacityPath
         })
+        $stagedFiles.Add([PSCustomObject]@{
+            TemporaryPath = New-RunnerTextStagingFile `
+                -Path $profileConfig.SessionOwnerPath `
+                -Value "$sessionOwner`n"
+            Path = $profileConfig.SessionOwnerPath
+        })
 
         if (-not $profileConfig.IsDefault -and -not $profileConfig.DisableDefaultLabels) {
             Write-Warning "Profile '$($profileConfig.Name)' retains GitHub's default labels, so jobs targeting only 'self-hosted' can run on it."
         }
 
         if ($Refresh) {
-            Write-Host "[refresh] Rebuilding and replacing profile '$($profileConfig.Name)'"
+            Write-Host "[refresh] Building a replacement manager for profile '$($profileConfig.Name)'"
         } else {
-            Write-Host "[replace] Replacing existing profile '$($profileConfig.Name)'"
+            Write-Host "[replace] Building a rolling replacement for profile '$($profileConfig.Name)'"
         }
-        Stop-RunnerProfile -ProfileConfig $profileConfig
+        $stagedEnvironment = $stagedFiles |
+            Where-Object { $_.Path -ceq $profileConfig.EnvironmentPath } |
+            Select-Object -First 1
+        $buildProfileConfig = $profileConfig.PSObject.Copy()
+        $buildProfileConfig.EnvironmentPath = $stagedEnvironment.TemporaryPath
+        Invoke-RunnerCompose `
+            -ProfileConfig $buildProfileConfig `
+            -CommandArguments @('build', 'runner-manager')
+
+        if ($managerRunning) {
+            Stop-RunnerManagerForHandoff `
+                -ProfileConfig $profileConfig `
+                -ContainerId $managerContainerId
+            $managerStoppedForHandoff = $true
+        }
 
         foreach ($stagedFile in $stagedFiles) {
             Complete-RunnerStagedFile `
@@ -997,8 +1250,7 @@ try {
             $stagedFile.TemporaryPath = $null
         }
         foreach ($managerStatePath in @(
-            $profileConfig.CapacityAcknowledgementPath,
-            $profileConfig.AcceptedCapacityPath
+            $profileConfig.CapacityAcknowledgementPath
         )) {
             if (Test-Path -LiteralPath $managerStatePath) {
                 Remove-Item -LiteralPath $managerStatePath -Force -ErrorAction Stop
@@ -1008,7 +1260,72 @@ try {
         Write-Host "[start] Starting profile '$($profileConfig.Name)'"
         Invoke-RunnerCompose `
             -ProfileConfig $profileConfig `
-            -CommandArguments @('up', '-d', '--build')
+            -CommandArguments @(
+                'up',
+                '-d',
+                '--no-deps',
+                '--force-recreate',
+                'runner-manager'
+            )
+
+        if ($managerRunning) {
+            $acknowledgement = Wait-RunnerCapacityAcknowledgement `
+                -ProfileConfig $profileConfig `
+                -Generation $nextGeneration `
+                -TimeoutSeconds 60 `
+                -MinimumManagerContractVersion $profileConfig.ManagerContractVersion
+        }
+    }
+    catch {
+        $updateError = $_
+        if ($managerRunning -and $managerStoppedForHandoff) {
+            if ($previousManagerContract -ge 9 -and $previousManagerImageId) {
+                $rollbackError = $null
+                try {
+                    $currentManagerId = Get-RunnerManagerContainerId -ProfileConfig $profileConfig
+                    if ($currentManagerId) {
+                        Stop-RunnerManagerForHandoff `
+                            -ProfileConfig $profileConfig `
+                            -ContainerId $currentManagerId
+                    }
+                    foreach ($rollbackFile in $rollbackFiles) {
+                        if ($rollbackFile.Exists) {
+                            $rollbackTemporary = New-RunnerTextStagingFile `
+                                -Path $rollbackFile.Path `
+                                -Value $rollbackFile.Content
+                            Complete-RunnerStagedFile `
+                                -TemporaryPath $rollbackTemporary `
+                                -Path $rollbackFile.Path
+                        } elseif (Test-Path -LiteralPath $rollbackFile.Path) {
+                            Remove-Item -LiteralPath $rollbackFile.Path -Force -ErrorAction Stop
+                        }
+                    }
+                    & docker tag `
+                        $previousManagerImageId `
+                        "ephemeral-runner-manager:profile-$($profileConfig.Name)"
+                    if ($LASTEXITCODE -ne 0) {
+                        throw "Failed to restore the previous manager image tag."
+                    }
+                    Invoke-RunnerCompose `
+                        -ProfileConfig $profileConfig `
+                        -CommandArguments @(
+                            'up',
+                            '-d',
+                            '--no-deps',
+                            '--force-recreate',
+                            'runner-manager'
+                        )
+                } catch {
+                    $rollbackError = $_.Exception.Message
+                }
+                if ($rollbackError) {
+                    throw "Manager update failed: $($updateError.Exception.Message) Rollback also failed: $rollbackError"
+                }
+            } else {
+                throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, but the legacy manager was not restarted because its startup cleanup would remove them."
+            }
+        }
+        throw
     }
     finally {
         foreach ($stagedFile in $stagedFiles) {
@@ -1025,6 +1342,17 @@ try {
         Write-Host "[done] Autoscaling manager for profile '$($profileConfig.Name)': maximum $total worker(s), minimum idle $($profileConfig.Autoscaling.MinimumIdle)."
     } else {
         Write-Host "[done] $total worker(s) + 1 manager for profile '$($profileConfig.Name)'."
+    }
+    $updatedObserved = Get-RunnerObservedManager -ProfileConfig $profileConfig
+    if (
+        $updatedObserved -and
+        $updatedObserved.PSObject.Properties['update'] -and
+        [string]$updatedObserved.update.status -eq 'rolling'
+    ) {
+        Write-Host (
+            "  rollout: $([int]$updatedObserved.update.currentWorkers) current, " +
+            "$([int]$updatedObserved.update.staleWorkers) stale worker(s) still converging"
+        )
     }
     Write-Host "  logs: docker compose --project-name $($profileConfig.ComposeProjectName) --env-file $([IO.Path]::GetFileName($profileConfig.EnvironmentPath)) logs -f"
     $stopSelector = if ($ProfilePath) {

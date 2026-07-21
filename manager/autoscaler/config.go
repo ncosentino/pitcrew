@@ -7,16 +7,20 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	"github.com/actions/scaleset"
 )
 
-const managerContractVersion = 8
+const managerContractVersion = 9
 
 type config struct {
 	accessToken          string
 	profileID            string
 	runnerImage          string
+	workerRevision       string
+	sessionOwner         string
+	assumeUnversioned    bool
 	scope                string
 	organization         string
 	enterprise           string
@@ -104,6 +108,13 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 	if err != nil {
 		return config{}, err
 	}
+	assumeUnversioned, err := parseBooleanFlag(
+		"PITCREW_ASSUME_UNVERSIONED_CURRENT",
+		value("PITCREW_ASSUME_UNVERSIONED_CURRENT", "0"),
+	)
+	if err != nil {
+		return config{}, err
+	}
 	labels, err := parseLabels(value("RUNNER_LABELS", ""))
 	if err != nil {
 		return config{}, err
@@ -113,6 +124,9 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		accessToken:          strings.TrimSpace(value("ACCESS_TOKEN", "")),
 		profileID:            strings.TrimSpace(value("RUNNER_PROFILE_ID", "")),
 		runnerImage:          strings.TrimSpace(value("RUNNER_IMAGE", "")),
+		workerRevision:       strings.TrimSpace(value("PITCREW_WORKER_REVISION", "")),
+		sessionOwner:         strings.TrimSpace(value("PITCREW_SESSION_OWNER", "")),
+		assumeUnversioned:    assumeUnversioned,
 		scope:                strings.TrimSpace(value("RUNNER_SCOPE", "")),
 		organization:         strings.TrimSpace(value("ORG_NAME", "")),
 		enterprise:           strings.TrimSpace(value("ENTERPRISE_NAME", "")),
@@ -146,6 +160,21 @@ func (c config) validate() error {
 		return errors.New("RUNNER_PROFILE_ID is required")
 	case c.runnerImage == "":
 		return errors.New("RUNNER_IMAGE is required")
+	case len(c.workerRevision) != 64 ||
+		strings.IndexFunc(c.workerRevision, func(r rune) bool {
+			return (r < '0' || r > '9') && (r < 'a' || r > 'f')
+		}) >= 0:
+		return errors.New("PITCREW_WORKER_REVISION must be a lowercase SHA-256 digest")
+	case c.sessionOwner == "":
+		return errors.New("PITCREW_SESSION_OWNER is required")
+	case strings.IndexFunc(c.sessionOwner, func(r rune) bool {
+		return !unicode.IsLetter(r) &&
+			!unicode.IsDigit(r) &&
+			r != '.' &&
+			r != '_' &&
+			r != '-'
+	}) >= 0:
+		return errors.New("PITCREW_SESSION_OWNER contains unsupported characters")
 	case c.namePrefix == "":
 		return errors.New("RUNNER_NAME_PREFIX is required")
 	case c.stateDirectory == "" || c.stateDirectory == ".":
@@ -187,6 +216,8 @@ func (c config) validate() error {
 		c.accessToken,
 		c.profileID,
 		c.runnerImage,
+		c.workerRevision,
+		c.sessionOwner,
 		c.organization,
 		c.enterprise,
 		c.namePrefix,

@@ -43,6 +43,14 @@ type observedAutoscaling struct {
 	LastError             *string `json:"lastError"`
 }
 
+type observedUpdate struct {
+	Status         string  `json:"status"`
+	TargetRevision string  `json:"targetRevision"`
+	CurrentWorkers int     `json:"currentWorkers"`
+	StaleWorkers   int     `json:"staleWorkers"`
+	LastError      *string `json:"lastError"`
+}
+
 type observedState struct {
 	SchemaVersion          int                 `json:"schemaVersion"`
 	ManagerContractVersion int                 `json:"managerContractVersion"`
@@ -61,6 +69,7 @@ type observedState struct {
 	Slots                  []observedSlot      `json:"slots"`
 	ResourceTelemetry      resourceTelemetry   `json:"resourceTelemetry"`
 	Autoscaling            observedAutoscaling `json:"autoscaling"`
+	Update                 observedUpdate      `json:"update"`
 }
 
 func buildObservedState(
@@ -113,6 +122,10 @@ func buildObservedState(
 			ScaleDownDelaySeconds: int(cfg.scaleDownDelay / time.Second),
 			ScaleSetCount:         len(snapshots),
 		},
+		Update: observedUpdate{
+			Status:         "current",
+			TargetRevision: cfg.workerRevision,
+		},
 	}
 	if lastError != nil {
 		message := lastError.Error()
@@ -132,6 +145,8 @@ func buildObservedState(
 		state.Autoscaling.AvailableJobs += snapshot.statistics.availableJobs
 		state.Autoscaling.IdleRunners += snapshot.idleRunners
 		state.Autoscaling.BusyRunners += snapshot.busyRunners
+		state.Update.StaleWorkers += snapshot.staleRunners
+		state.Update.CurrentWorkers += len(snapshot.runners) - snapshot.staleRunners
 		if snapshot.scaleDownAt != nil &&
 			(earliestScaleDown == nil || snapshot.scaleDownAt.Before(*earliestScaleDown)) {
 			value := *snapshot.scaleDownAt
@@ -149,6 +164,14 @@ func buildObservedState(
 				observedRunnerSlot(runner, snapshot.retiring),
 			)
 		}
+	}
+	if state.Update.StaleWorkers > 0 {
+		state.Update.Status = "rolling"
+	}
+	if lastError != nil {
+		message := lastError.Error()
+		state.Update.LastError = &message
+		state.Update.Status = "degraded"
 	}
 	if controllerMaximumSlots > state.ConfiguredSlots {
 		state.ConfiguredSlots = controllerMaximumSlots

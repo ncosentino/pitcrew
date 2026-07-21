@@ -139,17 +139,18 @@ profile manager (Docker socket)
 
 One lightweight manager runs per profile. Worker containers are siblings on the
 host Docker daemon rather than nested containers. Reapplying setup with only
-worker-count changes updates mounted state in place; image, label, scope,
-runner-group, and naming changes retain full profile replacement.
+worker-count changes updates mounted state in place. Manager and compatible
+worker-image changes use rolling handoff; routing and registration-topology
+changes require an explicit profile stop.
 
 The manager also samples host capacity and current manager and worker CPU,
 memory, and PID usage into the observed-state projection. Connectors and
 dashboards remain read-only consumers and never receive the Docker socket.
 
-Manager stop and restart send `SIGTERM` to all profile workers concurrently so
-compatible runner images can deregister from GitHub before their containers are
-removed. Exact-label force removal remains a bounded fallback for workers that
-do not exit.
+Manager restart preserves sibling workers and adopts them after the replacement
+starts. `Setup-Runner.ps1 -Down` is the explicit full-stop path that signals and
+then removes only the selected profile's workers. Scale-set image updates fence
+idle registrations through GitHub and leave assigned jobs running.
 
 ## Copilot CLI operations plugin
 

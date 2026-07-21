@@ -22,8 +22,8 @@ services:
   runner-manager:
     build: ./manager
     image: ephemeral-runner-manager:profile-${RUNNER_PROFILE_ID:-default}
-    # Keep the babysitter alive across crashes and reboots; on start it clears any
-    # runners orphaned by a previous incarnation, so the pool self-recovers.
+    # Keep the babysitter alive across crashes and reboots. A replacement manager
+    # adopts labeled workers left by its predecessor so active jobs survive.
     restart: unless-stopped
     stop_grace_period: 60s
     environment:
@@ -55,12 +55,16 @@ services:
       RUNNER_LABELS: ${RUNNER_LABELS:-}
       RUNNER_NO_DEFAULT_LABELS: ${RUNNER_NO_DEFAULT_LABELS:-}
       RUNNER_GROUP: ${RUNNER_GROUP:-}
+      PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}
+      PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}
+      PITCREW_ASSUME_UNVERSIONED_CURRENT: ${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}
       PITCREW_AUTOSCALING_MODE: ${PITCREW_AUTOSCALING_MODE:-}
       PITCREW_AUTOSCALING_MIN_IDLE: ${PITCREW_AUTOSCALING_MIN_IDLE:-0}
       PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS: ${PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS:-120}
-      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-8}
+      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-9}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
+      pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-9}
     volumes:
       # The manager needs the host Docker daemon to launch sibling runner
       # containers. Only the manager mounts this - never the runners.

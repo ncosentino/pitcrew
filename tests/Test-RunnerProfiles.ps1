@@ -115,7 +115,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 8
+        managerContractVersion = 9
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -171,7 +171,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 8
+                            managerContractVersion = 9
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -340,6 +340,25 @@ Add-Check (
     ($autoscaledStateV8 | ConvertTo-Json -Depth 8) |
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract eight autoscaling state does not conform to observed-state.schema.json.'
+$observedStateV9 = (
+    $autoscaledStateV8 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$observedStateV9.managerContractVersion = 9
+$observedStateV9 | Add-Member -NotePropertyName update -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        status = 'rolling'
+        targetRevision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        currentWorkers = 0
+        staleWorkers = 1
+        lastError = $null
+    }
+)
+Add-Check (
+    ($observedStateV9 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract nine rolling-update state does not conform to observed-state.schema.json.'
 $missingConfiguredV8 = (
     $observedStateV8 |
         ConvertTo-Json -Depth 8 |
@@ -488,7 +507,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 8) 'The setup contract does not identify the autoscaling-capable manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 9) 'The setup contract does not identify the rolling-update-capable manager.'
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
@@ -664,20 +683,31 @@ Add-Check ($profileJson -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOK
 
 $defaultEnvironment = New-RunnerEnvironmentContent `
     -Profile $defaultProfile `
-    -AccessToken 'test-registration-token'
+    -AccessToken 'test-registration-token' `
+    -WorkerRevision $defaultStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-default' `
+    -AssumeUnversionedCurrent $false
 $copilotEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
-    -AccessToken 'test-registration-token'
+    -AccessToken 'test-registration-token' `
+    -WorkerRevision $copilotStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-copilot-cli' `
+    -AssumeUnversionedCurrent $false
 $autoscaledEnvironment = New-RunnerEnvironmentContent `
     -Profile $autoscaledProfile `
-    -AccessToken 'test-registration-token'
+    -AccessToken 'test-registration-token' `
+    -WorkerRevision $autoscaledStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-autoscaled' `
+    -AssumeUnversionedCurrent $false
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PROFILE_ID=default$') 'The default environment does not identify its profile.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_LABELS=general-purpose$') 'The default environment does not emit the general-purpose label.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The default environment unexpectedly disables GitHub default labels.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=8$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=9$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SESSION_OWNER=pitcrew-default$') 'The environment does not pin the stable session owner.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=$') 'Fixed profiles unexpectedly enable autoscaling.'
 Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Autoscaling mode is missing from the manager environment.'
 Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_MIN_IDLE=1$') 'Autoscaling minimum idle is missing from the manager environment.'
@@ -689,6 +719,9 @@ Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The speciali
 $enterpriseEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
     -AccessToken 'test-registration-token' `
+    -WorkerRevision $copilotStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-copilot-cli' `
+    -AssumeUnversionedCurrent $false `
     -Scope ent `
     -EnterpriseName 'example-enterprise'
 Add-Check ($enterpriseEnvironment -match '(?m)^ENTERPRISE_NAME=example-enterprise$') 'Enterprise runner state does not include the enterprise name.'
@@ -864,6 +897,15 @@ try {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
                 -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+            if (
+                $dockerArguments -contains 'up' -and
+                $env:PITCREW_TEST_MANAGER_START_FAILURE -eq '1' -and
+                $env:PITCREW_TEST_MANAGER_START_FAILURE_USED -ne '1'
+            ) {
+                $env:PITCREW_TEST_MANAGER_START_FAILURE_USED = '1'
+                $global:LASTEXITCODE = 1
+                return
+            }
         }
         if (
             $dockerArguments[0] -eq 'ps' -and
@@ -879,6 +921,24 @@ try {
         ) {
             $global:LASTEXITCODE = 1
             return
+        }
+        if (
+            $dockerArguments[0] -eq 'inspect' -and
+            $dockerArguments -contains 'manager-container-id' -and
+            $dockerArguments -contains '{{ index .Config.Labels "pitcrew-manager-contract-version" }}'
+        ) {
+            Write-Output $(if ($env:PITCREW_TEST_MANAGER_CONTRACT) {
+                $env:PITCREW_TEST_MANAGER_CONTRACT
+            } else {
+                '9'
+            })
+        }
+        if (
+            $dockerArguments[0] -eq 'inspect' -and
+            $dockerArguments -contains 'manager-container-id' -and
+            $dockerArguments -contains '{{.Image}}'
+        ) {
+            Write-Output 'sha256:manager-image'
         }
         $global:LASTEXITCODE = 0
     }
@@ -1196,18 +1256,111 @@ try {
         Add-Check ($recoveredState.generation -eq 4) 'A stale acknowledgement did not force a recoverable generation.'
         Add-Check (-not ($recoveryCommands -match 'compose.*down')) 'Acknowledgement recovery restarted the manager.'
 
+        $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
+        Remove-Item `
+            -LiteralPath (Join-Path $defaultStateDirectory 'manager-session-owner.txt') `
+            -Force
+        [PSCustomObject][ordered]@{
+            schemaVersion = 1
+            managerContractVersion = 8
+            profileId = 'default'
+            managerInstanceId = 'legacy-session-owner'
+        } |
+            ConvertTo-Json |
+            Set-Content `
+                -LiteralPath (Join-Path $defaultStateDirectory 'observed-state.json') `
+                -Encoding UTF8
+        $env:PITCREW_TEST_MANAGER_CONTRACT = '8'
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
-        & $fixtureSetup `
-            -Token 'test-registration-token' `
-            -Refresh `
-            -Repos 'https://github.com/example/project=1'
+        $legacyRefreshAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation 4 `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Refresh `
+                -Repos 'https://github.com/example/project=1'
+        }
+        finally {
+            Wait-Job -Job $legacyRefreshAcknowledgement -Timeout 65 | Out-Null
+            Receive-Job -Job $legacyRefreshAcknowledgement -ErrorAction Stop | Out-Null
+            Remove-Job -Job $legacyRefreshAcknowledgement -Force
+        }
+        $legacyRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $legacyRefreshEnvironment = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
+        Add-Check ($legacyRefreshCommands -match 'update.*--restart=no.*manager-container-id') 'A legacy manager refresh did not disable automatic restart.'
+        Add-Check ($legacyRefreshCommands -match 'rm.*-f.*manager-container-id') 'A legacy manager refresh signaled its destructive shutdown path.'
+        Add-Check (-not ($legacyRefreshCommands -match 'compose.*\tdown(\t|$)')) 'A legacy manager refresh stopped the complete profile.'
+        Add-Check ($legacyRefreshEnvironment -match '(?m)^PITCREW_SESSION_OWNER=legacy-session-owner$') 'A legacy autoscaler refresh did not preserve its session owner.'
+
+        $env:PITCREW_TEST_MANAGER_CONTRACT = '9'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $refreshAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation 4 `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Refresh `
+                -Repos 'https://github.com/example/project=1'
+        }
+        finally {
+            Wait-Job -Job $refreshAcknowledgement -Timeout 65 | Out-Null
+            Receive-Job -Job $refreshAcknowledgement -ErrorAction Stop | Out-Null
+            Remove-Job -Job $refreshAcknowledgement -Force
+        }
         $refreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         $refreshedState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
             ConvertFrom-Json -Depth 10
-        Add-Check (-not ($refreshCommands -match '(^|\t)(pull|build|run)(\t|$)')) 'An explicit manager refresh mutated or reverified the shared runner image.'
-        Add-Check ($refreshCommands -match 'compose.*down') 'An explicit profile refresh did not stop the selected profile.'
-        Add-Check ($refreshCommands -match 'compose.*up.*--build') 'An explicit profile refresh did not rebuild and restart the selected manager.'
+        Add-Check (-not ($refreshCommands -match '^(pull|build|run)(\t|$)')) 'An explicit manager refresh mutated or reverified the shared runner image.'
+        Add-Check (-not ($refreshCommands -match 'compose.*\tdown(\t|$)')) 'An explicit profile refresh stopped the selected profile.'
+        Add-Check ($refreshCommands -match 'compose.*build.*runner-manager') 'An explicit profile refresh did not build the replacement manager first.'
+        Add-Check ($refreshCommands -match 'stop.*--time.*60.*manager-container-id') 'An explicit profile refresh did not hand off the running manager.'
+        Add-Check ($refreshCommands -match 'compose.*up.*--force-recreate.*runner-manager') 'An explicit profile refresh did not recreate only the selected manager.'
         Add-Check ($refreshedState.generation -eq 4) 'An explicit profile refresh changed identical desired capacity.'
+
+        $preRollbackEnvironment = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
+        $preRollbackStatic = Get-Content -LiteralPath $defaultStaticProfilePath -Raw -Encoding UTF8
+        $preRollbackDesired = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
+        $env:PITCREW_TEST_MANAGER_START_FAILURE = '1'
+        Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'docker compose up failed' `
+            -Failure 'A failed manager start was not surfaced after rollback.'
+        Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
+        $rollbackCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check ($rollbackCommands -match 'tag.*sha256:manager-image.*ephemeral-runner-manager:profile-default') 'A failed manager start did not restore the previous manager image.'
+        Add-Check (
+            (Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8) -ceq
+            $preRollbackEnvironment
+        ) 'A failed manager start did not restore the previous environment.'
+        Add-Check (
+            (Get-Content -LiteralPath $defaultStaticProfilePath -Raw -Encoding UTF8) -ceq
+            $preRollbackStatic
+        ) 'A failed manager start did not restore the previous static profile.'
+        Add-Check (
+            (Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8) -ceq
+            $preRollbackDesired
+        ) 'A failed manager start did not restore desired capacity.'
 
         if (-not $IsWindows) {
             $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
@@ -1238,15 +1391,31 @@ try {
         }
 
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
-        & $fixtureSetup `
-            -Token 'test-registration-token' `
-            -Labels 'additional-capability' `
-            -Repos 'https://github.com/example/project=1'
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Labels 'additional-capability' `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'cannot roll safely' `
+            -Failure 'A live routing change bypassed the explicit-stop requirement.'
         $immutableCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
-        Add-Check ($immutableCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'An immutable profile change skipped image preparation.'
-        Add-Check ($immutableCommands -match 'compose.*down') 'An immutable profile change did not replace the manager.'
-        Add-Check ($immutableCommands -match 'compose.*up') 'An immutable profile change did not restart the profile.'
+        Add-Check (-not ($immutableCommands -match 'compose.*\t(build|up|down)(\t|$)')) 'A rejected routing change modified the live profile.'
 
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Autoscale `
+                    -MinimumIdle 0 `
+                    -ScaleDownDelaySeconds 120 `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'cannot roll safely' `
+            -Failure 'A live fixed-to-scale-set migration bypassed the explicit-stop requirement.'
+        $env:PITCREW_TEST_MANAGER_RUNNING = '0'
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup `
             -Token 'test-registration-token' `
@@ -1260,7 +1429,8 @@ try {
         Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_MIN_IDLE=0$') 'Setup did not persist autoscaling minimum idle.'
         Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=120$') 'Setup did not persist autoscaling scale-down delay.'
         Add-Check ($autoscalingCommands -match 'run.*Runner\.Listener.*id runner') 'Setup did not verify the JIT runner image contract.'
-        Add-Check ($autoscalingCommands -match 'compose.*down') 'Enabling autoscaling did not replace the fixed manager.'
+        Add-Check (-not ($autoscalingCommands -match 'compose.*\tdown(\t|$)')) 'Starting a stopped autoscaling profile ran broad teardown.'
+        $env:PITCREW_TEST_MANAGER_RUNNING = '1'
 
         $defaultDesiredBeforeNamed = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
@@ -1286,6 +1456,10 @@ try {
         Add-Check (-not ($namedDownCommands | Where-Object { $_ -match '(^|\t)label=ephemeral-managed-runner$' })) 'Named teardown targeted the legacy global Docker label.'
         Add-Check (-not ($namedDownCommands -match 'name=')) 'Named teardown used a broad container-name filter.'
 
+        Remove-Item `
+            -LiteralPath (Join-Path (Split-Path -Parent $defaultDesiredPath) 'observed-state.json') `
+            -Force `
+            -ErrorAction SilentlyContinue
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup -Down
         $defaultDownCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -1313,6 +1487,8 @@ try {
         Remove-Item Env:\PITCREW_TEST_MANAGER_RUNNING -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_REJECT_TOKEN -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_IMAGE_MISSING -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
     }
 }
 finally {
@@ -1339,6 +1515,11 @@ Add-Check ($manager -match [regex]::Escape('LAST_DESIRED_DOCUMENT_HASH')) 'The m
 Add-Check ($manager -notmatch 'grep -Fqx') 'The manager still performs a quadratic desired-key scan.'
 Add-Check ($manager -match [regex]::Escape('/drain')) 'The manager does not represent graceful slot draining.'
 Add-Check ($manager -match [regex]::Escape('ephemeral-managed-runner-slot')) 'Worker containers do not expose stable slot identity.'
+Add-Check ($manager -match [regex]::Escape('pitcrew-worker-revision')) 'Worker containers do not expose their rolling-update revision.'
+Add-Check ($manager -match [regex]::Escape('restore_managed_slots')) 'A replacement manager cannot adopt workers from its predecessor.'
+Add-Check ($manager -match [regex]::Escape('received manager handoff signal; preserving managed runner containers')) 'Manager handoff still tears down profile workers.'
+Add-Check ($manager -match [regex]::Escape('docker run --rm --detach')) 'Fixed workers are not detached for manager adoption.'
+Add-Check ($manager -notmatch 'clearing any leftover managed runners') 'Manager startup still destroys workers left by its predecessor.'
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
 Add-Check ($manager -match [regex]::Escape('PITCREW_OBSERVED_STATE_INTERVAL:-30')) 'The manager does not bound observed-state heartbeat writes.'
 Add-Check ($manager -match [regex]::Escape('collect_resource_telemetry')) 'The manager does not collect resource telemetry through observed state.'
@@ -1373,8 +1554,11 @@ Add-Check ($compose -match [regex]::Escape('${PITCREW_STATE_DIR:-.pitcrew-state/
 Add-Check ($compose -match 'stop_grace_period:\s*60s') 'Compose does not allow autoscaling manager shutdown to complete bounded cleanup.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-9}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=8$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=9$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

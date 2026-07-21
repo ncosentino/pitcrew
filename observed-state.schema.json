@@ -160,7 +160,38 @@
           "type": ["string", "null"]
         }
       }
-    }
+    },
+    "updateState": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": [
+          "status",
+          "targetRevision",
+          "currentWorkers",
+          "staleWorkers",
+          "lastError"
+        ],
+        "properties": {
+          "status": {
+            "enum": ["current", "rolling", "degraded"]
+          },
+          "targetRevision": {
+            "type": "string",
+            "pattern": "^[0-9a-f]{64}$"
+          },
+          "currentWorkers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "staleWorkers": {
+            "type": "integer",
+            "minimum": 0
+          },
+          "lastError": {
+            "type": ["string", "null"]
+          }
+        }
+      }
   },
   "required": [
     "schemaVersion",
@@ -245,6 +276,16 @@
       "oneOf": [
         {
           "$ref": "#/$defs/autoscalingState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "update": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/updateState"
         },
         {
           "type": "null"
@@ -502,6 +543,28 @@
           "configuredSlots",
           "autoscaling"
         ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 9
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "update"
+        ],
+        "properties": {
+          "update": {
+            "$ref": "#/$defs/updateState"
+          }
+        }
       }
     }
   ]

@@ -22,6 +22,8 @@ type clock interface {
 
 type realClock struct{}
 
+const staleFenceRetryDelay = 15 * time.Second
+
 func (realClock) now() time.Time {
 	return time.Now()
 }
@@ -50,6 +52,9 @@ type runnerRecord struct {
 	idleSince           *time.Time
 	jobStartedAt        *time.Time
 	completedAt         *time.Time
+	revision            string
+	stale               bool
+	fenceRetryAt        *time.Time
 	recovered           bool
 	protected           bool
 	registrationRemoved bool
@@ -71,6 +76,7 @@ type scalerSnapshot struct {
 	idleRunners      int
 	busyRunners      int
 	drainingRunners  int
+	staleRunners     int
 	minimumIdleSlots int
 	retiring         bool
 }
@@ -79,26 +85,28 @@ type runnerScaler struct {
 	operationGate chan struct{}
 	mu            sync.Mutex
 
-	lifecycleContext context.Context
-	profileID        string
-	image            string
-	namePrefix       string
-	minimumIdle      int
-	scaleDownDelay   time.Duration
-	target           targetSpec
-	scaleSetID       int
-	api              scaleSetService
-	docker           dockerClient
-	clock            clock
-	runners          map[string]*runnerRecord
-	statistics       scalerStatistics
-	targetSlots      int
-	scaleDownAt      *time.Time
-	shuttingDown     bool
-	retiring         bool
-	onChange         func()
-	onError          func(error)
-	nameSuffix       func() (string, error)
+	lifecycleContext  context.Context
+	profileID         string
+	image             string
+	workerRevision    string
+	assumeUnversioned bool
+	namePrefix        string
+	minimumIdle       int
+	scaleDownDelay    time.Duration
+	target            targetSpec
+	scaleSetID        int
+	api               scaleSetService
+	docker            dockerClient
+	clock             clock
+	runners           map[string]*runnerRecord
+	statistics        scalerStatistics
+	targetSlots       int
+	scaleDownAt       *time.Time
+	shuttingDown      bool
+	retiring          bool
+	onChange          func()
+	onError           func(error)
+	nameSuffix        func() (string, error)
 }
 
 func newRunnerScaler(
@@ -119,23 +127,25 @@ func newRunnerScaler(
 		onError = func(error) {}
 	}
 	scaler := &runnerScaler{
-		operationGate:    make(chan struct{}, 1),
-		lifecycleContext: lifecycleContext,
-		profileID:        cfg.profileID,
-		image:            cfg.runnerImage,
-		namePrefix:       cfg.namePrefix,
-		minimumIdle:      cfg.minimumIdle,
-		scaleDownDelay:   cfg.scaleDownDelay,
-		target:           target,
-		scaleSetID:       scaleSetID,
-		api:              boundScaleSetService(api),
-		docker:           boundDockerClient(docker),
-		clock:            scalerClock,
-		runners:          make(map[string]*runnerRecord),
-		targetSlots:      calculateTarget(target.maximum, cfg.minimumIdle, 0),
-		onChange:         onChange,
-		onError:          onError,
-		nameSuffix:       randomSuffix,
+		operationGate:     make(chan struct{}, 1),
+		lifecycleContext:  lifecycleContext,
+		profileID:         cfg.profileID,
+		image:             cfg.runnerImage,
+		workerRevision:    cfg.workerRevision,
+		assumeUnversioned: cfg.assumeUnversioned,
+		namePrefix:        cfg.namePrefix,
+		minimumIdle:       cfg.minimumIdle,
+		scaleDownDelay:    cfg.scaleDownDelay,
+		target:            target,
+		scaleSetID:        scaleSetID,
+		api:               boundScaleSetService(api),
+		docker:            boundDockerClient(docker),
+		clock:             scalerClock,
+		runners:           make(map[string]*runnerRecord),
+		targetSlots:       calculateTarget(target.maximum, cfg.minimumIdle, 0),
+		onChange:          onChange,
+		onError:           onError,
+		nameSuffix:        randomSuffix,
 	}
 	scaler.operationGate <- struct{}{}
 	return scaler
@@ -416,6 +426,9 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	if err := s.retryCleanupPending(ctx); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
+	if err := s.retireStaleRunners(ctx); err != nil {
+		operationErrors = append(operationErrors, err)
+	}
 	s.mu.Lock()
 	if s.shuttingDown {
 		count := s.capacityCountLocked()
@@ -599,6 +612,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		targetKeyLabelKey:      s.target.key,
 		runnerNameLabelKey:     jit.runnerName,
 		runnerIDLabelKey:       strconv.FormatInt(jit.runnerID, 10),
+		workerRevisionLabelKey: s.workerRevision,
 	}
 	containerID, err := s.docker.run(ctx, containerLaunch{
 		name:      containerName,
@@ -632,6 +646,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		containerID: containerID,
 		container:   containerName,
 		state:       runnerStarting,
+		revision:    s.workerRevision,
 		startedAt:   now,
 		updatedAt:   now,
 	}
@@ -689,11 +704,15 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 		containerID: container.containerID,
 		container:   container.name,
 		state:       runnerStarting,
-		startedAt:   startedAt,
-		updatedAt:   s.clock.now().UTC(),
-		recovered:   true,
-		protected:   true,
+		revision:    container.revision,
+		stale: container.revision != s.workerRevision &&
+			!(container.revision == "" && s.assumeUnversioned),
+		startedAt: startedAt,
+		updatedAt: s.clock.now().UTC(),
+		recovered: true,
+		protected: true,
 	}
+
 	s.mu.Lock()
 	if _, exists := s.runners[runner.key]; exists {
 		s.mu.Unlock()
@@ -721,6 +740,101 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 	s.monitorRunner(runner, monitorSince)
 	s.onChange()
 	return nil
+}
+
+func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
+	s.mu.Lock()
+	candidates := make([]runnerRecord, 0)
+	now := s.clock.now().UTC()
+	for _, runner := range s.runners {
+		if !runner.stale ||
+			runner.registrationRemoved ||
+			runner.state == runnerBusy ||
+			runner.state == runnerDraining ||
+			runner.state == runnerCleanupPending ||
+			runner.fenceRetryAt != nil && now.Before(*runner.fenceRetryAt) {
+			continue
+		}
+		candidates = append(candidates, *runner)
+	}
+	s.mu.Unlock()
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].key < candidates[j].key
+	})
+
+	var operationErrors []error
+	for _, candidate := range candidates {
+		s.mu.Lock()
+		current := s.runners[candidate.key]
+		if current == nil ||
+			!current.stale ||
+			current.registrationRemoved ||
+			current.state == runnerBusy ||
+			current.state == runnerDraining ||
+			current.state == runnerCleanupPending {
+			s.mu.Unlock()
+			continue
+		}
+		previousState := current.state
+		previousIdleSince := current.idleSince
+		current.state = runnerDraining
+		current.idleSince = nil
+		current.updatedAt = s.clock.now().UTC()
+		runnerID := current.runnerID
+		containerID := current.containerID
+		s.mu.Unlock()
+		s.onChange()
+
+		err := registrationRemovalError(s.api.removeRunner(ctx, runnerID))
+		if err != nil {
+			s.mu.Lock()
+			if current := s.runners[candidate.key]; current != nil {
+				if errors.Is(err, scaleset.JobStillRunningError) {
+					current.state = runnerBusy
+					current.protected = false
+				} else if current.state == runnerDraining {
+					current.state = previousState
+					current.idleSince = previousIdleSince
+					retryAt := s.clock.now().UTC().Add(staleFenceRetryDelay)
+					current.fenceRetryAt = &retryAt
+				}
+				current.updatedAt = s.clock.now().UTC()
+			}
+			s.mu.Unlock()
+			s.onChange()
+			if !errors.Is(err, scaleset.JobStillRunningError) {
+				operationErrors = append(operationErrors, fmt.Errorf(
+					"fence stale runner %d before replacement: %w",
+					runnerID,
+					err,
+				))
+			}
+			continue
+		}
+
+		if err := s.docker.stopAndRemove(ctx, containerID); err != nil {
+			s.mu.Lock()
+			if current := s.runners[candidate.key]; current != nil {
+				current.state = runnerCleanupPending
+				current.registrationRemoved = true
+				current.updatedAt = s.clock.now().UTC()
+			}
+			s.mu.Unlock()
+			s.onChange()
+			operationErrors = append(operationErrors, fmt.Errorf(
+				"stop stale runner container %s after registration removal: %w",
+				containerID,
+				err,
+			))
+			continue
+		}
+
+		s.mu.Lock()
+		delete(s.runners, candidate.key)
+		s.mu.Unlock()
+		s.onChange()
+	}
+	return errors.Join(operationErrors...)
 }
 
 func (s *runnerScaler) monitorRunner(runner *runnerRecord, since time.Time) {
@@ -983,6 +1097,9 @@ func (s *runnerScaler) snapshot() scalerSnapshot {
 	snapshot.runners = make([]runnerRecord, 0, len(s.runners))
 	for _, runner := range s.runners {
 		snapshot.runners = append(snapshot.runners, *runner)
+		if runner.stale {
+			snapshot.staleRunners++
+		}
 		switch runner.state {
 		case runnerIdle:
 			snapshot.idleRunners++

@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 8
+$script:RunnerManagerContractVersion = 9
 
 function ConvertTo-RunnerLabelList {
     param(
@@ -318,6 +318,8 @@ function Resolve-RunnerProfile {
         CapacityAcknowledgementPath = Join-Path $stateDirectory 'acknowledged-capacity.json'
         ObservedStatePath = Join-Path $stateDirectory 'observed-state.json'
         StaticProfilePath = Join-Path $stateDirectory 'static-profile.json'
+        ShutdownRequestPath = Join-Path $stateDirectory 'manager-shutdown.json'
+        SessionOwnerPath = Join-Path $stateDirectory 'manager-session-owner.txt'
         LockPath = Join-Path $stateDirectory 'setup.lock'
         ComposeProjectName = $composeProjectName
         ManagedRunnerLabel = "ephemeral-managed-runner-profile=$profileName"
@@ -692,16 +694,114 @@ function New-RunnerStaticProfileState {
         }
         namePrefix = [string]$Profile.NamePrefix
     }
-    $configurationJson = $staticConfiguration | ConvertTo-Json -Depth 20 -Compress
-    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($configurationJson)
-    $fingerprint = [Convert]::ToHexString(
-        [Security.Cryptography.SHA256]::HashData($bytes)
-    ).ToLowerInvariant()
+    $fingerprint = Get-RunnerObjectFingerprint -Value $staticConfiguration
+    $workerRevision = Get-RunnerObjectFingerprint -Value (
+        Get-RunnerWorkerConfiguration -Configuration $staticConfiguration
+    )
 
     return [PSCustomObject][ordered]@{
         schemaVersion = $script:RunnerStaticProfileSchemaVersion
         fingerprint = $fingerprint
+        workerRevision = $workerRevision
         configuration = $staticConfiguration
+    }
+}
+
+<#
+.SYNOPSIS
+    Computes a stable SHA-256 fingerprint for a JSON-compatible value.
+
+.PARAMETER Value
+    Value whose ordered JSON representation identifies the contract.
+
+.OUTPUTS
+    Lowercase SHA-256 digest.
+#>
+function Get-RunnerObjectFingerprint {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Value
+    )
+
+    $json = $Value | ConvertTo-Json -Depth 20 -Compress
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($json)
+    return [Convert]::ToHexString(
+        [Security.Cryptography.SHA256]::HashData($bytes)
+    ).ToLowerInvariant()
+}
+
+<#
+.SYNOPSIS
+    Selects the configuration that changes a worker container revision.
+
+.DESCRIPTION
+    Excludes manager-only settings and autoscaling policy so manager refreshes
+    and policy tuning can preserve compatible workers across a handoff.
+
+.PARAMETER Configuration
+    Static profile configuration from New-RunnerStaticProfileState.
+
+.OUTPUTS
+    Ordered worker configuration suitable for hashing or equality checks.
+#>
+function Get-RunnerWorkerConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Configuration
+    )
+
+    return [PSCustomObject][ordered]@{
+        profile = [string]$Configuration.profile
+        image = [string]$Configuration.image
+        build = $Configuration.build
+        labels = @($Configuration.labels)
+        disableDefaultLabels = [bool]$Configuration.disableDefaultLabels
+        scope = [string]$Configuration.scope
+        organization = [string]$Configuration.organization
+        enterprise = [string]$Configuration.enterprise
+        runnerGroup = [string]$Configuration.runnerGroup
+        namePrefix = [string]$Configuration.namePrefix
+    }
+}
+
+<#
+.SYNOPSIS
+    Selects the topology that must remain stable for a rolling replacement.
+
+.DESCRIPTION
+    Image and manager implementation changes can roll in place. Registration
+    scope, manager mode, runner group, and naming changes require an explicit
+    full stop because existing workers cannot be safely rehomed.
+
+.PARAMETER Configuration
+    Static profile configuration from New-RunnerStaticProfileState.
+
+.OUTPUTS
+    Ordered topology configuration suitable for equality checks.
+#>
+function Get-RunnerRollingCompatibilityConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Configuration
+    )
+
+    return [PSCustomObject][ordered]@{
+        profile = [string]$Configuration.profile
+        labels = @($Configuration.labels)
+        disableDefaultLabels = [bool]$Configuration.disableDefaultLabels
+        scope = [string]$Configuration.scope
+        organization = [string]$Configuration.organization
+        enterprise = [string]$Configuration.enterprise
+        runnerGroup = [string]$Configuration.runnerGroup
+        autoscalingMode = if ($Configuration.autoscaling) {
+            [string]$Configuration.autoscaling.mode
+        } else {
+            ''
+        }
+        namePrefix = [string]$Configuration.namePrefix
     }
 }
 
@@ -829,6 +929,15 @@ function Enter-RunnerProfileLock {
 .PARAMETER AccessToken
     Registration token written only to the gitignored profile environment file.
 
+.PARAMETER WorkerRevision
+    SHA-256 revision assigned to newly launched worker containers.
+
+.PARAMETER SessionOwner
+    Stable non-secret owner name used for scale-set message sessions.
+
+.PARAMETER AssumeUnversionedCurrent
+    Whether workers created before revision labels should be adopted as current.
+
 .OUTPUTS
     Newline-delimited Docker Compose environment content.
 #>
@@ -840,6 +949,17 @@ function New-RunnerEnvironmentContent {
 
         [Parameter(Mandatory)]
         [string]$AccessToken,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[0-9a-f]{64}$')]
+        [string]$WorkerRevision,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$')]
+        [string]$SessionOwner,
+
+        [Parameter(Mandatory)]
+        [bool]$AssumeUnversionedCurrent,
 
         [ValidateSet('repo', 'org', 'ent')]
         [string]$Scope = 'repo',
@@ -858,13 +978,16 @@ function New-RunnerEnvironmentContent {
         $Profile.Image,
         $Profile.NamePrefix,
         $Profile.LabelsValue,
-        $Profile.RunnerGroup
+        $Profile.RunnerGroup,
+        $WorkerRevision,
+        $SessionOwner
     )
     if ($values | Where-Object { $_ -match '[\r\n]' }) {
         throw 'Runner environment values cannot contain newlines.'
     }
 
     $disableDefaultLabels = if ($Profile.DisableDefaultLabels) { '1' } else { '' }
+    $assumeUnversionedCurrentValue = if ($AssumeUnversionedCurrent) { '1' } else { '0' }
     $autoscalingMode = if ($Profile.Autoscaling) { [string]$Profile.Autoscaling.Mode } else { '' }
     $minimumIdle = if ($Profile.Autoscaling) { [string]$Profile.Autoscaling.MinimumIdle } else { '' }
     $scaleDownDelay = if ($Profile.Autoscaling) {
@@ -884,6 +1007,9 @@ function New-RunnerEnvironmentContent {
         "RUNNER_LABELS=$($Profile.LabelsValue)"
         "RUNNER_NO_DEFAULT_LABELS=$disableDefaultLabels"
         "RUNNER_GROUP=$($Profile.RunnerGroup)"
+        "PITCREW_WORKER_REVISION=$WorkerRevision"
+        "PITCREW_SESSION_OWNER=$SessionOwner"
+        "PITCREW_ASSUME_UNVERSIONED_CURRENT=$assumeUnversionedCurrentValue"
         "PITCREW_AUTOSCALING_MODE=$autoscalingMode"
         "PITCREW_AUTOSCALING_MIN_IDLE=$minimumIdle"
         "PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$scaleDownDelay"

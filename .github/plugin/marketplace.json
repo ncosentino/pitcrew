@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Operational skills for safely managing PitCrew runner pools and dashboards.",
-    "version": "1.1.0"
+    "version": "1.2.0"
   },
   "plugins": [
     {
       "name": "pitcrew-operations",
       "description": "Use PitCrew's existing scripts and scoped Docker Compose commands for capacity, autoscaling, and version updates.",
-      "version": "1.1.0",
+      "version": "1.2.0",
       "source": "./plugins/pitcrew-operations",
       "homepage": "https://www.devleader.ca/projects/pitcrew",
       "repository": "https://github.com/ncosentino/pitcrew",

@@ -345,6 +345,111 @@ func TestRecoveredRunnerIsProtectedUntilLifecycleSignal(t *testing.T) {
 	}
 }
 
+func TestStaleIdleRunnerRollsToCurrentRevision(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 1, 0)
+	defer cancel()
+	if err := scaler.recover(recoveredContainer{
+		containerID: "stale-container",
+		name:        "stale",
+		runnerName:  "stale-runner",
+		runnerID:    77,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-77",
+		revision:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		createdAt:   time.Date(2026, 7, 20, 11, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{77}) ||
+		!reflect.DeepEqual(docker.stopRemove, []string{"stale-container"}) {
+		t.Fatalf(
+			"stale idle runner was not fenced and removed: api=%#v docker=%#v",
+			api.removeCalls,
+			docker.stopRemove,
+		)
+	}
+	snapshot := scaler.snapshot()
+	if len(snapshot.runners) != 1 ||
+		snapshot.runners[0].stale ||
+		snapshot.runners[0].revision != testWorkerRevision {
+		t.Fatalf("replacement runner did not use the current revision: %#v", snapshot)
+	}
+}
+
+func TestStaleBusyRunnerSurvivesRollingUpdate(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 1, 0)
+	defer cancel()
+	api.removeErrors[77] = scaleset.JobStillRunningError
+	if err := scaler.recover(recoveredContainer{
+		containerID: "busy-container",
+		name:        "busy",
+		runnerName:  "busy-runner",
+		runnerID:    77,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-77",
+		revision:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		createdAt:   time.Date(2026, 7, 20, 11, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if runner.state != runnerBusy || !runner.stale {
+		t.Fatalf("busy stale runner was not preserved: %#v", runner)
+	}
+	if len(docker.stopRemove) != 0 || len(docker.stops) != 0 {
+		t.Fatal("rolling update stopped a busy stale runner")
+	}
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{77}) {
+		t.Fatalf("known-busy stale runner was repeatedly fenced: %#v", api.removeCalls)
+	}
+}
+
+func TestStaleRunnerFenceFailureUsesRetryDelay(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 1, 0)
+	defer cancel()
+	api.removeErrors[77] = errors.New("temporary fence failure")
+	if err := scaler.recover(recoveredContainer{
+		containerID: "stale-container",
+		name:        "stale",
+		runnerName:  "stale-runner",
+		runnerID:    77,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-77",
+		revision:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		createdAt:   time.Date(2026, 7, 20, 11, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("expected the first stale-runner fence to fail")
+	}
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("retry delay should suppress the immediate retry: %v", err)
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{77}) {
+		t.Fatalf("stale runner was retried before its delay: %#v", api.removeCalls)
+	}
+	clock.advance(staleFenceRetryDelay)
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("expected the delayed stale-runner fence to retry and fail")
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{77, 77}) {
+		t.Fatalf("stale runner did not retry after its delay: %#v", api.removeCalls)
+	}
+}
+
 func TestRecoveredReadLogFailureReplaysFromCreationAndRetiresIdleRunner(t *testing.T) {
 	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, 0)
 	defer cancel()

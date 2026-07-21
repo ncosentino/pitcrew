@@ -50,9 +50,10 @@ func parseRetirementDocument(data []byte) (retirementDocument, error) {
 			document.SchemaVersion,
 		)
 	}
-	if document.ManagerContractVersion != managerContractVersion {
+	if document.ManagerContractVersion < 8 ||
+		document.ManagerContractVersion > managerContractVersion {
 		return retirementDocument{}, fmt.Errorf(
-			"retiring-targets managerContractVersion must be %d, got %d",
+			"retiring-targets managerContractVersion must be between 8 and %d, got %d",
 			managerContractVersion,
 			document.ManagerContractVersion,
 		)

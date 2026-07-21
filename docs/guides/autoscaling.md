@@ -28,9 +28,10 @@ Configured worker counts become maximum capacity:
 This profile may run from zero through thirty workers. GitHub's outbound
 long-poll demand stream wakes the pool when matching jobs are assigned.
 
-Autoscaling mode is static profile configuration. Enabling or disabling it
-replaces the selected manager and its current workers, so make the transition
-during an idle maintenance window.
+Autoscaling mode changes registration topology. Enabling or disabling it
+requires an explicit profile stop after confirming no jobs are active. Tuning
+minimum idle or scale-down delay within scale-set mode uses manager handoff and
+does not interrupt active workers.
 
 For a manifest, add:
 
@@ -57,6 +58,8 @@ For a manifest, add:
   delay. Rising demand cancels the pending scale-down.
 - Busy runners are never selected for idle removal. PitCrew removes the GitHub
   runner registration before stopping an idle container.
+- Worker image revisions roll in place: idle stale runners are fenced and
+  replaced immediately, while assigned stale runners finish their one job.
 - Every JIT worker still executes one job and is destroyed.
 
 The configured maximum remains the operator's host resource ceiling. PitCrew
