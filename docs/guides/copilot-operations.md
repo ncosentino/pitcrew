@@ -113,6 +113,12 @@ ingress is enabled. Failures before ingress activation restore both the previous
 image and database; after ingress opens, the skill preserves new writes instead
 of automatically restoring an older snapshot.
 
+The same skill enables protocol-v3 capacity controls as one automated
+operation. It downloads the release-pinned host connector and installer,
+migrates the existing connector identity, installs the systemd service, and
+restores the container if startup fails. Operators do not manually build
+binaries, copy credentials, or write service files.
+
 ## Safety boundary
 
 Every skill stops on ambiguous installation, profile, release, ingress, or

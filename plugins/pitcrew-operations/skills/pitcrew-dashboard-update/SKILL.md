@@ -1,6 +1,6 @@
 ---
 name: pitcrew-dashboard-update
-description: Update a hosted PitCrew Dashboard release with its existing .env.hosted and Caddy or Cloudflare Tunnel Compose overlay. Use when the user asks to update or upgrade the PitCrew Dashboard.
+description: Update a hosted PitCrew Dashboard release or enable its typed capacity controls using the release installer and existing connector identity. Use when the user asks to update, upgrade, or enable dashboard operations.
 license: MIT
 ---
 
@@ -128,3 +128,44 @@ partial update requiring diagnosis while preserving the migrated database.
 Report private verification failure even when database and image rollback
 succeed. Retain the backup for operator inspection. Do not restart Docker, stop
 unrelated containers, or prune images.
+
+## Enable capacity operations
+
+Use this workflow when the user asks to enable dashboard write controls for
+worker capacity. This is an opt-in host-service migration of the existing
+connector, not a new container.
+
+1. Require the dashboard to be updated to a published release whose assets
+   include:
+   - `Enable-PitCrewCapacityOperations.ps1`
+   - `pitcrew-connector-<version>-linux-x64.tar.gz` and checksum, or
+     the equivalent `linux-arm64` assets
+2. Resolve the exact PitCrew root and selected profiles. If the user did not
+   name a ceiling, use each selected profile's current configured maximum as the
+   local ceiling; never invent additional headroom.
+3. Resolve the public HTTPS dashboard URL from the active hosted deployment.
+   Do not read or display unrelated environment values.
+4. Verify exactly one running container has the Compose service label
+   `com.docker.compose.service=connector`. Stop if the identity is ambiguous.
+5. Download the installer asset from the same published release to a temporary
+   path. Never substitute `main`, a branch, or an unversioned raw file.
+6. Run the installer as one elevated PowerShell operation with the exact
+   release version, PitCrew root, dashboard URL, selected profiles, and local
+   ceiling. The installer:
+   - verifies the release checksum
+   - stops only the exact connector container
+   - migrates its identity without displaying it
+   - installs and starts the existing connector binary as a systemd service
+   - restores the connector container if service startup fails
+7. Verify:
+   - `pitcrew-connector.service` is active
+   - the previous connector container remains stopped
+   - connector logs report a successful synchronization without exposing the
+     identity or profile environment
+   - the dashboard reports protocol-v3 capacity capability for every selected
+     eligible profile
+
+Do not manually copy credentials, author service files, build the connector on
+the host, mount the Docker socket into the connector container, or leave both
+connector processes running. The automated installer currently supports Linux
+hosts with systemd; report other hosts as unsupported instead of improvising.
