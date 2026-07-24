@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.2.0') 'The operations plugin version was not advanced for rolling updates.'
+Add-Check ($plugin.version -eq '1.3.0') 'The operations plugin version was not advanced for dashboard capacity operations.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -102,6 +102,20 @@ foreach ($skillDirectory in $skillDirectories) {
         ) "Skill '$($skillDirectory.Name)' references a missing file: $referencePath"
     }
 }
+
+$dashboardUpdateSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-dashboard-update' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $dashboardUpdateSkill -match 'Enable-PitCrewCapacityOperations\.ps1'
+) 'The dashboard update skill does not invoke the capacity-operations installer.'
+Add-Check (
+    $dashboardUpdateSkill -match 'restores the connector container if service startup fails'
+) 'The dashboard update skill omits connector migration rollback.'
+Add-Check (
+    $dashboardUpdateSkill -match 'Do not manually copy credentials'
+) 'The dashboard update skill still delegates identity migration to the user.'
 
 if ($errors.Count -gt 0) {
     foreach ($errorMessage in $errors) {
