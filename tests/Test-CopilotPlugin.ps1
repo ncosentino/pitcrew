@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.3.0') 'The operations plugin version was not advanced for dashboard capacity operations.'
+Add-Check ($plugin.version -eq '1.4.0') 'The operations plugin version was not advanced for Windows dashboard capacity operations.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -113,6 +113,15 @@ Add-Check (
 Add-Check (
     $dashboardUpdateSkill -match 'restores the connector container if service startup fails'
 ) 'The dashboard update skill omits connector migration rollback.'
+Add-Check (
+    $dashboardUpdateSkill -match 'win-x64' -and
+    $dashboardUpdateSkill -match 'win-arm64'
+) 'The dashboard update skill does not require Windows connector release assets.'
+Add-Check (
+    $dashboardUpdateSkill -match 'Get-Service PitCrewConnector' -and
+    $dashboardUpdateSkill -match 'requests UAC\s+elevation' -and
+    $dashboardUpdateSkill -match 'explicit result'
+) 'The dashboard update skill does not automate or verify Windows Service installation.'
 Add-Check (
     $dashboardUpdateSkill -match 'Do not manually copy credentials'
 ) 'The dashboard update skill still delegates identity migration to the user.'

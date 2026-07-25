@@ -138,8 +138,8 @@ connector, not a new container.
 1. Require the dashboard to be updated to a published release whose assets
    include:
    - `Enable-PitCrewCapacityOperations.ps1`
-   - `pitcrew-connector-<version>-linux-x64.tar.gz` and checksum, or
-     the equivalent `linux-arm64` assets
+   - the connector archive and checksum matching the host:
+     `linux-x64`, `linux-arm64`, `win-x64`, or `win-arm64`
 2. Resolve the exact PitCrew root and selected profiles. If the user did not
    name a ceiling, use each selected profile's current configured maximum as the
    local ceiling; never invent additional headroom.
@@ -151,21 +151,29 @@ connector, not a new container.
    path. Never substitute `main`, a branch, or an unversioned raw file.
 6. Run the installer as one elevated PowerShell operation with the exact
    release version, PitCrew root, dashboard URL, selected profiles, and local
-   ceiling. The installer:
+   ceiling. On Linux, invoke it through `sudo pwsh`. On Windows, invoke it
+   normally from the interactive host session; the installer requests UAC
+   elevation when needed and returns the elevated operation's explicit result.
+   If no interactive desktop is available, require the Copilot CLI session to
+   already be elevated rather than attempting unattended elevation. The
+   installer:
    - verifies the release checksum
    - stops only the exact connector container
    - migrates its identity without displaying it
-   - installs and starts the existing connector binary as a systemd service
+   - installs and starts the existing connector binary as a native systemd or
+     Windows Service
    - restores the connector container if service startup fails
 7. Verify:
-   - `pitcrew-connector.service` is active
+   - on Linux, `pitcrew-connector.service` is active
+   - on Windows, `Get-Service PitCrewConnector` reports `Running`
    - the previous connector container remains stopped
-   - connector logs report a successful synchronization without exposing the
-     identity or profile environment
    - the dashboard reports protocol-v3 capacity capability for every selected
      eligible profile
+   - the host service remains active through the successful dashboard
+     synchronization
 
 Do not manually copy credentials, author service files, build the connector on
 the host, mount the Docker socket into the connector container, or leave both
 connector processes running. The automated installer currently supports Linux
-hosts with systemd; report other hosts as unsupported instead of improvising.
+hosts with systemd and Windows hosts with the Service Control Manager. Report
+other operating systems as unsupported instead of improvising.

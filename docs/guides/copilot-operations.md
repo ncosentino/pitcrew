@@ -115,9 +115,9 @@ of automatically restoring an older snapshot.
 
 The same skill enables protocol-v3 capacity controls as one automated
 operation. It downloads the release-pinned host connector and installer,
-migrates the existing connector identity, installs the systemd service, and
-restores the container if startup fails. Operators do not manually build
-binaries, copy credentials, or write service files.
+migrates the existing connector identity, installs a native systemd or Windows
+Service, and restores the container if startup fails. Operators do not manually
+build binaries, copy credentials, or write service files.
 
 ## Safety boundary
 
