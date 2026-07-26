@@ -7,7 +7,8 @@ description: Install PitCrew's Copilot CLI plugin and use its skills for capacit
 PitCrew publishes an installable Copilot CLI marketplace plugin that teaches
 Copilot the repository's supported operational procedures. The plugin does not
 add a remote control plane or replace `Setup-Runner.ps1`; it makes Copilot use
-the existing scripts and scoped Compose commands consistently.
+the existing scripts, scoped Compose commands, and read-only diagnostics
+consistently.
 
 ## Install the plugin
 
@@ -118,6 +119,31 @@ operation. It downloads the release-pinned host connector and installer,
 migrates the existing connector identity, installs a native systemd or Windows
 Service, and restores the container if startup fails. Operators do not manually
 build binaries, copy credentials, or write service files.
+
+## Host diagnostics skill
+
+`pitcrew-host-diagnostics` collects read-only evidence about a degraded runner
+host without restarting Docker, stopping busy workers, or running cleanup.
+
+```text
+Use the pitcrew-host-diagnostics skill to explain why the copilot-cli profile is
+slow, and time https://github.com from the host and a worker image.
+```
+
+The skill resolves one installation and profile, reads only generated
+non-secret state, reports the exact manager and worker image references with
+their resolved local image IDs and digests, and captures bounded `docker stats
+--no-stream` CPU, memory, PID, `NetIO`, and `BlockIO` samples for exact PitCrew
+labels. It also collects `docker system df`, the Docker network count, host free
+space and inodes where supported, and read-only network-adapter error and drop
+counters, selecting Linux or Windows commands from the runner host platform.
+
+Caller-approved URLs are timed from the host and from exactly one disposable
+container built from the profile's exact worker image. Downloaded bodies are
+discarded, and only that exact diagnostic container is removed afterwards. A
+dry-run mode prints the resolved commands without changing state, and the
+redacted Markdown/JSON handoff separates verified measurements from unavailable
+evidence and unverified hypotheses.
 
 ## Safety boundary
 

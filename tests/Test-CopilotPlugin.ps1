@@ -46,13 +46,14 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.4.0') 'The operations plugin version was not advanced for Windows dashboard capacity operations.'
+Add-Check ($plugin.version -eq '1.5.0') 'The operations plugin version was not advanced for host diagnostics.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
 $expectedSkills = @(
     'pitcrew-capacity',
     'pitcrew-dashboard-update',
+    'pitcrew-host-diagnostics',
     'pitcrew-pool-update'
 )
 $skillDirectories = @(
@@ -125,6 +126,81 @@ Add-Check (
 Add-Check (
     $dashboardUpdateSkill -match 'Do not manually copy credentials'
 ) 'The dashboard update skill still delegates identity migration to the user.'
+
+$hostDiagnosticsSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-host-diagnostics' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $hostDiagnosticsSkill -match '(?m)^## Dry-run mode' -and
+    $hostDiagnosticsSkill -match 'Create no container, download nothing, and change nothing\.'
+) 'The host diagnostics skill has no state-preserving dry-run mode.'
+foreach ($requiredLabel in @(
+        'label=ephemeral-runner-manager-profile=<profile>',
+        'label=ephemeral-managed-runner-profile=<profile>',
+        'ephemeral-managed-runner-slot',
+        'pitcrew-worker-revision')) {
+    Add-Check (
+        $hostDiagnosticsSkill -match [regex]::Escape($requiredLabel)
+    ) "The host diagnostics skill does not filter Docker queries by the exact label '$requiredLabel'."
+}
+Add-Check (
+    $hostDiagnosticsSkill -match 'docker image inspect' -and
+    $hostDiagnosticsSkill -match 'RepoDigests'
+) 'The host diagnostics skill does not resolve exact local image IDs and digests.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'docker stats --no-stream' -and
+    $hostDiagnosticsSkill -match '\{\{\.PIDs\}\}' -and
+    $hostDiagnosticsSkill -match '\{\{\.NetIO\}\}' -and
+    $hostDiagnosticsSkill -match '\{\{\.BlockIO\}\}' -and
+    $hostDiagnosticsSkill -match 'Never run `docker stats` without `--no-stream`'
+) 'The host diagnostics skill does not capture bounded docker stats evidence.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'docker system df' -and
+    $hostDiagnosticsSkill -match 'docker network ls'
+) 'The host diagnostics skill omits Docker disk and network inventory evidence.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'df -P <docker-root>' -and
+    $hostDiagnosticsSkill -match 'df -Pi <docker-root>' -and
+    $hostDiagnosticsSkill -match '/proc/net/dev' -and
+    $hostDiagnosticsSkill -match 'Get-PSDrive -PSProvider FileSystem' -and
+    $hostDiagnosticsSkill -match 'Get-NetAdapterStatistics' -and
+    $hostDiagnosticsSkill -match 'curl\.exe'
+) 'The host diagnostics skill does not select Windows and Linux host commands.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'Never fabricate, estimate, or interpolate an unsupported measurement\.' -and
+    $hostDiagnosticsSkill -match 'unavailable \(NTFS has no inode budget\)'
+) 'The host diagnostics skill does not report unsupported measurements as unavailable.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'Validate each URL before use' -and
+    $hostDiagnosticsSkill -match 'the scheme is `http` or `https`' -and
+    $hostDiagnosticsSkill -match 'no embedded credentials' -and
+    $hostDiagnosticsSkill -match 'explicitly approved'
+) 'The host diagnostics skill does not validate caller-approved URLs.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'docker run --rm --name pitcrew-diagnostics-' -and
+    $hostDiagnosticsSkill -match 'label pitcrew-diagnostics-session=<session-id>' -and
+    $hostDiagnosticsSkill -match 'Persist nothing that was downloaded\.'
+) 'The host diagnostics skill does not time URLs from one disposable, non-persisting container.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'docker rm --force <exact-diagnostic-container-id>' -and
+    $hostDiagnosticsSkill -match 'Never clean up by name pattern'
+) 'The host diagnostics skill does not restrict cleanup to the exact container it created.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'absolute host paths, replaced with `<pitcrew-root>`' -and
+    $hostDiagnosticsSkill -match 'any URL query string' -and
+    $hostDiagnosticsSkill -match 'JIT\s+configuration'
+) 'The host diagnostics skill does not redact its handoff report.'
+Add-Check (
+    $hostDiagnosticsSkill -match '\*\*Verified measurements\*\*' -and
+    $hostDiagnosticsSkill -match '\*\*Unavailable evidence\*\*' -and
+    $hostDiagnosticsSkill -match '\*\*Hypotheses\*\*'
+) 'The host diagnostics report does not separate measurements from unavailable evidence and hypotheses.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'Never restart Docker' -and
+    $hostDiagnosticsSkill -match 'Never run `docker system prune`' -and
+    $hostDiagnosticsSkill -match 'Never enter a running worker with `docker exec`'
+) 'The host diagnostics skill does not forbid destructive host operations.'
 
 if ($errors.Count -gt 0) {
     foreach ($errorMessage in $errors) {
