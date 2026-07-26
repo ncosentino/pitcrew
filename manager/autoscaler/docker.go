@@ -139,7 +139,6 @@ func buildDockerRunArguments(launch containerLaunch) []string {
 		"--rm",
 		"--detach",
 		"--init",
-		"--user", "runner",
 		"--workdir", "/actions-runner",
 		"--entrypoint", "/actions-runner/bin/Runner.Listener",
 		"--name", launch.name,
@@ -156,6 +155,8 @@ func buildDockerRunArguments(launch containerLaunch) []string {
 		arguments,
 		"--env",
 		"ACTIONS_RUNNER_INPUT_JITCONFIG="+launch.jitConfig,
+		"--env",
+		"RUNNER_ALLOW_RUNASROOT=1",
 		launch.image,
 		"run",
 	)

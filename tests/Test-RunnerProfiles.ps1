@@ -694,6 +694,30 @@ Add-Check (
     $defaultStaticProfile.fingerprint -ne $autoscaledStaticProfile.fingerprint
 ) 'Autoscaling mode changes do not select full profile replacement.'
 Add-Check (
+    $defaultStaticProfile.configuration.workerRuntimeContractVersion -eq 2
+) 'Static profile state does not expose the current worker runtime contract.'
+$legacyRuntimeConfiguration = $defaultStaticProfile.configuration |
+    ConvertTo-Json -Depth 20 |
+    ConvertFrom-Json -Depth 20
+$legacyRuntimeConfiguration.PSObject.Properties.Remove(
+    'workerRuntimeContractVersion')
+$legacyWorkerRevision = Get-RunnerObjectFingerprint -Value (
+    Get-RunnerWorkerConfiguration -Configuration $legacyRuntimeConfiguration)
+Add-Check (
+    $legacyWorkerRevision -cne [string]$defaultStaticProfile.workerRevision
+) 'Worker runtime contract changes do not advance the worker revision.'
+Add-Check (
+    (
+        Get-RunnerObjectFingerprint -Value (
+            Get-RunnerRefreshCompatibilityConfiguration `
+                -Configuration $legacyRuntimeConfiguration)
+    ) -ceq (
+        Get-RunnerObjectFingerprint -Value (
+            Get-RunnerRefreshCompatibilityConfiguration `
+                -Configuration $defaultStaticProfile.configuration)
+    )
+) 'Internal worker runtime changes are not refresh-compatible.'
+Add-Check (
     $copilotStaticProfile.configuration.build.contextSha256 -match '^[0-9a-f]{64}$'
 ) 'Locally built profiles do not fingerprint their complete build context.'
 
@@ -1492,7 +1516,8 @@ try {
         Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Setup did not persist scale-set mode.'
         Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_MIN_IDLE=0$') 'Setup did not persist autoscaling minimum idle.'
         Add-Check ($autoscalingEnvironment -match '(?m)^PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=120$') 'Setup did not persist autoscaling scale-down delay.'
-        Add-Check ($autoscalingCommands -match 'run.*Runner\.Listener.*id runner') 'Setup did not verify the JIT runner image contract.'
+        Add-Check ($autoscalingCommands -match 'run.*Runner\.Listener') 'Setup did not verify the JIT runner image contract.'
+        Add-Check (-not ($autoscalingCommands -match 'id runner')) 'Setup still requires a hard-coded JIT worker user.'
         Add-Check (-not ($autoscalingCommands -match 'compose.*\tdown(\t|$)')) 'Starting a stopped autoscaling profile ran broad teardown.'
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
 
