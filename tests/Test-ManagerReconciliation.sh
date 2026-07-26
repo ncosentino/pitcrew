@@ -738,6 +738,238 @@ jq '
 ' "${observed_state_json}" > "${legacy_observed_state}"
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
+contract_eleven_state_json="${TEMP_DIRECTORY}/contract-eleven-state.json"
+contract_eleven_slots_json="${TEMP_DIRECTORY}/contract-eleven-slots.json"
+contract_eleven_policy_json="${TEMP_DIRECTORY}/contract-eleven-policy.json"
+contract_eleven_telemetry_json="${TEMP_DIRECTORY}/contract-eleven-telemetry.json"
+worker_image_id="sha256:1111111111111111111111111111111111111111111111111111111111111111"
+printf '%s\n' "${worker_image_id}" > "${observed_slots_directory}/repo-example-000001/image-id"
+printf '%s\n' "not-an-image-identity" > "${observed_slots_directory}/repo-example-000002/image-id"
+write_slot_exit_evidence \
+    "${observed_slots_directory}/repo-example-000002" \
+    "${observed_dirty}" \
+    docker-inspect \
+    137 \
+    true
+printf '%s\n' '{"classification":"guessed"}' \
+    > "${observed_slots_directory}/repo-example-000001/last-exit.json"
+jq '
+    .slots["repo-example-000001"].usage += {
+        networkRxBytes: 1048576,
+        networkTxBytes: 262144,
+        blockReadBytes: 536870912,
+        blockWriteBytes: 134217728
+    }
+    | .slots["repo-example-000002"].usage += {
+        networkRxBytes: null,
+        networkTxBytes: null,
+        blockReadBytes: null,
+        blockWriteBytes: null
+    }
+' "${resource_telemetry_json}" > "${contract_eleven_telemetry_json}"
+write_worker_resource_policy "${contract_eleven_policy_json}" 536870912 1073741824 2.5 256
+render_observed_slots \
+    "${observed_slots_directory}" \
+    "${contract_eleven_slots_json}" \
+    "${contract_eleven_telemetry_json}"
+write_manager_observed_state \
+    "${contract_eleven_state_json}" \
+    default \
+    manager-instance \
+    11 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_eleven_telemetry_json}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}"
+assert_true "Contract-eleven observed manager state was rejected." observed_state_is_valid "${contract_eleven_state_json}"
+assert_equals "536870912" "$(jq -r '.resourcePolicy.memoryBytes' "${contract_eleven_state_json}")" "Observed state lost the configured memory policy."
+assert_equals "2.5" "$(jq -r '.resourcePolicy.cpuCores' "${contract_eleven_state_json}")" "Observed state lost the configured CPU policy."
+assert_equals \
+    "${worker_image_id}" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .imageId' "${contract_eleven_state_json}")" \
+    "Observed state lost immutable worker image identity."
+assert_equals \
+    "null" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .imageId' "${contract_eleven_state_json}")" \
+    "Observed state published a malformed worker image identity."
+assert_equals \
+    "1048576" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .resources.networkRxBytes' "${contract_eleven_state_json}")" \
+    "Observed state lost cumulative worker network counters."
+assert_equals \
+    "null" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .resources.blockWriteBytes' "${contract_eleven_state_json}")" \
+    "Unavailable worker block I/O was reported as zero."
+assert_equals \
+    "oom-killed" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .lastExit.classification' "${contract_eleven_state_json}")" \
+    "Observed state lost Docker-confirmed exit evidence."
+assert_equals \
+    "null" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .lastExit' "${contract_eleven_state_json}")" \
+    "Observed state published malformed exit evidence."
+assert_false "Contract-eleven observed state exposed runner names or derived tags." \
+    contains_runner_identity_field "${contract_eleven_state_json}"
+
+invalid_contract_eleven_state="${TEMP_DIRECTORY}/invalid-contract-eleven-state.json"
+jq 'del(.resourcePolicy)' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Manager contract eleven accepted a missing resource policy." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq 'del(.slots[0].imageId)' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Manager contract eleven accepted a slot without image identity." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq 'del(.slots[0].lastExit)' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Manager contract eleven accepted a slot without exit evidence." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq 'del(.slots[0].resources.networkRxBytes)' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Manager contract eleven accepted worker resources without I/O counters." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq '.slots[0].resources.networkRxBytes = -1' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Observed state accepted a negative I/O counter." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq '.resourcePolicy.memorySwapBytes = 268435456' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Observed state accepted a memory-swap limit below the memory limit." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq '.resourcePolicy = {memoryBytes: null, memorySwapBytes: null, cpuCores: null, pids: null}' \
+    "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Observed state accepted an empty resource policy object." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq '.resourcePolicy.cpuCores = 2.5' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Observed state accepted a non-canonical CPU policy value." observed_state_is_valid "${invalid_contract_eleven_state}"
+jq '.slots[1].lastExit.classification = "guessed"' "${contract_eleven_state_json}" > "${invalid_contract_eleven_state}"
+assert_false "Observed state accepted an unknown exit classification." observed_state_is_valid "${invalid_contract_eleven_state}"
+rm -f \
+    "${observed_slots_directory}/repo-example-000001/image-id" \
+    "${observed_slots_directory}/repo-example-000002/image-id" \
+    "${observed_slots_directory}/repo-example-000001/last-exit.json" \
+    "${observed_slots_directory}/repo-example-000002/last-exit.json"
+
+assert_equals "null" "$(jq -r '.resourcePolicy' "${observed_state_json}")" "A profile without a resource policy published a policy object."
+assert_equals "null" "$(jq -r '.slots[0].lastExit' "${observed_state_json}")" "A slot without exit evidence published a last-exit diagnostic."
+assert_equals "null" "$(jq -r '.slots[0].imageId' "${observed_state_json}")" "A slot without image evidence published an image identity."
+
+assert_true \
+    "A complete canonical resource policy was rejected." \
+    worker_resource_policy_is_valid 536870912 1073741824 2.5 256
+assert_true \
+    "An unlimited resource policy was rejected." \
+    worker_resource_policy_is_valid '' '' '' ''
+assert_true \
+    "A fractional CPU-only policy was rejected." \
+    worker_resource_policy_is_valid '' '' 0.5 ''
+assert_false \
+    "A memory limit below Docker's minimum was accepted." \
+    worker_resource_policy_is_valid 1048576 '' '' ''
+assert_false \
+    "A memory-swap limit without a memory limit was accepted." \
+    worker_resource_policy_is_valid '' 1073741824 '' ''
+assert_false \
+    "A memory-swap limit below the memory limit was accepted." \
+    worker_resource_policy_is_valid 1073741824 536870912 '' ''
+assert_false \
+    "A zero CPU limit was accepted." \
+    worker_resource_policy_is_valid '' '' 0 ''
+assert_false \
+    "A non-numeric CPU limit was accepted." \
+    worker_resource_policy_is_valid '' '' unlimited ''
+assert_false \
+    "A zero PID limit was accepted." \
+    worker_resource_policy_is_valid '' '' '' 0
+assert_false \
+    "A PID limit above Docker's maximum was accepted." \
+    worker_resource_policy_is_valid '' '' '' 2147483648
+
+assert_equals \
+    "--memory 536870912 --memory-swap 1073741824 --cpus 2.5 --pids-limit 256" \
+    "$(render_worker_resource_arguments 536870912 1073741824 2.5 256)" \
+    "Canonical policy values did not reach the exact Docker arguments."
+assert_equals \
+    "--cpus 0.5" \
+    "$(render_worker_resource_arguments '' '' 0.5 '')" \
+    "A partial policy emitted arguments for unconfigured dimensions."
+assert_equals \
+    "" \
+    "$(render_worker_resource_arguments '' '' '' '')" \
+    "An unlimited policy emitted Docker resource arguments."
+assert_false \
+    "An invalid policy rendered Docker resource arguments." \
+    render_worker_resource_arguments 1048576 '' '' ''
+
+resource_policy_json="${TEMP_DIRECTORY}/resource-policy.json"
+write_worker_resource_policy "${resource_policy_json}" '' '' '' ''
+assert_equals "null" "$(jq -r '.' "${resource_policy_json}")" "An unlimited policy was published as a policy object."
+write_worker_resource_policy "${resource_policy_json}" 536870912 1073741824 2.5 256
+assert_equals "536870912" "$(jq -r '.memoryBytes' "${resource_policy_json}")" "The published policy lost its memory limit."
+assert_equals "1073741824" "$(jq -r '.memorySwapBytes' "${resource_policy_json}")" "The published policy lost its memory-swap limit."
+assert_equals "2.5" "$(jq -r '.cpuCores' "${resource_policy_json}")" "The published policy did not keep canonical CPU cores as a string."
+assert_equals "256" "$(jq -r '.pids' "${resource_policy_json}")" "The published policy lost its PID limit."
+write_worker_resource_policy "${resource_policy_json}" '' '' '' 512
+assert_equals "null" "$(jq -r '.memoryBytes' "${resource_policy_json}")" "An unconfigured memory limit was published as zero."
+assert_equals "512" "$(jq -r '.pids' "${resource_policy_json}")" "A PID-only policy lost its configured limit."
+assert_false \
+    "An invalid policy was published." \
+    write_worker_resource_policy "${resource_policy_json}" 1073741824 536870912 '' ''
+
+exit_slot_directory="${TEMP_DIRECTORY}/exit-slot"
+mkdir -p "${exit_slot_directory}"
+exit_evidence_json="${exit_slot_directory}/last-exit.json"
+classify_exit() {
+    write_slot_exit_evidence "${exit_slot_directory}" "" "$1" "$2" "$3"
+    jq -r '[.classification, (.exitCode | tostring), (.signal | tostring), (.dockerOomKilled | tostring), .evidence] | join(" ")' \
+        "${exit_evidence_json}"
+}
+assert_equals \
+    "clean 0 null false docker-inspect" \
+    "$(classify_exit docker-inspect 0 false)" \
+    "A clean worker exit was misclassified."
+assert_equals \
+    "error 2 null false docker-inspect" \
+    "$(classify_exit docker-inspect 2 false)" \
+    "An ordinary nonzero worker exit was misclassified."
+assert_equals \
+    "oom-killed 137 9 true docker-inspect" \
+    "$(classify_exit docker-inspect 137 true)" \
+    "A Docker-confirmed out-of-memory kill was misclassified."
+assert_equals \
+    "sigkill 137 9 false docker-inspect" \
+    "$(classify_exit docker-inspect 137 false)" \
+    "Status 137 without Docker out-of-memory evidence was not classified as a signal kill."
+assert_equals \
+    "sigkill 137 9 null docker-wait" \
+    "$(classify_exit docker-wait 137 '')" \
+    "Status 137 without Docker inspection evidence was claimed as an out-of-memory kill."
+assert_equals \
+    "signal 143 15 false docker-inspect" \
+    "$(classify_exit docker-inspect 143 false)" \
+    "A terminating signal exit was misclassified."
+assert_equals \
+    "launch-failure null null null launch" \
+    "$(classify_exit launch '' '')" \
+    "A worker launch failure was misclassified."
+assert_equals \
+    "unknown null null null unavailable" \
+    "$(classify_exit unavailable '' '')" \
+    "Missing Docker exit evidence was not surfaced as unknown."
+assert_false \
+    "Malformed Docker exit output was accepted as evidence." \
+    write_slot_exit_evidence "${exit_slot_directory}" "" docker-wait "not-a-status" ""
+assert_false \
+    "An unknown exit evidence source was accepted." \
+    write_slot_exit_evidence "${exit_slot_directory}" "" guessed 0 ""
+
+assert_equals \
+    "1450 0 0 8390" \
+    "$(normalize_container_resource_usage \
+        '{"CPUPerc":"1.00%","ID":"worker123","MemUsage":"32MiB / 32GiB","PIDs":"7","NetIO":"1.45kB / 0B","BlockIO":"0B / 8.39kB"}' |
+        jq -r '[.networkRxBytes, .networkTxBytes, .blockReadBytes, .blockWriteBytes] | join(" ")')" \
+    "Container I/O counters were not normalized to cumulative bytes."
+assert_equals \
+    "null null null null" \
+    "$(normalize_container_resource_usage \
+        '{"CPUPerc":"1.00%","ID":"worker123","MemUsage":"32MiB / 32GiB","PIDs":"7","NetIO":"-- / --","BlockIO":"--"}' |
+        jq -r '[.networkRxBytes, .networkTxBytes, .blockReadBytes, .blockWriteBytes] | map(tostring) | join(" ")')" \
+    "Unavailable container I/O counters were reported as zero."
+
 assert_equals "0" "$(parse_size_bytes '0B')" "Byte parsing changed zero bytes."
 assert_equals "44312822" "$(parse_size_bytes '42.26MiB')" "Byte parsing did not preserve Docker binary units."
 assert_equals "0.125" "$(parse_cpu_cores '12.5%')" "CPU parsing did not convert Docker percent to cores."

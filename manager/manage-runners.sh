@@ -19,6 +19,11 @@ fi
 PREFIX="${RUNNER_NAME_PREFIX:-runner}"
 IMAGE="${RUNNER_IMAGE:-myoung34/github-runner:ubuntu-noble}"
 WORKER_REVISION="${PITCREW_WORKER_REVISION:-}"
+WORKER_IMAGE_ID="${PITCREW_WORKER_IMAGE_ID:-}"
+WORKER_MEMORY_BYTES="${PITCREW_WORKER_MEMORY_BYTES:-}"
+WORKER_MEMORY_SWAP_BYTES="${PITCREW_WORKER_MEMORY_SWAP_BYTES:-}"
+WORKER_CPU_CORES="${PITCREW_WORKER_CPU_CORES:-}"
+WORKER_PIDS_LIMIT="${PITCREW_WORKER_PIDS_LIMIT:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
@@ -30,7 +35,10 @@ SHUTDOWN_REQUEST_PATH="${STATE_DIRECTORY}/manager-shutdown.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
 RESOURCE_TELEMETRY_PATH="/tmp/pitcrew-resource-telemetry.json"
+RESOURCE_POLICY_PATH="/tmp/pitcrew-resource-policy.json"
 RESOURCE_TELEMETRY_COMMAND_TIMEOUT=3
+EXIT_EVIDENCE_EVENT_GRACE_SECONDS=2
+EXIT_EVIDENCE_COMMAND_TIMEOUT=5
 REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
 REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
@@ -93,6 +101,27 @@ case "${ASSUME_UNVERSIONED_CURRENT}" in
         exit 1
         ;;
 esac
+if [ -n "${WORKER_IMAGE_ID}" ] &&
+    ! printf '%s' "${WORKER_IMAGE_ID}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+    echo "[manager:${PROFILE_ID}] PITCREW_WORKER_IMAGE_ID must be a local sha256 image identity." >&2
+    exit 1
+fi
+if ! worker_resource_policy_is_valid \
+    "${WORKER_MEMORY_BYTES}" \
+    "${WORKER_MEMORY_SWAP_BYTES}" \
+    "${WORKER_CPU_CORES}" \
+    "${WORKER_PIDS_LIMIT}"; then
+    echo "[manager:${PROFILE_ID}] worker resource policy is invalid; refusing to launch unlimited workers." >&2
+    exit 1
+fi
+WORKER_RESOURCE_ARGUMENTS=$(render_worker_resource_arguments \
+    "${WORKER_MEMORY_BYTES}" \
+    "${WORKER_MEMORY_SWAP_BYTES}" \
+    "${WORKER_CPU_CORES}" \
+    "${WORKER_PIDS_LIMIT}") || {
+    echo "[manager:${PROFILE_ID}] worker resource policy could not be rendered." >&2
+    exit 1
+}
 
 LABELS="${RUNNER_LABELS:-}"
 append_label() {
@@ -250,7 +279,8 @@ publish_observed_state() {
         "${observed_slots_path}" \
         "${RESOURCE_TELEMETRY_PATH}" \
         "${WORKER_REVISION}" \
-        "${observed_stale_count}"; then
+        "${observed_stale_count}" \
+        "${RESOURCE_POLICY_PATH}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty
@@ -413,6 +443,20 @@ remove_slot_registry() {
     [ "${removed_registry}" -eq 1 ] && mark_observed_state_dirty
 }
 
+record_container_image_identity() {
+    identity_slot_path="$1"
+    identity_container_id="$2"
+    identity_image=$(
+        docker inspect --format '{{.Image}}' "${identity_container_id}" 2>/dev/null || true
+    )
+    if printf '%s' "${identity_image}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
+        printf '%s\n' "${identity_image}" > "${identity_slot_path}/image-id"
+    else
+        rm -f "${identity_slot_path}/image-id"
+    fi
+    mark_observed_state_dirty
+}
+
 monitor_runner_container() {
     monitored_slot_path="$1"
     monitored_name="$2"
@@ -420,6 +464,7 @@ monitor_runner_container() {
     monitored_log_path="$4"
     monitored_since="${5:-}"
 
+    monitored_started_epoch=$(date +%s)
     : > "${monitored_log_path}"
     if [ -n "${monitored_since}" ]; then
         docker logs --since "${monitored_since}" --follow "${monitored_id}" 2>&1
@@ -449,13 +494,65 @@ monitor_runner_container() {
     wait_output=$(docker wait "${monitored_id}" 2>/dev/null || true)
     wait "${logs_pid}" 2>/dev/null || true
     case "${wait_output}" in
-        ''|*[!0-9]*) runner_exit_status=0 ;;
-        *) runner_exit_status="${wait_output}" ;;
+        ''|*[!0-9]*) wait_exit_code="" ;;
+        *) wait_exit_code="${wait_output}" ;;
     esac
+
+    # Docker removes an ephemeral worker as soon as it exits, so exit state is
+    # captured immediately and never inferred when the record is already gone.
+    exit_evidence="unavailable"
+    exit_code="${wait_exit_code}"
+    exit_oom_killed=""
+    exit_inspect_path="${monitored_slot_path}/.container-exit.$$.json"
+    if docker inspect "${monitored_id}" > "${exit_inspect_path}" 2>/dev/null &&
+        jq -e '
+            (.[0].State.ExitCode | type == "number")
+            and (.[0].State.OOMKilled | type == "boolean")
+            and (.[0].State.Running == false)
+        ' "${exit_inspect_path}" >/dev/null 2>&1; then
+        exit_evidence="docker-inspect"
+        exit_code=$(jq -r '.[0].State.ExitCode' "${exit_inspect_path}")
+        exit_oom_killed=$(jq -r '.[0].State.OOMKilled' "${exit_inspect_path}")
+    elif [ -n "${wait_exit_code}" ]; then
+        exit_evidence="docker-wait"
+    fi
+    rm -f "${exit_inspect_path}"
+    if [ "${exit_oom_killed}" = "" ] && [ "${exit_code}" = "137" ]; then
+        # Docker keeps recent daemon events after an ephemeral worker record is
+        # removed, but an out-of-memory event can arrive just after the wait
+        # returns, so the query holds a short grace window open. Only an exact
+        # container match confirms an out-of-memory kill; a missing event stays
+        # unknown instead of turning a plain signal exit into a resource claim.
+        oom_actors=$(
+            timeout "${EXIT_EVIDENCE_COMMAND_TIMEOUT}" docker events \
+                --since "${monitored_started_epoch}" \
+                --until "$(($(date +%s) + EXIT_EVIDENCE_EVENT_GRACE_SECONDS))" \
+                --filter event=oom \
+                --format '{{.Actor.ID}}' 2>/dev/null || true
+        )
+        for oom_actor in ${oom_actors}; do
+            [ "${oom_actor}" = "${monitored_id}" ] || continue
+            exit_oom_killed="true"
+            break
+        done
+    fi
+    write_slot_exit_evidence \
+        "${monitored_slot_path}" \
+        "${OBSERVED_STATE_DIRTY}" \
+        "${exit_evidence}" \
+        "${exit_code}" \
+        "${exit_oom_killed}" || true
+
     rm -f \
         "${monitored_slot_path}/container-id" \
-        "${monitored_slot_path}/container-name"
-    return "${runner_exit_status}"
+        "${monitored_slot_path}/container-name" \
+        "${monitored_slot_path}/image-id"
+    mark_observed_state_dirty
+    case "${exit_code}" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    [ "${exit_code}" -le 255 ] || return 0
+    return "${exit_code}"
 }
 
 run_slot() {
@@ -489,6 +586,7 @@ run_slot() {
             "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
             > "${slot_state_path}/registration-grace-until"
         if docker inspect "${recovered_id}" >/dev/null 2>&1; then
+            record_container_image_identity "${slot_state_path}" "${recovered_id}"
             recovered_logs_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             monitor_runner_container \
                 "${slot_state_path}" \
@@ -551,7 +649,9 @@ run_slot() {
         if [ -n "${RUNNER_GROUP:-}" ]; then
             set -- "$@" -e RUNNER_GROUP="${RUNNER_GROUP}"
         fi
-        set -- "$@" "${IMAGE}"
+        # Canonical policy values are validated at startup, so unquoted expansion
+        # only splits manager-owned Docker arguments.
+        set -- "$@" ${WORKER_RESOURCE_ARGUMENTS} "${IMAGE}"
         launch_output=$("$@" 2>&1)
         launch_status=$?
         if [ "${launch_status}" -eq 0 ] && [ -n "${launch_output}" ]; then
@@ -559,6 +659,7 @@ run_slot() {
             printf '%s\n' "${container_id}" > "${slot_state_path}/container-id"
             printf '%s\n' "${name}" > "${slot_state_path}/container-name"
             printf '%s\n' "${WORKER_REVISION}" > "${slot_state_path}/worker-revision"
+            record_container_image_identity "${slot_state_path}" "${container_id}"
             monitor_runner_container \
                 "${slot_state_path}" \
                 "${name}" \
@@ -567,6 +668,12 @@ run_slot() {
                 "" || true
         else
             printf '%s\n' "${launch_output}" | tee -a "${log_path}" >&2
+            write_slot_exit_evidence \
+                "${slot_state_path}" \
+                "${OBSERVED_STATE_DIRTY}" \
+                "launch" \
+                "" \
+                "" || true
         fi
 
         if [ -f "${slot_state_path}/drain" ]; then
@@ -1204,6 +1311,15 @@ rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
 rm -f "${OBSERVED_STATE_DIRTY}" "${RESOURCE_TELEMETRY_PATH}"
+if ! write_worker_resource_policy \
+    "${RESOURCE_POLICY_PATH}" \
+    "${WORKER_MEMORY_BYTES}" \
+    "${WORKER_MEMORY_SWAP_BYTES}" \
+    "${WORKER_CPU_CORES}" \
+    "${WORKER_PIDS_LIMIT}"; then
+    echo "[manager:${PROFILE_ID}] worker resource policy could not be published." >&2
+    exit 1
+fi
 mark_observed_state_dirty
 
 if [ "${RUNNER_PULL_IMAGE:-1}" = "1" ]; then

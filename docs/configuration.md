@@ -256,6 +256,14 @@ Exit classification uses this precedence: Docker-confirmed OOM, `SIGKILL`,
 another signal, clean zero exit, ordinary nonzero error, launch failure, then
 unknown. Exit code 137 alone does not prove an OOM kill.
 
+The fixed manager already publishes these projections. It applies the configured
+memory, swap, CPU, and PID limits to every worker it launches, so a policy change
+converges as busy workers finish their current job and are replaced. Exit
+evidence comes from Docker: the container state when it is still readable, and
+otherwise the wait status plus a bounded out-of-memory event lookup for the exact
+container. When Docker offers no usable evidence the slot reports `unknown`
+rather than a clean exit, and an unconfirmed out-of-memory kill stays `null`.
+
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify
 whether a runner is busy, so consumers must not infer job state from CPU or
