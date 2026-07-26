@@ -695,6 +695,54 @@ function Assert-RunnerManagerContractActivation {
 
 <#
 .SYNOPSIS
+    Reads an optional member from projected manager state.
+
+.DESCRIPTION
+    Observed state is deserialized from a file a manager wrote, so a member can
+    be missing. Strict mode turns a missing member into a terminating error, and
+    contract 12 requires malformed evidence to be discarded rather than to fail
+    the whole projection.
+
+.PARAMETER Value
+    Deserialized object or dictionary.
+
+.PARAMETER Name
+    Member name to read.
+
+.OUTPUTS
+    Member value, or null when the member is absent.
+#>
+function Get-RunnerOptionalMember {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        if ($Value.Contains($Name)) {
+            return ,$Value[$Name]
+        }
+
+        return $null
+    }
+    $property = $Value.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return ,$property.Value
+}
+
+<#
+.SYNOPSIS
     Reports whether a manager operation journal fits the contract-12 budget.
 
 .DESCRIPTION
@@ -709,7 +757,8 @@ function Assert-RunnerManagerContractActivation {
 
 .OUTPUTS
     Boolean that is true when the journal is absent or within every documented
-    limit.
+    limit. A malformed journal is out of budget rather than an error, so a
+    caller can discard it without discarding valid observed state.
 #>
 function Test-RunnerManagerJournalBudget {
     [CmdletBinding()]
@@ -723,17 +772,26 @@ function Test-RunnerManagerJournalBudget {
         return $true
     }
 
-    $events = @($Journal.events)
+    $capacity = Get-RunnerOptionalMember -Value $Journal -Name 'capacity'
+    if ($capacity -isnot [int] -and $capacity -isnot [long]) {
+        return $false
+    }
+    if ($capacity -gt $script:RunnerManagerJournalMaximumEvents) {
+        return $false
+    }
+    $declaredEvents = Get-RunnerOptionalMember -Value $Journal -Name 'events'
+    if ($null -eq $declaredEvents) {
+        return $false
+    }
+    $events = @($declaredEvents)
     if ($events.Count -gt $script:RunnerManagerJournalMaximumEvents) {
         return $false
     }
-    if ($Journal.capacity -gt $script:RunnerManagerJournalMaximumEvents) {
-        return $false
-    }
     foreach ($event in $events) {
+        $evidence = Get-RunnerOptionalMember -Value $event -Name 'evidence'
         if (
-            $null -ne $event.evidence -and
-            $event.evidence.Length -gt $script:RunnerManagerJournalMaximumEvidenceLength
+            $null -ne $evidence -and
+            "$evidence".Length -gt $script:RunnerManagerJournalMaximumEvidenceLength
         ) {
             return $false
         }

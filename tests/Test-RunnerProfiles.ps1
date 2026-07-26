@@ -1307,6 +1307,20 @@ Add-Check (
 Add-Check (
     Test-RunnerManagerJournalBudget -Journal $null
 ) 'The journal budget rejects a manager that predates contract twelve.'
+Add-Check (
+    Test-RunnerManagerJournalBudget -Journal $autoscaledStateV12.operationJournal
+) 'The journal budget rejects an empty contract-twelve journal.'
+foreach ($malformedJournalMember in @('capacity', 'events')) {
+    $malformedBudgetJournal = (
+        $fixedStateV12 |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json -Depth 16
+    ).operationJournal
+    $malformedBudgetJournal.PSObject.Properties.Remove($malformedJournalMember)
+    Add-Check (-not (
+        Test-RunnerManagerJournalBudget -Journal $malformedBudgetJournal
+    )) "The journal budget did not discard a journal without '$malformedJournalMember'."
+}
 
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
