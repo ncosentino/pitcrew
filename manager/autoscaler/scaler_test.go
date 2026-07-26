@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"reflect"
 	"strings"
 	"testing"
@@ -795,5 +796,275 @@ func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("worker command omitted %q: %s", expected, command)
 		}
+	}
+}
+
+func TestExitedRunnerRegistrationIsRemovedBeforeIdentityIsForgotten(t *testing.T) {
+	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	scaler.cleanupStore = &recordingCleanupStore{
+		inner:  scaler.cleanupStore,
+		events: api.events,
+	}
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	exited := findRunner(t, scaler)
+
+	scaler.handleContainerExit(exited.containerID, 137)
+
+	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID}) {
+		t.Fatalf("exit cleanup did not remove the exact registration: %#v", api.removeCalls)
+	}
+	if !reflect.DeepEqual(api.events.snapshot(), []string{
+		"cleanup-save-1",
+		"api-remove-1",
+		"cleanup-save-0",
+	}) {
+		t.Fatalf("registration cleanup was not durable before removal: %#v", api.events.snapshot())
+	}
+	if scaler.pendingRegistrationCount() != 0 {
+		t.Fatal("successful registration removal stayed pending")
+	}
+	replacement := findRunner(t, scaler)
+	if replacement.containerID == exited.containerID || api.jitCalls != 2 {
+		t.Fatal("clean registration removal blocked the replacement runner")
+	}
+}
+
+func TestExitedRunnerRegistrationNotFoundIsAlreadyClean(t *testing.T) {
+	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if err := scaler.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{
+		RunnerID:   int(runner.runnerID),
+		RunnerName: runner.runnerName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	api.removeErrors[runner.runnerID] = scaleset.RunnerNotFoundError
+
+	scaler.handleContainerExit(runner.containerID, 0)
+
+	if scaler.pendingRegistrationCount() != 0 {
+		t.Fatal("an already removed registration was retained as pending")
+	}
+	replacement := findRunner(t, scaler)
+	if replacement.containerID == runner.containerID || api.jitCalls != 2 {
+		t.Fatal("clean ephemeral completion did not restore capacity")
+	}
+}
+
+func TestFailedExitCleanupBlocksReplacementUntilRetrySucceeds(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	exited := findRunner(t, scaler)
+	api.removeErrors[exited.runnerID] = errors.New("registration removal failed")
+
+	scaler.handleContainerExit(exited.containerID, 137)
+
+	if scaler.pendingRegistrationCount() != 1 {
+		t.Fatal("failed registration removal was not retained as pending")
+	}
+	if scaler.runnerCount() != 0 || api.jitCalls != 1 {
+		t.Fatal("unresolved registration cleanup admitted a replacement runner")
+	}
+
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("cleanup retry ran before its retry delay: %v", err)
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID}) {
+		t.Fatalf("cleanup retry ignored its retry delay: %#v", api.removeCalls)
+	}
+
+	clock.advance(registrationCleanupRetryDelay)
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("expected the repeated cleanup failure to remain visible")
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID, exited.runnerID}) {
+		t.Fatalf("cleanup retry did not target the exact runner: %#v", api.removeCalls)
+	}
+	if api.jitCalls != 1 {
+		t.Fatal("unresolved registration cleanup looped into replacement runners")
+	}
+
+	delete(api.removeErrors, exited.runnerID)
+	clock.advance(registrationCleanupRetryDelay)
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("final cleanup retry failed: %v", err)
+	}
+	if scaler.pendingRegistrationCount() != 0 {
+		t.Fatal("resolved registration cleanup was not forgotten")
+	}
+	replacement := findRunner(t, scaler)
+	if replacement.containerID == exited.containerID || api.jitCalls != 2 {
+		t.Fatal("replacement capacity was not admitted after cleanup succeeded")
+	}
+}
+
+func TestExitCleanupKeepsJobStillRunningPending(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	exited := findRunner(t, scaler)
+	api.removeErrors[exited.runnerID] = scaleset.JobStillRunningError
+
+	scaler.handleContainerExit(exited.containerID, 0)
+
+	if scaler.pendingRegistrationCount() != 1 || api.jitCalls != 1 {
+		t.Fatal("JobStillRunning cleanup was treated as success")
+	}
+	clock.advance(registrationCleanupRetryDelay)
+	err := scaler.tick(context.Background())
+	if !errors.Is(err, scaleset.JobStillRunningError) {
+		t.Fatalf("expected JobStillRunningError to remain visible, got %v", err)
+	}
+	if scaler.pendingRegistrationCount() != 1 {
+		t.Fatal("JobStillRunning cleanup stopped being retried")
+	}
+}
+
+func TestDuplicateExitCallbacksRemoveRegistrationOnce(t *testing.T) {
+	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	exited := findRunner(t, scaler)
+
+	scaler.handleContainerExit(exited.containerID, 137)
+	scaler.handleContainerExit(exited.containerID, 137)
+
+	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID}) {
+		t.Fatalf("duplicate exit callbacks removed the registration twice: %#v", api.removeCalls)
+	}
+}
+
+func TestScaleDownExitDoesNotRepeatRegistrationRemoval(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	markAllRunnersIdle(scaler)
+	runner := findRunner(t, scaler)
+	docker.stopRemoveErrors[runner.containerID] = []error{
+		errors.New("docker removal failed"),
+	}
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err == nil {
+		t.Fatal("expected the Docker cleanup failure to be reported")
+	}
+
+	scaler.handleContainerExit(runner.containerID, 0)
+
+	if !reflect.DeepEqual(api.removeCalls, []int64{runner.runnerID}) {
+		t.Fatalf("scale-down exit repeated registration removal: %#v", api.removeCalls)
+	}
+	if scaler.pendingRegistrationCount() != 0 {
+		t.Fatal("an already deregistered runner became a cleanup-pending registration")
+	}
+}
+
+func TestPendingCleanupNeverRemovesLiveOrBusyRunner(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 2, 0, time.Minute)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	live := findRunner(t, scaler)
+	if err := scaler.HandleJobStarted(context.Background(), &scaleset.JobStarted{
+		RunnerID:   int(live.runnerID),
+		RunnerName: live.runnerName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	scaler.beginPendingRegistrationCleanup(live, clock.now().UTC())
+
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("cleanup retry failed: %v", err)
+	}
+
+	if len(api.removeCalls) != 0 {
+		t.Fatalf("cleanup removed the registration of a busy runner: %#v", api.removeCalls)
+	}
+	if scaler.pendingRegistrationCount() != 0 {
+		t.Fatal("cleanup for a live runner identity was retained")
+	}
+	if runner := findRunner(t, scaler); runner.state != runnerBusy {
+		t.Fatalf("busy runner was not preserved: %#v", runner)
+	}
+}
+
+func TestPendingRegistrationCleanupSurvivesManagerRestart(t *testing.T) {
+	directory := projectTestDirectory(t)
+	scaler, api, _, _, cancel := newTestScalerInDirectory(t, 1, 0, time.Minute, directory)
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	exited := findRunner(t, scaler)
+	api.removeErrors[exited.runnerID] = errors.New("registration removal failed")
+	scaler.handleContainerExit(exited.containerID, 137)
+	if scaler.pendingRegistrationCount() != 1 {
+		t.Fatal("failed registration removal was not retained as pending")
+	}
+	cancel()
+
+	path := registrationCleanupPath(directory, exited.targetKey)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted registration cleanup: %v", err)
+	}
+	document, err := parseRegistrationCleanupDocument(data, exited.targetKey)
+	if err != nil {
+		t.Fatalf("persisted registration cleanup is invalid: %v", err)
+	}
+	if len(document.Records) != 1 ||
+		document.Records[0].RunnerID != exited.runnerID ||
+		document.Records[0].SlotKey != exited.key ||
+		document.Records[0].ContainerID != exited.containerID {
+		t.Fatalf("persisted registration cleanup lost the runner identity: %#v", document.Records)
+	}
+	if strings.Contains(string(data), "jit-secret") {
+		t.Fatal("persisted registration cleanup leaked JIT configuration")
+	}
+
+	restarted, restartedAPI, _, restartedClock, restartedCancel := newTestScalerInDirectory(
+		t,
+		1,
+		0,
+		time.Minute,
+		directory,
+	)
+	defer restartedCancel()
+	if restarted.pendingRegistrationCount() != 1 {
+		t.Fatal("restarted scaler lost the pending registration cleanup")
+	}
+	if _, err := restarted.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if restartedAPI.jitCalls != 0 {
+		t.Fatal("restart admitted a replacement before cleanup was resolved")
+	}
+
+	restartedClock.advance(registrationCleanupRetryDelay)
+	if err := restarted.tick(context.Background()); err != nil {
+		t.Fatalf("restarted cleanup retry failed: %v", err)
+	}
+	if !reflect.DeepEqual(restartedAPI.removeCalls, []int64{exited.runnerID}) {
+		t.Fatalf("restarted cleanup did not remove the exact runner: %#v", restartedAPI.removeCalls)
+	}
+	if restarted.pendingRegistrationCount() != 0 || restartedAPI.jitCalls != 1 {
+		t.Fatal("restarted cleanup did not resolve and restore capacity")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("resolved registration cleanup state was not cleared: %v", err)
 	}
 }

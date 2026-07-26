@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"strconv"
 	"strings"
@@ -107,6 +108,10 @@ type runnerScaler struct {
 	onChange          func()
 	onError           func(error)
 	nameSuffix        func() (string, error)
+	logger            *slog.Logger
+
+	cleanupStore         registrationCleanupStore
+	pendingRegistrations map[string]registrationCleanupRecord
 }
 
 func newRunnerScaler(
@@ -117,6 +122,7 @@ func newRunnerScaler(
 	api scaleSetService,
 	docker dockerClient,
 	scalerClock clock,
+	logger *slog.Logger,
 	onChange func(),
 	onError func(error),
 ) *runnerScaler {
@@ -125,6 +131,9 @@ func newRunnerScaler(
 	}
 	if onError == nil {
 		onError = func(error) {}
+	}
+	if logger == nil {
+		logger = slog.New(slog.DiscardHandler)
 	}
 	scaler := &runnerScaler{
 		operationGate:     make(chan struct{}, 1),
@@ -146,9 +155,43 @@ func newRunnerScaler(
 		onChange:          onChange,
 		onError:           onError,
 		nameSuffix:        randomSuffix,
+		logger: logger.With(
+			"targetKey", target.key,
+			"component", "scaler",
+		),
+		cleanupStore: newRegistrationCleanupStore(
+			cfg.stateDirectory,
+			target.key,
+		),
+		pendingRegistrations: make(map[string]registrationCleanupRecord),
 	}
+	scaler.restorePendingRegistrations()
 	scaler.operationGate <- struct{}{}
 	return scaler
+}
+
+// restorePendingRegistrations reloads registration cleanup work that a previous
+// manager instance could not finish, so a restart cannot turn a known
+// registration into an untracked ghost.
+func (s *runnerScaler) restorePendingRegistrations() {
+	records, err := s.cleanupStore.load()
+	if err != nil {
+		s.onError(fmt.Errorf(
+			"restore pending registration cleanup for %s: %w",
+			s.target.key,
+			err,
+		))
+		return
+	}
+	for _, record := range records {
+		s.pendingRegistrations[record.SlotKey] = record
+	}
+	if len(records) > 0 {
+		s.logger.Warn(
+			"Restored pending runner registration cleanup",
+			"pendingRegistrations", len(records),
+		)
+	}
 }
 
 func calculateTarget(maximum, minimumIdle, assignedJobs int) int {
@@ -423,6 +466,9 @@ func (s *runnerScaler) tick(ctx context.Context) error {
 
 func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	var operationErrors []error
+	if err := s.retryPendingRegistrations(ctx); err != nil {
+		operationErrors = append(operationErrors, err)
+	}
 	if err := s.retryCleanupPending(ctx); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
@@ -443,7 +489,18 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	s.mu.Unlock()
 
 	if target > current {
-		for missing := target - current; missing > 0; missing-- {
+		missing := target - current
+		if blocked := s.pendingRegistrationCount(); blocked > 0 {
+			if blocked > missing {
+				blocked = missing
+			}
+			missing -= blocked
+			s.logger.Warn(
+				"Deferring replacement capacity until registration cleanup completes",
+				"blockedSlots", blocked,
+			)
+		}
+		for ; missing > 0; missing-- {
 			if _, err := s.startRunner(ctx); err != nil {
 				return s.capacityCount(), errors.Join(
 					errors.Join(operationErrors...),
@@ -580,6 +637,224 @@ func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {
 		s.onChange()
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+// beginPendingRegistrationCleanup durably records the exact runner identity
+// before its registration removal is attempted, so a crash mid-removal cannot
+// forget a registration that GitHub may still hold.
+func (s *runnerScaler) beginPendingRegistrationCleanup(
+	runner runnerRecord,
+	now time.Time,
+) registrationCleanupRecord {
+	s.mu.Lock()
+	record, exists := s.pendingRegistrations[runner.key]
+	if !exists {
+		record = registrationCleanupRecord{
+			TargetKey:     s.target.key,
+			SlotKey:       runner.key,
+			RunnerID:      runner.runnerID,
+			RunnerName:    runner.runnerName,
+			ContainerID:   runner.containerID,
+			ContainerName: runner.container,
+			FirstFailedAt: now.Format(time.RFC3339),
+		}
+	}
+	s.pendingRegistrations[record.SlotKey] = record
+	evicted := s.boundPendingRegistrationsLocked()
+	records := s.pendingRegistrationsLocked()
+	s.mu.Unlock()
+	s.reportEvictedRegistrations(evicted)
+	s.persistPendingRegistrations(records)
+	return record
+}
+
+// markPendingRegistrationAttempt keeps a failed registration removal pending
+// with bounded retry metadata.
+func (s *runnerScaler) markPendingRegistrationAttempt(
+	record registrationCleanupRecord,
+	now time.Time,
+	cause error,
+) {
+	s.mu.Lock()
+	current, exists := s.pendingRegistrations[record.SlotKey]
+	if !exists {
+		current = record
+	}
+	if current.FirstFailedAt == "" {
+		current.FirstFailedAt = now.Format(time.RFC3339)
+	}
+	current.Attempts++
+	current.LastAttemptAt = now.Format(time.RFC3339)
+	current.NextAttemptAt = now.Add(registrationCleanupRetryDelay).Format(time.RFC3339)
+	s.pendingRegistrations[current.SlotKey] = current
+	evicted := s.boundPendingRegistrationsLocked()
+	records := s.pendingRegistrationsLocked()
+	s.mu.Unlock()
+	s.reportEvictedRegistrations(evicted)
+	s.persistPendingRegistrations(records)
+	s.logger.Warn(
+		"Runner registration cleanup is pending",
+		"slotKey", current.SlotKey,
+		"runnerId", current.RunnerID,
+		"attempts", current.Attempts,
+	)
+	s.onError(fmt.Errorf(
+		"remove registration for runner %d after container exit: %w",
+		current.RunnerID,
+		cause,
+	))
+}
+
+func (s *runnerScaler) resolvePendingRegistration(slotKey string, reason string) {
+	s.mu.Lock()
+	_, exists := s.pendingRegistrations[slotKey]
+	delete(s.pendingRegistrations, slotKey)
+	records := s.pendingRegistrationsLocked()
+	s.mu.Unlock()
+	if !exists {
+		return
+	}
+	s.persistPendingRegistrations(records)
+	s.logger.Info(
+		"Runner registration cleanup completed",
+		"slotKey", slotKey,
+		"reason", reason,
+	)
+}
+
+func (s *runnerScaler) persistPendingRegistrations(
+	records []registrationCleanupRecord,
+) {
+	if err := s.cleanupStore.save(records); err != nil {
+		s.onError(fmt.Errorf(
+			"persist pending registration cleanup for %s: %w",
+			s.target.key,
+			err,
+		))
+	}
+}
+
+func (s *runnerScaler) reportEvictedRegistrations(
+	evicted []registrationCleanupRecord,
+) {
+	for _, record := range evicted {
+		s.onError(fmt.Errorf(
+			"pending registration cleanup for runner %d was dropped at the %d record bound",
+			record.RunnerID,
+			maxPendingRegistrationCleanups,
+		))
+	}
+}
+
+func (s *runnerScaler) boundPendingRegistrationsLocked() []registrationCleanupRecord {
+	evicted := make([]registrationCleanupRecord, 0)
+	for len(s.pendingRegistrations) > maxPendingRegistrationCleanups {
+		var oldest *registrationCleanupRecord
+		for _, record := range s.pendingRegistrations {
+			if oldest == nil ||
+				record.FirstFailedAt < oldest.FirstFailedAt ||
+				(record.FirstFailedAt == oldest.FirstFailedAt &&
+					record.SlotKey < oldest.SlotKey) {
+				value := record
+				oldest = &value
+			}
+		}
+		if oldest == nil {
+			break
+		}
+		delete(s.pendingRegistrations, oldest.SlotKey)
+		evicted = append(evicted, *oldest)
+	}
+	return evicted
+}
+
+func (s *runnerScaler) pendingRegistrationsLocked() []registrationCleanupRecord {
+	records := make([]registrationCleanupRecord, 0, len(s.pendingRegistrations))
+	for _, record := range s.pendingRegistrations {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].SlotKey < records[j].SlotKey
+	})
+	return records
+}
+
+func (s *runnerScaler) pendingRegistrationCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pendingRegistrations)
+}
+
+// removeExitedRegistration removes the exact JIT registration of a worker that
+// has exited, retaining a durable cleanup-pending record when GitHub cannot
+// confirm the removal.
+func (s *runnerScaler) removeExitedRegistration(runner runnerRecord) {
+	now := s.clock.now().UTC()
+	record := s.beginPendingRegistrationCleanup(runner, now)
+	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
+	err := registrationRemovalError(
+		s.api.removeRunner(cleanupContext, record.RunnerID),
+	)
+	cleanupCancel()
+	if err == nil {
+		s.resolvePendingRegistration(record.SlotKey, "removed")
+		return
+	}
+	s.markPendingRegistrationAttempt(record, s.clock.now().UTC(), err)
+}
+
+// retryPendingRegistrations retries registration removals that previously
+// failed, including work restored after a manager restart.
+func (s *runnerScaler) retryPendingRegistrations(ctx context.Context) error {
+	s.mu.Lock()
+	pending := s.pendingRegistrationsLocked()
+	s.mu.Unlock()
+
+	var cleanupErrors []error
+	for _, record := range pending {
+		if s.registrationHeldByLiveRunner(record) {
+			s.resolvePendingRegistration(record.SlotKey, "held-by-live-runner")
+			continue
+		}
+		now := s.clock.now().UTC()
+		if !registrationCleanupDue(record, now) {
+			continue
+		}
+		err := registrationRemovalError(
+			s.api.removeRunner(ctx, record.RunnerID),
+		)
+		if err == nil {
+			s.resolvePendingRegistration(record.SlotKey, "removed")
+			continue
+		}
+		s.markPendingRegistrationAttempt(record, s.clock.now().UTC(), err)
+		cleanupErrors = append(cleanupErrors, fmt.Errorf(
+			"retry registration removal for runner %d: %w",
+			record.RunnerID,
+			err,
+		))
+	}
+	return errors.Join(cleanupErrors...)
+}
+
+// registrationHeldByLiveRunner reports whether a live worker still owns the
+// exact identity of a pending cleanup record, so cleanup can never deregister
+// an assigned or busy runner.
+func (s *runnerScaler) registrationHeldByLiveRunner(
+	record registrationCleanupRecord,
+) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, runner := range s.runners {
+		if runner.registrationRemoved {
+			continue
+		}
+		if runner.runnerID == record.RunnerID ||
+			runner.containerID == record.ContainerID {
+			return true
+		}
+	}
+	return false
 }
 
 func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
@@ -976,7 +1251,9 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode int) {
 		s.mu.Unlock()
 		return
 	}
-	unexpected := runner.state != runnerDraining && !s.shuttingDown
+	exited := *runner
+	shuttingDown := s.shuttingDown
+	unexpected := runner.state != runnerDraining && !shuttingDown
 	delete(s.runners, runner.key)
 	needsReconcile := !s.shuttingDown && s.capacityCountLocked() < s.targetSlots
 	if s.capacityCountLocked() <= s.targetSlots {
@@ -991,6 +1268,9 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode int) {
 			containerID,
 			exitCode,
 		))
+	}
+	if !shuttingDown && !exited.registrationRemoved {
+		s.removeExitedRegistration(exited)
 	}
 	if needsReconcile && s.lifecycleContext.Err() == nil {
 		if _, err := s.reconcileLocked(s.lifecycleContext); err != nil {
