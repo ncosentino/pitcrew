@@ -80,6 +80,11 @@ observed_state_is_valid() {
                 or .activity == "unknown"
             )
             and (.target == null or (.target | type == "string" and length > 0));
+        def valid_registration_status:
+            . == "connected"
+            or . == "disconnected"
+            or . == "registration-missing"
+            or . == "unknown";
         type == "object"
         and .schemaVersion == 1
         and (.managerContractVersion | nonnegative_integer and . >= 1)
@@ -105,6 +110,7 @@ observed_state_is_valid() {
         and (.desiredSlots | nonnegative_integer)
         and (.configuredSlots == null or (.configuredSlots | nonnegative_integer))
         and (.activeSlots | nonnegative_integer)
+        and (.eligibleSlots == null or (.eligibleSlots | nonnegative_integer))
         and (.drainingSlots | nonnegative_integer)
         and (.slots | type == "array")
         and all(.slots[]; valid_slot)
@@ -131,6 +137,21 @@ observed_state_is_valid() {
             if .managerContractVersion >= 9 then
                 has("update")
                 and (.update | valid_update)
+            else
+                true
+            end
+        )
+        and (
+            if .managerContractVersion >= 10 then
+                has("eligibleSlots")
+                and (.eligibleSlots | nonnegative_integer)
+                and all(.slots[];
+                    has("registrationStatus")
+                    and (.registrationStatus | valid_registration_status))
+                and .eligibleSlots == (
+                    [.slots[] | select(.registrationStatus == "connected")]
+                    | length
+                )
             else
                 true
             end
@@ -462,6 +483,8 @@ render_observed_slots() {
             backoff_seconds=0
             updated_at=""
             runner_name=""
+            registration_status="unknown"
+            registration_activity=""
             runtime_path="${candidate_path}/runtime-state.json"
             runtime_snapshot="${output_path}.${slot_key}.runtime"
             if [ -f "${runtime_path}" ] &&
@@ -479,6 +502,30 @@ render_observed_slots() {
                 runner_name=$(jq -r '.runnerName // ""' "${runtime_snapshot}")
             fi
             rm -f "${runtime_snapshot}"
+            registration_path="${candidate_path}/registration-state.json"
+            registration_snapshot="${output_path}.${slot_key}.registration"
+            if [ -f "${registration_path}" ] &&
+                cp "${registration_path}" "${registration_snapshot}" &&
+                jq -e '
+                    type == "object"
+                    and (
+                        .status == "connected"
+                        or .status == "disconnected"
+                        or .status == "registration-missing"
+                        or .status == "unknown"
+                    )
+                    and (
+                        .activity == "starting"
+                        or .activity == "idle"
+                        or .activity == "busy"
+                        or .activity == "draining"
+                        or .activity == "unknown"
+                    )
+                ' "${registration_snapshot}" >/dev/null 2>&1; then
+                registration_status=$(jq -r '.status' "${registration_snapshot}")
+                registration_activity=$(jq -r '.activity' "${registration_snapshot}")
+            fi
+            rm -f "${registration_snapshot}"
 
             desired=true
             if [ -f "${candidate_path}/drain" ]; then
@@ -498,6 +545,8 @@ render_observed_slots() {
                 --argjson backoffSeconds "${backoff_seconds}" \
                 --arg updatedAt "${updated_at}" \
                 --arg runnerName "${runner_name}" \
+                --arg registrationStatus "${registration_status}" \
+                --arg registrationActivity "${registration_activity}" \
                 --slurpfile resourceTelemetry "${resource_telemetry_path}" \
                 '{
                     key: $key,
@@ -508,6 +557,13 @@ render_observed_slots() {
                     failureCount: $failureCount,
                     backoffSeconds: $backoffSeconds,
                     updatedAt: (if $updatedAt == "" then null else $updatedAt end),
+                    registrationStatus: $registrationStatus,
+                    activity: (
+                        if $registrationActivity == ""
+                        then null
+                        else $registrationActivity
+                        end
+                    ),
                     resources: (
                         $resourceTelemetry[0].slots[$key] as $slotResources
                         | if $slotResources != null
@@ -582,6 +638,11 @@ write_manager_observed_state() {
             desiredSlots: $desiredSlots,
             configuredSlots: $desiredSlots,
             activeSlots: ($slots[0] | map(select(.processRunning)) | length),
+            eligibleSlots: (
+                $slots[0]
+                | map(select(.registrationStatus == "connected"))
+                | length
+            ),
             drainingSlots: ($slots[0] | map(select(.state == "draining")) | length),
             slots: $slots[0],
             resourceTelemetry: ($resourceTelemetry[0] | del(.slots)),

@@ -86,9 +86,9 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		nil,
 		now,
 	)
-	if state.ManagerContractVersion != 9 || state.DesiredSlots != 3 ||
+	if state.ManagerContractVersion != 10 || state.DesiredSlots != 3 ||
 		state.ConfiguredSlots != 4 || state.ActiveSlots != 3 ||
-		state.DrainingSlots != 1 {
+		state.EligibleSlots != 2 || state.DrainingSlots != 1 {
 		t.Fatalf("unexpected observed capacity fields: %#v", state)
 	}
 	if state.Autoscaling.Mode != "scale-set" ||
@@ -114,7 +114,9 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	if state.Slots[0].Resources != nil ||
 		state.Slots[0].Activity == "" ||
-		state.Slots[0].Target != "scope" {
+		state.Slots[0].Target != "scope" ||
+		state.Slots[0].RegistrationStatus != "connected" ||
+		state.Slots[2].RegistrationStatus != "disconnected" {
 		t.Fatalf("slot projection omitted autoscaling lifecycle data: %#v", state.Slots[0])
 	}
 
@@ -134,7 +136,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		"schemaVersion", "managerContractVersion", "profileId",
 		"managerInstanceId", "managerStatus", "observedAt", "scope",
 		"generation", "desiredStateHash", "desiredStateStatus",
-		"desiredSlots", "activeSlots", "drainingSlots", "configuredSlots",
+		"desiredSlots", "activeSlots", "eligibleSlots", "drainingSlots", "configuredSlots",
 		"slots", "resourceTelemetry", "autoscaling",
 	} {
 		if _, exists := decoded[field]; !exists {

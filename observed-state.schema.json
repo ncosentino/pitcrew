@@ -258,6 +258,10 @@
       "type": "integer",
       "minimum": 0
     },
+    "eligibleSlots": {
+      "type": "integer",
+      "minimum": 0
+    },
     "drainingSlots": {
       "type": "integer",
       "minimum": 0
@@ -353,6 +357,9 @@
           "target": {
             "type": ["string", "null"],
             "minLength": 1
+          },
+          "registrationStatus": {
+            "enum": ["connected", "disconnected", "registration-missing", "unknown"]
           }
         }
       }
@@ -565,6 +572,33 @@
             "$ref": "#/$defs/updateState"
           }
         }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 10
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "eligibleSlots"
+        ],
+        "properties": {
+          "slots": {
+            "items": {
+              "required": [
+                "registrationStatus"
+              ]
+            }
+          }
+        },
+        "$comment": "eligibleSlots equals the number of slots whose registrationStatus is connected; enforced by manager and dashboard validators."
       }
     }
   ]

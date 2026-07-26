@@ -7,9 +7,10 @@ set -u
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 . "${SCRIPT_DIRECTORY}/observability.sh"
+. "${SCRIPT_DIRECTORY}/registration.sh"
 
-MANAGER_CONTRACT_VERSION=9
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-9}"
+MANAGER_CONTRACT_VERSION=10
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-10}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -30,6 +31,11 @@ RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
 RESOURCE_TELEMETRY_PATH="/tmp/pitcrew-resource-telemetry.json"
 RESOURCE_TELEMETRY_COMMAND_TIMEOUT=3
+REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
+REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
+REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
+REGISTRATION_API_TIMEOUT=5
+REGISTRATION_INVENTORY_DIRECTORY="/tmp/pitcrew-registration-inventory"
 SLOT_DIRECTORY="/tmp/pitcrew-slots"
 CURRENT_DESIRED_SLOTS="/tmp/pitcrew-current-desired-slots.tsv"
 PENDING_ACKNOWLEDGEMENT="/tmp/pitcrew-pending-acknowledgement.json"
@@ -49,6 +55,24 @@ esac
 case "${OBSERVED_STATE_INTERVAL}" in
     ''|*[!0-9]*|0)
         echo "[manager:${PROFILE_ID}] PITCREW_OBSERVED_STATE_INTERVAL must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${REGISTRATION_RECONCILE_INTERVAL}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_REGISTRATION_RECONCILE_INTERVAL must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${REGISTRATION_CLEANUP_THRESHOLD}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_REGISTRATION_CLEANUP_THRESHOLD must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${REGISTRATION_GRACE_SECONDS}" in
+    ''|*[!0-9]*)
+        echo "[manager:${PROFILE_ID}] PITCREW_REGISTRATION_GRACE_SECONDS must be a nonnegative integer." >&2
         exit 1
         ;;
 esac
@@ -101,6 +125,7 @@ MANAGER_STATUS="starting"
 LAST_OBSERVED_STATE_PUBLISH_EPOCH=0
 LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH=0
 LAST_RESOURCE_TELEMETRY_STATUS=""
+LAST_REGISTRATION_RECONCILE_EPOCH=0
 rand_hex() {
     tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 6
 }
@@ -393,9 +418,14 @@ monitor_runner_container() {
     monitored_name="$2"
     monitored_id="$3"
     monitored_log_path="$4"
+    monitored_since="${5:-}"
 
     : > "${monitored_log_path}"
-    docker logs --follow "${monitored_id}" 2>&1 |
+    if [ -n "${monitored_since}" ]; then
+        docker logs --since "${monitored_since}" --follow "${monitored_id}" 2>&1
+    else
+        docker logs --follow "${monitored_id}" 2>&1
+    fi |
         while IFS= read -r output_line || [ -n "${output_line:-}" ]; do
             printf '%s\n' "${output_line}"
             printf '%s\n' "${output_line}" >> "${monitored_log_path}"
@@ -449,12 +479,23 @@ run_slot() {
             "${recovered_name}" \
             0 \
             0 || true
+        write_registration_observation \
+            "${slot_state_path}" \
+            "${OBSERVED_STATE_DIRTY}" \
+            "unknown" \
+            "unknown" \
+            0 || true
+        printf '%s\n' \
+            "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
+            > "${slot_state_path}/registration-grace-until"
         if docker inspect "${recovered_id}" >/dev/null 2>&1; then
+            recovered_logs_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
             monitor_runner_container \
                 "${slot_state_path}" \
                 "${recovered_name}" \
                 "${recovered_id}" \
-                "${log_path}" || true
+                "${log_path}" \
+                "${recovered_logs_since}" || true
         fi
         rm -f \
             "${slot_state_path}/recovered-container-id" \
@@ -479,6 +520,15 @@ run_slot() {
             "${name}" \
             "${failures}" \
             0 || true
+        write_registration_observation \
+            "${slot_state_path}" \
+            "${OBSERVED_STATE_DIRTY}" \
+            "unknown" \
+            "unknown" \
+            0 || true
+        printf '%s\n' \
+            "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
+            > "${slot_state_path}/registration-grace-until"
         set -- docker run --rm --detach \
             --label "${MANAGED_LABEL}" \
             --label "${SLOT_LABEL_KEY}=${slot_key}" \
@@ -513,7 +563,8 @@ run_slot() {
                 "${slot_state_path}" \
                 "${name}" \
                 "${container_id}" \
-                "${log_path}" || true
+                "${log_path}" \
+                "" || true
         else
             printf '%s\n' "${launch_output}" | tee -a "${log_path}" >&2
         fi
@@ -560,6 +611,169 @@ run_slot() {
     done
 
     rm -f "${log_path}"
+}
+
+registration_endpoint_for_slot() {
+    slot_repository="$1"
+    github_runner_endpoint \
+        "${RUNNER_SCOPE:-repo}" \
+        "${slot_repository}" \
+        "${ORG_NAME:-}" \
+        "${ENTERPRISE_NAME:-}"
+}
+
+reconcile_runner_registrations() {
+    registration_now=$(date +%s)
+    if [ $((registration_now - LAST_REGISTRATION_RECONCILE_EPOCH)) -lt "${REGISTRATION_RECONCILE_INTERVAL}" ]; then
+        return
+    fi
+    LAST_REGISTRATION_RECONCILE_EPOCH="${registration_now}"
+    rm -rf "${REGISTRATION_INVENTORY_DIRECTORY}"
+    mkdir -p "${REGISTRATION_INVENTORY_DIRECTORY}"
+    targets_path="${REGISTRATION_INVENTORY_DIRECTORY}/targets.tsv"
+    slots_path="${REGISTRATION_INVENTORY_DIRECTORY}/slots.tsv"
+    : > "${targets_path}"
+    : > "${slots_path}"
+
+    for registration_slot_path in "${SLOT_DIRECTORY}"/*; do
+        [ -d "${registration_slot_path}" ] || continue
+        runner_name=""
+        runtime_path="${registration_slot_path}/runtime-state.json"
+        if [ -f "${runtime_path}" ]; then
+            runner_name=$(jq -r '.runnerName // ""' "${runtime_path}" 2>/dev/null || true)
+        fi
+        if [ -z "${runner_name}" ]; then
+            write_registration_observation \
+                "${registration_slot_path}" \
+                "${OBSERVED_STATE_DIRTY}" \
+                "unknown" \
+                "unknown" \
+                0 || true
+            continue
+        fi
+        slot_repository=""
+        [ -f "${registration_slot_path}/repo" ] &&
+            slot_repository=$(cat "${registration_slot_path}/repo")
+        endpoint=$(registration_endpoint_for_slot "${slot_repository}") || {
+            write_registration_observation \
+                "${registration_slot_path}" \
+                "${OBSERVED_STATE_DIRTY}" \
+                "unknown" \
+                "unknown" \
+                0 || true
+            continue
+        }
+        target_hash=$(printf '%s' "${endpoint}" | sha256sum | awk '{ print $1 }')
+        if ! awk -F '\t' -v hash="${target_hash}" '$1 == hash { found=1 } END { exit !found }' \
+            "${targets_path}"; then
+            printf '%s\t%s\n' "${target_hash}" "${endpoint}" >> "${targets_path}"
+        fi
+        printf '%s\t%s\t%s\t%s\n' \
+            "${registration_slot_path}" \
+            "${target_hash}" \
+            "${runner_name}" \
+            "${endpoint}" >> "${slots_path}"
+    done
+
+    inventory_pids=""
+    tab=$(printf '\t')
+    while IFS="${tab}" read -r target_hash endpoint; do
+        [ -n "${target_hash}" ] || continue
+        (
+            if ! fetch_github_runner_inventory \
+                "${REGISTRATION_INVENTORY_DIRECTORY}/${target_hash}.json" \
+                "${endpoint}" \
+                "${ACCESS_TOKEN:-}" \
+                "${REGISTRATION_API_TIMEOUT}"; then
+                : > "${REGISTRATION_INVENTORY_DIRECTORY}/${target_hash}.error"
+            fi
+        ) &
+        inventory_pids="${inventory_pids} $!"
+    done < "${targets_path}"
+    for inventory_pid in ${inventory_pids}; do
+        wait "${inventory_pid}" 2>/dev/null || true
+    done
+
+    while IFS="${tab}" read -r registration_slot_path target_hash runner_name endpoint; do
+        [ -d "${registration_slot_path}" ] || continue
+        inventory_path="${REGISTRATION_INVENTORY_DIRECTORY}/${target_hash}.json"
+        if [ -f "${REGISTRATION_INVENTORY_DIRECTORY}/${target_hash}.error" ] ||
+            [ ! -f "${inventory_path}" ]; then
+            status="unknown"
+            activity="unknown"
+            cleanup_candidate=0
+        else
+            classification=$(classify_github_runner_registration \
+                "${inventory_path}" \
+                "${runner_name}")
+            status=$(printf '%s\n' "${classification}" | cut -f1)
+            activity=$(printf '%s\n' "${classification}" | cut -f2)
+            cleanup_candidate=$(printf '%s\n' "${classification}" | cut -f3)
+        fi
+        evidence_count=$(registration_evidence_count \
+            "${registration_slot_path}" \
+            "${status}" \
+            "${cleanup_candidate}")
+        write_registration_observation \
+            "${registration_slot_path}" \
+            "${OBSERVED_STATE_DIRTY}" \
+            "${status}" \
+            "${activity}" \
+            "${evidence_count}" || true
+        grace_until=0
+        [ -f "${registration_slot_path}/registration-grace-until" ] &&
+            grace_until=$(cat "${registration_slot_path}/registration-grace-until")
+        if [ "${cleanup_candidate}" = "1" ] &&
+            [ "${evidence_count}" -ge "${REGISTRATION_CLEANUP_THRESHOLD}" ] &&
+            [ "${registration_now}" -ge "${grace_until}" ]; then
+            recheck_path="${REGISTRATION_INVENTORY_DIRECTORY}/${target_hash}.recheck.json"
+            if ! fetch_github_runner_inventory \
+                "${recheck_path}" \
+                "${endpoint}" \
+                "${ACCESS_TOKEN:-}" \
+                "${REGISTRATION_API_TIMEOUT}"; then
+                write_registration_observation \
+                    "${registration_slot_path}" \
+                    "${OBSERVED_STATE_DIRTY}" \
+                    "unknown" \
+                    "unknown" \
+                    0 || true
+                echo "[slot ${registration_slot_path##*/}] GitHub registration could not be rechecked; preserving container" >&2
+                continue
+            fi
+            recheck_classification=$(classify_github_runner_registration \
+                "${recheck_path}" \
+                "${runner_name}")
+            rm -f "${recheck_path}"
+            recheck_status=$(printf '%s\n' "${recheck_classification}" | cut -f1)
+            recheck_activity=$(printf '%s\n' "${recheck_classification}" | cut -f2)
+            recheck_candidate=$(printf '%s\n' "${recheck_classification}" | cut -f3)
+            if [ "${recheck_candidate}" != "1" ] ||
+                [ "${recheck_status}" != "${status}" ]; then
+                recheck_evidence_count=$(registration_evidence_count \
+                    "${registration_slot_path}" \
+                    "${recheck_status}" \
+                    "${recheck_candidate}")
+                write_registration_observation \
+                    "${registration_slot_path}" \
+                    "${OBSERVED_STATE_DIRTY}" \
+                    "${recheck_status}" \
+                    "${recheck_activity}" \
+                    "${recheck_evidence_count}" || true
+                echo "[slot ${registration_slot_path##*/}] GitHub registration evidence changed before cleanup; preserving container" >&2
+                continue
+            fi
+            stop_confirmed_ghost \
+                "${registration_slot_path}" \
+                "${runner_name}" \
+                "${PROFILE_ID}" \
+                "${MANAGED_LABEL_KEY}" \
+                "${SLOT_LABEL_KEY}" \
+                "${RUNNER_STOP_TIMEOUT}" \
+                "${REGISTRATION_CLEANUP_THRESHOLD}" || true
+        fi
+    done < "${slots_path}"
+    rm -rf "${REGISTRATION_INVENTORY_DIRECTORY}"
 }
 
 start_slot() {
@@ -1028,6 +1242,7 @@ if [ "${CURRENT_GENERATION}" -gt 0 ]; then
 fi
 MANAGER_STATUS="running"
 mark_observed_state_dirty
+reconcile_runner_registrations
 publish_observed_state 1
 
 while [ "${STOPPING}" -eq 0 ]; do
@@ -1054,6 +1269,7 @@ while [ "${STOPPING}" -eq 0 ]; do
         fi
         rm -f "${periodic_added}" "${periodic_draining}" "${periodic_unchanged}"
     fi
+    reconcile_runner_registrations
     publish_observed_state 0
     sleep "${RECONCILE_INTERVAL}"
 done

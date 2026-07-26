@@ -124,6 +124,11 @@ the same credential-free connector boundary.
 Manager contract 9 adds worker revision and rolling-convergence state. Manager
 replacement preserves sibling workers; scale-set profiles safely replace stale
 idle JIT runners through GitHub's service-side removal fence.
+Manager contract 10 adds GitHub registration reconciliation. Each slot reports
+whether its runner is connected, disconnected, missing from GitHub, or unknown,
+and the profile reports eligible capacity separately from running containers.
+Fixed managers replace only exact workers that remain missing or offline and
+not busy across repeated server-side observations.
 
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify

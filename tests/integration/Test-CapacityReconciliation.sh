@@ -145,7 +145,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="9" \
+        PITCREW_MANAGER_CONTRACT_VERSION="10" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -266,8 +266,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 9 ] || {
-    echo "Observed state did not report manager contract version nine." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 10 ] || {
+    echo "Observed state did not report manager contract version ten." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
@@ -292,6 +292,10 @@ MANAGER_ID=$(manager_id)
 }
 [ "$(jq '[.slots[].resources | select(. != null)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
     echo "Observed state did not report resources for every live worker." >&2
+    exit 1
+}
+[ "$(jq '.eligibleSlots == ([.slots[] | select(.registrationStatus == "connected")] | length)' "${OBSERVED_STATE}")" = "true" ] || {
+    echo "Observed state reported inconsistent GitHub-eligible capacity." >&2
     exit 1
 }
 mapfile -t original_workers < <(worker_ids)
@@ -368,6 +372,7 @@ jq '.generation = 2' "${ACKNOWLEDGEMENT}" > "${ACKNOWLEDGEMENT}.stale"
 mv -f "${ACKNOWLEDGEMENT}.stale" "${ACKNOWLEDGEMENT}"
 graceful_shutdowns_before=$(docker logs "${MANAGER_ID}" 2>&1 |
     grep -c 'Graceful runner deregistration' || true)
+manager_instance_before_restart=$(jq -r '.managerInstanceId' "${OBSERVED_STATE}")
 mapfile -t workers_before_manager_restart < <(worker_ids)
 docker restart --timeout 60 "${MANAGER_ID}" >/dev/null
 wait_for_acknowledgement 3
@@ -381,7 +386,11 @@ while [ "${SECONDS}" -lt "${restart_deadline}" ]; do
             --format "{{.Label \"${SLOT_LABEL}\"}}" |
             sort
     )
-    if [ "${restored}" -gt 0 ] && [ "${#restart_slots[@]}" -eq 5 ]; then
+    manager_instance_after_restart=$(jq -r '.managerInstanceId // ""' "${OBSERVED_STATE}" 2>/dev/null || true)
+    if [ "${restored}" -gt 0 ] &&
+        [ "${#restart_slots[@]}" -eq 5 ] &&
+        [ -n "${manager_instance_after_restart}" ] &&
+        [ "${manager_instance_after_restart}" != "${manager_instance_before_restart}" ]; then
         break
     fi
     sleep 1
@@ -407,6 +416,14 @@ graceful_shutdowns_after=$(docker logs "${MANAGER_ID}" 2>&1 |
     grep -c 'Graceful runner deregistration' || true)
 [ $((graceful_shutdowns_after - graceful_shutdowns_before)) -eq 0 ] || {
     echo "Manager restart deregistered workers during handoff." >&2
+    exit 1
+}
+[ "$(jq '.eligibleSlots == ([.slots[] | select(.registrationStatus == "connected")] | length)' "${OBSERVED_STATE}")" = "true" ] || {
+    echo "Recovered workers reported inconsistent GitHub-eligible capacity." >&2
+    exit 1
+}
+[ "$(jq '[.slots[] | select(.state == "online" and .registrationStatus != "connected")] | length' "${OBSERVED_STATE}")" -eq 0 ] || {
+    echo "Manager recovery reported an online slot without authoritative GitHub connectivity." >&2
     exit 1
 }
 

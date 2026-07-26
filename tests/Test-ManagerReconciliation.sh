@@ -4,6 +4,7 @@ set -eu
 ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "${ROOT}/manager/reconciliation.sh"
 . "${ROOT}/manager/observability.sh"
+. "${ROOT}/manager/registration.sh"
 
 TEMP_DIRECTORY=$(mktemp -d)
 trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
@@ -217,6 +218,262 @@ assert_false \
     'https://github.com/example/project=0' \
     1
 
+assert_equals \
+    "/repos/example/project/actions/runners" \
+    "$(github_runner_endpoint repo 'https://github.com/example/project' '' '')" \
+    "Repository runner endpoint was constructed incorrectly."
+assert_equals \
+    "/orgs/example-org/actions/runners" \
+    "$(github_runner_endpoint org '' 'example-org' '')" \
+    "Organization runner endpoint was constructed incorrectly."
+assert_equals \
+    "/enterprises/example-enterprise/actions/runners" \
+    "$(github_runner_endpoint ent '' '' 'example-enterprise')" \
+    "Enterprise runner endpoint was constructed incorrectly."
+assert_false \
+    "Repository runner endpoint accepted a malformed repository URL." \
+    github_runner_endpoint repo 'https://github.com/example' '' ''
+
+runner_inventory="${TEMP_DIRECTORY}/runner-inventory.json"
+cat > "${runner_inventory}" <<'EOF'
+{
+  "totalCount": 4,
+  "runners": [
+    {"name":"runner-idle","status":"online","busy":false},
+    {"name":"runner-busy","status":"online","busy":true},
+    {"name":"runner-offline","status":"offline","busy":false},
+    {"name":"runner-offline-busy","status":"offline","busy":true}
+  ]
+}
+EOF
+assert_equals \
+    "connected	idle	0" \
+    "$(classify_github_runner_registration "${runner_inventory}" runner-idle)" \
+    "Online idle runner classification changed."
+assert_equals \
+    "connected	busy	0" \
+    "$(classify_github_runner_registration "${runner_inventory}" runner-busy)" \
+    "Online busy runner classification changed."
+assert_equals \
+    "disconnected	unknown	1" \
+    "$(classify_github_runner_registration "${runner_inventory}" runner-offline)" \
+    "Offline idle runner did not become a cleanup candidate."
+assert_equals \
+    "disconnected	busy	0" \
+    "$(classify_github_runner_registration "${runner_inventory}" runner-offline-busy)" \
+    "Offline busy runner was not preserved."
+assert_equals \
+    "registration-missing	unknown	1" \
+    "$(classify_github_runner_registration "${runner_inventory}" runner-missing)" \
+    "Missing runner did not become a cleanup candidate."
+assert_equals \
+    "unknown	unknown	0" \
+    "$(classify_github_runner_registration "${runner_inventory}" '')" \
+    "Unknown runner identity became a cleanup candidate."
+ambiguous_runner_inventory="${TEMP_DIRECTORY}/ambiguous-runner-inventory.json"
+cat > "${ambiguous_runner_inventory}" <<'EOF'
+{
+  "totalCount": 2,
+  "runners": [
+    {"name":"duplicate-runner","status":"offline","busy":false},
+    {"name":"duplicate-runner","status":"offline","busy":false}
+  ]
+}
+EOF
+assert_equals \
+    "unknown	unknown	0" \
+    "$(classify_github_runner_registration "${ambiguous_runner_inventory}" duplicate-runner)" \
+    "Ambiguous runner inventory became a cleanup candidate."
+
+registration_slot="${TEMP_DIRECTORY}/registration-slot"
+registration_dirty="${TEMP_DIRECTORY}/registration-dirty"
+mkdir -p "${registration_slot}"
+write_registration_observation \
+    "${registration_slot}" \
+    "${registration_dirty}" \
+    disconnected \
+    unknown \
+    1
+assert_equals \
+    "1" \
+    "$(jq -r '.cleanupEvidenceCount' "${registration_slot}/registration-state.json")" \
+    "Registration observation lost its evidence count."
+assert_true \
+    "Registration observation did not mark observed state dirty." \
+    test -f "${registration_dirty}"
+assert_equals \
+    "2" \
+    "$(registration_evidence_count "${registration_slot}" disconnected 1)" \
+    "Consecutive unusable observations did not advance cleanup evidence."
+assert_equals \
+    "1" \
+    "$(registration_evidence_count "${registration_slot}" registration-missing 1)" \
+    "Changed unusable evidence did not restart its confirmation count."
+assert_equals \
+    "0" \
+    "$(registration_evidence_count "${registration_slot}" connected 0)" \
+    "Usable registration state retained cleanup evidence."
+
+ghost_slot="${TEMP_DIRECTORY}/ghost-slot"
+fake_cleanup_docker_directory="${TEMP_DIRECTORY}/fake-cleanup-docker"
+cleanup_log="${TEMP_DIRECTORY}/cleanup.log"
+mkdir -p "${ghost_slot}" "${fake_cleanup_docker_directory}"
+printf '%s\n' "container-ghost" > "${ghost_slot}/container-id"
+printf '%s\n' "runner-ghost" > "${ghost_slot}/container-name"
+printf '%s\n' "0" > "${ghost_slot}/registration-grace-until"
+cat > "${fake_cleanup_docker_directory}/docker" <<'EOF'
+#!/bin/sh
+case "$1" in
+    inspect)
+        printf '%s\n' '[{"Name":"/runner-ghost","State":{"Running":true},"Config":{"Labels":{"ephemeral-managed-runner-profile":"default","ephemeral-managed-runner-slot":"ghost-slot"}}}]'
+        ;;
+    stop)
+        printf '%s\n' "$*" >> "${PITCREW_TEST_CLEANUP_LOG}"
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "${fake_cleanup_docker_directory}/docker"
+PITCREW_TEST_CLEANUP_LOG="${cleanup_log}" \
+PATH="${fake_cleanup_docker_directory}:${PATH}" \
+    stop_confirmed_ghost \
+        "${ghost_slot}" \
+        "runner-ghost" \
+        "default" \
+        "ephemeral-managed-runner-profile" \
+        "ephemeral-managed-runner-slot" \
+        20 \
+        2
+assert_equals \
+    "stop --time 20 container-ghost" \
+    "$(cat "${cleanup_log}")" \
+    "Confirmed ghost cleanup did not stop the exact classified container."
+: > "${cleanup_log}"
+printf '%s\n' "runner-replacement" > "${ghost_slot}/container-name"
+PITCREW_TEST_CLEANUP_LOG="${cleanup_log}" \
+PATH="${fake_cleanup_docker_directory}:${PATH}" \
+    stop_confirmed_ghost \
+        "${ghost_slot}" \
+        "runner-ghost" \
+        "default" \
+        "ephemeral-managed-runner-profile" \
+        "ephemeral-managed-runner-slot" \
+        20 \
+        2
+assert_equals \
+    "0" \
+    "$(wc -c < "${cleanup_log}" | tr -d ' ')" \
+    "Cleanup stopped a replacement container after runner identity changed."
+printf '%s\n' "runner-ghost" > "${ghost_slot}/container-name"
+printf '%s\n' "$(( $(date +%s) + 60 ))" > "${ghost_slot}/registration-grace-until"
+PITCREW_TEST_CLEANUP_LOG="${cleanup_log}" \
+PATH="${fake_cleanup_docker_directory}:${PATH}" \
+    stop_confirmed_ghost \
+        "${ghost_slot}" \
+        "runner-ghost" \
+        "default" \
+        "ephemeral-managed-runner-profile" \
+        "ephemeral-managed-runner-slot" \
+        20 \
+        2
+assert_equals \
+    "0" \
+    "$(wc -c < "${cleanup_log}" | tr -d ' ')" \
+    "Cleanup stopped a runner whose replacement grace period had restarted."
+
+fake_wget_directory="${TEMP_DIRECTORY}/fake-wget"
+mkdir -p "${fake_wget_directory}"
+cat > "${fake_wget_directory}/wget" <<'EOF'
+#!/bin/sh
+output=""
+url=""
+authorization=""
+while [ "$#" -gt 0 ]; do
+    case "$1" in
+        -O)
+            output="$2"
+            shift 2
+            ;;
+        --header)
+            case "$2" in
+                Authorization:*) authorization="$2" ;;
+            esac
+            shift 2
+            ;;
+        -T)
+            shift 2
+            ;;
+        -q)
+            shift
+            ;;
+        *)
+            url="$1"
+            shift
+            ;;
+    esac
+done
+[ "${authorization}" = "Authorization: Bearer test-token" ] || exit 1
+if [ "${PITCREW_TEST_INCOMPLETE_INVENTORY:-0}" = "1" ]; then
+    printf '%s\n' \
+        '{"total_count":2,"runners":[{"name":"runner-only","status":"online","busy":false}]}' \
+        > "${output}"
+    exit 0
+fi
+case "${url}" in
+    *page=1)
+        jq -n '{
+            total_count: 101,
+            runners: [
+                range(0; 100) as $index
+                | {
+                    name: ("runner-" + ($index | tostring)),
+                    status: "online",
+                    busy: false
+                }
+            ]
+        }' > "${output}"
+        ;;
+    *page=2)
+        printf '%s\n' \
+            '{"total_count":101,"runners":[{"name":"runner-final","status":"online","busy":true}]}' \
+            > "${output}"
+        ;;
+    *)
+        exit 1
+        ;;
+esac
+EOF
+chmod +x "${fake_wget_directory}/wget"
+fetched_inventory="${TEMP_DIRECTORY}/fetched-runner-inventory.json"
+PATH="${fake_wget_directory}:${PATH}" \
+    fetch_github_runner_inventory \
+        "${fetched_inventory}" \
+        "/repos/example/project/actions/runners" \
+        "test-token" \
+        1
+assert_equals \
+    "101" \
+    "$(jq -r '.runners | length' "${fetched_inventory}")" \
+    "Runner inventory pagination lost records."
+assert_equals \
+    "connected	busy	0" \
+    "$(classify_github_runner_registration "${fetched_inventory}" runner-final)" \
+    "Paginated runner inventory was not classifiable."
+assert_false \
+    "Incomplete runner inventory was accepted as authoritative." \
+    env \
+    PATH="${fake_wget_directory}:${PATH}" \
+    PITCREW_TEST_INCOMPLETE_INVENTORY=1 \
+    sh -c \
+    '. "'"${ROOT}"'/manager/registration.sh"; fetch_github_runner_inventory "$1" "$2" "$3" "$4"' \
+    sh \
+    "${TEMP_DIRECTORY}/incomplete-runner-inventory.json" \
+    "/repos/example/project/actions/runners" \
+    "test-token" \
+    1
+
 fake_docker_directory="${TEMP_DIRECTORY}/fake-docker"
 collected_resources="${TEMP_DIRECTORY}/collected-resources.json"
 partial_resources="${TEMP_DIRECTORY}/partial-resources.json"
@@ -326,6 +583,12 @@ write_slot_runtime_state \
     runner-project-1 \
     0 \
     0
+write_registration_observation \
+    "${observed_slots_directory}/repo-example-000001" \
+    "${observed_dirty}" \
+    connected \
+    idle \
+    0
 write_slot_runtime_state \
     "${observed_slots_directory}/repo-example-000002" \
     "${observed_dirty}" \
@@ -333,6 +596,12 @@ write_slot_runtime_state \
     runner-project-2 \
     2 \
     12
+write_registration_observation \
+    "${observed_slots_directory}/repo-example-000002" \
+    "${observed_dirty}" \
+    disconnected \
+    busy \
+    0
 : > "${observed_slots_directory}/repo-example-000002/drain"
 cat > "${resource_telemetry_json}" <<'EOF'
 {
@@ -375,7 +644,7 @@ write_manager_observed_state \
     "${observed_state_json}" \
     default \
     manager-instance \
-    9 \
+    10 \
     running \
     repo \
     9 \
@@ -387,15 +656,19 @@ write_manager_observed_state \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     1
 assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
-assert_equals "9" "$(jq -r '.managerContractVersion' "${observed_state_json}")" "Observed state reported the wrong manager contract."
+assert_equals "10" "$(jq -r '.managerContractVersion' "${observed_state_json}")" "Observed state reported the wrong manager contract."
 assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
+assert_equals "1" "$(jq -r '.eligibleSlots' "${observed_state_json}")" "Observed state reported the wrong GitHub-eligible slot count."
 assert_equals "2" "$(jq -r '.configuredSlots' "${observed_state_json}")" "Observed state reported the wrong configured slot count."
 assert_equals "null" "$(jq -r '.autoscaling' "${observed_state_json}")" "Fixed observed state reported autoscaling metadata."
 assert_equals "rolling" "$(jq -r '.update.status' "${observed_state_json}")" "Fixed observed state lost rolling-update status."
 assert_equals "1" "$(jq -r '.update.staleWorkers' "${observed_state_json}")" "Fixed observed state reported the wrong stale-worker count."
 assert_equals "1" "$(jq -r '.drainingSlots' "${observed_state_json}")" "Observed state reported the wrong draining slot count."
 assert_equals "online" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .state' "${observed_state_json}")" "Observed state lost an online slot."
+assert_equals "connected" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .registrationStatus' "${observed_state_json}")" "Observed state lost connected registration status."
+assert_equals "idle" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .activity' "${observed_state_json}")" "Observed state lost server-side idle activity."
 assert_equals "draining" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .state' "${observed_state_json}")" "Drain state did not override runtime backoff."
+assert_equals "disconnected" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .registrationStatus' "${observed_state_json}")" "Observed state lost disconnected registration status."
 assert_equals "2" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .failureCount' "${observed_state_json}")" "Observed state lost the slot failure count."
 assert_equals "https://example.com/example/project" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .repository' "${observed_state_json}")" "Observed state did not strip repository credentials and query parameters."
 assert_equals "16" "$(jq -r '.resourceTelemetry.host.logicalProcessorCount' "${observed_state_json}")" "Observed state lost host processor capacity."
@@ -420,6 +693,12 @@ jq 'del(.slots[0].resources)' "${observed_state_json}" > "${invalid_resource_sta
 assert_false "Manager contract eight accepted a slot without a resources field." observed_state_is_valid "${invalid_resource_state}"
 jq 'del(.update)' "${observed_state_json}" > "${invalid_resource_state}"
 assert_false "Manager contract nine accepted missing rolling-update state." observed_state_is_valid "${invalid_resource_state}"
+jq 'del(.eligibleSlots)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract ten accepted missing eligible capacity." observed_state_is_valid "${invalid_resource_state}"
+jq 'del(.slots[0].registrationStatus)' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract ten accepted missing registration status." observed_state_is_valid "${invalid_resource_state}"
+jq '.eligibleSlots = 2' "${observed_state_json}" > "${invalid_resource_state}"
+assert_false "Manager contract ten accepted inconsistent eligible capacity." observed_state_is_valid "${invalid_resource_state}"
 jq '.resourceTelemetry.host = null' "${observed_state_json}" > "${invalid_resource_state}"
 assert_false "Available telemetry accepted missing host capacity." observed_state_is_valid "${invalid_resource_state}"
 jq '
@@ -453,11 +732,11 @@ jq '
 assert_false "Unavailable telemetry accepted a missing manager field." observed_state_is_valid "${invalid_resource_state}"
 legacy_observed_state="${TEMP_DIRECTORY}/legacy-observed-state.json"
 jq '
-    .managerContractVersion = 6
-    | del(.resourceTelemetry)
-    | .slots |= map(del(.resources))
+    .managerContractVersion = 9
+    | del(.eligibleSlots)
+    | del(.slots[].registrationStatus)
 ' "${observed_state_json}" > "${legacy_observed_state}"
-assert_true "Observed-state validation rejected a pre-telemetry manager contract." observed_state_is_valid "${legacy_observed_state}"
+assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals "0" "$(parse_size_bytes '0B')" "Byte parsing changed zero bytes."
 assert_equals "44312822" "$(parse_size_bytes '42.26MiB')" "Byte parsing did not preserve Docker binary units."
