@@ -178,14 +178,61 @@ Add-Check (
     $hostDiagnosticsSkill -match 'explicitly approved'
 ) 'The host diagnostics skill does not validate caller-approved URLs.'
 Add-Check (
-    $hostDiagnosticsSkill -match 'docker run --rm --name pitcrew-diagnostics-' -and
+    $hostDiagnosticsSkill -match 'docker run --rm --cidfile <run-scoped-cidfile> --name pitcrew-diagnostics-' -and
     $hostDiagnosticsSkill -match 'label pitcrew-diagnostics-session=<session-id>' -and
     $hostDiagnosticsSkill -match 'Persist nothing that was downloaded\.'
 ) 'The host diagnostics skill does not time URLs from one disposable, non-persisting container.'
 Add-Check (
+    $hostDiagnosticsSkill -match '--cidfile' -and
+    $hostDiagnosticsSkill -match '`docker create` . capture the printed ID . `docker start --attach`' -and
+    $hostDiagnosticsSkill -notmatch 'Capture the container name and ID at creation'
+) 'The host diagnostics skill does not make disposable-container identity provable client-side.'
+Add-Check (
     $hostDiagnosticsSkill -match 'docker rm --force <exact-diagnostic-container-id>' -and
+    $hostDiagnosticsSkill -match 'docker inspect <exact-diagnostic-container-id> --format' -and
     $hostDiagnosticsSkill -match 'Never clean up by name pattern'
 ) 'The host diagnostics skill does not restrict cleanup to the exact container it created.'
+Add-Check (
+    $hostDiagnosticsSkill -notmatch '--max-time 30\b' -and
+    $hostDiagnosticsSkill -match '--max-time <probe-timeout-seconds>' -and
+    $hostDiagnosticsSkill -match 'default of 300 seconds' -and
+    $hostDiagnosticsSkill -match 'Never hard-code a short'
+) 'The host diagnostics skill still hard-codes a short probe timeout.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'report it as `timed-out` partial evidence' -and
+    $hostDiagnosticsSkill -match 'Never record a timed-out probe as zero throughput'
+) 'The host diagnostics skill does not report timed-out probes as partial evidence.'
+Add-Check (
+    $hostDiagnosticsSkill -match '--write-out "%\{http_code\} %\{remote_ip\} %\{time_namelookup\} %\{time_connect\} %\{time_appconnect\} %\{time_starttransfer\} %\{time_total\} %\{size_download\} %\{speed_download\}'
+) 'The host diagnostics skill does not capture CDN edge and TLS handshake timing.'
+Add-Check (
+    $hostDiagnosticsSkill -match '(?m)^### Paired snapshots and deltas' -and
+    $hostDiagnosticsSkill -match 'immediately before the URL probes and a\s+second immediately after' -and
+    $hostDiagnosticsSkill -match '`NetIO` and `BlockIO` delta' -and
+    $hostDiagnosticsSkill -match 'adapter error and drop counter deltas' -and
+    $hostDiagnosticsSkill -match '`docker system df` delta' -and
+    $hostDiagnosticsSkill -match 'report the delta as\s+unavailable instead of treating the missing side as zero'
+) 'The host diagnostics skill does not capture paired before/after resource deltas.'
+Add-Check (
+    $hostDiagnosticsSkill -match '(?m)^### Per-worker writable layer' -and
+    $hostDiagnosticsSkill -match 'docker inspect --size <exact-container-id>' -and
+    $hostDiagnosticsSkill -match '\{\{\.SizeRw\}\}' -and
+    $hostDiagnosticsSkill -match 'Include `SizeRootFs` only when' -and
+    $hostDiagnosticsSkill -match 'never inspect every container on the\s+host'
+) 'The host diagnostics skill does not capture exact-ID per-worker writable-layer evidence.'
+Add-Check (
+    $hostDiagnosticsSkill -match '(?m)^## Capacity reconciliation evidence' -and
+    $hostDiagnosticsSkill -match 'live worker containers counted above' -and
+    $hostDiagnosticsSkill -match 'autoscaling\.targetSlots' -and
+    $hostDiagnosticsSkill -match '`observedAt` freshness' -and
+    $hostDiagnosticsSkill -match 'Never make a credentialed GitHub API query'
+) 'The host diagnostics skill does not compare live worker counts with registered capacity.'
+Add-Check (
+    $hostDiagnosticsSkill -match 'A single host-versus-container pair never establishes a root cause\.' -and
+    $hostDiagnosticsSkill -match 'CDN edge and route variability' -and
+    $hostDiagnosticsSkill -match 'load-sensitive host contention' -and
+    $hostDiagnosticsSkill -match 'single paired sample'
+) 'The host diagnostics skill infers a root cause from one host/container pair.'
 Add-Check (
     $hostDiagnosticsSkill -match 'absolute host paths, replaced with `<pitcrew-root>`' -and
     $hostDiagnosticsSkill -match 'any URL query string' -and

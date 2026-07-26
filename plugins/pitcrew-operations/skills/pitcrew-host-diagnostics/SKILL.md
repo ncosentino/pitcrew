@@ -35,7 +35,7 @@ host is in a sensitive state. In dry run:
 
 1. Resolve identity and read non-secret state only.
 2. Print every command that would run, in order, with fully resolved profile,
-   labels, image references, URLs, and container name.
+   labels, image references, URLs, probe timeout, and container name.
 3. Create no container, download nothing, and change nothing.
 4. Label the report `mode: dry-run` and mark every measurement as
    `not-collected`.
@@ -54,6 +54,36 @@ Run the collection only after the user approves the printed plan.
 3. Never open an environment or token file, including with a filtered command.
 4. Record the desired generation, the acknowledged generation, the observed
    generation, `managerStatus`, and observed-state freshness.
+
+## Capacity reconciliation evidence
+
+Count what is actually running and compare it with what each layer believes.
+
+1. Count live workers per target from exact labels, using the slot label to
+   attribute each container to its target:
+
+   ```text
+   docker ps --filter "label=ephemeral-managed-runner-profile=<profile>" --format "{{.ID}} {{.Label \"ephemeral-managed-runner-slot\"}} {{.Label \"pitcrew-worker-revision\"}}"
+   ```
+
+2. Build a per-target table comparing, for every repository or scale set:
+   - live worker containers counted above
+   - desired workers in `desired-capacity.json`
+   - acknowledged workers in `acknowledged-capacity.json`
+   - observed slots in `observed-state.json`, including per-slot `repository`
+     and `state`
+   - scale-set statistics already present in observed state
+     (`autoscaling.targetSlots`, `maximumSlots`, `minimumIdleSlots`,
+     `idleRunners`, `busyRunners`, `assignedJobs`, `runningJobs`,
+     `availableJobs`, `status`, `lastError`)
+3. Report `observedAt` freshness alongside those counts. Stale observed state
+   makes every registered count an unverified reading, not a measurement.
+4. A live-versus-registered mismatch (for example `2 live / 0 registered` or
+   `2 live / 8 registered`) is decisive evidence. Report it verbatim per target.
+5. Never make a credentialed GitHub API query to fill a gap. When registered
+   counts or scale-set statistics are missing from observed state, report the
+   missing evidence explicitly and name the non-destructive follow-up that
+   would supply it.
 
 ## Exact identity of the running images
 
@@ -90,6 +120,37 @@ returned by the label filters. Never run `docker stats` without `--no-stream`
 and never run it across every container on the host. If the command exceeds a
 short timeout or returns no row for a container, report that container's usage
 as unavailable.
+
+### Paired snapshots and deltas
+
+`NetIO`, `BlockIO`, adapter counters, and disk accounting are cumulative, so a
+single snapshot cannot attribute pressure to the URL probe or to the active
+workload. Take a complete snapshot immediately before the URL probes and a
+second immediately after, then report both absolute values and the delta:
+
+- per container: `NetIO` and `BlockIO` delta, plus CPU, memory, and PID values
+  at each snapshot
+- host: adapter error and drop counter deltas
+- Docker: `docker system df` delta for images, containers, and build cache
+
+Record the wall-clock timestamp of each snapshot so the delta has a known
+window. When either snapshot is unavailable for a container, report the delta as
+unavailable instead of treating the missing side as zero.
+
+### Per-worker writable layer
+
+Multi-gigabyte container layers can exhaust an overlay filesystem while the host
+still reports abundant free space, so measure the writable layer per worker
+using exact IDs only:
+
+```text
+docker ps --size --filter "label=ephemeral-managed-runner-profile=<profile>" --format "{{.ID}} {{.Size}}"
+docker inspect --size <exact-container-id> --format "{{.Id}} {{.SizeRw}} {{.SizeRootFs}}"
+```
+
+Report `SizeRw` per worker and the profile total. Include `SizeRootFs` only when
+the same exact-ID inspection returns it; never inspect every container on the
+host to obtain it, and never estimate a layer size.
 
 ## Host capacity evidence
 
@@ -131,40 +192,66 @@ Never fabricate, estimate, or interpolate an unsupported measurement.
    - there is no query string, token, or signature material
    - the host is a literal hostname or address, not a shell expansion
    Stop and ask when validation fails.
-3. Time each URL from the host, discarding the body:
+3. Agree the probe timeout with the caller before probing. Use a finite
+   caller-approved bound with a default of 300 seconds. Never hard-code a short
+   bound such as 30 seconds: a large artifact can legitimately take minutes, and
+   a truncated probe discards the decisive measurement.
+   - When a probe hits the bound, report it as `timed-out` partial evidence with
+     the bytes transferred and elapsed time observed so far.
+   - Never record a timed-out probe as zero throughput, as a generic failure, or
+     as a successful comparison.
+4. Take the "before" resource snapshot, then time each URL from the host,
+   discarding the body:
 
    ```text
-   curl --silent --show-error --location --max-time 30 --output /dev/null --write-out "%{http_code} %{time_namelookup} %{time_connect} %{time_starttransfer} %{time_total} %{size_download} %{speed_download}\n" <url>
+   curl --silent --show-error --location --max-time <probe-timeout-seconds> --output /dev/null --write-out "%{http_code} %{remote_ip} %{time_namelookup} %{time_connect} %{time_appconnect} %{time_starttransfer} %{time_total} %{size_download} %{speed_download}\n" <url>
    ```
+
+   `%{remote_ip}` identifies the selected CDN edge and `%{time_appconnect}`
+   isolates TLS handshake cost, so a one-off edge selection is not misread as a
+   Docker networking fault.
 
    On Windows use `curl.exe` with the same arguments and `--output NUL`. When
    `curl.exe` is unavailable, use `Invoke-WebRequest -UseBasicParsing` with a
    discarded response body and report the reduced timing detail.
-4. Time the same URLs from exactly one disposable container built from the
-   profile's exact worker image:
+5. Time the same URLs from exactly one disposable container built from the
+   profile's exact worker image. Prove the container identity client-side with
+   `--cidfile` so cleanup can verify an exact ID:
 
    ```text
-   docker run --rm --name pitcrew-diagnostics-<profile>-<timestamp> --label pitcrew-diagnostics-session=<session-id> <exact-worker-image> <the same curl command>
+   docker run --rm --cidfile <run-scoped-cidfile> --name pitcrew-diagnostics-<profile>-<timestamp> --label pitcrew-diagnostics-session=<session-id> <exact-worker-image> <the same curl command>
    ```
+
+   When `--cidfile` is unavailable, use an explicit
+   `docker create` → capture the printed ID → `docker start --attach` →
+   `docker rm <exact-id>` flow instead. Never infer the container identity from
+   a name pattern or from `docker ps` output filtered by name.
 
    The disposable container never mounts the Docker socket, never mounts a host
    path, and never receives PitCrew credentials or registration input.
-5. Persist nothing that was downloaded. Bodies always go to `/dev/null` or
+6. Persist nothing that was downloaded. Bodies always go to `/dev/null` or
    `NUL`; never use `--output <file>`, `--remote-name`, or a bind mount.
-6. Compare host and container results per URL: HTTP status, DNS, connect, first
-   byte, total time, and throughput. Report the delta and whether the
-   difference points at the host, Docker networking, or the upstream endpoint.
+7. Take the "after" resource snapshot immediately once the probes finish.
+8. Compare host and container results per URL: HTTP status, remote IP, DNS,
+   connect, TLS, first byte, total time, throughput, and bytes transferred.
+   Report the delta together with the probe-window resource deltas and the live
+   worker counts observed during the probe.
 
 ## Cleanup
 
 - `docker run --rm` removes the disposable container on exit.
-- Capture the container name and ID at creation. If it survives, remove exactly
-  that ID after confirming it carries `pitcrew-diagnostics-session=<session-id>`:
+- Read the exact container ID from the `--cidfile`, or from the `docker create`
+  output when the create/start flow was used. If the container survives, confirm
+  that exact ID still carries `pitcrew-diagnostics-session=<session-id>` before
+  removing it:
 
   ```text
+  docker inspect <exact-diagnostic-container-id> --format "{{index .Config.Labels \"pitcrew-diagnostics-session\"}}"
   docker rm --force <exact-diagnostic-container-id>
   ```
 
+- Delete the run-scoped cidfile afterwards. It contains no secret, but it must
+  not be reused by a later session.
 - Remove nothing else. Never clean up by name pattern, never remove untagged
   images, and never touch a container carrying a PitCrew manager or worker
   label.
@@ -192,5 +279,25 @@ Structure the report in three explicitly separated sections:
    non-destructive follow-up that would confirm it.
 
 Never present a hypothesis as a measurement, and never fill a gap in the
-unavailable section with an estimate. Recommend remediation as a proposal for
-the operator; this skill does not apply it.
+unavailable section with an estimate.
+
+A single host-versus-container pair never establishes a root cause. One pair is
+one sample taken under one host load, against one CDN edge, over one path. Keep
+these as competing hypotheses until repeated measurements resolve them:
+
+- CDN edge and route variability, evidenced by differing `%{remote_ip}` or
+  `%{time_appconnect}` between the two probes
+- load-sensitive host contention, evidenced by the probe-window resource deltas
+  and the live worker counts at each snapshot
+- host-specific network stack or filesystem behaviour, evidenced by adapter
+  error and drop deltas and writable-layer growth
+- a genuine Docker networking difference
+
+Report which hypotheses the collected evidence weakens and which remain open.
+When the container and host results differ substantially, state explicitly that
+the run is a single paired sample and name the repeat measurement — same URLs,
+same probe timeout, same worker image, under a stated worker load — that would
+separate the remaining hypotheses.
+
+Recommend remediation as a proposal for the operator; this skill does not apply
+it.

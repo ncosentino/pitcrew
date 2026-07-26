@@ -134,16 +134,31 @@ The skill resolves one installation and profile, reads only generated
 non-secret state, reports the exact manager and worker image references with
 their resolved local image IDs and digests, and captures bounded `docker stats
 --no-stream` CPU, memory, PID, `NetIO`, and `BlockIO` samples for exact PitCrew
-labels. It also collects `docker system df`, the Docker network count, host free
-space and inodes where supported, and read-only network-adapter error and drop
-counters, selecting Linux or Windows commands from the runner host platform.
+labels. It also collects `docker system df`, the Docker network count, exact-ID
+per-worker writable-layer sizes, host free space and inodes where supported, and
+read-only network-adapter error and drop counters, selecting Linux or Windows
+commands from the runner host platform.
+
+Because live worker counts and registered capacity drift apart on a degraded
+host, the skill compares live labelled containers per target against desired,
+acknowledged, and observed capacity plus any scale-set statistics already in
+observed state, including their freshness. It never issues a credentialed GitHub
+query to fill that gap; missing evidence is reported as missing.
 
 Caller-approved URLs are timed from the host and from exactly one disposable
-container built from the profile's exact worker image. Downloaded bodies are
-discarded, and only that exact diagnostic container is removed afterwards. A
-dry-run mode prints the resolved commands without changing state, and the
-redacted Markdown/JSON handoff separates verified measurements from unavailable
-evidence and unverified hypotheses.
+container built from the profile's exact worker image, using a caller-approved
+finite probe timeout that defaults to 300 seconds so a large artifact is not
+truncated into a false failure. Resource snapshots are taken immediately before
+and after the probes so `NetIO`, `BlockIO`, adapter-counter, and disk-accounting
+deltas can be attributed to the probe window. Downloaded bodies are discarded,
+the disposable container's exact ID is proven with `--cidfile` or an explicit
+create/start flow, and only that exact container is removed afterwards.
+
+A dry-run mode prints the resolved commands without changing state. The redacted
+Markdown/JSON handoff separates verified measurements from unavailable evidence
+and unverified hypotheses, and it never converts a single host/container pair
+into a root cause: CDN edge variability and load-sensitive host contention stay
+competing hypotheses until repeated measurements resolve them.
 
 ## Safety boundary
 
