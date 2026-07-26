@@ -152,6 +152,14 @@ func parseRegistrationCleanupDocument(
 			document.SchemaVersion,
 		)
 	}
+	if document.ManagerContractVersion < 10 ||
+		document.ManagerContractVersion > managerContractVersion {
+		return registrationCleanupDocument{}, fmt.Errorf(
+			"registration cleanup managerContractVersion must be between 10 and %d, got %d",
+			managerContractVersion,
+			document.ManagerContractVersion,
+		)
+	}
 	if document.TargetKey != targetKey {
 		return registrationCleanupDocument{}, fmt.Errorf(
 			"registration cleanup document targets %q, not %q",
