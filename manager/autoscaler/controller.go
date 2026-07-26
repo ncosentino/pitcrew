@@ -69,6 +69,7 @@ func startTargetController(
 		api,
 		docker,
 		scalerClock,
+		logger,
 		onChange,
 		onError,
 	)
