@@ -1,7 +1,7 @@
 {
   "name": "pitcrew-operations",
-  "description": "Safely manage PitCrew capacity and autoscaling, and update PitCrew or its optional dashboard using the repositories' supported commands.",
-  "version": "1.4.0",
+  "description": "Safely manage PitCrew capacity and autoscaling, update PitCrew or its optional dashboard, and collect non-destructive runner-host diagnostics using the repositories' supported commands.",
+  "version": "1.5.0",
   "author": {
     "name": "Nick Cosentino",
     "url": "https://www.devleader.ca"
