@@ -19,6 +19,8 @@ OBSERVED_STATE="${STATE_DIRECTORY}/observed-state.json"
 LEGACY_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${LEGACY_PROFILE_NAME}"
 LEGACY_DESIRED_STATE="${LEGACY_STATE_DIRECTORY}/desired-capacity.json"
 LEGACY_COMPOSE_PROJECT="self-hosted-runner-${LEGACY_PROFILE_NAME}"
+LEGACY_OBSERVED_STATE="${LEGACY_STATE_DIRECTORY}/observed-state.json"
+FAKE_IMAGE_ID=""
 FIXTURE_DIRECTORY=$(mktemp -d)
 PROFILE_PATH="${FIXTURE_DIRECTORY}/profile.json"
 MANAGER_ID=""
@@ -113,6 +115,24 @@ wait_for_slot_replacement() {
     return 1
 }
 
+wait_for_slot_exit_classification() {
+    slot_key="$1"
+    expected_classification="$2"
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        observed_classification=$(jq -r \
+            --arg key "${slot_key}" \
+            '.slots[] | select(.key == $key) | .lastExit.classification // ""' \
+            "${OBSERVED_STATE}" 2>/dev/null || true)
+        if [ "${observed_classification}" = "${expected_classification}" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for slot ${slot_key} to report a ${expected_classification} exit." >&2
+    return 1
+}
+
 run_setup() {
     workers="$1"
     pwsh -NoProfile -Command \
@@ -142,6 +162,11 @@ start_legacy_compose() {
         RUNNER_NO_DEFAULT_LABELS="1" \
         RUNNER_GROUP="" \
         PITCREW_WORKER_REVISION="0000000000000000000000000000000000000000000000000000000000000000" \
+        PITCREW_WORKER_IMAGE_ID="${FAKE_IMAGE_ID}" \
+        PITCREW_WORKER_MEMORY_BYTES="536870912" \
+        PITCREW_WORKER_MEMORY_SWAP_BYTES="1073741824" \
+        PITCREW_WORKER_CPU_CORES="0.5" \
+        PITCREW_WORKER_PIDS_LIMIT="512" \
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
@@ -224,6 +249,7 @@ EOF
 docker build \
     --tag "${FAKE_IMAGE}" \
     "${ROOT}/tests/integration/fake-runner"
+FAKE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${FAKE_IMAGE}")
 
 mkdir -p "${ROOT}/.pitcrew-state"
 start_legacy_compose
@@ -240,6 +266,48 @@ wait_for_legacy_worker_count 2
     echo "Legacy direct-Compose capacity did not preserve worker count." >&2
     exit 1
 }
+
+legacy_worker_sample=$(docker ps -q --filter "label=${LEGACY_PROFILE_LABEL}" | head -n 1)
+[ "$(docker inspect --format '{{.HostConfig.Memory}}' "${legacy_worker_sample}")" -eq 536870912 ] || {
+    echo "The configured memory limit did not reach the worker container." >&2
+    exit 1
+}
+[ "$(docker inspect --format '{{.HostConfig.MemorySwap}}' "${legacy_worker_sample}")" -eq 1073741824 ] || {
+    echo "The configured memory-swap limit did not reach the worker container." >&2
+    exit 1
+}
+[ "$(docker inspect --format '{{.HostConfig.NanoCpus}}' "${legacy_worker_sample}")" -eq 500000000 ] || {
+    echo "The configured CPU limit did not reach the worker container." >&2
+    exit 1
+}
+[ "$(docker inspect --format '{{.HostConfig.PidsLimit}}' "${legacy_worker_sample}")" -eq 512 ] || {
+    echo "The configured PID limit did not reach the worker container." >&2
+    exit 1
+}
+legacy_policy_deadline=$((SECONDS + 60))
+while [ "${SECONDS}" -lt "${legacy_policy_deadline}" ]; do
+    [ -f "${LEGACY_OBSERVED_STATE}" ] &&
+        [ "$(jq -r '.resourcePolicy.memoryBytes // 0' "${LEGACY_OBSERVED_STATE}")" -eq 536870912 ] &&
+        break
+    sleep 1
+done
+[ "$(jq -r '.resourcePolicy.memoryBytes' "${LEGACY_OBSERVED_STATE}")" -eq 536870912 ] || {
+    echo "Observed state did not publish the configured memory policy." >&2
+    exit 1
+}
+[ "$(jq -r '.resourcePolicy.memorySwapBytes' "${LEGACY_OBSERVED_STATE}")" -eq 1073741824 ] || {
+    echo "Observed state did not publish the configured memory-swap policy." >&2
+    exit 1
+}
+[ "$(jq -r '.resourcePolicy.cpuCores' "${LEGACY_OBSERVED_STATE}")" = "0.5" ] || {
+    echo "Observed state did not publish the canonical CPU policy." >&2
+    exit 1
+}
+[ "$(jq -r '.resourcePolicy.pids' "${LEGACY_OBSERVED_STATE}")" -eq 512 ] || {
+    echo "Observed state did not publish the configured PID policy." >&2
+    exit 1
+}
+
 stop_legacy_compose
 wait_for_legacy_worker_count 2
 docker ps -q --filter "label=${LEGACY_PROFILE_LABEL}" |
@@ -300,6 +368,46 @@ MANAGER_ID=$(manager_id)
 }
 mapfile -t original_workers < <(worker_ids)
 [ "${#original_workers[@]}" -eq 5 ]
+
+[ "$(jq -r --arg imageId "${FAKE_IMAGE_ID}" \
+    '[.slots[] | select(.imageId == $imageId)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
+    echo "Observed state did not tie every worker slot to the exact local image identity." >&2
+    exit 1
+}
+[ "$(jq -r '.resourcePolicy' "${OBSERVED_STATE}")" = "null" ] || {
+    echo "A profile without a resource policy published a policy object." >&2
+    exit 1
+}
+[ "$(docker inspect --format '{{.HostConfig.Memory}}' "${original_workers[0]}")" -eq 0 ] || {
+    echo "A profile without a resource policy applied a memory limit." >&2
+    exit 1
+}
+[ "$(jq '[
+        .slots[].resources
+        | select(. != null)
+        | select(
+            has("networkRxBytes")
+            and has("networkTxBytes")
+            and has("blockReadBytes")
+            and has("blockWriteBytes")
+        )
+    ] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
+    echo "Observed state did not publish I/O counters for every live worker." >&2
+    exit 1
+}
+[ "$(jq '[
+        .slots[].resources
+        | select(. != null)
+        | (.networkRxBytes, .networkTxBytes, .blockReadBytes, .blockWriteBytes)
+        | select(. != null and . < 0)
+    ] | length' "${OBSERVED_STATE}")" -eq 0 ] || {
+    echo "Observed state published a negative I/O counter." >&2
+    exit 1
+}
+[ "$(jq '[.slots[] | select(.lastExit != null)] | length' "${OBSERVED_STATE}")" -eq 0 ] || {
+    echo "Freshly launched workers reported exit evidence." >&2
+    exit 1
+}
 
 run_setup 6
 wait_for_acknowledgement 2
@@ -367,6 +475,33 @@ replacement_slot=$(docker inspect \
 docker stop --time 5 "${replacement_source}" >/dev/null
 wait_for_slot_replacement "${replacement_slot}" "${replacement_source}"
 wait_for_worker_count 5
+wait_for_slot_exit_classification "${replacement_slot}" clean
+[ "$(jq -r --arg key "${replacement_slot}" \
+    '.slots[] | select(.key == $key) | .lastExit.exitCode' "${OBSERVED_STATE}")" -eq 0 ] || {
+    echo "A graceful worker exit did not report a zero exit code." >&2
+    exit 1
+}
+
+killed_source=$(slot_container_id "${replacement_slot}")
+docker kill --signal KILL "${killed_source}" >/dev/null
+wait_for_slot_replacement "${replacement_slot}" "${killed_source}"
+wait_for_worker_count 5
+wait_for_slot_exit_classification "${replacement_slot}" sigkill
+[ "$(jq -r --arg key "${replacement_slot}" \
+    '.slots[] | select(.key == $key) | .lastExit.exitCode' "${OBSERVED_STATE}")" -eq 137 ] || {
+    echo "A killed worker did not report its Docker exit status." >&2
+    exit 1
+}
+[ "$(jq -r --arg key "${replacement_slot}" \
+    '.slots[] | select(.key == $key) | .lastExit.dockerOomKilled' "${OBSERVED_STATE}")" != "true" ] || {
+    echo "Status 137 was reported as an out-of-memory kill without Docker evidence." >&2
+    exit 1
+}
+[ "$(jq -r --arg key "${replacement_slot}" \
+    '.slots[] | select(.key == $key) | .lastExit.signal' "${OBSERVED_STATE}")" -eq 9 ] || {
+    echo "A killed worker did not report its terminating signal." >&2
+    exit 1
+}
 
 jq '.generation = 2' "${ACKNOWLEDGEMENT}" > "${ACKNOWLEDGEMENT}.stale"
 mv -f "${ACKNOWLEDGEMENT}.stale" "${ACKNOWLEDGEMENT}"
@@ -424,6 +559,11 @@ graceful_shutdowns_after=$(docker logs "${MANAGER_ID}" 2>&1 |
 }
 [ "$(jq '[.slots[] | select(.state == "online" and .registrationStatus != "connected")] | length' "${OBSERVED_STATE}")" -eq 0 ] || {
     echo "Manager recovery reported an online slot without authoritative GitHub connectivity." >&2
+    exit 1
+}
+
+[ "$(jq '[.slots[] | select(.lastExit != null)] | length' "${OBSERVED_STATE}")" -eq 0 ] || {
+    echo "Manager recovery replayed stale exit evidence for adopted workers." >&2
     exit 1
 }
 
