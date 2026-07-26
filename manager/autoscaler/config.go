@@ -30,6 +30,9 @@ type config struct {
 	runnerGroup          string
 	stateDirectory       string
 	minimumIdle          int
+	maximumActiveWorkers int
+	workerImageID        string
+	resources            workerResourcePolicy
 	scaleDownDelay       time.Duration
 	observedInterval     time.Duration
 	architectureLabel    string
@@ -119,6 +122,24 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 	if err != nil {
 		return config{}, err
 	}
+	maximumActiveWorkers, err := parseOptionalPositiveInteger(
+		"PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS",
+		value("PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS", ""),
+	)
+	if err != nil {
+		return config{}, err
+	}
+	workerImageID, err := parseWorkerImageID(
+		"PITCREW_WORKER_IMAGE_ID",
+		value("PITCREW_WORKER_IMAGE_ID", ""),
+	)
+	if err != nil {
+		return config{}, err
+	}
+	resources, err := loadWorkerResourcePolicy(value)
+	if err != nil {
+		return config{}, err
+	}
 
 	cfg := config{
 		accessToken:          strings.TrimSpace(value("ACCESS_TOKEN", "")),
@@ -136,6 +157,9 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		runnerGroup:          strings.TrimSpace(value("RUNNER_GROUP", scaleset.DefaultRunnerGroup)),
 		stateDirectory:       filepath.Clean(value("PITCREW_STATE_DIRECTORY", "/var/lib/pitcrew")),
 		minimumIdle:          minimumIdle,
+		maximumActiveWorkers: maximumActiveWorkers,
+		workerImageID:        workerImageID,
+		resources:            resources,
 		scaleDownDelay:       scaleDownDelay,
 		observedInterval:     observedInterval,
 		architectureLabel:    normalizeArchitecture(architecture),
@@ -181,6 +205,15 @@ func (c config) validate() error {
 		return errors.New("PITCREW_STATE_DIRECTORY must identify a directory")
 	case c.architectureLabel == "":
 		return errors.New("current architecture cannot be empty")
+	case c.maximumActiveWorkers < 0:
+		return errors.New("PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS must be a positive integer")
+	}
+
+	if err := c.resources.validate(); err != nil {
+		return err
+	}
+	if _, err := parseWorkerImageID("PITCREW_WORKER_IMAGE_ID", c.workerImageID); err != nil {
+		return err
 	}
 
 	switch c.scope {
@@ -232,6 +265,44 @@ func (c config) validate() error {
 		}
 	}
 	return nil
+}
+
+// loadWorkerResourcePolicy reads the canonical per-worker limits. Empty values
+// mean unconfigured; the manager never treats them as zero.
+func loadWorkerResourcePolicy(
+	value func(name, fallback string) string,
+) (workerResourcePolicy, error) {
+	memoryBytes, err := parseOptionalInt64(
+		"PITCREW_WORKER_MEMORY_BYTES",
+		value("PITCREW_WORKER_MEMORY_BYTES", ""),
+	)
+	if err != nil {
+		return workerResourcePolicy{}, err
+	}
+	memorySwapBytes, err := parseOptionalInt64(
+		"PITCREW_WORKER_MEMORY_SWAP_BYTES",
+		value("PITCREW_WORKER_MEMORY_SWAP_BYTES", ""),
+	)
+	if err != nil {
+		return workerResourcePolicy{}, err
+	}
+	pids, err := parseOptionalInt64(
+		"PITCREW_WORKER_PIDS_LIMIT",
+		value("PITCREW_WORKER_PIDS_LIMIT", ""),
+	)
+	if err != nil {
+		return workerResourcePolicy{}, err
+	}
+	policy := workerResourcePolicy{
+		memoryBytes:     memoryBytes,
+		memorySwapBytes: memorySwapBytes,
+		cpuCores:        strings.TrimSpace(value("PITCREW_WORKER_CPU_CORES", "")),
+		pids:            pids,
+	}
+	if err := policy.validate(); err != nil {
+		return workerResourcePolicy{}, err
+	}
+	return policy, nil
 }
 
 func parseLabels(value string) ([]string, error) {

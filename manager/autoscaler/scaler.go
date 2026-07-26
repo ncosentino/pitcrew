@@ -62,9 +62,14 @@ type runnerRecord struct {
 }
 
 type scalerStatistics struct {
-	assignedJobs  int
-	runningJobs   int
-	availableJobs int
+	observedAt        time.Time
+	assignedJobs      int
+	runningJobs       int
+	availableJobs     int
+	acquiredJobs      int
+	registeredRunners int
+	busyRunners       int
+	idleRunners       int
 }
 
 type scalerSnapshot struct {
@@ -74,6 +79,8 @@ type scalerSnapshot struct {
 	scaleDownAt      *time.Time
 	statistics       scalerStatistics
 	runners          []runnerRecord
+	pendingCleanups  []registrationCleanupRecord
+	activeRunners    int
 	idleRunners      int
 	busyRunners      int
 	drainingRunners  int
@@ -89,6 +96,8 @@ type runnerScaler struct {
 	lifecycleContext  context.Context
 	profileID         string
 	image             string
+	imageID           string
+	resources         workerResourcePolicy
 	workerRevision    string
 	assumeUnversioned bool
 	namePrefix        string
@@ -112,6 +121,7 @@ type runnerScaler struct {
 
 	cleanupStore         registrationCleanupStore
 	pendingRegistrations map[string]registrationCleanupRecord
+	admission            *admissionController
 }
 
 func newRunnerScaler(
@@ -122,6 +132,7 @@ func newRunnerScaler(
 	api scaleSetService,
 	docker dockerClient,
 	scalerClock clock,
+	admission *admissionController,
 	logger *slog.Logger,
 	onChange func(),
 	onError func(error),
@@ -140,6 +151,8 @@ func newRunnerScaler(
 		lifecycleContext:  lifecycleContext,
 		profileID:         cfg.profileID,
 		image:             cfg.runnerImage,
+		imageID:           cfg.workerImageID,
+		resources:         cfg.resources,
 		workerRevision:    cfg.workerRevision,
 		assumeUnversioned: cfg.assumeUnversioned,
 		namePrefix:        cfg.namePrefix,
@@ -164,8 +177,10 @@ func newRunnerScaler(
 			target.key,
 		),
 		pendingRegistrations: make(map[string]registrationCleanupRecord),
+		admission:            admission,
 	}
 	scaler.restorePendingRegistrations()
+	scaler.admission.join(target.key, scaler.runnerCount)
 	scaler.operationGate <- struct{}{}
 	return scaler
 }
@@ -345,9 +360,14 @@ func (s *runnerScaler) RecordStatistics(statistics *scaleset.RunnerScaleSetStati
 	}
 	s.mu.Lock()
 	s.statistics = scalerStatistics{
-		assignedJobs:  statistics.TotalAssignedJobs,
-		runningJobs:   statistics.TotalRunningJobs,
-		availableJobs: statistics.TotalAvailableJobs,
+		observedAt:        s.clock.now().UTC(),
+		assignedJobs:      statistics.TotalAssignedJobs,
+		runningJobs:       statistics.TotalRunningJobs,
+		availableJobs:     statistics.TotalAvailableJobs,
+		acquiredJobs:      statistics.TotalAcquiredJobs,
+		registeredRunners: statistics.TotalRegisteredRunners,
+		busyRunners:       statistics.TotalBusyRunners,
+		idleRunners:       statistics.TotalIdleRunners,
 	}
 	s.mu.Unlock()
 	s.onChange()
@@ -500,8 +520,19 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 				"blockedSlots", blocked,
 			)
 		}
-		for ; missing > 0; missing-- {
-			if _, err := s.startRunner(ctx); err != nil {
+		admitted := s.admission.reserve(s.target.key, missing)
+		if admitted < missing {
+			s.logger.Warn(
+				"Deferring capacity to respect the profile active-worker ceiling",
+				"requestedSlots", missing,
+				"admittedSlots", admitted,
+			)
+		}
+		for ; admitted > 0; admitted-- {
+			_, err := s.startRunner(ctx)
+			s.admission.settle(s.target.key, 1)
+			if err != nil {
+				s.admission.settle(s.target.key, admitted-1)
 				return s.capacityCount(), errors.Join(
 					errors.Join(operationErrors...),
 					fmt.Errorf("start missing runner: %w", err),
@@ -644,6 +675,7 @@ func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {
 // forget a registration that GitHub may still hold.
 func (s *runnerScaler) beginPendingRegistrationCleanup(
 	runner runnerRecord,
+	diagnostic *lastExitDiagnostic,
 	now time.Time,
 ) registrationCleanupRecord {
 	s.mu.Lock()
@@ -658,6 +690,10 @@ func (s *runnerScaler) beginPendingRegistrationCleanup(
 			ContainerName: runner.container,
 			FirstFailedAt: now.Format(time.RFC3339),
 		}
+	}
+	if diagnostic != nil {
+		value := *diagnostic
+		record.LastExit = &value
 	}
 	s.pendingRegistrations[record.SlotKey] = record
 	evicted := s.boundPendingRegistrationsLocked()
@@ -788,9 +824,12 @@ func (s *runnerScaler) pendingRegistrationCount() int {
 // removeExitedRegistration removes the exact JIT registration of a worker that
 // has exited, retaining a durable cleanup-pending record when GitHub cannot
 // confirm the removal.
-func (s *runnerScaler) removeExitedRegistration(runner runnerRecord) {
+func (s *runnerScaler) removeExitedRegistration(
+	runner runnerRecord,
+	diagnostic lastExitDiagnostic,
+) {
 	now := s.clock.now().UTC()
-	record := s.beginPendingRegistrationCleanup(runner, now)
+	record := s.beginPendingRegistrationCleanup(runner, &diagnostic, now)
 	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
 	err := registrationRemovalError(
 		s.api.removeRunner(cleanupContext, record.RunnerID),
@@ -894,8 +933,16 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		image:     s.image,
 		jitConfig: jit.encoded,
 		labels:    labels,
+		resources: s.resources,
 	})
 	if err != nil {
+		launchFailure := launchFailureDiagnostic(s.clock.now())
+		s.logger.Warn(
+			"Runner container launch failed",
+			"slotKey", slotKey,
+			"classification", launchFailure.Classification,
+			"observedAt", launchFailure.ObservedAt,
+		)
 		cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
 		cleanupErr := registrationRemovalError(
 			s.api.removeRunner(cleanupContext, jit.runnerID),
@@ -1138,7 +1185,7 @@ func (s *runnerScaler) monitorRunner(runner *runnerRecord, since time.Time) {
 				return
 			}
 			if err == nil {
-				s.handleContainerExit(runner.containerID, exitCode)
+				s.handleContainerExit(runner.containerID, &exitCode)
 				return
 			}
 			s.onError(err)
@@ -1152,7 +1199,7 @@ func (s *runnerScaler) monitorRunner(runner *runnerRecord, since time.Time) {
 			if stateErr != nil {
 				s.onError(stateErr)
 			} else if !running {
-				s.handleContainerExit(runner.containerID, 0)
+				s.handleContainerExit(runner.containerID, nil)
 				return
 			}
 			if !s.hasRunner(runner.containerID) {
@@ -1240,11 +1287,37 @@ func lifecycleStateFromLog(line string) (runnerLifecycleState, bool) {
 	}
 }
 
-func (s *runnerScaler) handleContainerExit(containerID string, exitCode int) {
+// captureExitEvidence records Docker's own exit evidence for the exact
+// container before it disappears. Workers launch with --rm, so a missing
+// container falls back to the status reported by docker wait, and an
+// unobserved status stays unknown instead of being guessed.
+func (s *runnerScaler) captureExitEvidence(
+	containerID string,
+	exitCode *int,
+) lastExitDiagnostic {
+	observedAt := s.clock.now().UTC()
+	inspectContext, cancel := detachedCleanupContext(s.lifecycleContext)
+	state, inspected := s.docker.inspectExit(inspectContext, containerID)
+	cancel()
+	if inspected {
+		return classifyContainerExit(state, true, observedAt)
+	}
+	if exitCode == nil {
+		return classifyContainerExit(containerExitState{exitCode: -1}, false, observedAt)
+	}
+	return classifyContainerExit(
+		containerExitState{exitCode: *exitCode},
+		false,
+		observedAt,
+	)
+}
+
+func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	if err := s.acquireOperation(s.lifecycleContext); err != nil {
 		return
 	}
 	defer s.releaseOperation()
+	diagnostic := s.captureExitEvidence(containerID, exitCode)
 	s.mu.Lock()
 	runner := s.findRunnerByContainerLocked(containerID)
 	if runner == nil {
@@ -1262,15 +1335,21 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode int) {
 	s.mu.Unlock()
 	s.onChange()
 
-	if unexpected && exitCode != 0 {
+	s.logger.Info(
+		"Runner container exited",
+		"slotKey", exited.key,
+		"classification", diagnostic.Classification,
+		"evidence", diagnostic.Evidence,
+	)
+	if unexpected && diagnostic.Classification != "clean" {
 		s.onError(fmt.Errorf(
-			"runner container %s exited unexpectedly with status %d",
+			"runner container %s exited unexpectedly (%s)",
 			containerID,
-			exitCode,
+			diagnostic.Classification,
 		))
 	}
 	if !shuttingDown && !exited.registrationRemoved {
-		s.removeExitedRegistration(exited)
+		s.removeExitedRegistration(exited, diagnostic)
 	}
 	if needsReconcile && s.lifecycleContext.Err() == nil {
 		if _, err := s.reconcileLocked(s.lifecycleContext); err != nil {
@@ -1334,6 +1413,7 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 	s.mu.Lock()
 	clear(s.runners)
 	s.mu.Unlock()
+	s.admission.leave(s.target.key)
 	s.onChange()
 	return errors.Join(shutdownErrors...)
 }
@@ -1389,6 +1469,8 @@ func (s *runnerScaler) snapshot() scalerSnapshot {
 			snapshot.drainingRunners++
 		}
 	}
+	snapshot.activeRunners = s.capacityCountLocked()
+	snapshot.pendingCleanups = s.pendingRegistrationsLocked()
 	sort.Slice(snapshot.runners, func(i, j int) bool {
 		return snapshot.runners[i].key < snapshot.runners[j].key
 	})

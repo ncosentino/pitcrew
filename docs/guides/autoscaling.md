@@ -65,6 +65,32 @@ For a manifest, add:
 The configured maximum remains the operator's host resource ceiling. PitCrew
 does not infer a new maximum from transient CPU or memory readings.
 
+## Profile-wide worker ceiling
+
+Contract-11 profiles may also declare `autoscaling.maximumActiveWorkers`, an
+aggregate ceiling across every target in the profile. Each target keeps its own
+configured maximum, and admission is reserved centrally before a JIT runner is
+generated, so simultaneous scale-up across targets cannot overshoot the ceiling.
+Locally live, starting, recovered, draining, and cleanup-pending workers all
+consume the ceiling.
+
+- Each target is guaranteed a rotating fair share of the ceiling, so no target
+  starves under sustained contention.
+- Capacity a target does not need is released to targets that do, so an idle
+  target never strands the ceiling.
+- The ceiling only withholds admission. It never removes an existing worker, so
+  busy or assigned runners are never destroyed to satisfy a lower ceiling.
+- Scale-up within the ceiling remains immediate, and scale-down keeps the
+  configured delay.
+
+Declared worker limits (`resources.memory`, `resources.memorySwap`,
+`resources.cpus`, and `resources.pids`) are applied to every new worker as
+canonical Docker arguments. Invalid limits are rejected before any container
+starts. Unset values mean no configured limit and are never treated as zero.
+
+Manager contract 11 is not active in this release, so setup still rejects a
+resource policy or aggregate ceiling until both manager modes implement it.
+
 ## Compatibility
 
 Autoscaling uses the same multi-label workflow routing as fixed profiles. The

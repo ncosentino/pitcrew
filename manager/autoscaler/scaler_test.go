@@ -279,7 +279,7 @@ func TestRetirementPreservesBusyRunnerUntilCompletionAndExit(t *testing.T) {
 	if len(api.removeCalls) != 0 || len(docker.stopRemove) != 0 {
 		t.Fatal("completed ephemeral runner was killed before its container exited")
 	}
-	scaler.handleContainerExit(runner.containerID, 0)
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
 	if scaler.runnerCount() != 0 {
 		t.Fatal("retirement did not finish after the completed runner exited")
 	}
@@ -628,7 +628,7 @@ func TestUnexpectedStoppedRunnerIsRemovedAndRetried(t *testing.T) {
 		t.Fatal(err)
 	}
 	first := findRunner(t, scaler)
-	scaler.handleContainerExit(first.containerID, 137)
+	scaler.handleContainerExit(first.containerID, exitStatus(137))
 	replacement := findRunner(t, scaler)
 	if replacement.containerID == first.containerID {
 		t.Fatal("unexpectedly exited runner was not replaced")
@@ -651,7 +651,7 @@ func TestCompletedRunnerExitRestoresMinimumIdle(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	scaler.handleContainerExit(runner.containerID, 0)
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
 	replacement := findRunner(t, scaler)
 	if replacement.containerID == runner.containerID || api.jitCalls != 2 {
 		t.Fatal("minimum-idle capacity was not restored after the ephemeral runner exited")
@@ -811,7 +811,7 @@ func TestExitedRunnerRegistrationIsRemovedBeforeIdentityIsForgotten(t *testing.T
 	}
 	exited := findRunner(t, scaler)
 
-	scaler.handleContainerExit(exited.containerID, 137)
+	scaler.handleContainerExit(exited.containerID, exitStatus(137))
 
 	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID}) {
 		t.Fatalf("exit cleanup did not remove the exact registration: %#v", api.removeCalls)
@@ -847,7 +847,7 @@ func TestExitedRunnerRegistrationNotFoundIsAlreadyClean(t *testing.T) {
 	}
 	api.removeErrors[runner.runnerID] = scaleset.RunnerNotFoundError
 
-	scaler.handleContainerExit(runner.containerID, 0)
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
 
 	if scaler.pendingRegistrationCount() != 0 {
 		t.Fatal("an already removed registration was retained as pending")
@@ -867,7 +867,7 @@ func TestFailedExitCleanupBlocksReplacementUntilRetrySucceeds(t *testing.T) {
 	exited := findRunner(t, scaler)
 	api.removeErrors[exited.runnerID] = errors.New("registration removal failed")
 
-	scaler.handleContainerExit(exited.containerID, 137)
+	scaler.handleContainerExit(exited.containerID, exitStatus(137))
 
 	if scaler.pendingRegistrationCount() != 1 {
 		t.Fatal("failed registration removal was not retained as pending")
@@ -917,7 +917,7 @@ func TestExitCleanupKeepsJobStillRunningPending(t *testing.T) {
 	exited := findRunner(t, scaler)
 	api.removeErrors[exited.runnerID] = scaleset.JobStillRunningError
 
-	scaler.handleContainerExit(exited.containerID, 0)
+	scaler.handleContainerExit(exited.containerID, exitStatus(0))
 
 	if scaler.pendingRegistrationCount() != 1 || api.jitCalls != 1 {
 		t.Fatal("JobStillRunning cleanup was treated as success")
@@ -940,8 +940,8 @@ func TestDuplicateExitCallbacksRemoveRegistrationOnce(t *testing.T) {
 	}
 	exited := findRunner(t, scaler)
 
-	scaler.handleContainerExit(exited.containerID, 137)
-	scaler.handleContainerExit(exited.containerID, 137)
+	scaler.handleContainerExit(exited.containerID, exitStatus(137))
+	scaler.handleContainerExit(exited.containerID, exitStatus(137))
 
 	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID}) {
 		t.Fatalf("duplicate exit callbacks removed the registration twice: %#v", api.removeCalls)
@@ -963,7 +963,7 @@ func TestScaleDownExitDoesNotRepeatRegistrationRemoval(t *testing.T) {
 		t.Fatal("expected the Docker cleanup failure to be reported")
 	}
 
-	scaler.handleContainerExit(runner.containerID, 0)
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
 
 	if !reflect.DeepEqual(api.removeCalls, []int64{runner.runnerID}) {
 		t.Fatalf("scale-down exit repeated registration removal: %#v", api.removeCalls)
@@ -986,7 +986,7 @@ func TestPendingCleanupNeverRemovesLiveOrBusyRunner(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	scaler.beginPendingRegistrationCleanup(live, clock.now().UTC())
+	scaler.beginPendingRegistrationCleanup(live, nil, clock.now().UTC())
 
 	if err := scaler.tick(context.Background()); err != nil {
 		t.Fatalf("cleanup retry failed: %v", err)
@@ -1011,7 +1011,7 @@ func TestPendingRegistrationCleanupSurvivesManagerRestart(t *testing.T) {
 	}
 	exited := findRunner(t, scaler)
 	api.removeErrors[exited.runnerID] = errors.New("registration removal failed")
-	scaler.handleContainerExit(exited.containerID, 137)
+	scaler.handleContainerExit(exited.containerID, exitStatus(137))
 	if scaler.pendingRegistrationCount() != 1 {
 		t.Fatal("failed registration removal was not retained as pending")
 	}
