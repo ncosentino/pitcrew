@@ -115,7 +115,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 9
+        managerContractVersion = 10
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -192,7 +192,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 9
+                            managerContractVersion = 10
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -381,6 +381,53 @@ Add-Check (
     ($observedStateV9 | ConvertTo-Json -Depth 8) |
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract nine rolling-update state does not conform to observed-state.schema.json.'
+$observedStateV10 = (
+    $observedStateV9 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$observedStateV10.managerContractVersion = 10
+$observedStateV10 | Add-Member -NotePropertyName eligibleSlots -NotePropertyValue 0
+Add-Check (
+    ($observedStateV10 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract ten registration state does not conform to observed-state.schema.json.'
+$connectedStateV10 = (
+    $observedStateV7 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$connectedStateV10.managerContractVersion = 10
+$connectedStateV10 | Add-Member -NotePropertyName configuredSlots -NotePropertyValue 1
+$connectedStateV10 | Add-Member -NotePropertyName autoscaling -NotePropertyValue $null
+$connectedStateV10 | Add-Member -NotePropertyName update -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        status = 'current'
+        targetRevision = 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'
+        currentWorkers = 1
+        staleWorkers = 0
+        lastError = $null
+    }
+)
+$connectedStateV10 | Add-Member -NotePropertyName eligibleSlots -NotePropertyValue 1
+$connectedStateV10.slots[0] |
+    Add-Member -NotePropertyName registrationStatus -NotePropertyValue 'connected'
+Add-Check (
+    ($connectedStateV10 | ConvertTo-Json -Depth 8) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract ten rejects a connected fixed-capacity slot.'
+$missingRegistrationV10 = (
+    $connectedStateV10 |
+        ConvertTo-Json -Depth 8 |
+        ConvertFrom-Json
+)
+$missingRegistrationV10.slots[0].PSObject.Properties.Remove('registrationStatus')
+Add-Check (-not (
+    ($missingRegistrationV10 | ConvertTo-Json -Depth 8) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract ten accepts a slot without registration status.'
 $missingConfiguredV8 = (
     $observedStateV8 |
         ConvertTo-Json -Depth 8 |
@@ -529,7 +576,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 9) 'The setup contract does not identify the rolling-update-capable manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 10) 'The setup contract does not identify the registration-aware manager.'
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
@@ -751,7 +798,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=9$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=10$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SESSION_OWNER=pitcrew-default$') 'The environment does not pin the stable session owner.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=$') 'Fixed profiles unexpectedly enable autoscaling.'
@@ -1645,9 +1692,9 @@ Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-9}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-10}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=9$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=10$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

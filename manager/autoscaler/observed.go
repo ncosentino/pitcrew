@@ -13,17 +13,18 @@ type resourceTelemetry struct {
 }
 
 type observedSlot struct {
-	Key            string         `json:"key"`
-	Repository     *string        `json:"repository"`
-	Desired        bool           `json:"desired"`
-	ProcessRunning bool           `json:"processRunning"`
-	State          string         `json:"state"`
-	FailureCount   int            `json:"failureCount"`
-	BackoffSeconds int            `json:"backoffSeconds"`
-	UpdatedAt      *string        `json:"updatedAt"`
-	Resources      *resourceUsage `json:"resources"`
-	Activity       string         `json:"activity,omitempty"`
-	Target         string         `json:"target,omitempty"`
+	Key                string         `json:"key"`
+	Repository         *string        `json:"repository"`
+	Desired            bool           `json:"desired"`
+	ProcessRunning     bool           `json:"processRunning"`
+	State              string         `json:"state"`
+	FailureCount       int            `json:"failureCount"`
+	BackoffSeconds     int            `json:"backoffSeconds"`
+	UpdatedAt          *string        `json:"updatedAt"`
+	Resources          *resourceUsage `json:"resources"`
+	Activity           string         `json:"activity,omitempty"`
+	Target             string         `json:"target,omitempty"`
+	RegistrationStatus string         `json:"registrationStatus"`
 }
 
 type observedAutoscaling struct {
@@ -64,6 +65,7 @@ type observedState struct {
 	DesiredStateStatus     string              `json:"desiredStateStatus"`
 	DesiredSlots           int                 `json:"desiredSlots"`
 	ActiveSlots            int                 `json:"activeSlots"`
+	EligibleSlots          int                 `json:"eligibleSlots"`
 	DrainingSlots          int                 `json:"drainingSlots"`
 	ConfiguredSlots        int                 `json:"configuredSlots"`
 	Slots                  []observedSlot      `json:"slots"`
@@ -159,9 +161,13 @@ func buildObservedState(
 				runner.state == runnerCleanupPending {
 				state.DrainingSlots++
 			}
+			slot := observedRunnerSlot(runner, snapshot.retiring)
+			if slot.RegistrationStatus == "connected" {
+				state.EligibleSlots++
+			}
 			state.Slots = append(
 				state.Slots,
-				observedRunnerSlot(runner, snapshot.retiring),
+				slot,
 			)
 		}
 	}
@@ -206,18 +212,22 @@ func applyResourceSample(state *observedState, sample resourceSample) {
 func observedRunnerSlot(runner runnerRecord, retiring bool) observedSlot {
 	state := "starting"
 	activity := string(runner.state)
+	registrationStatus := "unknown"
 	switch runner.state {
 	case runnerIdle, runnerBusy:
 		state = "online"
+		registrationStatus = "connected"
 	case runnerDraining, runnerCleanupPending:
 		state = "draining"
 		activity = "draining"
+		registrationStatus = "disconnected"
 	}
 	if retiring {
 		state = "draining"
 	}
 	if runner.recovered && runner.protected {
 		activity = "unknown"
+		registrationStatus = "unknown"
 	}
 	updatedAt := runner.updatedAt.UTC().Format(time.RFC3339)
 	var repository *string
@@ -231,14 +241,15 @@ func observedRunnerSlot(runner runnerRecord, retiring bool) observedSlot {
 		Desired: !retiring &&
 			runner.state != runnerDraining &&
 			runner.state != runnerCleanupPending,
-		ProcessRunning: true,
-		State:          state,
-		FailureCount:   0,
-		BackoffSeconds: 0,
-		UpdatedAt:      &updatedAt,
-		Resources:      nil,
-		Activity:       activity,
-		Target:         runner.targetKey,
+		ProcessRunning:     true,
+		State:              state,
+		FailureCount:       0,
+		BackoffSeconds:     0,
+		UpdatedAt:          &updatedAt,
+		Resources:          nil,
+		Activity:           activity,
+		Target:             runner.targetKey,
+		RegistrationStatus: registrationStatus,
 	}
 }
 
