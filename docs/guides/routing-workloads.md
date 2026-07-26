@@ -54,6 +54,23 @@ Autoscaled profiles publish the same effective label set through their GitHub
 runner scale sets. Enabling autoscaling therefore does not require changing a
 correctly labeled `runs-on` declaration.
 
+## Route prewarmed toolchain jobs
+
+The built-in `dotnet-node` profile preinstalls one pinned .NET 10 SDK and one
+pinned Node.js 24 release. Request it by profile name or by capability label:
+
+```yaml
+jobs:
+  build:
+    runs-on: [linux, x64, dotnet-node]
+
+  test:
+    runs-on: [linux, x64, dotnet-10]
+```
+
+See [Prewarmed Toolchains](prewarmed-toolchains.md) for migration away from
+`actions/setup-dotnet` and `actions/setup-node`, and for rollback.
+
 ## Route native operating systems
 
 PitCrew's container workers are Linux runners. Keep Windows and macOS jobs on

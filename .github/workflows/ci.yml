@@ -85,3 +85,29 @@ jobs:
 
       - name: Run real Docker reconciliation
         run: bash ./tests/integration/Test-CapacityReconciliation.sh
+
+  profile-image:
+    name: Prewarmed .NET/Node profile image
+    needs: contracts
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build and verify the profile image
+        shell: pwsh
+        run: ./tests/Test-ProfileImage.ps1 -Profile dotnet-node
+
+      - name: Prove a representative job downloads no toolchain
+        run: |
+          docker run --rm --network none \
+            --entrypoint /bin/sh \
+            "$(python3 -c 'import json;print(json.load(open("profiles/dotnet-node/profile.json"))["image"])')" \
+            -lc 'set -eu
+              workspace="$(mktemp -d)"
+              cd "${workspace}"
+              export HOME="${workspace}" DOTNET_CLI_HOME="${workspace}"
+              dotnet new console --output app
+              dotnet build ./app --nologo
+              node --eval "console.log(process.version)"
+              npm --version'

@@ -1,0 +1,35 @@
+{
+  "$schema": "../../runner-profile.schema.json",
+  "schemaVersion": 1,
+  "name": "dotnet-node",
+  "description": "Isolated runners with a prewarmed, checksum-verified .NET 10 SDK and Node.js 24 installation.",
+  "image": "pitcrew-dotnet-node:10.0.302-24.18.0",
+  "labels": [
+    "dotnet-10",
+    "node-24"
+  ],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true,
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile",
+    "args": {
+      "DOTNET_SDK_VERSION": "10.0.302",
+      "DOTNET_SDK_SHA512_X64": "10069bec8783596484a610332f090d562802a41b9b40e3327a5a5688b572e10c296ae300f940d40461f23c157ed1b0843c2f8e6b3f20d8d8d9d83432d8143bac",
+      "DOTNET_SDK_SHA512_ARM64": "9e409c14e00686d661c78fa4dd9ad0e4dcf695c328bd5ff777d05b4a9c34b42cf89b12573b92e9fb2f565dbe12016b4835f77c7d9a42b55a7494df21634cd5d6",
+      "NODE_VERSION": "24.18.0",
+      "NODE_SHA256_X64": "783130984963db7ba9cbd01089eaf2c2efb055c7c1693c943174b967b3050cb8",
+      "NODE_SHA256_ARM64": "6b4484c2190274175df9aa8f28e2d758a819cb1c1fe6ab481e2f95b463ab8508"
+    }
+  },
+  "verificationCommands": [
+    "test \"$(command -v dotnet)\" = \"/usr/local/bin/dotnet\"",
+    "dotnet --list-sdks | grep -F \"10.0.302\"",
+    "test \"$(command -v node)\" = \"/usr/local/bin/node\"",
+    "node --version | grep -Fx \"v24.18.0\"",
+    "npm --version",
+    "pwsh -NoLogo -NoProfile -Command \"exit 0\"",
+    "test -x /actions-runner/bin/Runner.Listener"
+  ]
+}

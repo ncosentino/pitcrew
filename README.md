@@ -77,7 +77,8 @@ jobs:
 ## Named profiles
 
 Named profiles isolate specialized workers from routine CI. PitCrew includes a
-checksum-verified `copilot-cli` profile as a complete example:
+checksum-verified `copilot-cli` profile and a prewarmed `dotnet-node` profile
+that preinstalls one pinned .NET 10 SDK and Node.js 24 release:
 
 ```powershell
 .\Setup-Runner.ps1 `

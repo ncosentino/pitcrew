@@ -24,6 +24,8 @@ $schemaPath = Join-Path $runnerRoot 'runner-profile.schema.json'
 $observedStateSchemaPath = Join-Path $runnerRoot 'observed-state.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
+$dotnetNodeProfilePath = Join-Path $runnerRoot 'profiles' 'dotnet-node' 'profile.json'
+$dotnetNodeDockerfilePath = Join-Path $runnerRoot 'profiles' 'dotnet-node' 'Dockerfile'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
 $managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
@@ -32,6 +34,7 @@ $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
+$prewarmedPath = Join-Path $runnerRoot 'docs' 'guides' 'prewarmed-toolchains.md'
 
 $errors = [System.Collections.Generic.List[string]]::new()
 $checks = 0
@@ -226,6 +229,8 @@ $requiredPaths = @(
     $observedStateSchemaPath,
     $copilotProfilePath,
     $copilotDockerfilePath,
+    $dotnetNodeProfilePath,
+    $dotnetNodeDockerfilePath,
     $managerPath,
     $managerEntrypointPath,
     $autoscalerModulePath,
@@ -233,8 +238,10 @@ $requiredPaths = @(
     $observabilityPath,
     $reconciliationPath,
     $composePath,
-    $routingPath
+    $routingPath,
+    $prewarmedPath
 )
+
 foreach ($path in $requiredPaths) {
     Add-Check (Test-Path -LiteralPath $path) "Required runner-profile surface is missing: $path"
 }
@@ -773,6 +780,49 @@ Add-Check ($copilotDockerfile -match [regex]::Escape('sha256sum -c -')) 'The Cop
 Add-Check ($copilotDockerfile -match [regex]::Escape('/usr/local/bin/copilot')) 'The Copilot CLI image does not expose the documented stable executable path.'
 Add-Check ($copilotDockerfile -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN=)') 'The Copilot CLI image contains authentication material.'
 Add-Check ($profileJson -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN)') 'The Copilot CLI profile contains authentication material.'
+
+$dotnetNodeProfileJson = Get-Content -LiteralPath $dotnetNodeProfilePath -Raw -Encoding UTF8
+Add-Check ($dotnetNodeProfileJson | Test-Json -SchemaFile $schemaPath) 'The built-in .NET/Node profile does not conform to runner-profile.schema.json.'
+
+$dotnetNodeProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile dotnet-node -HostName 'test-host'
+$dotnetNodeArguments = $dotnetNodeProfile.Build.Arguments
+$dotnetSdkVersion = [string]$dotnetNodeArguments['DOTNET_SDK_VERSION']
+$nodeVersion = [string]$dotnetNodeArguments['NODE_VERSION']
+$dotnetNodeCommands = ($dotnetNodeProfile.VerificationCommands -join "`n")
+
+Add-Check (-not $dotnetNodeProfile.IsDefault) 'The .NET/Node profile is incorrectly marked as default.'
+Add-Check ($dotnetNodeProfile.DisableDefaultLabels) 'The .NET/Node profile must disable GitHub default labels.'
+Add-Check ($dotnetNodeProfile.Labels -contains 'dotnet-node') 'The .NET/Node profile name is not enforced as a routing label.'
+Add-Check ($dotnetNodeProfile.Labels -contains 'dotnet-10') 'The .NET 10 capability label is missing.'
+Add-Check ($dotnetNodeProfile.Labels -contains 'node-24') 'The Node.js 24 capability label is missing.'
+Add-Check ($dotnetNodeProfile.Labels -notcontains 'self-hosted') 'The isolated .NET/Node profile must not carry self-hosted.'
+Add-Check ($dotnetNodeProfile.Labels -notcontains 'general-purpose') 'The .NET/Node profile must not broaden the default pool label.'
+Add-Check ($copilotProfile.Labels -notcontains 'dotnet-10' -and $copilotProfile.Labels -notcontains 'node-24') 'The .NET/Node capability labels leaked into an existing profile.'
+Add-Check ($dotnetNodeProfile.ComposeProjectName -eq 'self-hosted-runner-dotnet-node') 'The .NET/Node Compose project is not isolated.'
+Add-Check ($dotnetNodeProfile.ManagedRunnerLabel -eq 'ephemeral-managed-runner-profile=dotnet-node') 'The .NET/Node Docker cleanup label is not profile-specific.'
+Add-Check ($dotnetNodeProfile.EnvironmentPath -eq (Join-Path $runnerRoot '.env.dotnet-node')) 'The .NET/Node profile state file is not isolated.'
+Add-Check ($dotnetNodeProfile.StateVolumePath -eq '.pitcrew-state/dotnet-node') 'The .NET/Node mutable state is not profile-scoped.'
+Add-Check (-not $dotnetNodeProfile.PullImage) 'A locally built .NET/Node image must not be replaced by a remote pull.'
+Add-Check ($dotnetSdkVersion -match '^10\.\d+\.\d+$') 'The .NET 10 SDK version is not pinned to one exact release.'
+Add-Check ($nodeVersion -match '^24\.\d+\.\d+$') 'The Node.js 24 version is not pinned to one exact release.'
+Add-Check ($dotnetNodeArguments['DOTNET_SDK_SHA512_X64'] -match '^[0-9a-f]{128}$') 'The .NET 10 SDK x64 checksum is not pinned.'
+Add-Check ($dotnetNodeArguments['DOTNET_SDK_SHA512_ARM64'] -match '^[0-9a-f]{128}$') 'The .NET 10 SDK arm64 checksum is not pinned.'
+Add-Check ($dotnetNodeArguments['NODE_SHA256_X64'] -match '^[0-9a-f]{64}$') 'The Node.js 24 x64 checksum is not pinned.'
+Add-Check ($dotnetNodeArguments['NODE_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Node.js 24 arm64 checksum is not pinned.'
+Add-Check ($dotnetNodeProfile.Image -eq "pitcrew-dotnet-node:$dotnetSdkVersion-$nodeVersion") 'The .NET/Node image tag does not identify its pinned toolchain versions.'
+Add-Check ($dotnetNodeCommands -match [regex]::Escape("dotnet --list-sdks | grep -F `"$dotnetSdkVersion`"")) 'The .NET/Node profile does not verify the exact preinstalled SDK.'
+Add-Check ($dotnetNodeCommands -match [regex]::Escape("node --version | grep -Fx `"v$nodeVersion`"")) 'The .NET/Node profile does not verify the exact preinstalled Node.js release.'
+Add-Check ($dotnetNodeCommands -match 'npm --version') 'The .NET/Node profile does not verify npm.'
+Add-Check ($dotnetNodeCommands -match 'pwsh ') 'The .NET/Node profile does not verify the PowerShell contract.'
+Add-Check ($dotnetNodeCommands -match [regex]::Escape('/actions-runner/bin/Runner.Listener')) 'The .NET/Node profile does not verify the GitHub runner contract.'
+
+$dotnetNodeDockerfile = Get-Content -LiteralPath $dotnetNodeDockerfilePath -Raw -Encoding UTF8
+Add-Check ($dotnetNodeDockerfile -match '(?m)^FROM myoung34/github-runner@sha256:[0-9a-f]{64}$') 'The .NET/Node image is not built from an immutable base digest.'
+Add-Check ($dotnetNodeDockerfile -match [regex]::Escape('sha512sum -c -')) 'The .NET/Node image does not verify the downloaded .NET SDK checksum.'
+Add-Check ($dotnetNodeDockerfile -match [regex]::Escape('sha256sum -c -')) 'The .NET/Node image does not verify the downloaded Node.js checksum.'
+Add-Check ($dotnetNodeDockerfile -match 'aarch64\|arm64') 'The .NET/Node image does not install toolchains for both supported architectures.'
+Add-Check ($dotnetNodeDockerfile -notmatch '(?i)(token|secret|password|credential|api.?key|_auth|registry=)') 'The .NET/Node image contains authentication or package-feed material.'
+Add-Check ($dotnetNodeProfileJson -notmatch '(?i)(token|secret|password|credential|api.?key)') 'The .NET/Node profile contains authentication material.'
 
 $defaultEnvironment = New-RunnerEnvironmentContent `
     -Profile $defaultProfile `
@@ -1698,6 +1748,13 @@ Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=10$
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'
+Add-Check ($routing -match 'runs-on: \[linux, x64, dotnet-node\]') 'Routing guidance does not show prewarmed toolchain routing.'
+
+$prewarmed = Get-Content -LiteralPath $prewarmedPath -Raw -Encoding UTF8
+Add-Check ($prewarmed -match 'runs-on: \[linux, x64, dotnet-node\]') 'Prewarmed toolchain guidance does not document opt-in routing.'
+Add-Check ($prewarmed -match 'actions/setup-dotnet' -and $prewarmed -match 'actions/setup-node') 'Prewarmed toolchain guidance does not document migration from the setup actions.'
+Add-Check ($prewarmed -match 'DOTNET_INSTALL_DIR' -and $prewarmed -match 'RUNNER_TEMP') 'Prewarmed toolchain guidance does not warn that redirected SDK installs bypass prewarming.'
+Add-Check ($prewarmed -match '-Profile dotnet-node -Down') 'Prewarmed toolchain guidance does not document rollback.'
 
 if ($errors.Count -gt 0) {
     foreach ($errorMessage in $errors) {

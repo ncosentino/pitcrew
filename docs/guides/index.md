@@ -9,6 +9,8 @@ Use these guides after completing [Getting Started](../getting-started.md):
 - [Named Profiles](named-profiles.md) - run independent worker pools on one host.
 - [Custom Profiles](custom-profiles.md) - define a specialized image and verification contract.
 - [Routing Workloads](routing-workloads.md) - target the correct pool from GitHub Actions.
+- [Prewarmed Toolchains](prewarmed-toolchains.md) - run .NET 10 and Node.js 24
+  jobs without downloading a toolchain for every job.
 - [Demand-Driven Autoscaling](autoscaling.md) - shrink idle pools and
   automatically restore capacity for queued work.
 - [Rolling Updates](rolling-updates.md) - replace managers immediately, roll
