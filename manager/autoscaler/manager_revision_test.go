@@ -156,7 +156,7 @@ func TestDurableRetirementReloadsRemovedBusyTarget(t *testing.T) {
 	); err != nil {
 		t.Fatal(err)
 	}
-	retiring.scaler.handleContainerExit(runner.containerID, 0)
+	retiring.scaler.handleContainerExit(runner.containerID, exitStatus(0))
 	if err := restarted.reconcileRetirements(context.Background()); err != nil {
 		t.Fatal(err)
 	}
@@ -414,6 +414,7 @@ func TestManagerHandoffClosesSessionWithoutDestroyingPool(t *testing.T) {
 		service.ensureHandle,
 		docker,
 		&fakeClock{current: time.Now()},
+		newAdmissionController(0),
 		cfg.sessionOwner,
 		[]recoveredContainer{{
 			containerID: "live-container",
@@ -484,6 +485,7 @@ func TestListenerFailureCanRestartWithoutDestroyingPool(t *testing.T) {
 		service.ensureHandle,
 		docker,
 		&fakeClock{current: time.Now()},
+		newAdmissionController(0),
 		"instance",
 		nil,
 		testLogger(),
@@ -1212,6 +1214,7 @@ func newCoherenceTestController(
 		api,
 		newFakeDockerClient(nil),
 		&fakeClock{current: time.Now()},
+		newAdmissionController(0),
 		testLogger(),
 		nil,
 		nil,

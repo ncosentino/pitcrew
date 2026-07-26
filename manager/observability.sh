@@ -4,11 +4,81 @@ observed_state_is_valid() {
     jq -e '
         def nonnegative_integer:
             type == "number" and . >= 0 and floor == .;
+        def optional_counter:
+            . == null or nonnegative_integer;
         def valid_resource_usage:
             type == "object"
             and (.cpuCores | type == "number" and . >= 0)
             and (.memoryWorkingSetBytes | nonnegative_integer)
-            and (.pids | nonnegative_integer);
+            and (.pids | nonnegative_integer)
+            and (.networkRxBytes | optional_counter)
+            and (.networkTxBytes | optional_counter)
+            and (.blockReadBytes | optional_counter)
+            and (.blockWriteBytes | optional_counter);
+        def valid_io_counters:
+            has("networkRxBytes")
+            and has("networkTxBytes")
+            and has("blockReadBytes")
+            and has("blockWriteBytes");
+        def valid_resource_policy:
+            type == "object"
+            and has("memoryBytes")
+            and has("memorySwapBytes")
+            and has("cpuCores")
+            and has("pids")
+            and (.memoryBytes == null or (.memoryBytes | nonnegative_integer and . >= 6291456))
+            and (
+                .memorySwapBytes == null
+                or (
+                    (.memorySwapBytes | nonnegative_integer and . >= 6291456)
+                    and .memoryBytes != null
+                    and .memorySwapBytes >= .memoryBytes
+                )
+            )
+            and (
+                .cpuCores == null
+                or (
+                    .cpuCores
+                    | type == "string"
+                    and test("^(?:[1-9][0-9]*(?:\\.[0-9]{1,9})?|0\\.[0-9]{0,8}[1-9])$")
+                )
+            )
+            and (
+                .pids == null
+                or (.pids | nonnegative_integer and . >= 1 and . <= 2147483647)
+            )
+            and (
+                [.memoryBytes, .memorySwapBytes, .cpuCores, .pids]
+                | map(select(. != null))
+                | length > 0
+            );
+        def valid_last_exit:
+            type == "object"
+            and (.observedAt | type == "string" and length > 0)
+            and (
+                .classification == "clean"
+                or .classification == "oom-killed"
+                or .classification == "sigkill"
+                or .classification == "signal"
+                or .classification == "error"
+                or .classification == "launch-failure"
+                or .classification == "unknown"
+            )
+            and (
+                .exitCode == null
+                or (.exitCode | nonnegative_integer and . <= 255)
+            )
+            and (
+                .signal == null
+                or (.signal | nonnegative_integer and . >= 1 and . <= 64)
+            )
+            and (.dockerOomKilled == null or (.dockerOomKilled | type == "boolean"))
+            and (
+                .evidence == "docker-inspect"
+                or .evidence == "docker-wait"
+                or .evidence == "launch"
+                or .evidence == "unavailable"
+            );
         def valid_host_capacity:
             type == "object"
             and (.logicalProcessorCount | nonnegative_integer and . > 0)
@@ -79,7 +149,12 @@ observed_state_is_valid() {
                 or .activity == "draining"
                 or .activity == "unknown"
             )
-            and (.target == null or (.target | type == "string" and length > 0));
+            and (.target == null or (.target | type == "string" and length > 0))
+            and (
+                .imageId == null
+                or (.imageId | type == "string" and test("^sha256:[0-9a-f]{64}$"))
+            )
+            and (.lastExit == null or (.lastExit | valid_last_exit));
         def valid_registration_status:
             . == "connected"
             or . == "disconnected"
@@ -156,6 +231,18 @@ observed_state_is_valid() {
                 true
             end
         )
+        and (.resourcePolicy == null or (.resourcePolicy | valid_resource_policy))
+        and (
+            if .managerContractVersion >= 11 then
+                has("resourcePolicy")
+                and all(.slots[];
+                    has("imageId")
+                    and has("lastExit")
+                    and (.resources == null or (.resources | valid_io_counters)))
+            else
+                true
+            end
+        )
         and (
             .resourceTelemetry as $telemetry
             | if $telemetry == null then
@@ -213,11 +300,103 @@ parse_cpu_cores() (
         '($numberValue | tonumber) / 100'
 )
 
+parse_paired_size_bytes() (
+    paired_value="$1"
+    field_index="$2"
+    case "${paired_value}" in
+        *'/'*) ;;
+        *) printf 'null\n'; exit 0 ;;
+    esac
+    if [ "${field_index}" = "1" ]; then
+        component=${paired_value%%/*}
+    else
+        component=${paired_value#*/}
+    fi
+    component=$(printf '%s' "${component}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
+    if ! parsed_bytes=$(parse_size_bytes "${component}"); then
+        printf 'null\n'
+        exit 0
+    fi
+    printf '%s\n' "${parsed_bytes}"
+)
+
+write_slot_exit_evidence() {
+    slot_state_path="$1"
+    observed_dirty_path="$2"
+    exit_evidence="$3"
+    exit_code="$4"
+    exit_oom_killed="$5"
+
+    case "${exit_evidence}" in
+        docker-inspect|docker-wait|launch|unavailable) ;;
+        *) return 1 ;;
+    esac
+    case "${exit_code}" in
+        '') ;;
+        *[!0-9]*) return 1 ;;
+        *) [ "${exit_code}" -le 255 ] || exit_code="" ;;
+    esac
+    case "${exit_oom_killed}" in
+        true|false|'') ;;
+        *) return 1 ;;
+    esac
+
+    exit_signal=""
+    if [ -n "${exit_code}" ] && [ "${exit_code}" -gt 128 ] && [ "${exit_code}" -le 192 ]; then
+        exit_signal=$((exit_code - 128))
+    fi
+    if [ "${exit_oom_killed}" = "true" ]; then
+        exit_classification="oom-killed"
+    elif [ "${exit_signal}" = "9" ]; then
+        exit_classification="sigkill"
+    elif [ -n "${exit_signal}" ]; then
+        exit_classification="signal"
+    elif [ "${exit_code}" = "0" ]; then
+        exit_classification="clean"
+    elif [ -n "${exit_code}" ]; then
+        exit_classification="error"
+    elif [ "${exit_evidence}" = "launch" ]; then
+        exit_classification="launch-failure"
+    else
+        exit_classification="unknown"
+    fi
+
+    exit_temporary="${slot_state_path}/.last-exit.$$.tmp"
+    if ! jq -n \
+        --arg observedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg classification "${exit_classification}" \
+        --arg exitCode "${exit_code}" \
+        --arg signal "${exit_signal}" \
+        --arg dockerOomKilled "${exit_oom_killed}" \
+        --arg evidence "${exit_evidence}" \
+        '{
+            observedAt: $observedAt,
+            classification: $classification,
+            exitCode: (if $exitCode == "" then null else ($exitCode | tonumber) end),
+            signal: (if $signal == "" then null else ($signal | tonumber) end),
+            dockerOomKilled: (
+                if $dockerOomKilled == "" then null else ($dockerOomKilled == "true") end
+            ),
+            evidence: $evidence
+        }' > "${exit_temporary}"; then
+        rm -f "${exit_temporary}"
+        return 1
+    fi
+    if ! mv -f "${exit_temporary}" "${slot_state_path}/last-exit.json"; then
+        rm -f "${exit_temporary}"
+        return 1
+    fi
+    [ -n "${observed_dirty_path}" ] && : > "${observed_dirty_path}"
+    return 0
+}
+
 normalize_container_resource_usage() (
     stats_record="$1"
     cpu_percent=$(printf '%s' "${stats_record}" | jq -r '.CPUPerc // empty')
     memory_usage=$(printf '%s' "${stats_record}" | jq -r '.MemUsage // empty')
     pids=$(printf '%s' "${stats_record}" | jq -r '.PIDs // empty')
+    network_io=$(printf '%s' "${stats_record}" | jq -r '.NetIO // empty')
+    block_io=$(printf '%s' "${stats_record}" | jq -r '.BlockIO // empty')
     memory_working_set=${memory_usage%%/*}
     memory_working_set=$(printf '%s' "${memory_working_set}" | sed 's/^[[:space:]]*//; s/[[:space:]]*$//')
 
@@ -226,15 +405,27 @@ normalize_container_resource_usage() (
     case "${pids}" in
         ''|*[!0-9]*) exit 1 ;;
     esac
+    network_rx_bytes=$(parse_paired_size_bytes "${network_io}" 1)
+    network_tx_bytes=$(parse_paired_size_bytes "${network_io}" 2)
+    block_read_bytes=$(parse_paired_size_bytes "${block_io}" 1)
+    block_write_bytes=$(parse_paired_size_bytes "${block_io}" 2)
 
     jq -n \
         --argjson cpuCores "${cpu_cores}" \
         --argjson memoryWorkingSetBytes "${memory_bytes}" \
         --argjson pids "${pids}" \
+        --argjson networkRxBytes "${network_rx_bytes}" \
+        --argjson networkTxBytes "${network_tx_bytes}" \
+        --argjson blockReadBytes "${block_read_bytes}" \
+        --argjson blockWriteBytes "${block_write_bytes}" \
         '{
             cpuCores: $cpuCores,
             memoryWorkingSetBytes: $memoryWorkingSetBytes,
-            pids: $pids
+            pids: $pids,
+            networkRxBytes: $networkRxBytes,
+            networkTxBytes: $networkTxBytes,
+            blockReadBytes: $blockReadBytes,
+            blockWriteBytes: $blockWriteBytes
         }'
 )
 
@@ -526,6 +717,42 @@ render_observed_slots() {
                 registration_activity=$(jq -r '.activity' "${registration_snapshot}")
             fi
             rm -f "${registration_snapshot}"
+            image_id=""
+            if [ -f "${candidate_path}/image-id" ]; then
+                image_id=$(cat "${candidate_path}/image-id")
+                printf '%s' "${image_id}" |
+                    grep -Eq '^sha256:[0-9a-f]{64}$' || image_id=""
+            fi
+            last_exit_path="${candidate_path}/last-exit.json"
+            last_exit_snapshot="${output_path}.${slot_key}.last-exit"
+            printf 'null\n' > "${last_exit_snapshot}"
+            if [ -f "${last_exit_path}" ]; then
+                last_exit_candidate="${last_exit_snapshot}.candidate"
+                if cp "${last_exit_path}" "${last_exit_candidate}" &&
+                    jq -e '
+                        type == "object"
+                        and (.observedAt | type == "string" and length > 0)
+                        and (
+                            .classification == "clean"
+                            or .classification == "oom-killed"
+                            or .classification == "sigkill"
+                            or .classification == "signal"
+                            or .classification == "error"
+                            or .classification == "launch-failure"
+                            or .classification == "unknown"
+                        )
+                        and (
+                            .evidence == "docker-inspect"
+                            or .evidence == "docker-wait"
+                            or .evidence == "launch"
+                            or .evidence == "unavailable"
+                        )
+                    ' "${last_exit_candidate}" >/dev/null 2>&1; then
+                    mv -f "${last_exit_candidate}" "${last_exit_snapshot}"
+                else
+                    rm -f "${last_exit_candidate}"
+                fi
+            fi
 
             desired=true
             if [ -f "${candidate_path}/drain" ]; then
@@ -547,6 +774,8 @@ render_observed_slots() {
                 --arg runnerName "${runner_name}" \
                 --arg registrationStatus "${registration_status}" \
                 --arg registrationActivity "${registration_activity}" \
+                --arg imageId "${image_id}" \
+                --slurpfile lastExit "${last_exit_snapshot}" \
                 --slurpfile resourceTelemetry "${resource_telemetry_path}" \
                 '{
                     key: $key,
@@ -576,11 +805,14 @@ render_observed_slots() {
                           then $slotResources.usage
                           else null
                           end
-                    )
+                    ),
+                    imageId: (if $imageId == "" then null else $imageId end),
+                    lastExit: $lastExit[0]
                 }' >> "${records_path}" || {
-                    rm -f "${records_path}" "${output_path}"
+                    rm -f "${records_path}" "${output_path}" "${last_exit_snapshot}"
                     return 1
                 }
+            rm -f "${last_exit_snapshot}"
         done
     fi
 
@@ -589,6 +821,11 @@ render_observed_slots() {
         return 1
     fi
     rm -f "${records_path}"
+}
+
+remove_observed_policy_snapshot() {
+    [ "$2" = "1" ] && rm -f "$1"
+    return 0
 }
 
 write_manager_observed_state() {
@@ -606,6 +843,15 @@ write_manager_observed_state() {
     resource_telemetry_path="${12}"
     worker_revision="${13}"
     stale_workers="${14}"
+    resource_policy_path="${15:-}"
+
+    if [ -z "${resource_policy_path}" ] || [ ! -f "${resource_policy_path}" ]; then
+        resource_policy_path="${output_path%/*}/.resource-policy.$$.tmp"
+        printf 'null\n' > "${resource_policy_path}" || return 1
+        remove_resource_policy_snapshot=1
+    else
+        remove_resource_policy_snapshot=0
+    fi
 
     observed_temporary="${output_path%/*}/.observed-state.$$.tmp"
     if ! jq -n \
@@ -622,6 +868,7 @@ write_manager_observed_state() {
         --argjson desiredSlots "${desired_slots}" \
         --slurpfile slots "${slots_path}" \
         --slurpfile resourceTelemetry "${resource_telemetry_path}" \
+        --slurpfile resourcePolicy "${resource_policy_path}" \
         --arg workerRevision "${worker_revision}" \
         --argjson staleWorkers "${stale_workers}" \
         '{
@@ -646,6 +893,7 @@ write_manager_observed_state() {
             drainingSlots: ($slots[0] | map(select(.state == "draining")) | length),
             slots: $slots[0],
             resourceTelemetry: ($resourceTelemetry[0] | del(.slots)),
+            resourcePolicy: $resourcePolicy[0],
             autoscaling: null,
             update: {
                 status: (if $staleWorkers > 0 then "rolling" else "current" end),
@@ -658,9 +906,11 @@ write_manager_observed_state() {
                 lastError: null
             }
         }' > "${observed_temporary}"; then
+        remove_observed_policy_snapshot "${resource_policy_path}" "${remove_resource_policy_snapshot}"
         rm -f "${observed_temporary}"
         return 1
     fi
+    remove_observed_policy_snapshot "${resource_policy_path}" "${remove_resource_policy_snapshot}"
     if ! observed_state_is_valid "${observed_temporary}"; then
         rm -f "${observed_temporary}"
         return 1

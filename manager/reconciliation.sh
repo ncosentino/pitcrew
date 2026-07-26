@@ -201,3 +201,83 @@ write_legacy_desired_state() {
     rm -f "${repository_objects}"
     desired_state_is_valid "${output_path}"
 }
+
+# Contract-11 worker resource policy. An empty value means the dimension has no
+# configured limit and must never be published or applied as zero.
+WORKER_MEMORY_MINIMUM_BYTES=6291456
+WORKER_PIDS_MAXIMUM=2147483647
+
+worker_policy_byte_value_is_valid() {
+    case "$1" in
+        ''|*[!0-9]*|0*) return 1 ;;
+    esac
+    [ "$1" -ge "${WORKER_MEMORY_MINIMUM_BYTES}" ]
+}
+
+worker_resource_policy_is_valid() {
+    policy_memory_bytes="$1"
+    policy_memory_swap_bytes="$2"
+    policy_cpu_cores="$3"
+    policy_pids_limit="$4"
+
+    if [ -n "${policy_memory_bytes}" ] &&
+        ! worker_policy_byte_value_is_valid "${policy_memory_bytes}"; then
+        return 1
+    fi
+    if [ -n "${policy_memory_swap_bytes}" ]; then
+        worker_policy_byte_value_is_valid "${policy_memory_swap_bytes}" || return 1
+        [ -n "${policy_memory_bytes}" ] || return 1
+        [ "${policy_memory_swap_bytes}" -ge "${policy_memory_bytes}" ] || return 1
+    fi
+    if [ -n "${policy_cpu_cores}" ]; then
+        printf '%s' "${policy_cpu_cores}" |
+            grep -Eq '^([1-9][0-9]*(\.[0-9]{1,9})?|0\.[0-9]{0,8}[1-9])$' || return 1
+    fi
+    if [ -n "${policy_pids_limit}" ]; then
+        case "${policy_pids_limit}" in
+            ''|*[!0-9]*|0*) return 1 ;;
+        esac
+        [ "${policy_pids_limit}" -le "${WORKER_PIDS_MAXIMUM}" ] || return 1
+    fi
+}
+
+render_worker_resource_arguments() {
+    worker_resource_policy_is_valid "$1" "$2" "$3" "$4" || return 1
+    policy_arguments=""
+    if [ -n "$1" ]; then
+        policy_arguments="${policy_arguments}--memory $1 "
+    fi
+    if [ -n "$2" ]; then
+        policy_arguments="${policy_arguments}--memory-swap $2 "
+    fi
+    if [ -n "$3" ]; then
+        policy_arguments="${policy_arguments}--cpus $3 "
+    fi
+    if [ -n "$4" ]; then
+        policy_arguments="${policy_arguments}--pids-limit $4 "
+    fi
+    printf '%s\n' "${policy_arguments% }"
+}
+
+write_worker_resource_policy() {
+    policy_output_path="$1"
+    shift
+    worker_resource_policy_is_valid "$@" || return 1
+    if [ -z "$1$2$3$4" ]; then
+        printf 'null\n' > "${policy_output_path}"
+        return
+    fi
+    jq -n \
+        --arg memoryBytes "$1" \
+        --arg memorySwapBytes "$2" \
+        --arg cpuCores "$3" \
+        --arg pids "$4" \
+        '{
+            memoryBytes: (if $memoryBytes == "" then null else ($memoryBytes | tonumber) end),
+            memorySwapBytes: (
+                if $memorySwapBytes == "" then null else ($memorySwapBytes | tonumber) end
+            ),
+            cpuCores: (if $cpuCores == "" then null else $cpuCores end),
+            pids: (if $pids == "" then null else ($pids | tonumber) end)
+        }' > "${policy_output_path}"
+}

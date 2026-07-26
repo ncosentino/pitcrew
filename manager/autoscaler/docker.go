@@ -21,6 +21,7 @@ type containerLaunch struct {
 	image     string
 	jitConfig string
 	labels    map[string]string
+	resources workerResourcePolicy
 }
 
 type recoveredContainer struct {
@@ -38,6 +39,7 @@ type dockerClient interface {
 	run(ctx context.Context, launch containerLaunch) (string, error)
 	wait(ctx context.Context, containerID string) (int, error)
 	isRunning(ctx context.Context, containerID string) (bool, error)
+	inspectExit(ctx context.Context, containerID string) (containerExitState, bool)
 	readLogs(ctx context.Context, containerID string) ([]string, error)
 	followLogs(
 		ctx context.Context,
@@ -122,6 +124,9 @@ func newDockerCLI() *dockerCLI {
 }
 
 func (d *dockerCLI) run(ctx context.Context, launch containerLaunch) (string, error) {
+	if err := launch.resources.validate(); err != nil {
+		return "", fmt.Errorf("reject worker launch with invalid resource policy: %w", err)
+	}
 	output, err := d.executor.run(ctx, buildDockerRunArguments(launch)...)
 	if err != nil {
 		return "", fmt.Errorf("docker run failed: %w", err)
@@ -143,6 +148,7 @@ func buildDockerRunArguments(launch containerLaunch) []string {
 		"--entrypoint", "/actions-runner/bin/Runner.Listener",
 		"--name", launch.name,
 	}
+	arguments = append(arguments, launch.resources.dockerArguments()...)
 	labelKeys := make([]string, 0, len(launch.labels))
 	for key := range launch.labels {
 		labelKeys = append(labelKeys, key)
@@ -192,6 +198,42 @@ func (d *dockerCLI) isRunning(ctx context.Context, containerID string) (bool, er
 		}
 	}
 	return false, nil
+}
+
+// inspectExit reads Docker's own exit evidence for an exact container. Workers
+// launch with --rm, so a missing container is expected rather than an error and
+// the caller falls back to the exit status reported by docker wait.
+func (d *dockerCLI) inspectExit(
+	ctx context.Context,
+	containerID string,
+) (containerExitState, bool) {
+	output, err := d.executor.run(
+		ctx,
+		"inspect",
+		"--format",
+		"{{json .State}}",
+		containerID,
+	)
+	if err != nil {
+		return containerExitState{}, false
+	}
+	var record struct {
+		Status    string `json:"Status"`
+		Running   bool   `json:"Running"`
+		ExitCode  *int   `json:"ExitCode"`
+		OOMKilled *bool  `json:"OOMKilled"`
+	}
+	if err := json.Unmarshal(bytes.TrimSpace(output), &record); err != nil {
+		return containerExitState{}, false
+	}
+	if record.Running || record.ExitCode == nil {
+		return containerExitState{}, false
+	}
+	state := containerExitState{exitCode: *record.ExitCode}
+	if record.OOMKilled != nil {
+		state.oomKilled = record.OOMKilled
+	}
+	return state, true
 }
 
 func (d *dockerCLI) followLogs(
