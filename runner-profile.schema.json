@@ -69,6 +69,40 @@
           "type": "integer",
           "minimum": 30,
           "maximum": 3600
+        },
+        "maximumActiveWorkers": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      }
+    },
+    "resources": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "dependencies": {
+        "memorySwap": [
+          "memory"
+        ]
+      },
+      "properties": {
+        "memory": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:[bBkKmMgGtT]|[kKmMgGtT][bBiI]|[kKmMgGtT][iI][bB])?$"
+        },
+        "memorySwap": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:[bBkKmMgGtT]|[kKmMgGtT][bBiI]|[kKmMgGtT][iI][bB])?$"
+        },
+        "cpus": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]{1,9})?$"
+        },
+        "pids": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
         }
       }
     },

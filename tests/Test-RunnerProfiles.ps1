@@ -32,6 +32,8 @@ $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
+$testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
+$changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
 $errors = [System.Collections.Generic.List[string]]::new()
 $checks = 0
@@ -252,11 +254,38 @@ $autoscalingManifest | Add-Member -NotePropertyName autoscaling -NotePropertyVal
     mode = 'scale-set'
     minimumIdle = 0
     scaleDownDelaySeconds = 120
+    maximumActiveWorkers = 4
+})
+$autoscalingManifest | Add-Member -NotePropertyName resources -NotePropertyValue ([PSCustomObject]@{
+    memory = '512MiB'
+    memorySwap = '1g'
+    cpus = '2.5'
+    pids = 256
 })
 Add-Check (
     ($autoscalingManifest | ConvertTo-Json -Depth 20) |
         Test-Json -SchemaFile $schemaPath
 ) 'The profile schema rejects a valid scale-set autoscaling policy.'
+$invalidResourceManifest = (
+    $autoscalingManifest |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidResourceManifest.resources.PSObject.Properties.Remove('memory')
+Add-Check (-not (
+    ($invalidResourceManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+)) 'The profile schema accepts memorySwap without memory.'
+$emptyResourceManifest = (
+    $autoscalingManifest |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$emptyResourceManifest.resources = [PSCustomObject]@{}
+Add-Check (-not (
+    ($emptyResourceManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+)) 'The profile schema accepts an empty resource policy.'
 $observedStateV7 = [PSCustomObject][ordered]@{
     schemaVersion = 1
     managerContractVersion = 7
@@ -416,6 +445,167 @@ Add-Check (
     ($connectedStateV10 | ConvertTo-Json -Depth 8) |
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract ten rejects a connected fixed-capacity slot.'
+$fixedStateV11 = (
+    $connectedStateV10 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+$fixedStateV11.managerContractVersion = 11
+$fixedStateV11 | Add-Member -NotePropertyName resourcePolicy -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        memoryBytes = 536870912
+        memorySwapBytes = 1073741824
+        cpuCores = '2.5'
+        pids = 256
+    }
+)
+$fixedStateV11.slots[0].resources |
+    Add-Member -NotePropertyName networkRxBytes -NotePropertyValue 1048576
+$fixedStateV11.slots[0].resources |
+    Add-Member -NotePropertyName networkTxBytes -NotePropertyValue 131072
+$fixedStateV11.slots[0].resources |
+    Add-Member -NotePropertyName blockReadBytes -NotePropertyValue $null
+$fixedStateV11.slots[0].resources |
+    Add-Member -NotePropertyName blockWriteBytes -NotePropertyValue 2147483648
+$fixedStateV11.slots[0] |
+    Add-Member -NotePropertyName imageId -NotePropertyValue $testWorkerImageId
+$fixedStateV11.slots[0] |
+    Add-Member -NotePropertyName lastExit -NotePropertyValue (
+        [PSCustomObject][ordered]@{
+            observedAt = '2026-01-01T00:00:00Z'
+            classification = 'oom-killed'
+            exitCode = 137
+            signal = 9
+            dockerOomKilled = $true
+            evidence = 'docker-inspect'
+        }
+    )
+Add-Check (
+    ($fixedStateV11 | ConvertTo-Json -Depth 12) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eleven rejects a valid fixed resource, image, I/O, and exit projection.'
+
+$autoscaledStateV11 = (
+    $observedStateV10 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+$autoscaledStateV11.managerContractVersion = 11
+$autoscaledStateV11 | Add-Member -NotePropertyName resourcePolicy -NotePropertyValue $null
+$autoscaledStateV11.autoscaling.status = 'degraded'
+$autoscaledStateV11.autoscaling.lastError = 'Local worker counts diverge from GitHub runner registrations.'
+$autoscaledStateV11.autoscaling |
+    Add-Member -NotePropertyName maximumActiveWorkers -NotePropertyValue 4
+$autoscaledStateV11.autoscaling |
+    Add-Member -NotePropertyName targets -NotePropertyValue @(
+        [PSCustomObject][ordered]@{
+            key = 'repo-needlr'
+            repository = 'https://github.com/ncosentino/needlr'
+            maximumSlots = 4
+            targetSlots = 2
+            localActiveWorkers = 2
+            localIdleWorkers = 0
+            localBusyWorkers = 2
+            localDrainingWorkers = 0
+            statistics = [PSCustomObject][ordered]@{
+                observedAt = '2026-01-01T00:00:00Z'
+                availableJobs = 0
+                acquiredJobs = 0
+                assignedJobs = 0
+                runningJobs = 0
+                registeredRunners = 0
+                busyRunners = 0
+                idleRunners = 0
+            }
+        },
+        [PSCustomObject][ordered]@{
+            key = 'repo-genesis'
+            repository = 'https://github.com/ncosentino/genesis'
+            maximumSlots = 4
+            targetSlots = 2
+            localActiveWorkers = 2
+            localIdleWorkers = 0
+            localBusyWorkers = 2
+            localDrainingWorkers = 0
+            statistics = [PSCustomObject][ordered]@{
+                observedAt = '2026-01-01T00:00:00Z'
+                availableJobs = 0
+                acquiredJobs = 1
+                assignedJobs = 2
+                runningJobs = 1
+                registeredRunners = 8
+                busyRunners = 2
+                idleRunners = 0
+            }
+        }
+    )
+Add-Check (
+    ($autoscaledStateV11 | ConvertTo-Json -Depth 12) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eleven rejects explicit per-target local/control-plane divergence.'
+Add-Check (
+    $autoscaledStateV11.autoscaling.status -ceq 'degraded'
+) 'Local/control-plane divergence was presented as a healthy autoscaler state.'
+Add-Check (
+    $autoscaledStateV11.autoscaling.targets[0].localActiveWorkers -eq 2 -and
+    $autoscaledStateV11.autoscaling.targets[0].statistics.registeredRunners -eq 0
+) 'The 2-live/0-registered example collapsed local and GitHub evidence.'
+Add-Check (
+    $autoscaledStateV11.autoscaling.targets[1].localActiveWorkers -eq 2 -and
+    $autoscaledStateV11.autoscaling.targets[1].statistics.registeredRunners -eq 8
+) 'The 2-live/8-registered example collapsed local and GitHub evidence.'
+$unavailableStatisticsV11 = (
+    $autoscaledStateV11 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+$unavailableStatisticsV11.autoscaling.targets[0].statistics = $null
+Add-Check (
+    ($unavailableStatisticsV11 | ConvertTo-Json -Depth 12) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eleven rejects explicitly unavailable scale-set statistics.'
+$unavailableStatisticsRoundTripV11 = (
+    $unavailableStatisticsV11 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+Add-Check (
+    $null -eq $unavailableStatisticsRoundTripV11.autoscaling.targets[0].statistics -and
+    $unavailableStatisticsRoundTripV11.autoscaling.targets[1].statistics.registeredRunners -eq 8 -and
+    [DateTimeOffset]$unavailableStatisticsRoundTripV11.autoscaling.targets[1].statistics.observedAt -eq
+        [DateTimeOffset]'2026-01-01T00:00:00Z'
+) 'Unavailable or timestamped scale-set evidence did not round-trip distinctly from measured zero.'
+$missingContractV11Image = (
+    $fixedStateV11 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+$missingContractV11Image.slots[0].PSObject.Properties.Remove('imageId')
+Add-Check (-not (
+    ($missingContractV11Image | ConvertTo-Json -Depth 12) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract eleven accepts a slot without immutable image identity evidence.'
+$missingContractV11Io = (
+    $fixedStateV11 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+$missingContractV11Io.slots[0].resources.PSObject.Properties.Remove('blockWriteBytes')
+Add-Check (-not (
+    ($missingContractV11Io | ConvertTo-Json -Depth 12) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract eleven accepts worker telemetry without all nullable I/O counters.'
+$missingStatisticsFreshnessV11 = (
+    $autoscaledStateV11 |
+        ConvertTo-Json -Depth 12 |
+        ConvertFrom-Json -Depth 12
+)
+$missingStatisticsFreshnessV11.autoscaling.targets[0].statistics.PSObject.Properties.Remove(
+    'observedAt')
+Add-Check (-not (
+    ($missingStatisticsFreshnessV11 | ConvertTo-Json -Depth 12) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract eleven accepts scale-set statistics without freshness evidence.'
 $missingRegistrationV10 = (
     $connectedStateV10 |
         ConvertTo-Json -Depth 8 |
@@ -539,6 +729,52 @@ $autoscaledProfile = Resolve-RunnerProfile `
 Add-Check ($autoscaledProfile.Autoscaling.Mode -eq 'scale-set') 'Autoscaling mode did not resolve to scale-set.'
 Add-Check ($autoscaledProfile.Autoscaling.MinimumIdle -eq 1) 'Autoscaling minimum idle override was not applied.'
 Add-Check ($autoscaledProfile.Autoscaling.ScaleDownDelaySeconds -eq 180) 'Autoscaling scale-down delay override was not applied.'
+$admissionProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile default `
+    -Autoscale $true `
+    -MaximumActiveWorkers 4 `
+    -HostName 'test-host'
+Add-Check (
+    $admissionProfile.Autoscaling.MaximumActiveWorkers -eq 4
+) 'The profile-wide autoscaling admission ceiling was not resolved.'
+$resourceProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile default `
+    -WorkerMemory '512MiB' `
+    -WorkerMemorySwap '1g' `
+    -WorkerCpus '02.500000000' `
+    -WorkerPids 256 `
+    -HostName 'test-host'
+Add-Check ($resourceProfile.Resources.MemoryBytes -eq 536870912) 'Worker memory was not canonicalized to bytes.'
+Add-Check ($resourceProfile.Resources.MemorySwapBytes -eq 1073741824) 'Worker memory-swap was not canonicalized to bytes.'
+Add-Check ($resourceProfile.Resources.CpuCores -ceq '2.5') 'Worker CPU was not canonicalized without floating-point noise.'
+Add-Check ($resourceProfile.Resources.Pids -eq 256) 'Worker PID policy was not canonicalized.'
+$equivalentResourceProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile default `
+    -WorkerMemory '536870912' `
+    -WorkerMemorySwap '1024m' `
+    -WorkerCpus '2.5' `
+    -WorkerPids 256 `
+    -HostName 'test-host'
+Add-Check (
+    (Get-RunnerObjectFingerprint -Value $resourceProfile.Resources) -ceq
+    (Get-RunnerObjectFingerprint -Value $equivalentResourceProfile.Resources)
+) 'Equivalent resource-policy inputs do not produce one canonical representation.'
+Assert-RunnerResilienceContractActivation -Profile $defaultProfile
+Add-ThrowsCheck `
+    -Action {
+        Assert-RunnerResilienceContractActivation -Profile $resourceProfile
+    } `
+    -ExpectedMessage 'require manager contract 11.*contract 10' `
+    -Failure 'A contract-10 manager accepted a resource policy it cannot enforce.'
+Add-ThrowsCheck `
+    -Action {
+        Assert-RunnerResilienceContractActivation -Profile $admissionProfile
+    } `
+    -ExpectedMessage 'require manager contract 11.*contract 10' `
+    -Failure 'A contract-10 manager accepted a profile admission ceiling it cannot enforce.'
 Add-ThrowsCheck `
     -Action {
         Resolve-RunnerProfile `
@@ -558,6 +794,80 @@ Add-ThrowsCheck `
     } `
     -ExpectedMessage 'between 30 and 3600' `
     -Failure 'An unsafe autoscaling scale-down delay was accepted.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -MaximumActiveWorkers 4
+    } `
+    -ExpectedMessage 'requires autoscaling' `
+    -Failure 'A profile admission ceiling was accepted without autoscaling.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -Autoscale $true `
+            -MaximumActiveWorkers 0
+    } `
+    -ExpectedMessage 'must be a positive integer' `
+    -Failure 'A zero profile admission ceiling was accepted.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -WorkerMemory '5m'
+    } `
+    -ExpectedMessage 'at least 6291456 bytes' `
+    -Failure 'Docker-incompatible memory below six MiB was accepted.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -WorkerMemorySwap '1g'
+    } `
+    -ExpectedMessage 'requires a worker memory limit' `
+    -Failure 'Memory-swap was accepted without memory.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -WorkerMemory '1g' `
+            -WorkerMemorySwap '512m'
+    } `
+    -ExpectedMessage 'greater than or equal' `
+    -Failure 'Memory-swap below memory was accepted.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -WorkerCpus '0'
+    } `
+    -ExpectedMessage 'must be positive' `
+    -Failure 'A zero CPU limit was accepted.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -WorkerCpus '0.1234567890'
+    } `
+    -ExpectedMessage 'at most nine fractional digits' `
+    -Failure 'A CPU limit beyond canonical Docker precision was accepted.'
+Add-ThrowsCheck `
+    -Action {
+        Resolve-RunnerProfile `
+            -RootPath $runnerRoot `
+            -Profile default `
+            -WorkerPids 0
+    } `
+    -ExpectedMessage 'between 1 and 2147483647' `
+    -Failure 'A zero PID limit was accepted.'
 
 Add-Check (-not $copilotProfile.IsDefault) 'The Copilot CLI profile is incorrectly marked as default.'
 Add-Check ($copilotProfile.DisableDefaultLabels) 'Specialized profiles must disable GitHub default labels by default.'
@@ -577,6 +887,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
 Add-Check ($defaultProfile.ManagerContractVersion -eq 10) 'The setup contract does not identify the registration-aware manager.'
+Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `
@@ -700,12 +1011,14 @@ $defaultStaticProfile = New-RunnerStaticProfileState `
     -Profile $defaultProfile `
     -Scope repo `
     -OrgName '' `
-    -EnterpriseName ''
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
 $copilotStaticProfile = New-RunnerStaticProfileState `
     -Profile $copilotProfile `
     -Scope repo `
     -OrgName '' `
-    -EnterpriseName ''
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
 $replicaOverrideProfile = Resolve-RunnerProfile `
     -RootPath $runnerRoot `
     -Profile default `
@@ -715,7 +1028,8 @@ $replicaOverrideStaticProfile = New-RunnerStaticProfileState `
     -Profile $replicaOverrideProfile `
     -Scope repo `
     -OrgName '' `
-    -EnterpriseName ''
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
 $imageOverrideProfile = Resolve-RunnerProfile `
     -RootPath $runnerRoot `
     -Profile default `
@@ -725,12 +1039,38 @@ $imageOverrideStaticProfile = New-RunnerStaticProfileState `
     -Profile $imageOverrideProfile `
     -Scope repo `
     -OrgName '' `
-    -EnterpriseName ''
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
 $autoscaledStaticProfile = New-RunnerStaticProfileState `
     -Profile $autoscaledProfile `
     -Scope repo `
     -OrgName '' `
-    -EnterpriseName ''
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
+$admissionStaticProfile = New-RunnerStaticProfileState `
+    -Profile $admissionProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
+$resourceStaticProfile = New-RunnerStaticProfileState `
+    -Profile $resourceProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
+$equivalentResourceStaticProfile = New-RunnerStaticProfileState `
+    -Profile $equivalentResourceProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
+$changedImageIdentityStaticProfile = New-RunnerStaticProfileState `
+    -Profile $defaultProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName '' `
+    -ResolvedImageId $changedWorkerImageId
 Add-Check (
     $defaultStaticProfile.fingerprint -eq $replicaOverrideStaticProfile.fingerprint
 ) 'Mutable capacity is included in the static profile fingerprint.'
@@ -741,8 +1081,48 @@ Add-Check (
     $defaultStaticProfile.fingerprint -ne $autoscaledStaticProfile.fingerprint
 ) 'Autoscaling mode changes do not select full profile replacement.'
 Add-Check (
+    $autoscaledStaticProfile.fingerprint -ne $admissionStaticProfile.fingerprint
+) 'The profile admission ceiling is missing from the static fingerprint.'
+Add-Check (
+    $autoscaledStaticProfile.workerRevision -eq $admissionStaticProfile.workerRevision
+) 'A manager-only admission ceiling unnecessarily changes the worker revision.'
+Add-Check (
+    $defaultStaticProfile.workerRevision -ne $resourceStaticProfile.workerRevision
+) 'Worker resource policy changes do not advance the worker revision.'
+Add-Check (
+    $resourceStaticProfile.workerRevision -eq $equivalentResourceStaticProfile.workerRevision
+) 'Equivalent resource policy input changes the worker revision.'
+Add-Check (
+    $defaultStaticProfile.workerRevision -ne $changedImageIdentityStaticProfile.workerRevision
+) 'Changed local image content does not advance the worker revision.'
+Add-Check (
+    (
+        Get-RunnerObjectFingerprint -Value (
+            Get-RunnerRefreshCompatibilityConfiguration `
+                -Configuration $defaultStaticProfile.configuration)
+    ) -cne (
+        Get-RunnerObjectFingerprint -Value (
+            Get-RunnerRefreshCompatibilityConfiguration `
+                -Configuration $changedImageIdentityStaticProfile.configuration)
+    )
+) 'Refresh compatibility ignores changed immutable image content.'
+Add-Check (
+    (
+        Get-RunnerObjectFingerprint -Value (
+            Get-RunnerRollingCompatibilityConfiguration `
+                -Configuration $defaultStaticProfile.configuration)
+    ) -ceq (
+        Get-RunnerObjectFingerprint -Value (
+            Get-RunnerRollingCompatibilityConfiguration `
+                -Configuration $resourceStaticProfile.configuration)
+    )
+) 'A resource-policy change is incorrectly treated as a routing-topology change.'
+Add-Check (
     $defaultStaticProfile.configuration.workerRuntimeContractVersion -eq 2
 ) 'Static profile state does not expose the current worker runtime contract.'
+Add-Check (
+    $defaultStaticProfile.configuration.resolvedImageId -ceq $testWorkerImageId
+) 'Static profile state does not retain immutable local image identity.'
 $legacyRuntimeConfiguration = $defaultStaticProfile.configuration |
     ConvertTo-Json -Depth 20 |
     ConvertFrom-Json -Depth 20
@@ -779,19 +1159,36 @@ $defaultEnvironment = New-RunnerEnvironmentContent `
     -AccessToken 'test-registration-token' `
     -WorkerRevision $defaultStaticProfile.workerRevision `
     -SessionOwner 'pitcrew-default' `
-    -AssumeUnversionedCurrent $false
+    -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId
 $copilotEnvironment = New-RunnerEnvironmentContent `
     -Profile $copilotProfile `
     -AccessToken 'test-registration-token' `
     -WorkerRevision $copilotStaticProfile.workerRevision `
     -SessionOwner 'pitcrew-copilot-cli' `
-    -AssumeUnversionedCurrent $false
+    -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId
 $autoscaledEnvironment = New-RunnerEnvironmentContent `
     -Profile $autoscaledProfile `
     -AccessToken 'test-registration-token' `
     -WorkerRevision $autoscaledStaticProfile.workerRevision `
     -SessionOwner 'pitcrew-autoscaled' `
-    -AssumeUnversionedCurrent $false
+    -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId
+$resourceEnvironment = New-RunnerEnvironmentContent `
+    -Profile $resourceProfile `
+    -AccessToken 'test-registration-token' `
+    -WorkerRevision $resourceStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-resource' `
+    -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId
+$admissionEnvironment = New-RunnerEnvironmentContent `
+    -Profile $admissionProfile `
+    -AccessToken 'test-registration-token' `
+    -WorkerRevision $admissionStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-admission' `
+    -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PROFILE_ID=default$') 'The default environment does not identify its profile.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_LABELS=general-purpose$') 'The default environment does not emit the general-purpose label.'
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The default environment unexpectedly disables GitHub default labels.'
@@ -800,11 +1197,22 @@ Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'M
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=10$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
+Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=$') 'The default memory-swap policy is not represented as an empty manager-only value.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=$') 'The default CPU policy is not represented as an empty manager-only value.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=$') 'The default PID policy is not represented as an empty manager-only value.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$') 'The default admission ceiling is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SESSION_OWNER=pitcrew-default$') 'The environment does not pin the stable session owner.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=$') 'Fixed profiles unexpectedly enable autoscaling.'
 Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Autoscaling mode is missing from the manager environment.'
 Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_MIN_IDLE=1$') 'Autoscaling minimum idle is missing from the manager environment.'
 Add-Check ($autoscaledEnvironment -match '(?m)^PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=180$') 'Autoscaling scale-down delay is missing from the manager environment.'
+Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The canonical memory policy is missing from the manager environment.'
+Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The canonical memory-swap policy is missing from the manager environment.'
+Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The canonical CPU policy is missing from the manager environment.'
+Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=256$') 'The canonical PID policy is missing from the manager environment.'
+Add-Check ($admissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The profile admission ceiling is missing from the manager environment.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'The specialized environment does not protect its locally built image.'
@@ -815,6 +1223,7 @@ $enterpriseEnvironment = New-RunnerEnvironmentContent `
     -WorkerRevision $copilotStaticProfile.workerRevision `
     -SessionOwner 'pitcrew-copilot-cli' `
     -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId `
     -Scope ent `
     -EnterpriseName 'example-enterprise'
 Add-Check ($enterpriseEnvironment -match '(?m)^ENTERPRISE_NAME=example-enterprise$') 'Enterprise runner state does not include the enterprise name.'
@@ -953,9 +1362,15 @@ try {
         'RUNNER_PROFILE_ID',
         'RUNNER_REPLICAS',
         'RUNNER_IMAGE',
+        'PITCREW_WORKER_IMAGE_ID',
+        'PITCREW_WORKER_MEMORY_BYTES',
+        'PITCREW_WORKER_MEMORY_SWAP_BYTES',
+        'PITCREW_WORKER_CPU_CORES',
+        'PITCREW_WORKER_PIDS_LIMIT',
         'PITCREW_AUTOSCALING_MODE',
         'PITCREW_AUTOSCALING_MIN_IDLE',
         'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
+        'PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS',
         'PITCREW_STATE_DIR',
         'PITCREW_MANAGER_CONTRACT_VERSION'
     )
@@ -973,9 +1388,15 @@ try {
     $env:RUNNER_PROFILE_ID = 'ambient-profile'
     $env:RUNNER_REPLICAS = '99'
     $env:RUNNER_IMAGE = 'ambient/image:wrong'
+    $env:PITCREW_WORKER_IMAGE_ID = $changedWorkerImageId
+    $env:PITCREW_WORKER_MEMORY_BYTES = '99'
+    $env:PITCREW_WORKER_MEMORY_SWAP_BYTES = '999'
+    $env:PITCREW_WORKER_CPU_CORES = '9.9'
+    $env:PITCREW_WORKER_PIDS_LIMIT = '9999'
     $env:PITCREW_AUTOSCALING_MODE = 'ambient-mode'
     $env:PITCREW_AUTOSCALING_MIN_IDLE = '99'
     $env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS = '999'
+    $env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS = '99'
     $env:PITCREW_STATE_DIR = 'ambient-state'
     $env:PITCREW_MANAGER_CONTRACT_VERSION = '99'
     $env:PITCREW_TEST_MANAGER_RUNNING = '0'
@@ -989,7 +1410,7 @@ try {
         if ($dockerArguments[0] -eq 'compose') {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
-                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
             if (
                 $dockerArguments -contains 'build' -and
                 $dockerArguments -contains 'runner-manager' -and
@@ -1028,7 +1449,11 @@ try {
             $dockerArguments[1] -eq 'inspect' -and
             $dockerArguments -contains '{{.Id}}'
         ) {
-            Write-Output 'sha256:worker-image'
+            Write-Output $(if ($env:PITCREW_TEST_WORKER_IMAGE_ID) {
+                $env:PITCREW_TEST_WORKER_IMAGE_ID
+            } else {
+                $testWorkerImageId
+            })
         }
         if (
             $dockerArguments[0] -eq 'inspect' -and
@@ -1038,7 +1463,7 @@ try {
             Write-Output $(if ($env:PITCREW_TEST_MANAGER_CONTRACT) {
                 $env:PITCREW_TEST_MANAGER_CONTRACT
             } else {
-                '9'
+                '10'
             })
         }
         if (
@@ -1121,6 +1546,41 @@ try {
         $untrustedHostCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check (-not ($untrustedHostCommands -match 'compose.*down')) 'An untrusted repository URL stopped a running profile.'
 
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -WorkerMemory '512m' `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'require manager contract 11.*contract 10' `
+            -Failure 'Setup accepted a resource policy before manager contract 11 activation.'
+        $resourceGuardCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8 |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+        Add-Check ($resourceGuardCommands.Count -eq 0) 'The resource activation guard ran Docker before failing closed.'
+        Add-Check (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot '.env'))) 'The resource activation guard wrote environment state before failing closed.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Autoscale `
+                    -MaximumActiveWorkers 4 `
+                    -Repos 'https://github.com/example/project=2'
+            } `
+            -ExpectedMessage 'require manager contract 11.*contract 10' `
+            -Failure 'Setup accepted an admission ceiling before manager contract 11 activation.'
+        $admissionGuardCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8 |
+                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+        Add-Check ($admissionGuardCommands.Count -eq 0) 'The admission activation guard ran Docker before failing closed.'
+        Add-Check (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot '.env'))) 'The admission activation guard wrote environment state before failing closed.'
+
         @(
             'ACCESS_TOKEN=legacy-registration-token'
             'REPO_URLS=https://github.com/example/existing-a=2,https://github.com/example/existing-b'
@@ -1165,12 +1625,16 @@ try {
             ConvertFrom-Json -Depth 10
         Add-Check ($defaultEnvironmentState -match '(?m)^RUNNER_PROFILE_ID=default$') 'Default setup did not write the default profile environment.'
         Add-Check ($defaultEnvironmentState -match '(?m)^RUNNER_LABELS=general-purpose$') 'Default setup did not write the general-purpose label.'
+        Add-Check ($defaultEnvironmentState -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'Default setup did not persist immutable worker image identity.'
         Add-Check ($defaultEnvironmentState -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Default setup wrote mutable capacity into the static environment.'
+        $defaultStaticProfileState = Get-Content -LiteralPath $defaultStaticProfilePath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 20
+        Add-Check ($defaultStaticProfileState.configuration.resolvedImageId -ceq $testWorkerImageId) 'Default setup did not persist immutable image identity in static state.'
         Add-Check ($defaultDesiredState.generation -eq 1) 'Initial desired capacity did not start at generation one.'
         Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
-        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
         Set-TestCapacityAcknowledgement `
@@ -1227,6 +1691,34 @@ try {
             -Value $savedStaticProfile `
             -NoNewline `
             -Encoding UTF8
+
+        $env:PITCREW_TEST_WORKER_IMAGE_ID = $changedWorkerImageId
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -CapacityOnly `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Capacity-only update cannot proceed' `
+            -Failure 'Capacity-only setup ignored changed immutable image content.'
+        $changedImageCapacityCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($changedImageCapacityCommands -match '(^|\t)(pull|build|run)(\t|$)|compose.*(up|down)')) 'A changed-image capacity guard mutated the live profile.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'worker profile configuration is otherwise unchanged' `
+            -Failure 'Manager refresh ignored changed immutable image content.'
+        $changedImageRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($changedImageRefreshCommands -match '(^|\t)(pull|build|run)(\t|$)|compose.*(up|down)')) 'A changed-image refresh guard mutated the live profile.'
+        Remove-Item Env:\PITCREW_TEST_WORKER_IMAGE_ID -ErrorAction SilentlyContinue
 
         $env:PITCREW_TEST_IMAGE_MISSING = '1'
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
@@ -1457,7 +1949,7 @@ try {
         $managerBuildFailureCommands = @(
             Get-Content -LiteralPath $dockerLog -Encoding UTF8
         )
-        Add-Check ($managerBuildFailureCommands -match 'tag.*sha256:worker-image.*myoung34/github-runner:ubuntu-noble') 'A pre-handoff manager-build failure did not restore the previous worker image.'
+        Add-Check ($managerBuildFailureCommands -match "tag.*$([regex]::Escape($testWorkerImageId)).*myoung34/github-runner:ubuntu-noble") 'A pre-handoff manager-build failure did not restore the previous worker image.'
         Add-Check (-not ($managerBuildFailureCommands -match '^stop\t')) 'A failed replacement-manager build stopped the live manager.'
 
         $preRollbackEnvironment = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
@@ -1483,7 +1975,7 @@ try {
         Remove-Item Env:\PITCREW_TEST_MANAGER_BUILD_FAILURE -ErrorAction SilentlyContinue
         $rollbackCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($rollbackCommands -match 'tag.*sha256:manager-image.*ephemeral-runner-manager:profile-default') 'A failed manager start did not restore the previous manager image.'
-        Add-Check ($rollbackCommands -match 'tag.*sha256:worker-image.*myoung34/github-runner:ubuntu-noble') 'A failed manager start did not restore the previous worker image.'
+        Add-Check ($rollbackCommands -match "tag.*$([regex]::Escape($testWorkerImageId)).*myoung34/github-runner:ubuntu-noble") 'A failed manager start did not restore the previous worker image.'
         Add-Check (
             (Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8) -ceq
             $preRollbackEnvironment
