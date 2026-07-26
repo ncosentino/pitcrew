@@ -160,6 +160,48 @@ and unverified hypotheses, and it never converts a single host/container pair
 into a root cause: CDN edge variability and load-sensitive host contention stay
 competing hypotheses until repeated measurements resolve them.
 
+## Profile recovery skill
+
+`pitcrew-profile-recover` recovers one explicitly selected degraded profile with
+a single manager-only restart.
+
+```text
+Use the pitcrew-profile-recover skill to recover the degraded copilot-cli
+profile on this host.
+```
+
+The skill resolves exactly one installation and one named profile, reads only
+generated non-secret state, and performs a read-only dry run that prints the
+selected profile, the manager contract and exact manager match count, the
+current manager instance and generation fences, the local worker count and
+observed eligibility evidence, the exact secret-free
+`Setup-Runner.ps1 -RecoverManager` invocation, and every prohibited action that
+will not occur. It then requires explicit operator confirmation; approval to
+diagnose or update a host is not approval to restart a manager.
+
+Recovery itself is a first-class PitCrew operation rather than ad-hoc Docker
+commands. `Setup-Runner.ps1 -RecoverManager` takes the profile operation lock,
+selects the manager only through `ephemeral-runner-manager-profile=<profile>`,
+requires exactly one running contract-9-or-newer manager with no pending
+shutdown request, re-verifies the caller's instance, generation, and
+desired-state hash fences immediately before mutation, and then issues exactly
+one restart against the exact container ID with the existing 60-second graceful
+stop window.
+
+Workers are preserved by construction: no worker-directed command is issued at
+all, and a worker that exits during the window simply finished its ephemeral
+job. Fixed and autoscaled profiles use the same entry point and differ only in
+their convergence postcondition. The result is reported as `recovered`,
+`still-degraded`, `rejected`, `failed`, or `indeterminate` with verified
+evidence, and everything except `recovered` exits nonzero.
+
+Recovery is non-idempotent, so it is never retried automatically. The skill
+stops after one attempt, never escalates to a Docker daemon, Docker Desktop, or
+host restart, never touches workers, capacity, images, or configuration, and
+processes multiple named profiles one at a time with a fresh preflight and
+confirmation each time, stopping the batch after the first ambiguous or failed
+result.
+
 ## Safety boundary
 
 Every skill stops on ambiguous installation, profile, release, ingress, or

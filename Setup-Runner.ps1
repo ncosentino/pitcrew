@@ -108,6 +108,29 @@
     replacing the selected profile when its manager or static configuration is
     not compatible with a capacity-only update.
 
+.PARAMETER RecoverManager
+    Restart only the selected profile's already running manager once so a
+    degraded manager can rebuild its controllers and re-adopt its labelled
+    workers. Capacity, static configuration, images, and worker containers are
+    never changed, and a stopped profile is never started.
+
+.PARAMETER ExpectedManagerInstanceId
+    Manager instance the caller observed before requesting recovery. Recovery is
+    rejected when observed state reports a different instance, so stale evidence
+    cannot restart a manager that already changed.
+
+.PARAMETER ExpectedGeneration
+    Desired-state generation the caller observed before requesting recovery.
+    Recovery is rejected when observed state reports another generation.
+
+.PARAMETER ExpectedDesiredStateHash
+    Desired-state hash the caller observed before requesting recovery. Required
+    when observed state carries a hash and rejected when it does not match.
+
+.PARAMETER RecoveryTimeoutSeconds
+    Bounded window allowed for the replacement manager to publish observed state
+    and for registration or listener convergence. Defaults to 120 seconds.
+
 .EXAMPLE
     .\Setup-Runner.ps1 -Repos https://github.com/me/repo-a
 
@@ -125,6 +148,9 @@
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -Autoscale -MinimumIdle 0 -Repos https://github.com/me/repo-a=30
+
+.EXAMPLE
+    .\Setup-Runner.ps1 -Profile copilot-cli -RecoverManager -ExpectedManagerInstanceId pitcrew-copilot-cli-0a1b -ExpectedGeneration 7 -ExpectedDesiredStateHash 9f2c
 #>
 [CmdletBinding()]
 param(
@@ -168,7 +194,17 @@ param(
     [string]$ProfilePath = '',
     [switch]$Down,
     [switch]$Refresh,
-    [switch]$CapacityOnly
+    [switch]$CapacityOnly,
+    [switch]$RecoverManager,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$ExpectedManagerInstanceId,
+    [Nullable[int]]$ExpectedGeneration,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$ExpectedDesiredStateHash,
+    [ValidateRange(1, 600)]
+    [int]$RecoveryTimeoutSeconds = 120
 )
 $ErrorActionPreference = 'Stop'
 
@@ -202,7 +238,7 @@ foreach ($parameterName in @(
     }
 }
 $profileConfig = Resolve-RunnerProfile @resolveArguments
-if (-not $Down) {
+if (-not $Down -and -not $RecoverManager) {
     Assert-RunnerResilienceContractActivation -Profile $profileConfig
 }
 
@@ -355,7 +391,7 @@ function Stop-RunnerProfile {
     }
 }
 
-function Get-RunnerManagerContainerId {
+function Get-RunnerManagerContainerIdList {
     param(
         [Parameter(Mandatory)]
         [PSCustomObject]$ProfileConfig
@@ -368,6 +404,32 @@ function Get-RunnerManagerContainerId {
     if ($LASTEXITCODE -ne 0) {
         Write-Error "Failed to inspect the manager for profile '$($ProfileConfig.Name)'."
     }
+    return @($managerIds | ForEach-Object { ([string]$_).Trim() })
+}
+
+function Get-RunnerWorkerContainerIdList {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    $workerIds = @(
+        docker ps -q --filter "label=$($ProfileConfig.ManagedRunnerLabel)" 2>$null |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+    )
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error "Failed to inspect workers for profile '$($ProfileConfig.Name)'."
+    }
+    return @($workerIds | ForEach-Object { ([string]$_).Trim() })
+}
+
+function Get-RunnerManagerContainerId {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig
+    )
+
+    $managerIds = @(Get-RunnerManagerContainerIdList -ProfileConfig $ProfileConfig)
     if ($managerIds.Count -gt 1) {
         throw "Profile '$($ProfileConfig.Name)' has multiple running manager containers."
     }
@@ -426,6 +488,471 @@ function Get-RunnerObservedManager {
     } catch {
         return $null
     }
+}
+
+<#
+.SYNOPSIS
+    Converts an observed-state document into non-secret recovery evidence.
+
+.PARAMETER ProfileConfig
+    Effective profile returned by Resolve-RunnerProfile.
+
+.PARAMETER Observed
+    Observed-state document returned by Get-RunnerObservedManager, or null.
+
+.OUTPUTS
+    Object carrying manager identity, fences, mode, and slot counts only.
+#>
+function New-RunnerRecoveryEvidence {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$Observed
+    )
+
+    if (-not $Observed) {
+        return $null
+    }
+
+    $observedAtUtc = $null
+    $rawObservedAt = $Observed.observedAt
+    if ($rawObservedAt -is [DateTime]) {
+        $observedAtUtc = ([DateTime]$rawObservedAt).ToUniversalTime()
+    } else {
+        $parsedObservedAt = [DateTime]::MinValue
+        if ([DateTime]::TryParse(
+                [string]$rawObservedAt,
+                [Globalization.CultureInfo]::InvariantCulture,
+                [Globalization.DateTimeStyles]::AdjustToUniversal -bor
+                    [Globalization.DateTimeStyles]::AssumeUniversal,
+                [ref]$parsedObservedAt)) {
+            $observedAtUtc = $parsedObservedAt
+        }
+    }
+    $observedAtText = if ($null -ne $observedAtUtc) {
+        $observedAtUtc.ToString('o')
+    } else {
+        [string]$rawObservedAt
+    }
+
+    $autoscaling = if ($Observed.PSObject.Properties['autoscaling']) {
+        $Observed.autoscaling
+    } else {
+        $null
+    }
+    $eligibleSlots = if ($Observed.PSObject.Properties['eligibleSlots']) {
+        [Nullable[int]][int]$Observed.eligibleSlots
+    } else {
+        $null
+    }
+    $configuredSlots = if ($Observed.PSObject.Properties['configuredSlots']) {
+        [Nullable[int]][int]$Observed.configuredSlots
+    } else {
+        $null
+    }
+
+    return [PSCustomObject][ordered]@{
+        profileId = [string]$Observed.profileId
+        managerContractVersion = [int]$Observed.managerContractVersion
+        managerInstanceId = [string]$Observed.managerInstanceId
+        managerStatus = [string]$Observed.managerStatus
+        observedAt = $observedAtText
+        observedAtUtc = $observedAtUtc
+        generation = [int]$Observed.generation
+        desiredStateHash = [string]$Observed.desiredStateHash
+        desiredStateStatus = [string]$Observed.desiredStateStatus
+        mode = $(if ($autoscaling) { 'autoscaled' } else { 'fixed' })
+        desiredSlots = [int]$Observed.desiredSlots
+        activeSlots = [int]$Observed.activeSlots
+        configuredSlots = $configuredSlots
+        eligibleSlots = $eligibleSlots
+        autoscalingStatus = $(if ($autoscaling) { [string]$autoscaling.status } else { $null })
+        autoscalingTargetSlots = $(if ($autoscaling) { [int]$autoscaling.targetSlots } else { $null })
+        autoscalingLastError = $(if ($autoscaling) { [string]$autoscaling.lastError } else { $null })
+    }
+}
+
+<#
+.SYNOPSIS
+    Tests whether recovery evidence shows converged registration or listener state.
+
+.PARAMETER Evidence
+    Evidence object returned by New-RunnerRecoveryEvidence.
+
+.OUTPUTS
+    Boolean convergence result for the profile's fixed or autoscaled mode.
+#>
+function Test-RunnerRecoveryConvergence {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Evidence
+    )
+
+    if ($Evidence.mode -eq 'autoscaled') {
+        return (
+            $Evidence.autoscalingStatus -eq 'running' -and
+            [string]::IsNullOrWhiteSpace($Evidence.autoscalingLastError)
+        )
+    }
+
+    $reconciled = if ($null -ne $Evidence.eligibleSlots) {
+        [int]$Evidence.eligibleSlots
+    } else {
+        [int]$Evidence.activeSlots
+    }
+    return $reconciled -ge [int]$Evidence.desiredSlots
+}
+
+<#
+.SYNOPSIS
+    Prints one non-secret manager-recovery outcome and its supporting evidence.
+
+.PARAMETER Result
+    Outcome classification reported to the operator.
+
+.PARAMETER Reason
+    Short explanation of the classification.
+
+.PARAMETER Evidence
+    Non-secret evidence document describing the attempt.
+#>
+function Write-RunnerRecoveryOutcome {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('recovered', 'still-degraded', 'rejected', 'failed', 'indeterminate')]
+        [string]$Result,
+
+        [Parameter(Mandatory)]
+        [string]$Reason,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Evidence
+    )
+
+    $Evidence | Add-Member -NotePropertyName result -NotePropertyValue $Result -Force
+    $Evidence | Add-Member -NotePropertyName reason -NotePropertyValue $Reason -Force
+    Write-Host "[recover] result: $Result"
+    Write-Host "[recover] reason: $Reason"
+    Write-Host "[recover] evidence: $($Evidence | ConvertTo-Json -Depth 8 -Compress)"
+}
+
+<#
+.SYNOPSIS
+    Restarts exactly one already running manager for a degraded profile.
+
+.DESCRIPTION
+    Performs a manager-only recovery under the profile operation lock. The
+    manager is selected only by its exact PitCrew label, caller fences must match
+    observed state immediately before mutation, and exactly one bounded restart
+    is issued against the exact container ID. Workers, capacity, static
+    configuration, images, Compose state, and credentials are never touched, and
+    a failed or indeterminate attempt is never retried.
+
+.PARAMETER ProfileConfig
+    Effective profile returned by Resolve-RunnerProfile.
+
+.PARAMETER ExpectedManagerInstanceId
+    Manager instance the caller observed before requesting recovery.
+
+.PARAMETER ExpectedGeneration
+    Desired-state generation the caller observed before requesting recovery.
+
+.PARAMETER ExpectedDesiredStateHash
+    Desired-state hash the caller observed, required when observed state has one.
+
+.PARAMETER TimeoutSeconds
+    Bounded window for observed-state advancement and convergence.
+
+.OUTPUTS
+    One of recovered, still-degraded, rejected, failed, or indeterminate.
+#>
+function Invoke-RunnerManagerRecovery {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ExpectedManagerInstanceId,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [Nullable[int]]$ExpectedGeneration,
+
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$ExpectedDesiredStateHash,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, 600)]
+        [int]$TimeoutSeconds
+    )
+
+    $evidence = [PSCustomObject][ordered]@{
+        operation = 'recover-manager'
+        profile = $ProfileConfig.Name
+        managerLabel = "ephemeral-runner-manager-profile=$($ProfileConfig.Name)"
+        workerLabel = $ProfileConfig.ManagedRunnerLabel
+        expectedManagerInstanceId = $ExpectedManagerInstanceId
+        expectedGeneration = $ExpectedGeneration
+        expectedDesiredStateHash = $ExpectedDesiredStateHash
+        managerContainerId = $null
+        managerContractVersion = 0
+        managerMatchCount = 0
+        restartInvocations = 0
+        stopTimeoutSeconds = 60
+        timeoutSeconds = $TimeoutSeconds
+        before = $null
+        after = $null
+        workersBefore = @()
+        workersAfter = @()
+        workersPreserved = @()
+        workersExitedDuringWindow = @()
+        workersStartedDuringWindow = @()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($ExpectedManagerInstanceId)) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason '-RecoverManager requires -ExpectedManagerInstanceId.' `
+            -Evidence $evidence
+        return 'rejected'
+    }
+    if ($null -eq $ExpectedGeneration) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason '-RecoverManager requires -ExpectedGeneration.' `
+            -Evidence $evidence
+        return 'rejected'
+    }
+
+    $managerIds = @(Get-RunnerManagerContainerIdList -ProfileConfig $ProfileConfig)
+    $evidence.managerMatchCount = $managerIds.Count
+    if ($managerIds.Count -eq 0) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Profile '$($ProfileConfig.Name)' has no running manager. Recovery never starts a stopped profile." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+    if ($managerIds.Count -gt 1) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Profile '$($ProfileConfig.Name)' has $($managerIds.Count) running managers, so the recovery target is ambiguous." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+
+    $managerContainerId = [string]$managerIds[0]
+    $evidence.managerContainerId = $managerContainerId
+    $managerContract = Get-RunnerManagerContractVersion -ContainerId $managerContainerId
+    $evidence.managerContractVersion = $managerContract
+    if ($managerContract -lt 9) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Manager '$managerContainerId' reports contract $managerContract. Manager-only recovery requires contract 9 or newer." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+
+    if (Test-Path -LiteralPath $ProfileConfig.ShutdownRequestPath -PathType Leaf) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Profile '$($ProfileConfig.Name)' has an explicit manager shutdown request pending." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+
+    $before = New-RunnerRecoveryEvidence `
+        -ProfileConfig $ProfileConfig `
+        -Observed (Get-RunnerObservedManager -ProfileConfig $ProfileConfig)
+    if (-not $before) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Profile '$($ProfileConfig.Name)' has no readable observed state for its own profile identity." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+    $evidence.before = $before
+
+    if ($before.managerInstanceId -cne $ExpectedManagerInstanceId) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Observed manager instance '$($before.managerInstanceId)' does not match the expected instance. Re-read current state before retrying." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+    if ($before.generation -ne [int]$ExpectedGeneration) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason "Observed generation $($before.generation) does not match the expected generation $ExpectedGeneration." `
+            -Evidence $evidence
+        return 'rejected'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($before.desiredStateHash)) {
+        if ($before.desiredStateHash -cne $ExpectedDesiredStateHash) {
+            Write-RunnerRecoveryOutcome `
+                -Result 'rejected' `
+                -Reason 'Observed desired-state hash does not match the expected desired-state hash.' `
+                -Evidence $evidence
+            return 'rejected'
+        }
+    }
+
+    $workersBefore = @(Get-RunnerWorkerContainerIdList -ProfileConfig $ProfileConfig)
+    $evidence.workersBefore = $workersBefore
+
+    Write-Host "[recover] Profile '$($ProfileConfig.Name)' manager '$managerContainerId' contract $managerContract"
+    Write-Host "[recover] Fences: instance '$($before.managerInstanceId)', generation $($before.generation), status '$($before.managerStatus)'"
+    Write-Host "[recover] Mode '$($before.mode)' with $($workersBefore.Count) labelled worker container(s); no worker command is issued"
+
+    $recheckIds = @(Get-RunnerManagerContainerIdList -ProfileConfig $ProfileConfig)
+    if ($recheckIds.Count -ne 1 -or [string]$recheckIds[0] -cne $managerContainerId) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason 'The manager container identity changed between preflight and mutation.' `
+            -Evidence $evidence
+        return 'rejected'
+    }
+    $recheck = New-RunnerRecoveryEvidence `
+        -ProfileConfig $ProfileConfig `
+        -Observed (Get-RunnerObservedManager -ProfileConfig $ProfileConfig)
+    if (
+        -not $recheck -or
+        $recheck.managerInstanceId -cne $before.managerInstanceId -or
+        $recheck.generation -ne $before.generation -or
+        $recheck.desiredStateHash -cne $before.desiredStateHash
+    ) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'rejected' `
+            -Reason 'Observed state changed between preflight and mutation.' `
+            -Evidence $evidence
+        return 'rejected'
+    }
+
+    Write-Host "[recover] Restarting manager '$managerContainerId' once with a 60 second graceful stop window"
+    $evidence.restartInvocations = 1
+    & docker restart --time 60 $managerContainerId 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        $evidence.workersAfter = @(Get-RunnerWorkerContainerIdList -ProfileConfig $ProfileConfig)
+        Write-RunnerRecoveryOutcome `
+            -Result 'failed' `
+            -Reason "Docker could not restart manager '$managerContainerId'. Recovery does not retry automatically." `
+            -Evidence $evidence
+        return 'failed'
+    }
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $latest = $null
+    $managerReturned = $false
+    do {
+        $candidate = New-RunnerRecoveryEvidence `
+            -ProfileConfig $ProfileConfig `
+            -Observed (Get-RunnerObservedManager -ProfileConfig $ProfileConfig)
+        if (
+            $candidate -and
+            $null -ne $candidate.observedAtUtc -and
+            $null -ne $before.observedAtUtc -and
+            $candidate.observedAtUtc -gt $before.observedAtUtc
+        ) {
+            $latest = $candidate
+            if (
+                $candidate.managerInstanceId -cne $before.managerInstanceId -and
+                $candidate.managerStatus -eq 'running'
+            ) {
+                $managerReturned = $true
+                break
+            }
+        }
+        Start-Sleep -Milliseconds 200
+    } while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+
+    $evidence.after = $latest
+    $evidence.workersAfter = @(Get-RunnerWorkerContainerIdList -ProfileConfig $ProfileConfig)
+    $evidence.workersPreserved = @(
+        $evidence.workersBefore | Where-Object { $evidence.workersAfter -contains $_ }
+    )
+    $evidence.workersExitedDuringWindow = @(
+        $evidence.workersBefore | Where-Object { $evidence.workersAfter -notcontains $_ }
+    )
+    $evidence.workersStartedDuringWindow = @(
+        $evidence.workersAfter | Where-Object { $evidence.workersBefore -notcontains $_ }
+    )
+
+    if (-not $latest) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'indeterminate' `
+            -Reason "Observed state did not advance within $TimeoutSeconds seconds. Re-read current identity before any second attempt." `
+            -Evidence $evidence
+        return 'indeterminate'
+    }
+    if ($latest.managerInstanceId -ceq $before.managerInstanceId) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'failed' `
+            -Reason 'The manager instance did not change, so the replacement manager did not take over.' `
+            -Evidence $evidence
+        return 'failed'
+    }
+    if ($latest.generation -ne $before.generation -or $latest.desiredStateHash -cne $before.desiredStateHash) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'failed' `
+            -Reason 'The accepted generation or desired-state hash changed during recovery, which recovery must never do.' `
+            -Evidence $evidence
+        return 'failed'
+    }
+
+    $postManagerIds = @(Get-RunnerManagerContainerIdList -ProfileConfig $ProfileConfig)
+    if ($postManagerIds.Count -ne 1) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'indeterminate' `
+            -Reason "Exactly one running manager was expected after recovery but $($postManagerIds.Count) matched the exact label." `
+            -Evidence $evidence
+        return 'indeterminate'
+    }
+
+    if (-not $managerReturned) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'still-degraded' `
+            -Reason "Manager status is '$($latest.managerStatus)' rather than running after the bounded window." `
+            -Evidence $evidence
+        return 'still-degraded'
+    }
+
+    $converged = Test-RunnerRecoveryConvergence -Evidence $latest
+    while (-not $converged -and $stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds) {
+        Start-Sleep -Milliseconds 200
+        $candidate = New-RunnerRecoveryEvidence `
+            -ProfileConfig $ProfileConfig `
+            -Observed (Get-RunnerObservedManager -ProfileConfig $ProfileConfig)
+        if (
+            $candidate -and
+            $null -ne $candidate.observedAtUtc -and
+            $candidate.observedAtUtc -ge $latest.observedAtUtc
+        ) {
+            $latest = $candidate
+            $evidence.after = $latest
+            $converged = Test-RunnerRecoveryConvergence -Evidence $latest
+        }
+    }
+
+    if (-not $converged) {
+        Write-RunnerRecoveryOutcome `
+            -Result 'still-degraded' `
+            -Reason 'The manager returned but registration or listener state did not converge within the bounded window.' `
+            -Evidence $evidence
+        return 'still-degraded'
+    }
+
+    Write-RunnerRecoveryOutcome `
+        -Result 'recovered' `
+        -Reason 'The replacement manager published a new instance, kept the accepted generation, and converged.' `
+        -Evidence $evidence
+    return 'recovered'
 }
 
 function Get-RunnerSessionOwner {
@@ -765,6 +1292,53 @@ $profileLock = $null
 try {
     New-Item -ItemType Directory -Path $profileConfig.StateDirectory -Force | Out-Null
     $profileLock = Enter-RunnerProfileLock -Path $profileConfig.LockPath -TimeoutSeconds 30
+
+    if ($RecoverManager) {
+        if ($Down -or $Refresh -or $CapacityOnly) {
+            Write-Error '-RecoverManager cannot be combined with -Down, -Refresh, or -CapacityOnly.'
+        }
+        $mutatingParameterNames = @(
+            'Token',
+            'Replicas',
+            'Labels',
+            'NamePrefix',
+            'Repos',
+            'AddRepos',
+            'RemoveRepos',
+            'OrgName',
+            'EnterpriseName',
+            'Image',
+            'PullImage',
+            'RunnerGroup',
+            'Autoscale',
+            'MinimumIdle',
+            'ScaleDownDelaySeconds',
+            'MaximumActiveWorkers',
+            'WorkerMemory',
+            'WorkerMemorySwap',
+            'WorkerCpus',
+            'WorkerPids'
+        )
+        $suppliedMutations = @(
+            $mutatingParameterNames | Where-Object { $PSBoundParameters.ContainsKey($_) }
+        )
+        if ($suppliedMutations.Count -gt 0) {
+            Write-Error "-RecoverManager never changes configuration, capacity, or credentials, so it rejects: $($suppliedMutations -join ', ')."
+        }
+
+        Write-Host "[recover] Recovering only the manager for profile '$($profileConfig.Name)'"
+        $recoveryResult = Invoke-RunnerManagerRecovery `
+            -ProfileConfig $profileConfig `
+            -ExpectedManagerInstanceId $ExpectedManagerInstanceId `
+            -ExpectedGeneration $ExpectedGeneration `
+            -ExpectedDesiredStateHash $ExpectedDesiredStateHash `
+            -TimeoutSeconds $RecoveryTimeoutSeconds
+        if ($recoveryResult -ne 'recovered') {
+            Write-Error "Manager recovery for profile '$($profileConfig.Name)' reported '$recoveryResult'. No second attempt was made."
+        }
+        Write-Host "[done] Manager for profile '$($profileConfig.Name)' recovered. Workers, capacity, and configuration were not changed."
+        return
+    }
 
     if ($Down) {
         if ($Refresh -or $CapacityOnly) {

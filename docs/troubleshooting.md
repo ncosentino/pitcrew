@@ -85,6 +85,34 @@ Autoscaled profiles intentionally retain excess idle JIT runners until
 `scaleDownDelaySeconds` elapses. Any renewed demand cancels that pending
 scale-down.
 
+## A manager is degraded while its workers keep running
+
+When a profile's manager reports repeated Docker or listener failures, restart
+only that manager. Manager contract 9 and newer treat an ordinary termination
+signal without an explicit shutdown request as a handoff, so labelled workers
+stay alive and the replacement manager adopts them.
+
+Read the current fences first, then pass them back so a stale command cannot
+restart a manager that already changed:
+
+```powershell
+Get-Content .pitcrew-state\copilot-cli\observed-state.json
+.\Setup-Runner.ps1 -Profile copilot-cli -RecoverManager -ExpectedManagerInstanceId <managerInstanceId> -ExpectedGeneration <generation> -ExpectedDesiredStateHash <desiredStateHash>
+```
+
+The operation takes the profile operation lock, requires exactly one running
+manager on contract 9 or newer, refuses while a shutdown request is pending, and
+issues exactly one restart against the exact container ID with the established
+60-second graceful stop window. It never changes capacity or configuration,
+never touches a worker, never runs Compose or cleanup, and never needs the
+stored registration token.
+
+It reports `recovered`, `still-degraded`, `rejected`, `failed`, or
+`indeterminate`, and exits nonzero for everything except `recovered`. Recovery is
+never retried automatically: re-read observed state and reassess before any
+second attempt. A profile with no running manager is intentionally stopped or
+separately broken, and recovery will not start it.
+
 ## Docker-dependent workflow steps fail
 
 PitCrew workers intentionally do not receive a Docker socket. Route container

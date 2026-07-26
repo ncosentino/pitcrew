@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.5.0') 'The operations plugin version was not advanced for host diagnostics.'
+Add-Check ($plugin.version -eq '1.6.0') 'The operations plugin version was not advanced for profile recovery.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -54,7 +54,8 @@ $expectedSkills = @(
     'pitcrew-capacity',
     'pitcrew-dashboard-update',
     'pitcrew-host-diagnostics',
-    'pitcrew-pool-update'
+    'pitcrew-pool-update',
+    'pitcrew-profile-recover'
 )
 $skillDirectories = @(
     Get-ChildItem -LiteralPath $skillsRoot -Directory |
@@ -248,6 +249,148 @@ Add-Check (
     $hostDiagnosticsSkill -match 'Never run `docker system prune`' -and
     $hostDiagnosticsSkill -match 'Never enter a running worker with `docker exec`'
 ) 'The host diagnostics skill does not forbid destructive host operations.'
+
+$profileRecoverSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-profile-recover' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+$recoveryReferencePath = Join-Path $pluginRoot 'references' 'manager-recovery.md'
+Add-Check (
+    Test-Path -LiteralPath $recoveryReferencePath -PathType Leaf
+) 'The manager-only recovery reference is missing.'
+$recoveryReference = if (Test-Path -LiteralPath $recoveryReferencePath -PathType Leaf) {
+    Get-Content -LiteralPath $recoveryReferencePath -Raw -Encoding UTF8
+} else {
+    ''
+}
+
+foreach ($requiredReference in @(
+        '../../references/safety.md',
+        '../../references/profile-replay.md',
+        '../../references/manager-recovery.md')) {
+    Add-Check (
+        $profileRecoverSkill -match [regex]::Escape($requiredReference)
+    ) "The profile recovery skill does not read '$requiredReference'."
+}
+
+function Get-SkillCommandLine {
+    param([string]$Content)
+
+    $lines = [System.Collections.Generic.List[string]]::new()
+    foreach ($block in [regex]::Matches($Content, '(?ms)^\s*```[a-z]*\r?\n(?<body>.*?)^\s*```')) {
+        foreach ($line in ($block.Groups['body'].Value -split '\r?\n')) {
+            if (-not [string]::IsNullOrWhiteSpace($line)) {
+                $lines.Add($line.Trim())
+            }
+        }
+    }
+    return @($lines)
+}
+
+$forbiddenCommandPattern =
+    '(?i)(compose\s+down|docker\s+(stop|kill|rm|exec|pause|start|restart|prune|build|pull|update|system|compose)|prune|Restart-Service|Restart-Computer|Stop-Computer|shutdown\s|-Down\b|--force)'
+$recoverCommandLines = @(Get-SkillCommandLine -Content $profileRecoverSkill)
+$recoveryReferenceCommandLines = @(Get-SkillCommandLine -Content $recoveryReference)
+Add-Check ($recoverCommandLines.Count -gt 0) 'The profile recovery skill prints no resolved commands.'
+Add-Check (
+    -not (@($recoverCommandLines) | Where-Object { $_ -match $forbiddenCommandPattern })
+) 'The profile recovery skill contains a destructive command.'
+Add-Check (
+    -not (@($recoveryReferenceCommandLines) | Where-Object { $_ -match $forbiddenCommandPattern })
+) 'The manager-only recovery reference contains a destructive command.'
+
+$recoverDockerLines = @($recoverCommandLines | Where-Object { $_ -match '^docker\s' })
+Add-Check ($recoverDockerLines.Count -gt 0) 'The profile recovery skill collects no Docker evidence.'
+Add-Check (
+    -not (
+        @($recoverDockerLines) |
+            Where-Object {
+                $_ -notmatch 'label=ephemeral-runner-manager-profile=<profile>' -and
+                $_ -notmatch 'label=ephemeral-managed-runner-profile=<profile>' -and
+                $_ -notmatch 'docker inspect <exact-manager-id>'
+            }
+    )
+) 'The profile recovery skill queries Docker outside exact PitCrew labels and the exact manager ID.'
+Add-Check (
+    -not (@($recoverDockerLines) | Where-Object { $_ -notmatch '^docker (ps|inspect)\s' })
+) 'The profile recovery skill runs a Docker command that is not read-only.'
+
+$recoverSetupLines = @(
+    @($recoverCommandLines) + @($recoveryReferenceCommandLines) |
+        Where-Object { $_ -match 'Setup-Runner\.ps1' }
+)
+Add-Check (
+    $recoverSetupLines.Count -eq 2
+) 'The recovery surface does not publish exactly one supported invocation per document.'
+Add-Check (
+    -not (
+        @($recoverSetupLines) |
+            Where-Object {
+                $_ -notmatch '-RecoverManager' -or
+                $_ -notmatch '-ExpectedManagerInstanceId' -or
+                $_ -notmatch '-ExpectedGeneration'
+            }
+    )
+) 'The recovery surface invokes Setup-Runner.ps1 without the first-class recovery operation and its fences.'
+
+Add-Check (
+    $profileRecoverSkill -match '(?m)^## Dry-run mode' -and
+    $profileRecoverSkill -match 'Change nothing during the dry run\.' -and
+    $profileRecoverSkill -match '(?m)^## Explicit confirmation' -and
+    $profileRecoverSkill -match 'never approval to restart a manager'
+) 'The profile recovery skill does not gate recovery behind a dry run and explicit confirmation.'
+Add-Check (
+    $profileRecoverSkill -match 'An omitted profile is never permission to' -and
+    $profileRecoverSkill -match 'stop and ask which profile to recover'
+) 'The profile recovery skill can treat an omitted profile as every profile.'
+foreach ($requiredResult in @(
+        'recovered',
+        'still-degraded',
+        'rejected',
+        'failed',
+        'indeterminate')) {
+    Add-Check (
+        $profileRecoverSkill -match "``$requiredResult``"
+    ) "The profile recovery skill does not report the '$requiredResult' result."
+    Add-Check (
+        $recoveryReference -match "``$requiredResult``"
+    ) "The manager-only recovery reference does not define the '$requiredResult' result."
+}
+Add-Check (
+    $profileRecoverSkill -match '(?m)^## One attempt only' -and
+    $profileRecoverSkill -match 'never repeat the\s+recovery on your own initiative'
+) 'The profile recovery skill allows an automatic second attempt.'
+Add-Check (
+    $profileRecoverSkill -match '(?m)^## Multiple profiles' -and
+    $profileRecoverSkill -match 'Stop the\s+whole batch after the first'
+) 'The profile recovery skill does not stop a batch after an unsafe result.'
+Add-Check (
+    $profileRecoverSkill -match '(?m)^## Redaction' -and
+    $profileRecoverSkill -match '<pitcrew-root>' -and
+    $profileRecoverSkill -match 'Never open `\.env`'
+) 'The profile recovery skill does not redact its report or forbid credential access.'
+Add-Check (
+    $profileRecoverSkill -match 'manager contract is below 9' -and
+    $profileRecoverSkill -match 'manager-shutdown\.json' -and
+    $profileRecoverSkill -match 'zero or more than one container'
+) 'The profile recovery skill does not fail closed on contract, shutdown request, or ambiguous manager identity.'
+Add-Check (
+    $profileRecoverSkill -match 'finished its ephemeral job' -and
+    $profileRecoverSkill -match 'never describe such an exit as a worker that\s+recovery stopped'
+) 'The profile recovery skill can misreport a naturally completed worker as killed by recovery.'
+
+$setupRunnerContent = Get-Content `
+    -LiteralPath (Join-Path $root 'Setup-Runner.ps1') `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $setupRunnerContent -match '\[switch\]\$RecoverManager' -and
+    $setupRunnerContent -match '(?m)^\.PARAMETER RecoverManager' -and
+    $setupRunnerContent -match '(?m)^\.PARAMETER ExpectedManagerInstanceId' -and
+    $setupRunnerContent -match '(?m)^\.PARAMETER ExpectedGeneration' -and
+    $setupRunnerContent -match '(?m)^\.PARAMETER ExpectedDesiredStateHash' -and
+    $setupRunnerContent -match '(?m)^\.PARAMETER RecoveryTimeoutSeconds'
+) 'Setup-Runner.ps1 does not document the first-class manager recovery operation the skill invokes.'
 
 if ($errors.Count -gt 0) {
     foreach ($errorMessage in $errors) {

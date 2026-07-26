@@ -221,6 +221,65 @@ function Start-TestCapacityAcknowledgementWriter {
     }
 }
 
+function Set-TestObservedState {
+    param(
+        [string]$Path,
+        [string]$InstanceId,
+        [int]$Generation,
+        [string]$DesiredStateHash,
+        [string]$ManagerStatus,
+        [string]$ObservedAt,
+        [int]$DesiredSlots,
+        [int]$ActiveSlots,
+        [int]$EligibleSlots,
+        [AllowEmptyString()]
+        [string]$AutoscalingStatus
+    )
+
+    $document = [PSCustomObject][ordered]@{
+        schemaVersion = 1
+        managerContractVersion = 10
+        profileId = 'default'
+        managerInstanceId = $InstanceId
+        managerStatus = $ManagerStatus
+        observedAt = $ObservedAt
+        scope = 'repo'
+        generation = $Generation
+        desiredStateHash = $DesiredStateHash
+        desiredStateStatus = 'accepted'
+        desiredSlots = $DesiredSlots
+        configuredSlots = $DesiredSlots
+        activeSlots = $ActiveSlots
+        eligibleSlots = $EligibleSlots
+        drainingSlots = 0
+        slots = @()
+        autoscaling = $null
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AutoscalingStatus)) {
+        $document.autoscaling = [PSCustomObject][ordered]@{
+            mode = 'scale-set'
+            status = $AutoscalingStatus
+            minimumIdleSlots = 0
+            maximumSlots = $DesiredSlots
+            targetSlots = $ActiveSlots
+            assignedJobs = 0
+            runningJobs = 0
+            availableJobs = 0
+            idleRunners = 0
+            busyRunners = $ActiveSlots
+            scaleDownDelaySeconds = 120
+            scaleDownAt = $null
+            scaleSetCount = 1
+            lastError = $null
+        }
+    }
+
+    New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
+    $document |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $Path -Encoding UTF8
+}
+
 $requiredPaths = @(
     $functionsPath,
     $setupPath,
@@ -1435,6 +1494,41 @@ try {
             $env:PITCREW_TEST_MANAGER_RUNNING -eq '1'
         ) {
             Write-Output 'manager-container-id'
+            if ($env:PITCREW_TEST_MANAGER_EXTRA_ID) {
+                Write-Output $env:PITCREW_TEST_MANAGER_EXTRA_ID
+            }
+        }
+        if (
+            $dockerArguments[0] -eq 'ps' -and
+            $dockerArguments -contains '-q' -and
+            $dockerArguments -contains 'label=ephemeral-managed-runner-profile=default' -and
+            $env:PITCREW_TEST_WORKER_IDS
+        ) {
+            foreach ($workerId in ($env:PITCREW_TEST_WORKER_IDS -split ',')) {
+                if ($workerId) {
+                    Write-Output $workerId
+                }
+            }
+        }
+        if ($dockerArguments[0] -eq 'restart') {
+            if ($env:PITCREW_TEST_RESTART_FAILURE -eq '1') {
+                $global:LASTEXITCODE = 1
+                return
+            }
+            if (
+                $env:PITCREW_TEST_POST_OBSERVED_SOURCE -and
+                $env:PITCREW_TEST_POST_OBSERVED_TARGET
+            ) {
+                Copy-Item `
+                    -LiteralPath $env:PITCREW_TEST_POST_OBSERVED_SOURCE `
+                    -Destination $env:PITCREW_TEST_POST_OBSERVED_TARGET `
+                    -Force
+            }
+            if ($env:PITCREW_TEST_POST_WORKER_IDS) {
+                $env:PITCREW_TEST_WORKER_IDS = $env:PITCREW_TEST_POST_WORKER_IDS
+            }
+            $global:LASTEXITCODE = 0
+            return
         }
         if (
             $dockerArguments[0] -eq 'image' -and
@@ -2084,6 +2178,369 @@ try {
         Add-Check (-not ($namedDownCommands | Where-Object { $_ -match '(^|\t)label=ephemeral-managed-runner$' })) 'Named teardown targeted the legacy global Docker label.'
         Add-Check (-not ($namedDownCommands -match 'name=')) 'Named teardown used a broad container-name filter.'
 
+        $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
+        $defaultObservedPath = Join-Path $defaultStateDirectory 'observed-state.json'
+        $defaultShutdownPath = Join-Path $defaultStateDirectory 'manager-shutdown.json'
+        $postObservedPath = Join-Path $tempRoot 'post-observed-state.json'
+        $env:PITCREW_TEST_POST_OBSERVED_TARGET = $defaultObservedPath
+
+        function Reset-TestRecoveryState {
+            param(
+                [AllowEmptyString()]
+                [string]$PreAutoscalingStatus = ''
+            )
+
+            Set-TestObservedState `
+                -Path $defaultObservedPath `
+                -InstanceId 'manager-instance-a' `
+                -Generation 5 `
+                -DesiredStateHash 'hash-5' `
+                -ManagerStatus 'running' `
+                -ObservedAt '2026-01-01T00:00:00Z' `
+                -DesiredSlots 2 `
+                -ActiveSlots 2 `
+                -EligibleSlots 0 `
+                -AutoscalingStatus $PreAutoscalingStatus
+            $env:PITCREW_TEST_WORKER_IDS = 'worker-alpha,worker-beta'
+            Remove-Item -LiteralPath $defaultShutdownPath -Force -ErrorAction SilentlyContinue
+            Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        }
+
+        function Test-TestRecoveryTouchedForbiddenSurface {
+            param([string[]]$Commands)
+
+            foreach ($command in $Commands) {
+                $tokens = @($command -split "`t")
+                if ($tokens[0] -in @(
+                        'compose', 'build', 'pull', 'system', 'rm', 'kill',
+                        'exec', 'stop', 'start', 'update', 'tag', 'run')) {
+                    return $true
+                }
+                if ($tokens[0] -ne 'ps' -and ($command -match 'ephemeral-managed-runner')) {
+                    return $true
+                }
+                if ($command -match 'worker-alpha|worker-beta') {
+                    return $true
+                }
+            }
+            return $false
+        }
+
+        Reset-TestRecoveryState
+        Set-TestObservedState `
+            -Path $postObservedPath `
+            -InstanceId 'manager-instance-b' `
+            -Generation 5 `
+            -DesiredStateHash 'hash-5' `
+            -ManagerStatus 'running' `
+            -ObservedAt '2026-01-01T00:05:00Z' `
+            -DesiredSlots 2 `
+            -ActiveSlots 2 `
+            -EligibleSlots 2 `
+            -AutoscalingStatus ''
+        $env:PITCREW_TEST_POST_OBSERVED_SOURCE = $postObservedPath
+        $desiredCapacityBeforeRecovery = Get-Content `
+            -LiteralPath $defaultDesiredPath `
+            -Raw `
+            -Encoding UTF8
+        $recoverOutput = (
+            & $fixtureSetup `
+                -RecoverManager `
+                -ExpectedManagerInstanceId 'manager-instance-a' `
+                -ExpectedGeneration 5 `
+                -ExpectedDesiredStateHash 'hash-5' `
+                -RecoveryTimeoutSeconds 5 *>&1
+        ) | Out-String
+        $recoverCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $restartCommands = @($recoverCommands | Where-Object { $_ -match '^restart(\t|$)' })
+        Add-Check ($recoverOutput -match 'result: recovered') 'A fixed profile with matching fences was not recovered.'
+        Add-Check ($restartCommands.Count -eq 1) 'Manager recovery did not issue exactly one restart.'
+        Add-Check (
+            $restartCommands.Count -eq 1 -and
+            $restartCommands[0] -eq "restart`t--time`t60`tmanager-container-id"
+        ) 'Manager recovery did not restart the exact manager container with the 60 second stop window.'
+        Add-Check (
+            $recoverCommands -match 'ps.*label=ephemeral-runner-manager-profile=default'
+        ) 'Manager recovery did not select the manager by its exact label.'
+        Add-Check (
+            -not (Test-TestRecoveryTouchedForbiddenSurface -Commands $recoverCommands)
+        ) 'Manager recovery ran Compose, image, cleanup, or worker-directed Docker commands.'
+        Add-Check (
+            $recoverOutput -match '"workersBefore":\["worker-alpha","worker-beta"\]'
+        ) 'Manager recovery did not report the labelled workers observed before the restart.'
+        Add-Check (
+            $recoverOutput -match '"workersPreserved":\["worker-alpha","worker-beta"\]'
+        ) 'Manager recovery did not report preserved workers.'
+        Add-Check (
+            (Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8) -eq
+                $desiredCapacityBeforeRecovery
+        ) 'Manager recovery changed desired capacity.'
+        Add-Check (
+            $recoverOutput -notmatch 'test-registration-token|ACCESS_TOKEN'
+        ) 'Manager recovery disclosed registration credentials.'
+
+        Reset-TestRecoveryState -PreAutoscalingStatus 'degraded'
+        Set-TestObservedState `
+            -Path $postObservedPath `
+            -InstanceId 'manager-instance-b' `
+            -Generation 5 `
+            -DesiredStateHash 'hash-5' `
+            -ManagerStatus 'running' `
+            -ObservedAt '2026-01-01T00:05:00Z' `
+            -DesiredSlots 2 `
+            -ActiveSlots 2 `
+            -EligibleSlots 0 `
+            -AutoscalingStatus 'running'
+        $autoscaledRecoverOutput = (
+            & $fixtureSetup `
+                -RecoverManager `
+                -ExpectedManagerInstanceId 'manager-instance-a' `
+                -ExpectedGeneration 5 `
+                -ExpectedDesiredStateHash 'hash-5' `
+                -RecoveryTimeoutSeconds 5 *>&1
+        ) | Out-String
+        Add-Check (
+            $autoscaledRecoverOutput -match 'result: recovered' -and
+            $autoscaledRecoverOutput -match '"mode":"autoscaled"'
+        ) 'An autoscaled profile did not use the same recovery entry point and listener postcondition.'
+
+        Reset-TestRecoveryState -PreAutoscalingStatus 'degraded'
+        Set-TestObservedState `
+            -Path $postObservedPath `
+            -InstanceId 'manager-instance-b' `
+            -Generation 5 `
+            -DesiredStateHash 'hash-5' `
+            -ManagerStatus 'running' `
+            -ObservedAt '2026-01-01T00:05:00Z' `
+            -DesiredSlots 2 `
+            -ActiveSlots 2 `
+            -EligibleSlots 2 `
+            -AutoscalingStatus 'degraded'
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -RecoverManager `
+                    -ExpectedManagerInstanceId 'manager-instance-a' `
+                    -ExpectedGeneration 5 `
+                    -ExpectedDesiredStateHash 'hash-5' `
+                    -RecoveryTimeoutSeconds 2
+            } `
+            -ExpectedMessage "reported 'still-degraded'" `
+            -Failure 'A returning autoscaled manager with a degraded listener was reported as recovered.'
+
+        Reset-TestRecoveryState
+        Set-TestObservedState `
+            -Path $postObservedPath `
+            -InstanceId 'manager-instance-b' `
+            -Generation 5 `
+            -DesiredStateHash 'hash-5' `
+            -ManagerStatus 'running' `
+            -ObservedAt '2026-01-01T00:05:00Z' `
+            -DesiredSlots 2 `
+            -ActiveSlots 2 `
+            -EligibleSlots 0 `
+            -AutoscalingStatus ''
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -RecoverManager `
+                    -ExpectedManagerInstanceId 'manager-instance-a' `
+                    -ExpectedGeneration 5 `
+                    -ExpectedDesiredStateHash 'hash-5' `
+                    -RecoveryTimeoutSeconds 2
+            } `
+            -ExpectedMessage "reported 'still-degraded'" `
+            -Failure 'A fixed profile whose registrations never reconciled was reported as recovered.'
+
+        Reset-TestRecoveryState
+        Set-TestObservedState `
+            -Path $postObservedPath `
+            -InstanceId 'manager-instance-a' `
+            -Generation 5 `
+            -DesiredStateHash 'hash-5' `
+            -ManagerStatus 'running' `
+            -ObservedAt '2026-01-01T00:05:00Z' `
+            -DesiredSlots 2 `
+            -ActiveSlots 2 `
+            -EligibleSlots 2 `
+            -AutoscalingStatus ''
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -RecoverManager `
+                    -ExpectedManagerInstanceId 'manager-instance-a' `
+                    -ExpectedGeneration 5 `
+                    -ExpectedDesiredStateHash 'hash-5' `
+                    -RecoveryTimeoutSeconds 2
+            } `
+            -ExpectedMessage "reported 'failed'" `
+            -Failure 'An unchanged manager instance was accepted as a successful recovery.'
+        $unchangedInstanceCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            @($unchangedInstanceCommands | Where-Object { $_ -match '^restart(\t|$)' }).Count -eq 1
+        ) 'Manager recovery retried the restart after an unchanged manager instance.'
+
+        Reset-TestRecoveryState
+        $env:PITCREW_TEST_POST_OBSERVED_SOURCE = ''
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -RecoverManager `
+                    -ExpectedManagerInstanceId 'manager-instance-a' `
+                    -ExpectedGeneration 5 `
+                    -ExpectedDesiredStateHash 'hash-5' `
+                    -RecoveryTimeoutSeconds 2
+            } `
+            -ExpectedMessage "reported 'indeterminate'" `
+            -Failure 'Observed state that never advanced was not reported as indeterminate.'
+        $timeoutCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            @($timeoutCommands | Where-Object { $_ -match '^restart(\t|$)' }).Count -eq 1
+        ) 'Manager recovery retried the restart after an observed-state timeout.'
+        $env:PITCREW_TEST_POST_OBSERVED_SOURCE = $postObservedPath
+
+        Reset-TestRecoveryState
+        $env:PITCREW_TEST_RESTART_FAILURE = '1'
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -RecoverManager `
+                    -ExpectedManagerInstanceId 'manager-instance-a' `
+                    -ExpectedGeneration 5 `
+                    -ExpectedDesiredStateHash 'hash-5' `
+                    -RecoveryTimeoutSeconds 2
+            } `
+            -ExpectedMessage "reported 'failed'" `
+            -Failure 'A failed Docker restart was not reported as a failed recovery.'
+        $restartFailureCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            @($restartFailureCommands | Where-Object { $_ -match '^restart(\t|$)' }).Count -eq 1
+        ) 'Manager recovery retried the restart after a Docker failure.'
+        Add-Check (
+            -not (Test-TestRecoveryTouchedForbiddenSurface -Commands $restartFailureCommands)
+        ) 'A failed manager recovery escalated to Compose, cleanup, or worker commands.'
+        Remove-Item Env:\PITCREW_TEST_RESTART_FAILURE -ErrorAction SilentlyContinue
+
+        function New-TestRecoveryArguments {
+            param([hashtable]$Override)
+
+            $arguments = @{
+                ExpectedManagerInstanceId = 'manager-instance-a'
+                ExpectedGeneration = 5
+                ExpectedDesiredStateHash = 'hash-5'
+            }
+            foreach ($entry in $Override.GetEnumerator()) {
+                $arguments[$entry.Key] = $entry.Value
+            }
+            return $arguments
+        }
+        $recoveryRejections = @(
+            [PSCustomObject]@{
+                Name = 'a missing manager instance fence'
+                Arguments = @{ ExpectedGeneration = 5 }
+                Setup = { }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a missing generation fence'
+                Arguments = @{ ExpectedManagerInstanceId = 'manager-instance-a' }
+                Setup = { }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a stale manager instance'
+                Arguments = New-TestRecoveryArguments -Override @{ ExpectedManagerInstanceId = 'manager-instance-old' }
+                Setup = { }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a stale generation'
+                Arguments = New-TestRecoveryArguments -Override @{ ExpectedGeneration = 4 }
+                Setup = { }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a stale desired-state hash'
+                Arguments = New-TestRecoveryArguments -Override @{ ExpectedDesiredStateHash = 'hash-4' }
+                Setup = { }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a pending explicit shutdown request'
+                Arguments = New-TestRecoveryArguments -Override @{ }
+                Setup = {
+                    '{"schemaVersion":1}' |
+                        Set-Content -LiteralPath $defaultShutdownPath -Encoding UTF8
+                }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'no running manager'
+                Arguments = New-TestRecoveryArguments -Override @{ }
+                Setup = { $env:PITCREW_TEST_MANAGER_RUNNING = '0' }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'multiple matching managers'
+                Arguments = New-TestRecoveryArguments -Override @{ }
+                Setup = { $env:PITCREW_TEST_MANAGER_EXTRA_ID = 'manager-container-id-2' }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a legacy manager contract'
+                Arguments = New-TestRecoveryArguments -Override @{ }
+                Setup = { $env:PITCREW_TEST_MANAGER_CONTRACT = '8' }
+                Expected = "reported 'rejected'"
+            },
+            [PSCustomObject]@{
+                Name = 'a capacity mutation'
+                Arguments = New-TestRecoveryArguments -Override @{ Replicas = 4 }
+                Setup = { }
+                Expected = 'never changes configuration, capacity, or credentials'
+            },
+            [PSCustomObject]@{
+                Name = 'a supplied registration token'
+                Arguments = New-TestRecoveryArguments -Override @{ Token = 'test-registration-token' }
+                Setup = { }
+                Expected = 'never changes configuration, capacity, or credentials'
+            },
+            [PSCustomObject]@{
+                Name = 'a combined teardown'
+                Arguments = New-TestRecoveryArguments -Override @{ Down = $true }
+                Setup = { }
+                Expected = 'cannot be combined with'
+            }
+        )
+        foreach ($rejection in $recoveryRejections) {
+            Reset-TestRecoveryState
+            & $rejection.Setup
+            $rejectionArguments = @{
+                RecoverManager = $true
+                RecoveryTimeoutSeconds = 2
+            }
+            foreach ($entry in $rejection.Arguments.GetEnumerator()) {
+                $rejectionArguments[$entry.Key] = $entry.Value
+            }
+            Add-ThrowsCheck `
+                -Action { & $fixtureSetup @rejectionArguments } `
+                -ExpectedMessage ([regex]::Escape($rejection.Expected)) `
+                -Failure "Manager recovery accepted $($rejection.Name)."
+            $rejectionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+            Add-Check (
+                @($rejectionCommands | Where-Object { $_ -match '^restart(\t|$)' }).Count -eq 0
+            ) "Manager recovery restarted a manager despite $($rejection.Name)."
+            Add-Check (
+                -not (Test-TestRecoveryTouchedForbiddenSurface -Commands $rejectionCommands)
+            ) "A rejected manager recovery ran Compose, cleanup, or worker commands for $($rejection.Name)."
+            $env:PITCREW_TEST_MANAGER_RUNNING = '1'
+            Remove-Item Env:\PITCREW_TEST_MANAGER_EXTRA_ID -ErrorAction SilentlyContinue
+            Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
+        }
+
+        Remove-Item Env:\PITCREW_TEST_WORKER_IDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_POST_OBSERVED_SOURCE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_POST_OBSERVED_TARGET -ErrorAction SilentlyContinue
+
         Remove-Item `
             -LiteralPath (Join-Path (Split-Path -Parent $defaultDesiredPath) 'observed-state.json') `
             -Force `
@@ -2117,6 +2574,13 @@ try {
         Remove-Item Env:\PITCREW_TEST_IMAGE_MISSING -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_WORKER_IDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_POST_WORKER_IDS -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_POST_OBSERVED_SOURCE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_POST_OBSERVED_TARGET -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_RESTART_FAILURE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_EXTRA_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
     }
 }
 finally {
