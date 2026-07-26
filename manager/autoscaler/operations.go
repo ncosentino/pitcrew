@@ -316,6 +316,28 @@ func (d *boundedDockerClient) isRunning(
 	)
 }
 
+func (d *boundedDockerClient) inspectExit(
+	ctx context.Context,
+	containerID string,
+) (containerExitState, bool) {
+	type inspection struct {
+		state     containerExitState
+		inspected bool
+	}
+	result, err := runContextOperation(
+		ctx,
+		dockerOperationTimeout,
+		func(operationContext context.Context) (inspection, error) {
+			state, inspected := d.inner.inspectExit(operationContext, containerID)
+			return inspection{state: state, inspected: inspected}, nil
+		},
+	)
+	if err != nil {
+		return containerExitState{}, false
+	}
+	return result.state, result.inspected
+}
+
 func (d *boundedDockerClient) readLogs(
 	ctx context.Context,
 	containerID string,

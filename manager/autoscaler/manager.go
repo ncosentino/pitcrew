@@ -23,6 +23,7 @@ type autoscalerManager struct {
 	clock      clock
 	logger     *slog.Logger
 	instanceID string
+	admission  *admissionController
 
 	controllers          map[string]*targetController
 	retiring             map[string]*targetController
@@ -56,6 +57,11 @@ type autoscalerManager struct {
 	writeObserved         func(string, any) error
 }
 
+// recoveredAdmissionKey names the admission member that holds workers recovered
+// from a previous manager instance. The leading control character keeps it
+// outside the target key namespace.
+const recoveredAdmissionKey = "\x00recovered"
+
 type pendingScaleSet struct {
 	handle scaleSetHandle
 	api    scaleSetService
@@ -82,6 +88,7 @@ func newAutoscalerManager(
 		clock:                 managerClock,
 		logger:                logger,
 		instanceID:            instanceID,
+		admission:             newAdmissionController(cfg.maximumActiveWorkers),
 		controllers:           make(map[string]*targetController),
 		retiring:              make(map[string]*targetController),
 		pending:               make(map[string]pendingScaleSet),
@@ -217,7 +224,20 @@ func (m *autoscalerManager) scanRecovered(ctx context.Context) error {
 			container,
 		)
 	}
+	// Recovered workers that no controller has adopted yet still occupy the
+	// profile ceiling, so admission must count them before any target starts.
+	m.admission.join(recoveredAdmissionKey, m.unadoptedRecoveredCount)
 	return nil
+}
+
+// unadoptedRecoveredCount reports workers recovered from a previous manager
+// instance that no target controller owns yet.
+func (m *autoscalerManager) unadoptedRecoveredCount() int {
+	total := 0
+	for _, containers := range m.recovered {
+		total += len(containers)
+	}
+	return total
 }
 
 func (m *autoscalerManager) restoreLastValid() error {
@@ -554,6 +574,7 @@ func (m *autoscalerManager) startDesiredController(
 		handle,
 		m.docker,
 		m.clock,
+		m.admission,
 		m.cfg.sessionOwner,
 		m.recovered[target.key],
 		m.logger,
@@ -706,6 +727,7 @@ func (m *autoscalerManager) startRetiringController(
 		existing,
 		m.docker,
 		m.clock,
+		m.admission,
 		m.cfg.sessionOwner,
 		m.recovered[target.key],
 		m.logger,

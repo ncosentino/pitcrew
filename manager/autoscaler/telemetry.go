@@ -23,6 +23,12 @@ type resourceUsage struct {
 	CPUCores              float64 `json:"cpuCores"`
 	MemoryWorkingSetBytes int64   `json:"memoryWorkingSetBytes"`
 	PIDs                  int64   `json:"pids"`
+	// Cumulative counters stay null when Docker does not report them so an
+	// unavailable measurement is never published as a measured zero.
+	NetworkRxBytes  *int64 `json:"networkRxBytes"`
+	NetworkTxBytes  *int64 `json:"networkTxBytes"`
+	BlockReadBytes  *int64 `json:"blockReadBytes"`
+	BlockWriteBytes *int64 `json:"blockWriteBytes"`
 }
 
 type hostResourceCapacity struct {
@@ -210,6 +216,8 @@ func parseDockerResourceStats(
 			CPUPerc   string          `json:"CPUPerc"`
 			MemUsage  string          `json:"MemUsage"`
 			PIDs      json.RawMessage `json:"PIDs"`
+			NetIO     string          `json:"NetIO"`
+			BlockIO   string          `json:"BlockIO"`
 		}
 		if err := json.Unmarshal(line, &record); err != nil {
 			continue
@@ -219,6 +227,10 @@ func parseDockerResourceStats(
 			record.MemUsage,
 			record.PIDs,
 		)
+		if err == nil {
+			usage.NetworkRxBytes, usage.NetworkTxBytes = parseCumulativeIOPair(record.NetIO)
+			usage.BlockReadBytes, usage.BlockWriteBytes = parseCumulativeIOPair(record.BlockIO)
+		}
 		if err != nil {
 			continue
 		}
@@ -264,6 +276,24 @@ func parseContainerResourceUsage(
 		MemoryWorkingSetBytes: memoryBytes,
 		PIDs:                  pids,
 	}, nil
+}
+
+// parseCumulativeIOPair reads Docker's cumulative "<in> / <out>" counters.
+// Either side stays null when it cannot be measured.
+func parseCumulativeIOPair(value string) (*int64, *int64) {
+	first, second, found := strings.Cut(value, "/")
+	if !found {
+		return nil, nil
+	}
+	return parseOptionalSizeBytes(first), parseOptionalSizeBytes(second)
+}
+
+func parseOptionalSizeBytes(value string) *int64 {
+	parsed, err := parseSizeBytes(value)
+	if err != nil {
+		return nil
+	}
+	return &parsed
 }
 
 func parseCPUCores(value string) (float64, error) {

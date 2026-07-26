@@ -13,18 +13,56 @@ type resourceTelemetry struct {
 }
 
 type observedSlot struct {
-	Key                string         `json:"key"`
-	Repository         *string        `json:"repository"`
-	Desired            bool           `json:"desired"`
-	ProcessRunning     bool           `json:"processRunning"`
-	State              string         `json:"state"`
-	FailureCount       int            `json:"failureCount"`
-	BackoffSeconds     int            `json:"backoffSeconds"`
-	UpdatedAt          *string        `json:"updatedAt"`
-	Resources          *resourceUsage `json:"resources"`
-	Activity           string         `json:"activity,omitempty"`
-	Target             string         `json:"target,omitempty"`
-	RegistrationStatus string         `json:"registrationStatus"`
+	Key                string              `json:"key"`
+	Repository         *string             `json:"repository"`
+	Desired            bool                `json:"desired"`
+	ProcessRunning     bool                `json:"processRunning"`
+	State              string              `json:"state"`
+	FailureCount       int                 `json:"failureCount"`
+	BackoffSeconds     int                 `json:"backoffSeconds"`
+	UpdatedAt          *string             `json:"updatedAt"`
+	Resources          *resourceUsage      `json:"resources"`
+	Activity           string              `json:"activity,omitempty"`
+	Target             string              `json:"target,omitempty"`
+	RegistrationStatus string              `json:"registrationStatus"`
+	ImageID            *string             `json:"imageId"`
+	LastExit           *lastExitDiagnostic `json:"lastExit"`
+}
+
+// observedResourcePolicy publishes the configured per-worker limits. A null
+// field means unconfigured; it never means zero.
+type observedResourcePolicy struct {
+	MemoryBytes     *int64  `json:"memoryBytes"`
+	MemorySwapBytes *int64  `json:"memorySwapBytes"`
+	CPUCores        *string `json:"cpuCores"`
+	PIDs            *int64  `json:"pids"`
+}
+
+// observedScaleSetStatistics carries timestamped GitHub evidence. It is never a
+// count of local Docker workers.
+type observedScaleSetStatistics struct {
+	ObservedAt        string `json:"observedAt"`
+	AvailableJobs     int    `json:"availableJobs"`
+	AcquiredJobs      int    `json:"acquiredJobs"`
+	AssignedJobs      int    `json:"assignedJobs"`
+	RunningJobs       int    `json:"runningJobs"`
+	RegisteredRunners int    `json:"registeredRunners"`
+	BusyRunners       int    `json:"busyRunners"`
+	IdleRunners       int    `json:"idleRunners"`
+}
+
+// observedTarget separates each target's local Docker worker counts from the
+// GitHub scale-set statistics observed for the same target.
+type observedTarget struct {
+	Key                  string                      `json:"key"`
+	Repository           *string                     `json:"repository"`
+	MaximumSlots         int                         `json:"maximumSlots"`
+	TargetSlots          int                         `json:"targetSlots"`
+	LocalActiveWorkers   int                         `json:"localActiveWorkers"`
+	LocalIdleWorkers     int                         `json:"localIdleWorkers"`
+	LocalBusyWorkers     int                         `json:"localBusyWorkers"`
+	LocalDrainingWorkers int                         `json:"localDrainingWorkers"`
+	Statistics           *observedScaleSetStatistics `json:"statistics"`
 }
 
 type observedAutoscaling struct {
@@ -42,6 +80,9 @@ type observedAutoscaling struct {
 	ScaleDownAt           *string `json:"scaleDownAt"`
 	ScaleSetCount         int     `json:"scaleSetCount"`
 	LastError             *string `json:"lastError"`
+
+	MaximumActiveWorkers int              `json:"maximumActiveWorkers"`
+	Targets              []observedTarget `json:"targets"`
 }
 
 type observedUpdate struct {
@@ -53,25 +94,26 @@ type observedUpdate struct {
 }
 
 type observedState struct {
-	SchemaVersion          int                 `json:"schemaVersion"`
-	ManagerContractVersion int                 `json:"managerContractVersion"`
-	ProfileID              string              `json:"profileId"`
-	ManagerInstanceID      string              `json:"managerInstanceId"`
-	ManagerStatus          string              `json:"managerStatus"`
-	ObservedAt             string              `json:"observedAt"`
-	Scope                  string              `json:"scope"`
-	Generation             int                 `json:"generation"`
-	DesiredStateHash       *string             `json:"desiredStateHash"`
-	DesiredStateStatus     string              `json:"desiredStateStatus"`
-	DesiredSlots           int                 `json:"desiredSlots"`
-	ActiveSlots            int                 `json:"activeSlots"`
-	EligibleSlots          int                 `json:"eligibleSlots"`
-	DrainingSlots          int                 `json:"drainingSlots"`
-	ConfiguredSlots        int                 `json:"configuredSlots"`
-	Slots                  []observedSlot      `json:"slots"`
-	ResourceTelemetry      resourceTelemetry   `json:"resourceTelemetry"`
-	Autoscaling            observedAutoscaling `json:"autoscaling"`
-	Update                 observedUpdate      `json:"update"`
+	SchemaVersion          int                     `json:"schemaVersion"`
+	ManagerContractVersion int                     `json:"managerContractVersion"`
+	ProfileID              string                  `json:"profileId"`
+	ManagerInstanceID      string                  `json:"managerInstanceId"`
+	ManagerStatus          string                  `json:"managerStatus"`
+	ObservedAt             string                  `json:"observedAt"`
+	Scope                  string                  `json:"scope"`
+	Generation             int                     `json:"generation"`
+	DesiredStateHash       *string                 `json:"desiredStateHash"`
+	DesiredStateStatus     string                  `json:"desiredStateStatus"`
+	DesiredSlots           int                     `json:"desiredSlots"`
+	ActiveSlots            int                     `json:"activeSlots"`
+	EligibleSlots          int                     `json:"eligibleSlots"`
+	DrainingSlots          int                     `json:"drainingSlots"`
+	ConfiguredSlots        int                     `json:"configuredSlots"`
+	Slots                  []observedSlot          `json:"slots"`
+	ResourceTelemetry      resourceTelemetry       `json:"resourceTelemetry"`
+	ResourcePolicy         *observedResourcePolicy `json:"resourcePolicy"`
+	Autoscaling            observedAutoscaling     `json:"autoscaling"`
+	Update                 observedUpdate          `json:"update"`
 }
 
 func buildObservedState(
@@ -116,6 +158,7 @@ func buildObservedState(
 			Host:      nil,
 			Manager:   nil,
 		},
+		ResourcePolicy: observedResourcePolicyFrom(cfg.resources),
 		Autoscaling: observedAutoscaling{
 			Mode:                  "scale-set",
 			Status:                autoscalingStatus(managerStatus, lastError),
@@ -123,6 +166,8 @@ func buildObservedState(
 			MaximumSlots:          configuredSlots,
 			ScaleDownDelaySeconds: int(cfg.scaleDownDelay / time.Second),
 			ScaleSetCount:         len(snapshots),
+			MaximumActiveWorkers:  cfg.maximumActiveWorkers,
+			Targets:               []observedTarget{},
 		},
 		Update: observedUpdate{
 			Status:         "current",
@@ -154,6 +199,20 @@ func buildObservedState(
 			value := *snapshot.scaleDownAt
 			earliestScaleDown = &value
 		}
+		state.Autoscaling.Targets = append(
+			state.Autoscaling.Targets,
+			observedTargetState(snapshot),
+		)
+		for _, cleanup := range snapshot.pendingCleanups {
+			if slotKeyHeldByRunner(snapshot, cleanup.SlotKey) {
+				continue
+			}
+			state.DrainingSlots++
+			state.Slots = append(
+				state.Slots,
+				observedCleanupSlot(cleanup, snapshot),
+			)
+		}
 		for _, runner := range snapshot.runners {
 			state.ActiveSlots++
 			if snapshot.retiring ||
@@ -161,7 +220,7 @@ func buildObservedState(
 				runner.state == runnerCleanupPending {
 				state.DrainingSlots++
 			}
-			slot := observedRunnerSlot(runner, snapshot.retiring)
+			slot := observedRunnerSlot(runner, snapshot.retiring, cfg.workerImageID)
 			if slot.RegistrationStatus == "connected" {
 				state.EligibleSlots++
 			}
@@ -209,7 +268,110 @@ func applyResourceSample(state *observedState, sample resourceSample) {
 	}
 }
 
-func observedRunnerSlot(runner runnerRecord, retiring bool) observedSlot {
+// observedResourcePolicyFrom projects the configured worker limits, keeping an
+// unconfigured policy null rather than reporting zero limits.
+func observedResourcePolicyFrom(policy workerResourcePolicy) *observedResourcePolicy {
+	if !policy.configured() {
+		return nil
+	}
+	projected := observedResourcePolicy{
+		MemoryBytes:     policy.memoryBytes,
+		MemorySwapBytes: policy.memorySwapBytes,
+		PIDs:            policy.pids,
+	}
+	if policy.cpuCores != "" {
+		value := policy.cpuCores
+		projected.CPUCores = &value
+	}
+	return &projected
+}
+
+// observedTargetState separates local Docker worker counts from timestamped
+// GitHub scale-set statistics. Statistics stay null until GitHub has reported
+// them, so an unavailable observation is never published as measured zero.
+func observedTargetState(snapshot scalerSnapshot) observedTarget {
+	target := observedTarget{
+		Key:                  snapshot.target.key,
+		MaximumSlots:         max(snapshot.target.maximum, 0),
+		TargetSlots:          max(snapshot.targetSlots, 0),
+		LocalActiveWorkers:   snapshot.activeRunners,
+		LocalIdleWorkers:     snapshot.idleRunners,
+		LocalBusyWorkers:     snapshot.busyRunners,
+		LocalDrainingWorkers: snapshot.drainingRunners,
+	}
+	if snapshot.target.repository != "" {
+		value := snapshot.target.repository
+		target.Repository = &value
+	}
+	if !snapshot.statistics.observedAt.IsZero() {
+		target.Statistics = &observedScaleSetStatistics{
+			ObservedAt:        snapshot.statistics.observedAt.UTC().Format(time.RFC3339),
+			AvailableJobs:     snapshot.statistics.availableJobs,
+			AcquiredJobs:      snapshot.statistics.acquiredJobs,
+			AssignedJobs:      snapshot.statistics.assignedJobs,
+			RunningJobs:       snapshot.statistics.runningJobs,
+			RegisteredRunners: snapshot.statistics.registeredRunners,
+			BusyRunners:       snapshot.statistics.busyRunners,
+			IdleRunners:       snapshot.statistics.idleRunners,
+		}
+	}
+	return target
+}
+
+// slotKeyHeldByRunner reports whether a live worker still owns a slot key, so
+// pending registration cleanup never publishes a duplicate slot.
+func slotKeyHeldByRunner(snapshot scalerSnapshot, slotKey string) bool {
+	for _, runner := range snapshot.runners {
+		if runner.key == slotKey {
+			return true
+		}
+	}
+	return false
+}
+
+// observedCleanupSlot publishes a worker whose container has gone but whose
+// exact JIT registration removal is still pending, carrying the exit evidence
+// captured before removal.
+func observedCleanupSlot(
+	record registrationCleanupRecord,
+	snapshot scalerSnapshot,
+) observedSlot {
+	updatedAt := record.FirstFailedAt
+	if record.LastAttemptAt != "" {
+		updatedAt = record.LastAttemptAt
+	}
+	var updated *string
+	if updatedAt != "" {
+		updated = &updatedAt
+	}
+	var repository *string
+	if snapshot.target.repository != "" {
+		value := snapshot.target.repository
+		repository = &value
+	}
+	return observedSlot{
+		Key:                record.SlotKey,
+		Repository:         repository,
+		Desired:            false,
+		ProcessRunning:     false,
+		State:              "draining",
+		FailureCount:       record.Attempts,
+		BackoffSeconds:     0,
+		UpdatedAt:          updated,
+		Resources:          nil,
+		Activity:           "draining",
+		Target:             record.TargetKey,
+		RegistrationStatus: "unknown",
+		ImageID:            nil,
+		LastExit:           record.LastExit,
+	}
+}
+
+func observedRunnerSlot(
+	runner runnerRecord,
+	retiring bool,
+	imageID string,
+) observedSlot {
 	state := "starting"
 	activity := string(runner.state)
 	registrationStatus := "unknown"
@@ -250,7 +412,19 @@ func observedRunnerSlot(runner runnerRecord, retiring bool) observedSlot {
 		Activity:           activity,
 		Target:             runner.targetKey,
 		RegistrationStatus: registrationStatus,
+		ImageID:            slotImageID(imageID),
+		LastExit:           nil,
 	}
+}
+
+// slotImageID reports the immutable local image identity a worker launched
+// from, or null when the manager has no configured identity.
+func slotImageID(imageID string) *string {
+	if imageID == "" {
+		return nil
+	}
+	value := imageID
+	return &value
 }
 
 func autoscalingStatus(managerStatus string, lastError error) string {
