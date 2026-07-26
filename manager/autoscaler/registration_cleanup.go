@@ -33,6 +33,9 @@ type registrationCleanupRecord struct {
 	FirstFailedAt string `json:"firstFailedAt"`
 	LastAttemptAt string `json:"lastAttemptAt"`
 	NextAttemptAt string `json:"nextAttemptAt"`
+	// LastExit carries the exit evidence captured for this exact worker so it
+	// survives a manager restart tied to the same runner and container identity.
+	LastExit *lastExitDiagnostic `json:"lastExit,omitempty"`
 }
 
 type registrationCleanupDocument struct {

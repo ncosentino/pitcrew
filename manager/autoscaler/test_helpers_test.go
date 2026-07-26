@@ -211,6 +211,7 @@ type fakeDockerClient struct {
 	waitResults      map[string][]fakeWaitResult
 	waitObserved     chan string
 	running          map[string]bool
+	exitStates       map[string]containerExitState
 	runningErrors    map[string][]error
 	runningObserved  chan string
 	resourceResult   resourceSample
@@ -316,6 +317,7 @@ func newFakeDockerClient(events *eventRecorder) *fakeDockerClient {
 		stopRemoveErrors: make(map[string][]error),
 		waitResults:      make(map[string][]fakeWaitResult),
 		running:          make(map[string]bool),
+		exitStates:       make(map[string]containerExitState),
 		runningErrors:    make(map[string][]error),
 	}
 }
@@ -384,6 +386,16 @@ func (d *fakeDockerClient) isRunning(
 		return true, nil
 	}
 	return running, nil
+}
+
+func (d *fakeDockerClient) inspectExit(
+	_ context.Context,
+	containerID string,
+) (containerExitState, bool) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	state, exists := d.exitStates[containerID]
+	return state, exists
 }
 
 func (d *fakeDockerClient) followLogs(
@@ -550,6 +562,7 @@ func newTestScalerInDirectory(
 		api,
 		docker,
 		clock,
+		newAdmissionController(0),
 		testLogger(),
 		nil,
 		func(err error) {
@@ -564,6 +577,11 @@ func newTestScalerInDirectory(
 		return fmt.Sprintf("suffix%02d", suffix), nil
 	}
 	return scaler, api, docker, clock, cancel
+}
+
+// exitStatus expresses an observed container exit status in tests.
+func exitStatus(code int) *int {
+	return &code
 }
 
 func markAllRunnersIdle(scaler *runnerScaler) {
