@@ -7,7 +7,8 @@ description: Install PitCrew's Copilot CLI plugin and use its skills for capacit
 PitCrew publishes an installable Copilot CLI marketplace plugin that teaches
 Copilot the repository's supported operational procedures. The plugin does not
 add a remote control plane or replace `Setup-Runner.ps1`; it makes Copilot use
-the existing scripts and scoped Compose commands consistently.
+the existing scripts, scoped Compose commands, and read-only diagnostics
+consistently.
 
 ## Install the plugin
 
@@ -118,6 +119,46 @@ operation. It downloads the release-pinned host connector and installer,
 migrates the existing connector identity, installs a native systemd or Windows
 Service, and restores the container if startup fails. Operators do not manually
 build binaries, copy credentials, or write service files.
+
+## Host diagnostics skill
+
+`pitcrew-host-diagnostics` collects read-only evidence about a degraded runner
+host without restarting Docker, stopping busy workers, or running cleanup.
+
+```text
+Use the pitcrew-host-diagnostics skill to explain why the copilot-cli profile is
+slow, and time https://github.com from the host and a worker image.
+```
+
+The skill resolves one installation and profile, reads only generated
+non-secret state, reports the exact manager and worker image references with
+their resolved local image IDs and digests, and captures bounded `docker stats
+--no-stream` CPU, memory, PID, `NetIO`, and `BlockIO` samples for exact PitCrew
+labels. It also collects `docker system df`, the Docker network count, exact-ID
+per-worker writable-layer sizes, host free space and inodes where supported, and
+read-only network-adapter error and drop counters, selecting Linux or Windows
+commands from the runner host platform.
+
+Because live worker counts and registered capacity drift apart on a degraded
+host, the skill compares live labelled containers per target against desired,
+acknowledged, and observed capacity plus any scale-set statistics already in
+observed state, including their freshness. It never issues a credentialed GitHub
+query to fill that gap; missing evidence is reported as missing.
+
+Caller-approved URLs are timed from the host and from exactly one disposable
+container built from the profile's exact worker image, using a caller-approved
+finite probe timeout that defaults to 300 seconds so a large artifact is not
+truncated into a false failure. Resource snapshots are taken immediately before
+and after the probes so `NetIO`, `BlockIO`, adapter-counter, and disk-accounting
+deltas can be attributed to the probe window. Downloaded bodies are discarded,
+the disposable container's exact ID is proven with `--cidfile` or an explicit
+create/start flow, and only that exact container is removed afterwards.
+
+A dry-run mode prints the resolved commands without changing state. The redacted
+Markdown/JSON handoff separates verified measurements from unavailable evidence
+and unverified hypotheses, and it never converts a single host/container pair
+into a root cause: CDN edge variability and load-sensitive host contention stay
+competing hypotheses until repeated measurements resolve them.
 
 ## Safety boundary
 
