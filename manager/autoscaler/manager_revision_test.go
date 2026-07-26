@@ -1212,6 +1212,7 @@ func newCoherenceTestController(
 		api,
 		newFakeDockerClient(nil),
 		&fakeClock{current: time.Now()},
+		testLogger(),
 		nil,
 		nil,
 	)

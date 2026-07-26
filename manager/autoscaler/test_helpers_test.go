@@ -507,6 +507,17 @@ func newTestScaler(
 	scaleDownDelay time.Duration,
 ) (*runnerScaler, *fakeScaleSetService, *fakeDockerClient, *fakeClock, context.CancelFunc) {
 	t.Helper()
+	return newTestScalerInDirectory(t, maximum, minimumIdle, scaleDownDelay, "")
+}
+
+func newTestScalerInDirectory(
+	t *testing.T,
+	maximum int,
+	minimumIdle int,
+	scaleDownDelay time.Duration,
+	stateDirectory string,
+) (*runnerScaler, *fakeScaleSetService, *fakeDockerClient, *fakeClock, context.CancelFunc) {
+	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := &fakeClock{current: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
 	events := &eventRecorder{}
@@ -522,6 +533,7 @@ func newTestScaler(
 		minimumIdle:       minimumIdle,
 		scaleDownDelay:    scaleDownDelay,
 		noDefaultLabels:   false,
+		stateDirectory:    stateDirectory,
 	}
 	target := targetSpec{
 		key:             "repo-1234",
@@ -538,6 +550,7 @@ func newTestScaler(
 		api,
 		docker,
 		clock,
+		testLogger(),
 		nil,
 		func(err error) {
 			if err != nil && !errors.Is(err, context.Canceled) {
@@ -581,6 +594,25 @@ func projectTestDirectory(t *testing.T) string {
 		}
 	})
 	return directory
+}
+
+// recordingCleanupStore observes registration cleanup persistence so tests can
+// prove the durable record is written before the registration is removed.
+type recordingCleanupStore struct {
+	inner  registrationCleanupStore
+	events *eventRecorder
+}
+
+func (s *recordingCleanupStore) load() ([]registrationCleanupRecord, error) {
+	return s.inner.load()
+}
+
+func (s *recordingCleanupStore) save(records []registrationCleanupRecord) error {
+	if err := s.inner.save(records); err != nil {
+		return err
+	}
+	s.events.add(fmt.Sprintf("cleanup-save-%d", len(records)))
+	return nil
 }
 
 var _ scaleSetService = (*fakeScaleSetService)(nil)
