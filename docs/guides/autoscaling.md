@@ -78,13 +78,18 @@ Worker images must contain:
 /actions-runner/bin/Runner.Listener
 ```
 
-and a `runner` user. Built-in and default PitCrew images satisfy this contract.
-Setup verifies it before replacing a live profile.
+PitCrew preserves the image's declared Docker user. The default image declares a
+root-capable workflow contract, matching fixed-capacity workers and allowing
+standard setup actions to install SDKs in system locations. A custom image may
+declare a non-root `USER`, but that user must be able to execute the listener
+and satisfy every workflow capability advertised by the profile labels. Setup
+verifies the listener before replacing a live profile.
 
 JIT mode launches `Runner.Listener` directly under Docker's init process rather
 than running the image's normal registration entrypoint. Custom runtime setup
 must therefore be baked into the image instead of depending on entrypoint side
-effects.
+effects. PitCrew sets `RUNNER_ALLOW_RUNASROOT=1` for compatibility with images
+whose declared user is root; it does not force a root or non-root user.
 
 ## Capacity changes
 

@@ -53,9 +53,16 @@ the current profile.
 
 If verification fails, the existing profile remains online.
 
-Autoscaled profiles must retain `/actions-runner/bin/Runner.Listener` and the
-`runner` user from the base image. JIT workers bypass the image's normal
-entrypoint, so runtime prerequisites must be installed during the image build.
+Autoscaled profiles must retain `/actions-runner/bin/Runner.Listener`. JIT
+workers bypass the image's normal entrypoint, so runtime prerequisites must be
+installed during the image build. PitCrew preserves the Dockerfile's declared
+user instead of overriding it.
+
+Profiles that intentionally use a non-root `USER` must preconfigure writable
+tool and cache locations and must use labels that distinguish that reduced
+capability from the root-capable default profile. Do not route workflows that
+expect system package or SDK installation to an unprivileged image under the
+same labels.
 
 ## Route jobs to the profile
 

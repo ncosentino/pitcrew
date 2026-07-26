@@ -758,7 +758,7 @@ func TestShutdownDeadlineBoundsBlockedDockerOperation(t *testing.T) {
 	}
 }
 
-func TestWorkerLaunchContainsNoAccessToken(t *testing.T) {
+func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
 	launch := containerLaunch{
 		name:      "runner-one",
 		image:     "example/runner:latest",
@@ -778,11 +778,15 @@ func TestWorkerLaunchContainsNoAccessToken(t *testing.T) {
 		strings.Contains(command, "pat-super-secret") {
 		t.Fatalf("worker command contains a PAT: %s", command)
 	}
+	if strings.Contains(command, "--user") {
+		t.Fatalf("worker command overrides the image user: %s", command)
+	}
 	for _, expected := range []string{
-		"--rm", "--detach", "--init", "--user runner",
+		"--rm", "--detach", "--init",
 		"--workdir /actions-runner",
 		"--entrypoint /actions-runner/bin/Runner.Listener",
 		"ACTIONS_RUNNER_INPUT_JITCONFIG=encoded-jit-secret",
+		"RUNNER_ALLOW_RUNASROOT=1",
 		"example/runner:latest run",
 		targetKeyLabelKey + "=repo-1",
 		runnerNameLabelKey + "=runner-one",

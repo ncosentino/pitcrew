@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerManagerContractVersion = 9
+$script:RunnerWorkerRuntimeContractVersion = 2
 
 function ConvertTo-RunnerLabelList {
     param(
@@ -672,6 +673,7 @@ function New-RunnerStaticProfileState {
 
     $staticConfiguration = [PSCustomObject][ordered]@{
         managerContractVersion = [int]$Profile.ManagerContractVersion
+        workerRuntimeContractVersion = $script:RunnerWorkerRuntimeContractVersion
         profile = [string]$Profile.Name
         image = [string]$Profile.Image
         pullImage = [bool]$Profile.PullImage
@@ -752,7 +754,15 @@ function Get-RunnerWorkerConfiguration {
         [object]$Configuration
     )
 
+    $workerRuntimeContractVersion = if (
+        $Configuration.PSObject.Properties['workerRuntimeContractVersion']
+    ) {
+        [int]$Configuration.workerRuntimeContractVersion
+    } else {
+        1
+    }
     return [PSCustomObject][ordered]@{
+        workerRuntimeContractVersion = $workerRuntimeContractVersion
         profile = [string]$Configuration.profile
         image = [string]$Configuration.image
         build = $Configuration.build
@@ -763,6 +773,43 @@ function Get-RunnerWorkerConfiguration {
         enterprise = [string]$Configuration.enterprise
         runnerGroup = [string]$Configuration.runnerGroup
         namePrefix = [string]$Configuration.namePrefix
+    }
+}
+
+<#
+.SYNOPSIS
+    Selects worker configuration that must remain unchanged for manager refresh.
+
+.DESCRIPTION
+    Excludes PitCrew's internal worker runtime contract version so a published
+    manager refresh can roll workers onto a corrected launch contract while
+    still rejecting operator-visible image, label, scope, or build changes.
+
+.PARAMETER Configuration
+    Static profile configuration from New-RunnerStaticProfileState.
+
+.OUTPUTS
+    Ordered refresh-compatible worker configuration suitable for hashing.
+#>
+function Get-RunnerRefreshCompatibilityConfiguration {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Configuration
+    )
+
+    $worker = Get-RunnerWorkerConfiguration -Configuration $Configuration
+    return [PSCustomObject][ordered]@{
+        profile = [string]$worker.profile
+        image = [string]$worker.image
+        build = $worker.build
+        labels = @($worker.labels)
+        disableDefaultLabels = [bool]$worker.disableDefaultLabels
+        scope = [string]$worker.scope
+        organization = [string]$worker.organization
+        enterprise = [string]$worker.enterprise
+        runnerGroup = [string]$worker.runnerGroup
+        namePrefix = [string]$worker.namePrefix
     }
 }
 

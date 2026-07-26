@@ -1017,10 +1017,15 @@ try {
             $storedStaticProfile.PSObject.Properties['configuration'] -and
             (
                 Get-RunnerObjectFingerprint -Value (
-                    Get-RunnerWorkerConfiguration `
+                    Get-RunnerRefreshCompatibilityConfiguration `
                         -Configuration $storedStaticProfile.configuration
                 )
-            ) -ceq [string]$staticProfileState.workerRevision
+            ) -ceq (
+                Get-RunnerObjectFingerprint -Value (
+                    Get-RunnerRefreshCompatibilityConfiguration `
+                        -Configuration $staticProfileState.configuration
+                )
+            )
         )
         $rollingConfigurationMatches = (
             $null -ne $storedStaticProfile -and
@@ -1188,7 +1193,7 @@ try {
                     --rm `
                     --entrypoint /bin/sh `
                     $profileConfig.Image `
-                    -lc 'test -x /actions-runner/bin/Runner.Listener && id runner >/dev/null'
+                    -lc 'test -x /actions-runner/bin/Runner.Listener'
                 if ($LASTEXITCODE -ne 0) {
                     Write-Error "Runner image '$($profileConfig.Image)' does not satisfy the scale-set JIT runtime contract."
                 }
