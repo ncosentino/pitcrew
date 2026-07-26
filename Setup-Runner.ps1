@@ -72,6 +72,23 @@
     Time demand must remain below active capacity before excess idle runners are
     removed. Defaults to 120 seconds.
 
+.PARAMETER MaximumActiveWorkers
+    Aggregate active-worker ceiling across every target in an autoscaled profile.
+    Contract 11 defines this setting; contract-10 managers reject activation.
+
+.PARAMETER WorkerMemory
+    Optional per-worker memory limit in bytes or a Docker-compatible binary unit.
+    Contract 11 defines this setting; contract-10 managers reject activation.
+
+.PARAMETER WorkerMemorySwap
+    Optional total per-worker memory-plus-swap limit. Requires WorkerMemory.
+
+.PARAMETER WorkerCpus
+    Optional positive per-worker CPU limit with at most nine fractional digits.
+
+.PARAMETER WorkerPids
+    Optional positive per-worker process limit.
+
 .PARAMETER Profile
     Built-in profile name. Defaults to the backward-compatible default profile.
 
@@ -136,6 +153,17 @@ param(
     [switch]$Autoscale,
     [Nullable[int]]$MinimumIdle,
     [Nullable[int]]$ScaleDownDelaySeconds,
+    [Nullable[int]]$MaximumActiveWorkers,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$WorkerMemory,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$WorkerMemorySwap,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$WorkerCpus,
+    [Nullable[long]]$WorkerPids,
     [string]$Profile = 'default',
     [string]$ProfilePath = '',
     [switch]$Down,
@@ -162,13 +190,21 @@ foreach ($parameterName in @(
     'RunnerGroup',
     'Autoscale',
     'MinimumIdle',
-    'ScaleDownDelaySeconds'
+    'ScaleDownDelaySeconds',
+    'MaximumActiveWorkers',
+    'WorkerMemory',
+    'WorkerMemorySwap',
+    'WorkerCpus',
+    'WorkerPids'
 )) {
     if ($PSBoundParameters.ContainsKey($parameterName)) {
         $resolveArguments[$parameterName] = Get-Variable -Name $parameterName -ValueOnly
     }
 }
 $profileConfig = Resolve-RunnerProfile @resolveArguments
+if (-not $Down) {
+    Assert-RunnerResilienceContractActivation -Profile $profileConfig
+}
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
     Write-Error 'docker not found. Install Docker Desktop and retry.'
@@ -192,11 +228,17 @@ $composeEnvironmentNames = @(
     'RUNNER_NO_DEFAULT_LABELS',
     'RUNNER_GROUP',
     'PITCREW_WORKER_REVISION',
+    'PITCREW_WORKER_IMAGE_ID',
+    'PITCREW_WORKER_MEMORY_BYTES',
+    'PITCREW_WORKER_MEMORY_SWAP_BYTES',
+    'PITCREW_WORKER_CPU_CORES',
+    'PITCREW_WORKER_PIDS_LIMIT',
     'PITCREW_SESSION_OWNER',
     'PITCREW_ASSUME_UNVERSIONED_CURRENT',
     'PITCREW_AUTOSCALING_MODE',
     'PITCREW_AUTOSCALING_MIN_IDLE',
     'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
+    'PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS',
     'PITCREW_STATE_DIR',
     'PITCREW_MANAGER_CONTRACT_VERSION'
 )
@@ -463,6 +505,28 @@ function Restore-RunnerImageTag {
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to restore worker image '$Image' to '$ImageId'."
     }
+}
+
+function Get-RunnerResolvedImageId {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Image,
+
+        [switch]$AllowMissing
+    )
+
+    $imageIdOutput = & docker image inspect --format '{{.Id}}' $Image 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        if ($AllowMissing) {
+            return ''
+        }
+        throw "Runner image '$Image' is not available locally."
+    }
+    $imageId = ([string]$imageIdOutput).Trim().ToLowerInvariant()
+    if ($imageId -notmatch '^sha256:[0-9a-f]{64}$') {
+        throw "Runner image '$Image' returned invalid immutable image ID '$imageId'."
+    }
+    return $imageId
 }
 
 function New-RunnerTextStagingFile {
@@ -956,11 +1020,18 @@ try {
         -Repositories $desiredRepositories `
         -Replicas $desiredReplicas
 
+    $resolvedImageId = Get-RunnerResolvedImageId `
+        -Image $profileConfig.Image `
+        -AllowMissing
+    if ($Refresh -and [string]::IsNullOrWhiteSpace($resolvedImageId)) {
+        throw "Runner image '$($profileConfig.Image)' is not available. Run the complete setup command without -Refresh to prepare it."
+    }
     $staticProfileState = New-RunnerStaticProfileState `
         -Profile $profileConfig `
         -Scope $Scope `
         -OrgName $OrgName `
-        -EnterpriseName $EnterpriseName
+        -EnterpriseName $EnterpriseName `
+        -ResolvedImageId $resolvedImageId
 
     $managerContainerId = Get-RunnerManagerContainerId -ProfileConfig $profileConfig
     $managerRunning = -not [string]::IsNullOrWhiteSpace($managerContainerId)
@@ -984,17 +1055,23 @@ try {
             [string]::IsNullOrWhiteSpace($storedWorkerRevision)
         )
     )
-    $environmentContent = New-RunnerEnvironmentContent `
-        -Profile $profileConfig `
-        -AccessToken $Token `
-        -WorkerRevision ([string]$staticProfileState.workerRevision) `
-        -SessionOwner $sessionOwner `
-        -AssumeUnversionedCurrent $assumeUnversionedCurrent `
-        -Scope $Scope `
-        -OrgName $OrgName `
-        -EnterpriseName $EnterpriseName
+    $environmentContent = if ([string]::IsNullOrWhiteSpace($resolvedImageId)) {
+        $null
+    } else {
+        New-RunnerEnvironmentContent `
+            -Profile $profileConfig `
+            -AccessToken $Token `
+            -WorkerRevision ([string]$staticProfileState.workerRevision) `
+            -SessionOwner $sessionOwner `
+            -AssumeUnversionedCurrent $assumeUnversionedCurrent `
+            -ResolvedImageId $resolvedImageId `
+            -Scope $Scope `
+            -OrgName $OrgName `
+            -EnterpriseName $EnterpriseName
+    }
 
     $environmentMatches = (
+        $null -ne $environmentContent -and
         (Test-Path -LiteralPath $profileConfig.EnvironmentPath -PathType Leaf) -and
         (Get-Content -LiteralPath $profileConfig.EnvironmentPath -Raw -Encoding UTF8) -ceq $environmentContent
     )
@@ -1059,12 +1136,6 @@ try {
         -not $rollingConfigurationMatches
     ) {
         throw "Profile '$($profileConfig.Name)' changes registration topology or routing that cannot roll safely. Stop the profile explicitly with -Down before applying this configuration."
-    }
-    if ($Refresh) {
-        & docker image inspect $profileConfig.Image 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Runner image '$($profileConfig.Image)' is not available. Run the complete setup command without -Refresh to prepare it."
-        }
     }
     $capacityOnlyCompatible = (
         -not $Refresh -and
@@ -1198,6 +1269,34 @@ try {
                     Write-Error "Runner image '$($profileConfig.Image)' does not satisfy the scale-set JIT runtime contract."
                 }
             }
+
+            $resolvedImageId = Get-RunnerResolvedImageId -Image $profileConfig.Image
+            $staticProfileState = New-RunnerStaticProfileState `
+                -Profile $profileConfig `
+                -Scope $Scope `
+                -OrgName $OrgName `
+                -EnterpriseName $EnterpriseName `
+                -ResolvedImageId $resolvedImageId
+            $assumeUnversionedCurrent = (
+                (
+                    $storedAssumeUnversioned -eq '1' -and
+                    $storedWorkerRevision -ceq [string]$staticProfileState.workerRevision
+                ) -or (
+                    $Refresh -and
+                    $managerRunning -and
+                    [string]::IsNullOrWhiteSpace($storedWorkerRevision)
+                )
+            )
+            $environmentContent = New-RunnerEnvironmentContent `
+                -Profile $profileConfig `
+                -AccessToken $Token `
+                -WorkerRevision ([string]$staticProfileState.workerRevision) `
+                -SessionOwner $sessionOwner `
+                -AssumeUnversionedCurrent $assumeUnversionedCurrent `
+                -ResolvedImageId $resolvedImageId `
+                -Scope $Scope `
+                -OrgName $OrgName `
+                -EnterpriseName $EnterpriseName
         }
         catch {
             $imagePreparationError = $_

@@ -4,6 +4,7 @@ Set-StrictMode -Version Latest
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerManagerContractVersion = 10
+$script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerWorkerRuntimeContractVersion = 2
 
 function ConvertTo-RunnerLabelList {
@@ -35,6 +36,132 @@ function ConvertTo-RunnerLabelList {
 
 <#
 .SYNOPSIS
+    Converts a Docker-compatible byte limit to a canonical integer.
+
+.DESCRIPTION
+    Accepts an integer byte count or a binary unit suffix from bytes through
+    tebibytes. The result is overflow-safe and stable across equivalent input.
+
+.PARAMETER Value
+    Byte limit such as 6291456, 6m, or 6MiB.
+
+.PARAMETER LimitName
+    Public setting name included in validation errors.
+
+.PARAMETER MinimumBytes
+    Smallest accepted canonical byte count.
+
+.OUTPUTS
+    Signed 64-bit canonical byte count.
+#>
+function ConvertTo-RunnerByteLimit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value,
+
+        [Parameter(Mandatory)]
+        [string]$LimitName,
+
+        [long]$MinimumBytes = 1
+    )
+
+    $normalized = $Value.Trim().ToLowerInvariant()
+    $match = [regex]::Match(
+        $normalized,
+        '^(?<amount>[0-9]+)(?<unit>b|k|kb|ki|kib|m|mb|mi|mib|g|gb|gi|gib|t|tb|ti|tib)?$')
+    if (-not $match.Success) {
+        throw "$LimitName '$Value' must be an integer byte count or use a Docker-compatible binary unit such as 6m, 512MiB, or 2g."
+    }
+
+    $amount = [Numerics.BigInteger]::Zero
+    if (-not [Numerics.BigInteger]::TryParse(
+        $match.Groups['amount'].Value,
+        [Globalization.NumberStyles]::None,
+        [Globalization.CultureInfo]::InvariantCulture,
+        [ref]$amount
+    )) {
+        throw "$LimitName '$Value' is not a valid byte count."
+    }
+    $multipliers = @{
+        '' = [Numerics.BigInteger]::One
+        b = [Numerics.BigInteger]::One
+        k = [Numerics.BigInteger]::Pow(1024, 1)
+        kb = [Numerics.BigInteger]::Pow(1024, 1)
+        ki = [Numerics.BigInteger]::Pow(1024, 1)
+        kib = [Numerics.BigInteger]::Pow(1024, 1)
+        m = [Numerics.BigInteger]::Pow(1024, 2)
+        mb = [Numerics.BigInteger]::Pow(1024, 2)
+        mi = [Numerics.BigInteger]::Pow(1024, 2)
+        mib = [Numerics.BigInteger]::Pow(1024, 2)
+        g = [Numerics.BigInteger]::Pow(1024, 3)
+        gb = [Numerics.BigInteger]::Pow(1024, 3)
+        gi = [Numerics.BigInteger]::Pow(1024, 3)
+        gib = [Numerics.BigInteger]::Pow(1024, 3)
+        t = [Numerics.BigInteger]::Pow(1024, 4)
+        tb = [Numerics.BigInteger]::Pow(1024, 4)
+        ti = [Numerics.BigInteger]::Pow(1024, 4)
+        tib = [Numerics.BigInteger]::Pow(1024, 4)
+    }
+    $bytes = $amount * $multipliers[$match.Groups['unit'].Value]
+    if ($bytes -gt [long]::MaxValue) {
+        throw "$LimitName '$Value' exceeds the supported 64-bit byte range."
+    }
+    if ($bytes -lt $MinimumBytes) {
+        throw "$LimitName must be at least $MinimumBytes bytes."
+    }
+    return [long]$bytes
+}
+
+<#
+.SYNOPSIS
+    Converts a Docker CPU limit to a canonical decimal string.
+
+.DESCRIPTION
+    Accepts a positive decimal with at most nine fractional digits and removes
+    insignificant leading and trailing zeroes without using floating point.
+
+.PARAMETER Value
+    CPU limit such as 0.5, 2, or 2.250000000.
+
+.OUTPUTS
+    Canonical invariant-culture decimal string.
+#>
+function ConvertTo-RunnerCpuLimit {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$Value
+    )
+
+    $normalized = $Value.Trim()
+    if ($normalized -notmatch '^[0-9]+(?:\.[0-9]{1,9})?$') {
+        throw "Worker CPU limit '$Value' must be a positive decimal with at most nine fractional digits."
+    }
+    try {
+        $cpu = [decimal]::Parse(
+            $normalized,
+            [Globalization.NumberStyles]::AllowDecimalPoint,
+            [Globalization.CultureInfo]::InvariantCulture)
+    } catch {
+        throw "Worker CPU limit '$Value' is outside the supported decimal range."
+    }
+    if ($cpu -le 0) {
+        throw 'Worker CPU limit must be positive.'
+    }
+    $maximum = [decimal]::Parse(
+        '9223372036.854775807',
+        [Globalization.CultureInfo]::InvariantCulture)
+    if ($cpu -gt $maximum) {
+        throw "Worker CPU limit '$Value' exceeds the supported Docker nano-CPU range."
+    }
+    return $cpu.ToString(
+        '0.#########',
+        [Globalization.CultureInfo]::InvariantCulture)
+}
+
+<#
+.SYNOPSIS
     Resolves the effective configuration for one self-hosted runner profile.
 
 .DESCRIPTION
@@ -50,6 +177,21 @@ function ConvertTo-RunnerLabelList {
 
 .PARAMETER ProfilePath
     Optional path to an external profile manifest.
+
+.PARAMETER WorkerMemory
+    Optional per-worker memory limit in bytes or a Docker-compatible binary unit.
+
+.PARAMETER WorkerMemorySwap
+    Optional total per-worker memory-plus-swap limit. Requires WorkerMemory.
+
+.PARAMETER WorkerCpus
+    Optional positive per-worker CPU limit with at most nine fractional digits.
+
+.PARAMETER WorkerPids
+    Optional positive per-worker process limit.
+
+.PARAMETER MaximumActiveWorkers
+    Optional aggregate active-worker ceiling for an autoscaled profile.
 
 .OUTPUTS
     PSCustomObject containing the effective profile configuration.
@@ -90,6 +232,22 @@ function Resolve-RunnerProfile {
 
         [Nullable[int]]$ScaleDownDelaySeconds,
 
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$WorkerMemory,
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$WorkerMemorySwap,
+
+        [AllowNull()]
+        [AllowEmptyString()]
+        [string]$WorkerCpus,
+
+        [Nullable[long]]$WorkerPids,
+
+        [Nullable[int]]$MaximumActiveWorkers,
+
         [string]$HostName = 'runner'
     )
 
@@ -120,6 +278,12 @@ function Resolve-RunnerProfile {
     $verificationCommands = @()
     $build = $null
     $effectiveAutoscaling = $null
+    $effectiveResources = [ordered]@{
+        Memory = $null
+        MemorySwap = $null
+        Cpus = $null
+        Pids = $null
+    }
 
     if ($manifestPath) {
         $schemaPath = Join-Path $resolvedRoot 'runner-profile.schema.json'
@@ -166,6 +330,25 @@ function Resolve-RunnerProfile {
                 } else {
                     120
                 }
+                MaximumActiveWorkers = if ($manifest.autoscaling.PSObject.Properties['maximumActiveWorkers']) {
+                    [int]$manifest.autoscaling.maximumActiveWorkers
+                } else {
+                    $null
+                }
+            }
+        }
+        if ($manifest.PSObject.Properties['resources']) {
+            if ($manifest.resources.PSObject.Properties['memory']) {
+                $effectiveResources.Memory = [string]$manifest.resources.memory
+            }
+            if ($manifest.resources.PSObject.Properties['memorySwap']) {
+                $effectiveResources.MemorySwap = [string]$manifest.resources.memorySwap
+            }
+            if ($manifest.resources.PSObject.Properties['cpus']) {
+                $effectiveResources.Cpus = [string]$manifest.resources.cpus
+            }
+            if ($manifest.resources.PSObject.Properties['pids']) {
+                $effectiveResources.Pids = [long]$manifest.resources.pids
             }
         }
 
@@ -240,6 +423,7 @@ function Resolve-RunnerProfile {
                 Mode = 'scale-set'
                 MinimumIdle = 0
                 ScaleDownDelaySeconds = 120
+                MaximumActiveWorkers = $null
             }
         } else {
             $null
@@ -257,6 +441,12 @@ function Resolve-RunnerProfile {
         }
         $effectiveAutoscaling.ScaleDownDelaySeconds = [int]$ScaleDownDelaySeconds
     }
+    if ($PSBoundParameters.ContainsKey('MaximumActiveWorkers')) {
+        if ($null -eq $effectiveAutoscaling) {
+            throw '-MaximumActiveWorkers requires autoscaling to be enabled.'
+        }
+        $effectiveAutoscaling.MaximumActiveWorkers = [int]$MaximumActiveWorkers
+    }
     if ($effectiveAutoscaling) {
         if ($effectiveAutoscaling.MinimumIdle -lt 0) {
             throw 'Autoscaling minimum idle runners cannot be negative.'
@@ -266,6 +456,73 @@ function Resolve-RunnerProfile {
             $effectiveAutoscaling.ScaleDownDelaySeconds -gt 3600
         ) {
             throw 'Autoscaling scale-down delay must be between 30 and 3600 seconds.'
+        }
+        if (
+            $null -ne $effectiveAutoscaling.MaximumActiveWorkers -and
+            $effectiveAutoscaling.MaximumActiveWorkers -lt 1
+        ) {
+            throw 'Autoscaling maximum active workers must be a positive integer.'
+        }
+    }
+
+    if ($PSBoundParameters.ContainsKey('WorkerMemory')) {
+        $effectiveResources.Memory = $WorkerMemory
+    }
+    if ($PSBoundParameters.ContainsKey('WorkerMemorySwap')) {
+        $effectiveResources.MemorySwap = $WorkerMemorySwap
+    }
+    if ($PSBoundParameters.ContainsKey('WorkerCpus')) {
+        $effectiveResources.Cpus = $WorkerCpus
+    }
+    if ($PSBoundParameters.ContainsKey('WorkerPids')) {
+        $effectiveResources.Pids = [long]$WorkerPids
+    }
+    $hasResources = @(
+        $effectiveResources.Values |
+            Where-Object { $null -ne $_ }
+    ).Count -gt 0
+    $resourcePolicy = $null
+    if ($hasResources) {
+        $memoryBytes = if ($null -ne $effectiveResources.Memory) {
+            ConvertTo-RunnerByteLimit `
+                -Value ([string]$effectiveResources.Memory) `
+                -LimitName 'Worker memory limit' `
+                -MinimumBytes 6291456
+        } else {
+            $null
+        }
+        $memorySwapBytes = if ($null -ne $effectiveResources.MemorySwap) {
+            if ($null -eq $memoryBytes) {
+                throw 'Worker memory-swap limit requires a worker memory limit.'
+            }
+            ConvertTo-RunnerByteLimit `
+                -Value ([string]$effectiveResources.MemorySwap) `
+                -LimitName 'Worker memory-swap limit'
+        } else {
+            $null
+        }
+        if ($null -ne $memorySwapBytes -and $memorySwapBytes -lt $memoryBytes) {
+            throw 'Worker memory-swap limit must be greater than or equal to the worker memory limit.'
+        }
+        $cpuCores = if ($null -ne $effectiveResources.Cpus) {
+            ConvertTo-RunnerCpuLimit -Value ([string]$effectiveResources.Cpus)
+        } else {
+            $null
+        }
+        $pids = if ($null -ne $effectiveResources.Pids) {
+            $candidate = [long]$effectiveResources.Pids
+            if ($candidate -lt 1 -or $candidate -gt [int]::MaxValue) {
+                throw 'Worker PID limit must be between 1 and 2147483647.'
+            }
+            [int]$candidate
+        } else {
+            $null
+        }
+        $resourcePolicy = [PSCustomObject][ordered]@{
+            MemoryBytes = $memoryBytes
+            MemorySwapBytes = $memorySwapBytes
+            CpuCores = $cpuCores
+            Pids = $pids
         }
     }
 
@@ -325,6 +582,7 @@ function Resolve-RunnerProfile {
         ComposeProjectName = $composeProjectName
         ManagedRunnerLabel = "ephemeral-managed-runner-profile=$profileName"
         ManagerContractVersion = $script:RunnerManagerContractVersion
+        DefinedManagerContractVersion = $script:RunnerDefinedManagerContractVersion
         Image = $effectiveImage
         Replicas = $effectiveReplicas
         Labels = @($labelList)
@@ -332,10 +590,51 @@ function Resolve-RunnerProfile {
         DisableDefaultLabels = $disableDefaultLabels
         RunnerGroup = $effectiveRunnerGroup
         Autoscaling = $effectiveAutoscaling
+        Resources = $resourcePolicy
         NamePrefix = $effectiveNamePrefix
         VerificationCommands = @($verificationCommands)
         Build = $build
         PullImage = $effectivePullImage
+    }
+}
+
+<#
+.SYNOPSIS
+    Rejects resilience settings that the active manager contract cannot enforce.
+
+.DESCRIPTION
+    Contract 11 configuration is resolved and testable before both manager modes
+    implement it, but setup must not activate resource or admission policies
+    through a contract-10 manager.
+
+.PARAMETER Profile
+    Effective profile returned by Resolve-RunnerProfile.
+
+.EXCEPTION
+    Throws when the profile requests a contract-11 policy while the active
+    manager contract is older.
+#>
+function Assert-RunnerResilienceContractActivation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile
+    )
+
+    $requestsAdmissionCeiling = (
+        $Profile.Autoscaling -and
+        $null -ne $Profile.Autoscaling.MaximumActiveWorkers
+    )
+    if (
+        ($Profile.Resources -or $requestsAdmissionCeiling) -and
+        $Profile.ManagerContractVersion -lt $Profile.DefinedManagerContractVersion
+    ) {
+        throw (
+            "Runner resource limits and profile-wide admission require manager contract " +
+            "$($Profile.DefinedManagerContractVersion), but this release activates contract " +
+            "$($Profile.ManagerContractVersion). Upgrade after both manager implementations support contract " +
+            "$($Profile.DefinedManagerContractVersion); the requested policy was not applied."
+        )
     }
 }
 
@@ -627,6 +926,9 @@ function Get-RunnerDesiredCapacitySignature {
 .PARAMETER EnterpriseName
     Enterprise name for enterprise scope.
 
+.PARAMETER ResolvedImageId
+    Immutable local Docker image ID resolved after image preparation.
+
 .OUTPUTS
     PSCustomObject containing the static contract and its SHA-256 fingerprint.
 #>
@@ -646,7 +948,11 @@ function New-RunnerStaticProfileState {
 
         [Parameter(Mandatory)]
         [AllowEmptyString()]
-        [string]$EnterpriseName
+        [string]$EnterpriseName,
+
+        [AllowNull()]
+        [ValidatePattern('^$|^sha256:[0-9a-f]{64}$')]
+        [string]$ResolvedImageId = ''
     )
 
     $buildState = $null
@@ -676,6 +982,11 @@ function New-RunnerStaticProfileState {
         workerRuntimeContractVersion = $script:RunnerWorkerRuntimeContractVersion
         profile = [string]$Profile.Name
         image = [string]$Profile.Image
+        resolvedImageId = if ([string]::IsNullOrWhiteSpace($ResolvedImageId)) {
+            $null
+        } else {
+            $ResolvedImageId.ToLowerInvariant()
+        }
         pullImage = [bool]$Profile.PullImage
         verificationCommands = @($Profile.VerificationCommands)
         build = $buildState
@@ -690,6 +1001,23 @@ function New-RunnerStaticProfileState {
                 mode = [string]$Profile.Autoscaling.Mode
                 minimumIdle = [int]$Profile.Autoscaling.MinimumIdle
                 scaleDownDelaySeconds = [int]$Profile.Autoscaling.ScaleDownDelaySeconds
+                maximumActiveWorkers = if (
+                    $null -eq $Profile.Autoscaling.MaximumActiveWorkers
+                ) {
+                    $null
+                } else {
+                    [int]$Profile.Autoscaling.MaximumActiveWorkers
+                }
+            }
+        } else {
+            $null
+        }
+        resources = if ($Profile.Resources) {
+            [PSCustomObject][ordered]@{
+                memoryBytes = $Profile.Resources.MemoryBytes
+                memorySwapBytes = $Profile.Resources.MemorySwapBytes
+                cpuCores = $Profile.Resources.CpuCores
+                pids = $Profile.Resources.Pids
             }
         } else {
             $null
@@ -765,7 +1093,17 @@ function Get-RunnerWorkerConfiguration {
         workerRuntimeContractVersion = $workerRuntimeContractVersion
         profile = [string]$Configuration.profile
         image = [string]$Configuration.image
+        resolvedImageId = if ($Configuration.PSObject.Properties['resolvedImageId']) {
+            $Configuration.resolvedImageId
+        } else {
+            $null
+        }
         build = $Configuration.build
+        resources = if ($Configuration.PSObject.Properties['resources']) {
+            $Configuration.resources
+        } else {
+            $null
+        }
         labels = @($Configuration.labels)
         disableDefaultLabels = [bool]$Configuration.disableDefaultLabels
         scope = [string]$Configuration.scope
@@ -802,7 +1140,9 @@ function Get-RunnerRefreshCompatibilityConfiguration {
     return [PSCustomObject][ordered]@{
         profile = [string]$worker.profile
         image = [string]$worker.image
+        resolvedImageId = $worker.resolvedImageId
         build = $worker.build
+        resources = $worker.resources
         labels = @($worker.labels)
         disableDefaultLabels = [bool]$worker.disableDefaultLabels
         scope = [string]$worker.scope
@@ -985,6 +1325,9 @@ function Enter-RunnerProfileLock {
 .PARAMETER AssumeUnversionedCurrent
     Whether workers created before revision labels should be adopted as current.
 
+.PARAMETER ResolvedImageId
+    Immutable local Docker image ID used for the target worker revision.
+
 .OUTPUTS
     Newline-delimited Docker Compose environment content.
 #>
@@ -1008,6 +1351,10 @@ function New-RunnerEnvironmentContent {
         [Parameter(Mandatory)]
         [bool]$AssumeUnversionedCurrent,
 
+        [Parameter(Mandatory)]
+        [ValidatePattern('^sha256:[0-9a-f]{64}$')]
+        [string]$ResolvedImageId,
+
         [ValidateSet('repo', 'org', 'ent')]
         [string]$Scope = 'repo',
 
@@ -1027,7 +1374,8 @@ function New-RunnerEnvironmentContent {
         $Profile.LabelsValue,
         $Profile.RunnerGroup,
         $WorkerRevision,
-        $SessionOwner
+        $SessionOwner,
+        $ResolvedImageId
     )
     if ($values | Where-Object { $_ -match '[\r\n]' }) {
         throw 'Runner environment values cannot contain newlines.'
@@ -1039,6 +1387,37 @@ function New-RunnerEnvironmentContent {
     $minimumIdle = if ($Profile.Autoscaling) { [string]$Profile.Autoscaling.MinimumIdle } else { '' }
     $scaleDownDelay = if ($Profile.Autoscaling) {
         [string]$Profile.Autoscaling.ScaleDownDelaySeconds
+    } else {
+        ''
+    }
+    $maximumActiveWorkers = if (
+        $Profile.Autoscaling -and
+        $null -ne $Profile.Autoscaling.MaximumActiveWorkers
+    ) {
+        [string]$Profile.Autoscaling.MaximumActiveWorkers
+    } else {
+        ''
+    }
+    $memoryBytes = if ($Profile.Resources -and $null -ne $Profile.Resources.MemoryBytes) {
+        [string]$Profile.Resources.MemoryBytes
+    } else {
+        ''
+    }
+    $memorySwapBytes = if (
+        $Profile.Resources -and
+        $null -ne $Profile.Resources.MemorySwapBytes
+    ) {
+        [string]$Profile.Resources.MemorySwapBytes
+    } else {
+        ''
+    }
+    $cpuCores = if ($Profile.Resources -and $null -ne $Profile.Resources.CpuCores) {
+        [string]$Profile.Resources.CpuCores
+    } else {
+        ''
+    }
+    $pidsLimit = if ($Profile.Resources -and $null -ne $Profile.Resources.Pids) {
+        [string]$Profile.Resources.Pids
     } else {
         ''
     }
@@ -1055,11 +1434,17 @@ function New-RunnerEnvironmentContent {
         "RUNNER_NO_DEFAULT_LABELS=$disableDefaultLabels"
         "RUNNER_GROUP=$($Profile.RunnerGroup)"
         "PITCREW_WORKER_REVISION=$WorkerRevision"
+        "PITCREW_WORKER_IMAGE_ID=$ResolvedImageId"
+        "PITCREW_WORKER_MEMORY_BYTES=$memoryBytes"
+        "PITCREW_WORKER_MEMORY_SWAP_BYTES=$memorySwapBytes"
+        "PITCREW_WORKER_CPU_CORES=$cpuCores"
+        "PITCREW_WORKER_PIDS_LIMIT=$pidsLimit"
         "PITCREW_SESSION_OWNER=$SessionOwner"
         "PITCREW_ASSUME_UNVERSIONED_CURRENT=$assumeUnversionedCurrentValue"
         "PITCREW_AUTOSCALING_MODE=$autoscalingMode"
         "PITCREW_AUTOSCALING_MIN_IDLE=$minimumIdle"
         "PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$scaleDownDelay"
+        "PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$maximumActiveWorkers"
         "PITCREW_STATE_DIR=$($Profile.StateVolumePath)"
         "PITCREW_MANAGER_CONTRACT_VERSION=$($Profile.ManagerContractVersion)"
     ) -join "`n"

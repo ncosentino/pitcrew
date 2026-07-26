@@ -26,6 +26,260 @@
         "pids": {
           "type": "integer",
           "minimum": 0
+        },
+        "networkRxBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "networkTxBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "blockReadBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "blockWriteBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        }
+      }
+    },
+    "resourcePolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "memoryBytes",
+        "memorySwapBytes",
+        "cpuCores",
+        "pids"
+      ],
+      "properties": {
+        "memoryBytes": {
+          "type": ["integer", "null"],
+          "minimum": 6291456
+        },
+        "memorySwapBytes": {
+          "type": ["integer", "null"],
+          "minimum": 6291456
+        },
+        "cpuCores": {
+          "type": ["string", "null"],
+          "pattern": "^(?:[1-9][0-9]*(?:\\.[0-9]{1,9})?|0\\.[0-9]{0,8}[1-9])$"
+        },
+        "pids": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 2147483647
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "memorySwapBytes": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "memorySwapBytes"
+            ]
+          },
+          "then": {
+            "properties": {
+              "memoryBytes": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ],
+      "anyOf": [
+        {
+          "properties": {
+            "memoryBytes": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "properties": {
+            "memorySwapBytes": {
+              "type": "integer"
+            }
+          }
+        },
+        {
+          "properties": {
+            "cpuCores": {
+              "type": "string"
+            }
+          }
+        },
+        {
+          "properties": {
+            "pids": {
+              "type": "integer"
+            }
+          }
+        }
+      ],
+      "$comment": "Manager and dashboard validators enforce memorySwapBytes >= memoryBytes."
+    },
+    "lastExitDiagnostic": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observedAt",
+        "classification",
+        "exitCode",
+        "signal",
+        "dockerOomKilled",
+        "evidence"
+      ],
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "classification": {
+          "enum": [
+            "clean",
+            "oom-killed",
+            "sigkill",
+            "signal",
+            "error",
+            "launch-failure",
+            "unknown"
+          ]
+        },
+        "exitCode": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 255
+        },
+        "signal": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 64
+        },
+        "dockerOomKilled": {
+          "type": ["boolean", "null"]
+        },
+        "evidence": {
+          "enum": [
+            "docker-inspect",
+            "docker-wait",
+            "launch",
+            "unavailable"
+          ]
+        }
+      },
+      "$comment": "Classification precedence is Docker-confirmed OOM, SIGKILL, other signal, clean zero, ordinary nonzero error, launch failure, then unknown. Exit code 137 alone never proves OOM."
+    },
+    "scaleSetStatistics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observedAt",
+        "availableJobs",
+        "acquiredJobs",
+        "assignedJobs",
+        "runningJobs",
+        "registeredRunners",
+        "busyRunners",
+        "idleRunners"
+      ],
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "availableJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "acquiredJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "assignedJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "runningJobs": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "registeredRunners": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "busyRunners": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "idleRunners": {
+          "type": "integer",
+          "minimum": 0
+        }
+      }
+    },
+    "autoscalingTargetState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "key",
+        "repository",
+        "maximumSlots",
+        "targetSlots",
+        "localActiveWorkers",
+        "localIdleWorkers",
+        "localBusyWorkers",
+        "localDrainingWorkers",
+        "statistics"
+      ],
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1
+        },
+        "repository": {
+          "type": ["string", "null"]
+        },
+        "maximumSlots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targetSlots": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "localActiveWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "localIdleWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "localBusyWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "localDrainingWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "statistics": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/scaleSetStatistics"
+            },
+            {
+              "type": "null"
+            }
+          ]
         }
       }
     },
@@ -158,6 +412,16 @@
         },
         "lastError": {
           "type": ["string", "null"]
+        },
+        "maximumActiveWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "targets": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/autoscalingTargetState"
+          }
         }
       }
     },
@@ -276,6 +540,16 @@
         }
       ]
     },
+    "resourcePolicy": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/resourcePolicy"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "autoscaling": {
       "oneOf": [
         {
@@ -360,6 +634,20 @@
           },
           "registrationStatus": {
             "enum": ["connected", "disconnected", "registration-missing", "unknown"]
+          },
+          "imageId": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
+          "lastExit": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/lastExitDiagnostic"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         }
       }
@@ -599,6 +887,78 @@
           }
         },
         "$comment": "eligibleSlots equals the number of slots whose registrationStatus is connected; enforced by manager and dashboard validators."
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 11
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "resourcePolicy"
+        ],
+        "properties": {
+          "autoscaling": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/autoscalingState"
+                  },
+                  {
+                    "required": [
+                      "maximumActiveWorkers",
+                      "targets"
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "slots": {
+            "items": {
+              "required": [
+                "imageId",
+                "lastExit"
+              ],
+              "properties": {
+                "resources": {
+                  "oneOf": [
+                    {
+                      "type": "null"
+                    },
+                    {
+                      "allOf": [
+                        {
+                          "$ref": "#/$defs/resourceUsage"
+                        },
+                        {
+                          "required": [
+                            "networkRxBytes",
+                            "networkTxBytes",
+                            "blockReadBytes",
+                            "blockWriteBytes"
+                          ]
+                        }
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        },
+        "$comment": "Local worker counts and timestamped GitHub scale-set statistics are separate evidence. Neither source makes a mismatched runner automatically removable."
       }
     }
   ]
