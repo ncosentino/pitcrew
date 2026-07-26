@@ -759,6 +759,555 @@ Add-Check (-not (
             -ErrorAction SilentlyContinue
 )) 'The observed-state schema accepts worker resources in unavailable telemetry.'
 
+$journalV12 = [PSCustomObject][ordered]@{
+    status = 'current'
+    capacity = 64
+    highestSequence = 45
+    droppedEvents = 0
+    events = @(
+        [PSCustomObject][ordered]@{
+            sequence = 41
+            managerInstanceId = 'manager-instance-a'
+            observedAt = '2026-01-01T00:00:00Z'
+            subsystem = 'docker'
+            operation = 'docker-run'
+            target = 'repo-example-000001'
+            outcome = 'failed'
+            durationMilliseconds = 1200
+            attempt = 1
+            consecutiveFailures = 1
+            retryAt = $null
+            reason = 'docker-failed'
+            evidence = 'Worker launch was rejected by the Docker daemon'
+        },
+        [PSCustomObject][ordered]@{
+            sequence = 42
+            managerInstanceId = 'manager-instance-a'
+            observedAt = '2026-01-01T00:00:10Z'
+            subsystem = 'registration'
+            operation = 'registration-token-request'
+            target = $null
+            outcome = 'timed-out'
+            durationMilliseconds = 30000
+            attempt = 1
+            consecutiveFailures = 1
+            retryAt = $null
+            reason = 'timeout'
+            evidence = 'Registration token request exceeded its deadline'
+        },
+        [PSCustomObject][ordered]@{
+            sequence = 43
+            managerInstanceId = 'manager-instance-a'
+            observedAt = '2026-01-01T00:00:20Z'
+            subsystem = 'worker-launch'
+            operation = 'worker-launch'
+            target = 'repo-example-000001'
+            outcome = 'retry-scheduled'
+            durationMilliseconds = $null
+            attempt = 2
+            consecutiveFailures = 2
+            retryAt = '2026-01-01T00:00:50Z'
+            reason = 'retry-backoff'
+            evidence = 'Worker launch is waiting for its backoff window'
+        },
+        [PSCustomObject][ordered]@{
+            sequence = 44
+            managerInstanceId = 'manager-instance-b'
+            observedAt = '2026-01-01T00:01:00Z'
+            subsystem = 'recovery'
+            operation = 'journal-restore'
+            target = $null
+            outcome = 'recovered'
+            durationMilliseconds = 5
+            attempt = $null
+            consecutiveFailures = 0
+            retryAt = $null
+            reason = 'recovered'
+            evidence = 'Restored the persisted operation journal after restart'
+        },
+        [PSCustomObject][ordered]@{
+            sequence = 45
+            managerInstanceId = 'manager-instance-b'
+            observedAt = '2026-01-01T00:01:01Z'
+            subsystem = 'docker'
+            operation = 'docker-ping'
+            target = $null
+            outcome = 'succeeded'
+            durationMilliseconds = 0
+            attempt = 1
+            consecutiveFailures = 0
+            retryAt = $null
+            reason = 'none'
+            evidence = $null
+        }
+    )
+}
+$subsystemHealthV12 = [PSCustomObject][ordered]@{
+    docker = [PSCustomObject][ordered]@{
+        state = 'healthy'
+        observedAt = '2026-01-01T00:01:01Z'
+        consecutiveFailures = 0
+        retryAt = $null
+        lastSuccess = [PSCustomObject][ordered]@{
+            operation = 'docker-ping'
+            observedAt = '2026-01-01T00:01:01Z'
+            durationMilliseconds = 0
+            reason = 'none'
+            evidence = $null
+        }
+        lastFailure = [PSCustomObject][ordered]@{
+            operation = 'docker-run'
+            observedAt = '2026-01-01T00:00:00Z'
+            durationMilliseconds = 1200
+            reason = 'docker-failed'
+            evidence = 'Worker launch was rejected by the Docker daemon'
+        }
+    }
+    github = [PSCustomObject][ordered]@{
+        state = 'degraded'
+        observedAt = '2026-01-01T00:01:01Z'
+        consecutiveFailures = 1
+        retryAt = '2026-01-01T00:01:30Z'
+        lastSuccess = $null
+        lastFailure = [PSCustomObject][ordered]@{
+            operation = 'registration-token-request'
+            observedAt = '2026-01-01T00:00:10Z'
+            durationMilliseconds = 30000
+            reason = 'timeout'
+            evidence = 'Registration token request exceeded its deadline'
+        }
+    }
+}
+$fixedStateV12 = (
+    $fixedStateV11 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$fixedStateV12.managerContractVersion = 12
+$fixedStateV12 | Add-Member -NotePropertyName operationJournal -NotePropertyValue (
+    $journalV12 | ConvertTo-Json -Depth 16 | ConvertFrom-Json -Depth 16
+)
+$fixedStateV12 | Add-Member -NotePropertyName subsystemHealth -NotePropertyValue (
+    $subsystemHealthV12 | ConvertTo-Json -Depth 16 | ConvertFrom-Json -Depth 16
+)
+$fixedStateV12 | Add-Member -NotePropertyName capacityEvidence -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        fixed = [PSCustomObject][ordered]@{
+            observedAt = '2026-01-01T00:01:01Z'
+            freshness = 'current'
+            targetSlots = 2
+            activeWorkers = 1
+            startingWorkers = 0
+            drainingWorkers = 0
+            cleanupPendingWorkers = 0
+            eligibleWorkers = 1
+            localDeficit = 1
+            eligibilityDeficit = 1
+            reason = 'retry-backoff'
+            evidence = 'One worker is waiting for its launch backoff window'
+        }
+        targets = @()
+    }
+)
+Add-Check (
+    ($fixedStateV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twelve rejects a valid fixed journal, health, and deficit projection.'
+Add-Check (
+    Test-RunnerManagerJournalBudget -Journal $fixedStateV12.operationJournal
+) 'The contract-twelve journal example exceeds the documented bound.'
+$roundTrippedJournalV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+).operationJournal
+Add-Check (
+    $roundTrippedJournalV12.events[3].managerInstanceId -cne
+        $roundTrippedJournalV12.events[2].managerInstanceId -and
+    $roundTrippedJournalV12.events[3].sequence -gt $roundTrippedJournalV12.events[2].sequence -and
+    $roundTrippedJournalV12.highestSequence -eq $roundTrippedJournalV12.events[-1].sequence
+) 'The journal did not preserve durable sequence identity across a manager restart.'
+Add-Check (
+    $roundTrippedJournalV12.events[4].durationMilliseconds -eq 0 -and
+    $null -eq $roundTrippedJournalV12.events[2].durationMilliseconds
+) 'A measured-zero duration did not round-trip distinctly from an unmeasured duration.'
+$autoscaledStateV12 = (
+    $autoscaledStateV11 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$autoscaledStateV12.managerContractVersion = 12
+$autoscaledStateV12 | Add-Member -NotePropertyName operationJournal -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        status = 'current'
+        capacity = 64
+        highestSequence = $null
+        droppedEvents = 0
+        events = @()
+    }
+)
+$autoscaledStateV12 | Add-Member -NotePropertyName subsystemHealth -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        docker = [PSCustomObject][ordered]@{
+            state = 'unknown'
+            observedAt = '2026-01-01T00:00:00Z'
+            consecutiveFailures = 0
+            retryAt = $null
+            lastSuccess = $null
+            lastFailure = $null
+        }
+        github = [PSCustomObject][ordered]@{
+            state = 'unavailable'
+            observedAt = '2026-01-01T00:00:00Z'
+            consecutiveFailures = 3
+            retryAt = '2026-01-01T00:00:30Z'
+            lastSuccess = $null
+            lastFailure = [PSCustomObject][ordered]@{
+                operation = 'session-create'
+                observedAt = '2026-01-01T00:00:00Z'
+                durationMilliseconds = 30000
+                reason = 'timeout'
+                evidence = 'Scale set session creation exceeded its deadline'
+            }
+        }
+    }
+)
+$autoscaledStateV12 | Add-Member -NotePropertyName capacityEvidence -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        fixed = $null
+        targets = @(
+            [PSCustomObject][ordered]@{
+                key = 'repo-needlr'
+                repository = 'https://github.com/ncosentino/needlr'
+                observedAt = '2026-01-01T00:00:00Z'
+                freshness = 'current'
+                targetSlots = 2
+                activeWorkers = 2
+                startingWorkers = 0
+                drainingWorkers = 0
+                cleanupPendingWorkers = 0
+                eligibleWorkers = 2
+                localDeficit = 0
+                eligibilityDeficit = 0
+                reason = 'none'
+                evidence = $null
+            },
+            [PSCustomObject][ordered]@{
+                key = 'repo-genesis'
+                repository = 'https://github.com/ncosentino/genesis'
+                observedAt = '2026-01-01T00:00:00Z'
+                freshness = 'stale'
+                targetSlots = 2
+                activeWorkers = 0
+                startingWorkers = 0
+                drainingWorkers = 0
+                cleanupPendingWorkers = 1
+                eligibleWorkers = $null
+                localDeficit = 2
+                eligibilityDeficit = $null
+                reason = 'registration-cleanup-pending'
+                evidence = 'Replacement admission is waiting for registration cleanup'
+            }
+        )
+    }
+)
+Add-Check (
+    ($autoscaledStateV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twelve rejects per-target deficit evidence and an empty journal.'
+Add-Check (
+    $autoscaledStateV12.capacityEvidence.targets[0].targetSlots -eq
+        $autoscaledStateV12.autoscaling.targets[0].targetSlots -and
+    $autoscaledStateV12.capacityEvidence.targets[0].targetSlots -lt
+        $autoscaledStateV12.autoscaling.targets[0].maximumSlots -and
+    $autoscaledStateV12.capacityEvidence.targets[0].localDeficit -eq 0 -and
+    $autoscaledStateV12.capacityEvidence.targets[0].reason -ceq 'none'
+) 'A configured autoscaling maximum was presented as a capacity deficit.'
+$unavailableEvidenceV12 = (
+    $autoscaledStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$unavailableEvidenceV12.capacityEvidence.targets[1].freshness = 'unavailable'
+$unavailableEvidenceV12.capacityEvidence.targets[1].reason = 'unknown'
+Add-Check (
+    ($unavailableEvidenceV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twelve rejects explicitly unavailable capacity evidence.'
+$unavailableWithReasonV12 = (
+    $unavailableEvidenceV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$unavailableWithReasonV12.capacityEvidence.targets[1].reason = 'session-unavailable'
+Add-Check (-not (
+    ($unavailableWithReasonV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Unavailable capacity evidence claimed a blocking reason it could not observe.'
+$unavailableJournalV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$unavailableJournalV12.operationJournal.status = 'unavailable'
+$unavailableJournalV12.operationJournal.highestSequence = $null
+$unavailableJournalV12.operationJournal.events = @()
+$unavailableJournalV12.operationJournal.droppedEvents = 5
+Add-Check (
+    ($unavailableJournalV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'A discarded journal invalidated otherwise valid observed state.'
+$retainedEventsWhileUnavailableV12 = (
+    $unavailableJournalV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$retainedEventsWhileUnavailableV12.operationJournal.events = @(
+    $journalV12.events[0] | ConvertTo-Json -Depth 16 | ConvertFrom-Json -Depth 16
+)
+Add-Check (-not (
+    ($retainedEventsWhileUnavailableV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'An unavailable journal reported retained events.'
+$silentTruncationV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$silentTruncationV12.operationJournal.status = 'truncated'
+Add-Check (-not (
+    ($silentTruncationV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A truncated journal hid the number of discarded events.'
+$oversizedJournalV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$oversizedTemplate = $journalV12.events[0] |
+    ConvertTo-Json -Depth 16 |
+    ConvertFrom-Json -Depth 16
+$oversizedEvents = [System.Collections.Generic.List[object]]::new()
+foreach ($sequence in 1..65) {
+    $oversizedEvent = $oversizedTemplate |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+    $oversizedEvent.sequence = $sequence
+    $oversizedEvents.Add($oversizedEvent)
+}
+$oversizedJournalV12.operationJournal.events = @($oversizedEvents)
+$oversizedJournalV12.operationJournal.highestSequence = 65
+Add-Check (-not (
+    ($oversizedJournalV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts an unbounded operation journal.'
+Add-Check (-not (
+    Test-RunnerManagerJournalBudget -Journal $oversizedJournalV12.operationJournal
+)) 'The journal budget accepts more retained events than the contract allows.'
+$oversizedBytesJournalV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$oversizedBytesEvents = [System.Collections.Generic.List[object]]::new()
+foreach ($sequence in 1..64) {
+    $oversizedBytesEvent = $oversizedTemplate |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+    $oversizedBytesEvent.sequence = $sequence
+    $oversizedBytesEvent.evidence = 'Worker launch was rejected by the Docker daemon and is bounded'.PadRight(160, '.')
+    $oversizedBytesEvents.Add($oversizedBytesEvent)
+}
+$oversizedBytesJournalV12.operationJournal.events = @($oversizedBytesEvents)
+$oversizedBytesJournalV12.operationJournal.highestSequence = 64
+Add-Check (
+    ($oversizedBytesJournalV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'The observed-state schema rejects a journal that only the size budget bounds.'
+Add-Check (-not (
+    Test-RunnerManagerJournalBudget -Journal $oversizedBytesJournalV12.operationJournal
+)) 'The journal budget accepts a serialized journal beyond the documented size gate.'
+$longEvidenceJournalV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$longEvidenceJournalV12.operationJournal.events[0].evidence = 'Worker launch failed'.PadRight(161, '.')
+Add-Check (-not (
+    ($longEvidenceJournalV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts unbounded journal evidence text.'
+Add-Check (-not (
+    Test-RunnerManagerJournalBudget -Journal $longEvidenceJournalV12.operationJournal
+)) 'The journal budget accepts unbounded journal evidence text.'
+foreach ($leakedEvidence in @(
+    'Docker refused https://github.com/example/project',
+    'token=abcdef0123456789',
+    'error: unauthorized@github')) {
+    $leakedJournalV12 = (
+        $fixedStateV12 |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json -Depth 16
+    )
+    $leakedJournalV12.operationJournal.events[0].evidence = $leakedEvidence
+    Add-Check (-not (
+        ($leakedJournalV12 | ConvertTo-Json -Depth 16) |
+            Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+    )) "The observed-state schema accepts unsanitized journal evidence '$leakedEvidence'."
+}
+$invalidVocabularyV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$invalidVocabularyV12.operationJournal.events[0].operation = 'docker-run-something-new'
+Add-Check (-not (
+    ($invalidVocabularyV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts an invented journal operation name.'
+$successWithFailureReasonV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$successWithFailureReasonV12.operationJournal.events[4].reason = 'docker-failed'
+Add-Check (-not (
+    ($successWithFailureReasonV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A succeeded journal event reported a failure reason.'
+$failureWithoutReasonV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$failureWithoutReasonV12.operationJournal.events[0].reason = 'none'
+Add-Check (-not (
+    ($failureWithoutReasonV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A failed journal event reported no typed reason.'
+$retryWithoutDeadlineV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$retryWithoutDeadlineV12.operationJournal.events[2].retryAt = $null
+Add-Check (-not (
+    ($retryWithoutDeadlineV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A scheduled retry omitted its next-attempt deadline.'
+$malformedEventV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$malformedEventV12.operationJournal.events[0].PSObject.Properties.Remove('subsystem')
+Add-Check (-not (
+    ($malformedEventV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'The observed-state schema accepts a journal event without its subsystem.'
+$healthyWithFailuresV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$healthyWithFailuresV12.subsystemHealth.docker.consecutiveFailures = 2
+Add-Check (-not (
+    ($healthyWithFailuresV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A healthy subsystem summary reported consecutive failures.'
+$degradedWithoutFailureV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$degradedWithoutFailureV12.subsystemHealth.github.lastFailure = $null
+Add-Check (-not (
+    ($degradedWithoutFailureV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A degraded subsystem summary reported no failing operation.'
+$unknownWithEvidenceV12 = (
+    $autoscaledStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$unknownWithEvidenceV12.subsystemHealth.docker.lastSuccess = (
+    $subsystemHealthV12.docker.lastSuccess |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+Add-Check (-not (
+    ($unknownWithEvidenceV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'An unknown subsystem summary reported an operation it never performed.'
+$deficitWithoutReasonV12 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$deficitWithoutReasonV12.capacityEvidence.fixed.reason = 'none'
+Add-Check (-not (
+    ($deficitWithoutReasonV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A capacity deficit reported no blocking reason.'
+$inventedEligibilityV12 = (
+    $autoscaledStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$inventedEligibilityV12.capacityEvidence.targets[1].eligibilityDeficit = 2
+Add-Check (-not (
+    ($inventedEligibilityV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'An eligibility deficit was reported without control-plane evidence.'
+$fixedEvidenceWhileAutoscalingV12 = (
+    $autoscaledStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$fixedEvidenceWhileAutoscalingV12.capacityEvidence.fixed = (
+    $fixedStateV12.capacityEvidence.fixed |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+Add-Check (-not (
+    ($fixedEvidenceWhileAutoscalingV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'An autoscaled profile reported fixed-mode capacity evidence.'
+foreach ($requiredContractTwelveField in @(
+    'operationJournal',
+    'subsystemHealth',
+    'capacityEvidence')) {
+    $missingContractV12 = (
+        $fixedStateV12 |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json -Depth 16
+    )
+    $missingContractV12.PSObject.Properties.Remove($requiredContractTwelveField)
+    Add-Check (-not (
+        ($missingContractV12 | ConvertTo-Json -Depth 16) |
+            Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+    )) "Manager contract twelve accepts observed state without '$requiredContractTwelveField'."
+}
+Add-Check (
+    ($fixedStateV11 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eleven stopped being accepted after contract twelve was defined.'
+$nullDiagnosticsV11 = (
+    $fixedStateV11 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$nullDiagnosticsV11 | Add-Member -NotePropertyName operationJournal -NotePropertyValue $null
+$nullDiagnosticsV11 | Add-Member -NotePropertyName subsystemHealth -NotePropertyValue $null
+$nullDiagnosticsV11 | Add-Member -NotePropertyName capacityEvidence -NotePropertyValue $null
+Add-Check (
+    ($nullDiagnosticsV11 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Contract-twelve fields are not additive and nullable for older observations.'
+Add-Check (
+    Test-RunnerManagerJournalBudget -Journal $null
+) 'The journal budget rejects a manager that predates contract twelve.'
+
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
 
@@ -947,6 +1496,36 @@ Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The de
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
 Add-Check ($defaultProfile.ManagerContractVersion -eq 10) 'The setup contract does not identify the registration-aware manager.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
+Add-Check (
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 12
+) 'The setup contract does not expose the defined diagnostics contract.'
+$implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
+Add-Check (
+    $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
+    $implementedContract.Autoscaling -eq $defaultProfile.ManagerContractVersion
+) 'The activated manager contract does not match both manager implementations.'
+Add-Check (
+    $implementedContract.Implemented -lt $defaultProfile.DefinedDiagnosticsContractVersion
+) 'The diagnostics contract was marked defined while a manager already implements it.'
+Assert-RunnerManagerContractActivation -Profile $defaultProfile
+$diagnosticsProfile = $defaultProfile.PSObject.Copy()
+$diagnosticsProfile.ManagerContractVersion = $defaultProfile.DefinedDiagnosticsContractVersion
+Add-ThrowsCheck `
+    -Action {
+        Assert-RunnerManagerContractActivation -Profile $diagnosticsProfile
+    } `
+    -ExpectedMessage 'Manager contract 12 cannot activate' `
+    -Failure 'Contract 12 activated before both manager modes implement it.'
+$missingManagerRoot = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('n'))
+New-Item -ItemType Directory -Path $missingManagerRoot | Out-Null
+try {
+    $missingManagerContract = Get-RunnerImplementedManagerContract -RootPath $missingManagerRoot
+    Add-Check (
+        $missingManagerContract.Implemented -eq 0
+    ) 'An unreadable manager declaration did not fail closed.'
+} finally {
+    Remove-Item -LiteralPath $missingManagerRoot -Recurse -Force
+}
 Add-Check ($defaultProfile.ObservedStatePath -eq (Join-Path $defaultProfile.StateDirectory 'observed-state.json')) 'The profile does not expose its observed-state path.'
 
 $fiveWorkers = New-RunnerDesiredCapacityState `

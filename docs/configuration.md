@@ -264,6 +264,135 @@ otherwise the wait status plus a bounded out-of-memory event lookup for the exac
 container. When Docker offers no usable evidence the slot reports `unknown`
 rather than a clean exit, and an unconfirmed out-of-memory kill stays `null`.
 
+### Contract-12 operation evidence
+
+The contract-12 schema adds three additive projections: a durable manager
+operation journal, current Docker and GitHub subsystem summaries, and explicit
+capacity-deficit evidence. Every field is nullable for contract-11 and older
+observations, so contract-10 and contract-11 readers are unaffected.
+
+```json
+{
+  "operationJournal": {
+    "status": "current",
+    "capacity": 64,
+    "highestSequence": 45,
+    "droppedEvents": 0,
+    "events": [
+      {
+        "sequence": 45,
+        "managerInstanceId": "manager-instance-b",
+        "observedAt": "2026-07-26T12:00:00Z",
+        "subsystem": "worker-launch",
+        "operation": "worker-launch",
+        "target": "repo-example-000001",
+        "outcome": "retry-scheduled",
+        "durationMilliseconds": null,
+        "attempt": 2,
+        "consecutiveFailures": 2,
+        "retryAt": "2026-07-26T12:00:30Z",
+        "reason": "retry-backoff",
+        "evidence": "Worker launch is waiting for its backoff window"
+      }
+    ]
+  },
+  "subsystemHealth": {
+    "docker": {
+      "state": "healthy",
+      "observedAt": "2026-07-26T12:00:00Z",
+      "consecutiveFailures": 0,
+      "retryAt": null,
+      "lastSuccess": {
+        "operation": "docker-ping",
+        "observedAt": "2026-07-26T12:00:00Z",
+        "durationMilliseconds": 0,
+        "reason": "none",
+        "evidence": null
+      },
+      "lastFailure": null
+    },
+    "github": {
+      "state": "degraded",
+      "observedAt": "2026-07-26T12:00:00Z",
+      "consecutiveFailures": 1,
+      "retryAt": "2026-07-26T12:00:30Z",
+      "lastSuccess": null,
+      "lastFailure": {
+        "operation": "registration-token-request",
+        "observedAt": "2026-07-26T11:59:30Z",
+        "durationMilliseconds": 30000,
+        "reason": "timeout",
+        "evidence": "Registration token request exceeded its deadline"
+      }
+    }
+  },
+  "capacityEvidence": {
+    "fixed": {
+      "observedAt": "2026-07-26T12:00:00Z",
+      "freshness": "current",
+      "targetSlots": 2,
+      "activeWorkers": 1,
+      "startingWorkers": 0,
+      "drainingWorkers": 0,
+      "cleanupPendingWorkers": 0,
+      "eligibleWorkers": 1,
+      "localDeficit": 1,
+      "eligibilityDeficit": 1,
+      "reason": "retry-backoff",
+      "evidence": "One worker is waiting for its launch backoff window"
+    },
+    "targets": []
+  }
+}
+```
+
+The journal is persisted atomically beneath the profile state directory, so it
+survives ordinary manager restart and hot-swap. `sequence` is durable and
+monotonic across restarts, so dashboards deduplicate on the profile plus the
+sequence and treat `managerInstanceId` as the observer rather than the identity
+of the event. The journal retains failures, state transitions, retries, and
+recovery instead of every reconciliation pass.
+
+Journal limits are strict and enforced: at most 64 retained events, at most 160
+characters of sanitized `evidence` per event, and at most 16384 serialized
+bytes. `subsystem`, `operation`, `outcome`, and `reason` are closed
+vocabularies; a manager that needs a new value needs a new contract version.
+`evidence` excludes `:`, `/`, `@`, `?`, `=`, and `&`, so tokens, URLs, HTTP
+bodies, environment values, JIT payloads, job output, and raw Docker or GitHub
+stderr cannot be relayed. `target` is limited to a slot or autoscaling target
+key that already appears in non-secret state.
+
+Journal `status` separates the intact window (`current`) from a window that
+discarded older, malformed, or oversized entries (`truncated`, which requires a
+nonzero `droppedEvents`) and from a journal the manager could not read or
+restore (`unavailable`, which reports no events). A discarded journal never
+discards otherwise valid observed state. An empty `events` array with status
+`current` means no notable event has occurred.
+
+Subsystem summaries describe operations PitCrew itself performed. They are not
+a claim that the host, Docker daemon, network, or GitHub service is healthy.
+`unknown` means the manager has performed no such operation yet and therefore
+carries no evidence, `healthy` requires a last success and zero consecutive
+failures, and `degraded` or `unavailable` requires a last failure and at least
+one consecutive failure.
+
+Capacity evidence separates the actual target from local and control-plane
+counts. `targetSlots` is `desiredSlots` for a fixed profile and the activation
+`targetSlots` for an autoscaling target; a configured autoscaling maximum is
+not a health target and never creates a deficit by itself. `eligibleWorkers`
+and `eligibilityDeficit` are `null` together when the manager has no current
+control-plane evidence, while `0` means it observed none. `freshness`
+distinguishes `current` and `stale` measurements from `unavailable` evidence,
+which reports the `unknown` reason because the manager observed nothing to
+blame. `reason` is observed manager state, never a diagnosis inferred by a
+dashboard.
+
+Manager contract 12 is defined but not active in this release. Both manager
+modes still implement contract 10, so setup fails closed before Docker, image,
+or generated state mutation if a contract ahead of both implementations is
+selected. Contract-11 resource, image, exit, and worker-revision semantics are
+unchanged.
+
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify
 whether a runner is busy, so consumers must not infer job state from CPU or
