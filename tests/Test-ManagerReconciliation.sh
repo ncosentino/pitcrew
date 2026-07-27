@@ -565,6 +565,26 @@ assert_true \
     test "${timeout_elapsed}" -lt 4
 assert_equals "partial" "$(jq -r '.status' "${timed_resources}")" "A timed-out stats sample was not surfaced as partial telemetry."
 
+launched_marker_slot="${TEMP_DIRECTORY}/connect-marker-launched"
+recovered_marker_slot="${TEMP_DIRECTORY}/connect-marker-recovered"
+mkdir -p "${launched_marker_slot}" "${recovered_marker_slot}"
+reset_slot_connect_marker "${launched_marker_slot}"
+assert_true \
+    "A freshly launched slot could not observe its own connect marker." \
+    slot_connect_marker_is_pending "${launched_marker_slot}"
+consume_slot_connect_marker "${launched_marker_slot}"
+assert_false \
+    "A connect marker stayed pending after it promoted its slot." \
+    slot_connect_marker_is_pending "${launched_marker_slot}"
+consume_slot_connect_marker "${recovered_marker_slot}"
+assert_false \
+    "An adopted slot could be reported online by worker output produced before adoption." \
+    slot_connect_marker_is_pending "${recovered_marker_slot}"
+reset_slot_connect_marker "${recovered_marker_slot}"
+assert_true \
+    "A replacement runner launched by the adopting manager could not report its own connect marker." \
+    slot_connect_marker_is_pending "${recovered_marker_slot}"
+
 observed_slots_directory="${TEMP_DIRECTORY}/observed-slots"
 observed_slots_json="${TEMP_DIRECTORY}/observed-slots.json"
 observed_state_json="${TEMP_DIRECTORY}/observed-state.json"

@@ -851,6 +851,24 @@ write_slot_runtime_state() {
     [ -n "${observed_dirty_path}" ] && : > "${observed_dirty_path}"
 }
 
+# A worker's connect marker is local process output, not authoritative GitHub
+# connectivity, so it may only promote a slot whose runner this manager launched
+# and watched from its first line. A fresh launch opens the transition, the
+# first observed marker consumes it, and a slot adopted from a previous manager
+# starts with it already consumed: log output produced before adoption is
+# replayable and can never report recovered capacity as online.
+reset_slot_connect_marker() {
+    rm -f "$1/connected"
+}
+
+consume_slot_connect_marker() {
+    : > "$1/connected"
+}
+
+slot_connect_marker_is_pending() {
+    [ ! -f "$1/connected" ]
+}
+
 render_observed_slots() {
     slot_directory="$1"
     output_path="$2"

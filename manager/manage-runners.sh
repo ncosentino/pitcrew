@@ -580,8 +580,8 @@ monitor_runner_container() {
             printf '%s\n' "${output_line}" >> "${monitored_log_path}"
             case "${output_line}" in
                 *"${CONNECT_MARKER}"*)
-                    if [ ! -f "${monitored_slot_path}/connected" ]; then
-                        : > "${monitored_slot_path}/connected"
+                    if slot_connect_marker_is_pending "${monitored_slot_path}"; then
+                        consume_slot_connect_marker "${monitored_slot_path}"
                         write_slot_runtime_state \
                             "${monitored_slot_path}" \
                             "${OBSERVED_STATE_DIRTY}" \
@@ -689,7 +689,7 @@ run_slot() {
     if [ -f "${slot_state_path}/recovered-container-id" ]; then
         recovered_id=$(cat "${slot_state_path}/recovered-container-id")
         recovered_name=$(cat "${slot_state_path}/recovered-container-name")
-        rm -f "${slot_state_path}/connected"
+        consume_slot_connect_marker "${slot_state_path}"
         printf '%s\n' "${recovered_id}" > "${slot_state_path}/container-id"
         printf '%s\n' "${recovered_name}" > "${slot_state_path}/container-name"
         write_slot_runtime_state \
@@ -735,7 +735,7 @@ run_slot() {
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
         echo "[slot ${slot_key}] starting fresh ephemeral runner: ${name} -> ${repo:-<scope>}"
         : > "${log_path}"
-        rm -f "${slot_state_path}/connected"
+        reset_slot_connect_marker "${slot_state_path}"
         write_slot_runtime_state \
             "${slot_state_path}" \
             "${OBSERVED_STATE_DIRTY}" \

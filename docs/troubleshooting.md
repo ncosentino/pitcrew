@@ -113,6 +113,13 @@ never retried automatically: re-read observed state and reassess before any
 second attempt. A profile with no running manager is intentionally stopped or
 separately broken, and recovery will not start it.
 
+An adopted worker keeps reporting `starting` for the rest of its life. A
+worker's own log output only reports that its process is listening, and output
+produced before the handoff is replayable, so the replacement manager never
+treats it as evidence about a runner it did not launch. Use `registrationStatus`
+and `eligibleSlots` for GitHub-authoritative capacity; those stay `unknown` and
+`0` whenever the manager cannot reach GitHub.
+
 ## Docker-dependent workflow steps fail
 
 PitCrew workers intentionally do not receive a Docker socket. Route container
