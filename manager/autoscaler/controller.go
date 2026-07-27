@@ -14,6 +14,7 @@ import (
 
 type targetController struct {
 	mu                sync.Mutex
+	diagnostics       *diagnosticsRecorder
 	target            targetSpec
 	handle            scaleSetHandle
 	api               scaleSetService
@@ -48,6 +49,7 @@ func startTargetController(
 	docker dockerClient,
 	scalerClock clock,
 	admission *admissionController,
+	diagnostics *diagnosticsRecorder,
 	instanceID string,
 	recovered []recoveredContainer,
 	logger *slog.Logger,
@@ -71,6 +73,7 @@ func startTargetController(
 		docker,
 		scalerClock,
 		admission,
+		diagnostics,
 		logger,
 		onChange,
 		onError,
@@ -110,6 +113,7 @@ func startTargetController(
 		)
 	}
 	controller := &targetController{
+		diagnostics:       diagnostics,
 		target:            target,
 		handle:            handle,
 		api:               api,
@@ -230,6 +234,15 @@ func (c *targetController) restartListener(ctx context.Context) error {
 	c.done = nextDone
 	c.mu.Unlock()
 	c.runListener(controllerContext, targetKey, session, scaleSetListener, nextDone)
+	c.diagnostics.record(diagnosticsObservation{
+		subsystem:  subsystemListener,
+		operation:  operationSessionCreate,
+		target:     targetKey,
+		outcome:    outcomeRecovered,
+		reason:     reasonRecovered,
+		evidence:   "scale-set listener restarted after failure",
+		healthKind: healthGitHub,
+	})
 	return nil
 }
 

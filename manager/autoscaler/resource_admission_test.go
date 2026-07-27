@@ -249,6 +249,7 @@ func newCeilingTestScaler(
 		docker,
 		clock,
 		admission,
+		newDiagnosticsRecorder("", "manager-instance", clock),
 		testLogger(),
 		nil,
 		func(err error) {
@@ -619,6 +620,7 @@ func TestExitEvidenceIsRetainedWithPendingRegistrationCleanup(t *testing.T) {
 		docker,
 		clock,
 		newAdmissionController(0),
+		newDiagnosticsRecorder("", "manager-instance", clock),
 		testLogger(),
 		nil,
 		func(error) {},

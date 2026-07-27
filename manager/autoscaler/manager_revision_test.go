@@ -415,6 +415,7 @@ func TestManagerHandoffClosesSessionWithoutDestroyingPool(t *testing.T) {
 		docker,
 		&fakeClock{current: time.Now()},
 		newAdmissionController(0),
+		newDiagnosticsRecorder("", "instance", nil),
 		cfg.sessionOwner,
 		[]recoveredContainer{{
 			containerID: "live-container",
@@ -486,6 +487,7 @@ func TestListenerFailureCanRestartWithoutDestroyingPool(t *testing.T) {
 		docker,
 		&fakeClock{current: time.Now()},
 		newAdmissionController(0),
+		newDiagnosticsRecorder("", "instance", nil),
 		"instance",
 		nil,
 		testLogger(),
@@ -1215,6 +1217,7 @@ func newCoherenceTestController(
 		newFakeDockerClient(nil),
 		&fakeClock{current: time.Now()},
 		newAdmissionController(0),
+		newDiagnosticsRecorder("", "manager-instance", nil),
 		testLogger(),
 		nil,
 		nil,

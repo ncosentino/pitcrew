@@ -207,6 +207,7 @@ type fakeDockerClient struct {
 	readLogErrors    map[string]error
 	followLines      map[string][]string
 	followObserved   chan fakeFollowRequest
+	runErrors        []error
 	stopRemoveErrors map[string][]error
 	waitResults      map[string][]fakeWaitResult
 	waitObserved     chan string
@@ -328,6 +329,13 @@ func (d *fakeDockerClient) run(
 ) (string, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if len(d.runErrors) > 0 {
+		err := d.runErrors[0]
+		d.runErrors = d.runErrors[1:]
+		if err != nil {
+			return "", err
+		}
+	}
 	d.nextID++
 	d.launches = append(d.launches, launch)
 	containerID := fmt.Sprintf("container-%d", d.nextID)
@@ -563,6 +571,7 @@ func newTestScalerInDirectory(
 		docker,
 		clock,
 		newAdmissionController(0),
+		newDiagnosticsRecorder(stateDirectory, "manager-instance", clock),
 		testLogger(),
 		nil,
 		func(err error) {

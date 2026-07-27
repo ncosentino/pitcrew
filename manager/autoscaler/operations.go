@@ -74,7 +74,8 @@ type boundedScaleSetServiceFactory struct {
 func boundScaleSetServiceFactory(
 	factory scaleSetServiceFactory,
 ) scaleSetServiceFactory {
-	if _, bounded := factory.(*boundedScaleSetServiceFactory); bounded {
+	switch factory.(type) {
+	case *boundedScaleSetServiceFactory, *instrumentedScaleSetServiceFactory:
 		return factory
 	}
 	return &boundedScaleSetServiceFactory{inner: factory}
@@ -95,7 +96,8 @@ type boundedScaleSetService struct {
 }
 
 func boundScaleSetService(service scaleSetService) scaleSetService {
-	if _, bounded := service.(*boundedScaleSetService); bounded {
+	switch service.(type) {
+	case *boundedScaleSetService, *instrumentedScaleSetService:
 		return service
 	}
 	return &boundedScaleSetService{inner: service}
@@ -208,7 +210,8 @@ type boundedMessageSession struct {
 }
 
 func boundMessageSession(session messageSession) messageSession {
-	if _, bounded := session.(*boundedMessageSession); bounded {
+	switch session.(type) {
+	case *boundedMessageSession, *instrumentedMessageSession:
 		return session
 	}
 	return &boundedMessageSession{inner: session}
@@ -271,7 +274,8 @@ type boundedDockerClient struct {
 }
 
 func boundDockerClient(client dockerClient) dockerClient {
-	if _, bounded := client.(*boundedDockerClient); bounded {
+	switch client.(type) {
+	case *boundedDockerClient, *instrumentedDockerClient:
 		return client
 	}
 	return &boundedDockerClient{inner: client}
