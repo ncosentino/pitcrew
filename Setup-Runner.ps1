@@ -74,11 +74,11 @@
 
 .PARAMETER MaximumActiveWorkers
     Aggregate active-worker ceiling across every target in an autoscaled profile.
-    Contract 11 defines this setting; contract-10 managers reject activation.
+    Requires manager contract 11, which this release activates.
 
 .PARAMETER WorkerMemory
     Optional per-worker memory limit in bytes or a Docker-compatible binary unit.
-    Contract 11 defines this setting; contract-10 managers reject activation.
+    Requires manager contract 11, which this release activates.
 
 .PARAMETER WorkerMemorySwap
     Optional total per-worker memory-plus-swap limit. Requires WorkerMemory.

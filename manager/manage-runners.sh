@@ -9,8 +9,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/observability.sh"
 . "${SCRIPT_DIRECTORY}/registration.sh"
 
-MANAGER_CONTRACT_VERSION=10
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-10}"
+MANAGER_CONTRACT_VERSION=11
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-11}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -587,7 +587,9 @@ run_slot() {
             > "${slot_state_path}/registration-grace-until"
         if docker inspect "${recovered_id}" >/dev/null 2>&1; then
             record_container_image_identity "${slot_state_path}" "${recovered_id}"
-            recovered_logs_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            # Docker's --since boundary is inclusive. Skip the current second so
+            # a pre-handoff connect marker cannot be replayed as fresh evidence.
+            recovered_logs_since=$(( $(date +%s) + 1 ))
             monitor_runner_container \
                 "${slot_state_path}" \
                 "${recovered_name}" \

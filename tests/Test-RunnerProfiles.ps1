@@ -32,6 +32,7 @@ $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
+$activeManagerContractVersion = 11
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -117,7 +118,7 @@ function Set-TestCapacityAcknowledgement {
         schemaVersion = 1
         status = 'accepted'
         generation = $Generation
-        managerContractVersion = 10
+        managerContractVersion = $activeManagerContractVersion
         desiredStateHash = 'test'
         observedAt = '2026-01-01T00:00:00Z'
         desiredSlots = $DesiredSlots
@@ -153,7 +154,8 @@ function Start-TestCapacityAcknowledgementWriter {
         $AddedSlots,
         $DrainingSlots,
         $UnchangedSlots,
-        $WaitForAcknowledgementRemoval
+        $WaitForAcknowledgementRemoval,
+        $activeManagerContractVersion
     ) -ScriptBlock {
         param(
             $DesiredPath,
@@ -163,7 +165,8 @@ function Start-TestCapacityAcknowledgementWriter {
             $AddedSlots,
             $DrainingSlots,
             $UnchangedSlots,
-            $WaitForAcknowledgementRemoval
+            $WaitForAcknowledgementRemoval,
+            $ManagerContractVersion
         )
 
         $deadline = [DateTime]::UtcNow.AddSeconds(60)
@@ -194,7 +197,7 @@ function Start-TestCapacityAcknowledgementWriter {
                             schemaVersion = 1
                             status = 'accepted'
                             generation = $Generation
-                            managerContractVersion = 10
+                            managerContractVersion = $ManagerContractVersion
                             desiredStateHash = 'test'
                             observedAt = '2026-01-01T00:00:00Z'
                             desiredSlots = $DesiredSlots
@@ -1385,15 +1388,21 @@ Add-Check (
     (Get-RunnerObjectFingerprint -Value $equivalentResourceProfile.Resources)
 ) 'Equivalent resource-policy inputs do not produce one canonical representation.'
 Assert-RunnerResilienceContractActivation -Profile $defaultProfile
+Assert-RunnerResilienceContractActivation -Profile $resourceProfile
+Assert-RunnerResilienceContractActivation -Profile $admissionProfile
+$legacyResourceProfile = $resourceProfile.PSObject.Copy()
+$legacyResourceProfile.ManagerContractVersion = $resourceProfile.DefinedManagerContractVersion - 1
 Add-ThrowsCheck `
     -Action {
-        Assert-RunnerResilienceContractActivation -Profile $resourceProfile
+        Assert-RunnerResilienceContractActivation -Profile $legacyResourceProfile
     } `
     -ExpectedMessage 'require manager contract 11.*contract 10' `
     -Failure 'A contract-10 manager accepted a resource policy it cannot enforce.'
+$legacyAdmissionProfile = $admissionProfile.PSObject.Copy()
+$legacyAdmissionProfile.ManagerContractVersion = $admissionProfile.DefinedManagerContractVersion - 1
 Add-ThrowsCheck `
     -Action {
-        Assert-RunnerResilienceContractActivation -Profile $admissionProfile
+        Assert-RunnerResilienceContractActivation -Profile $legacyAdmissionProfile
     } `
     -ExpectedMessage 'require manager contract 11.*contract 10' `
     -Failure 'A contract-10 manager accepted a profile admission ceiling it cannot enforce.'
@@ -1508,7 +1517,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 10) 'The setup contract does not identify the registration-aware manager.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 11) 'The setup contract does not activate the resilience manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
     $defaultProfile.DefinedDiagnosticsContractVersion -eq 12
@@ -1847,7 +1856,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=10$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -2234,39 +2243,43 @@ try {
         Add-Check (-not ($untrustedHostCommands -match 'compose.*down')) 'An untrusted repository URL stopped a running profile.'
 
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
-        Add-ThrowsCheck `
-            -Action {
-                & $fixtureSetup `
-                    -Token 'test-registration-token' `
-                    -WorkerMemory '512m' `
-                    -Repos 'https://github.com/example/project=1'
-            } `
-            -ExpectedMessage 'require manager contract 11.*contract 10' `
-            -Failure 'Setup accepted a resource policy before manager contract 11 activation.'
-        $resourceGuardCommands = @(
-            Get-Content -LiteralPath $dockerLog -Encoding UTF8 |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-        )
-        Add-Check ($resourceGuardCommands.Count -eq 0) 'The resource activation guard ran Docker before failing closed.'
-        Add-Check (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot '.env'))) 'The resource activation guard wrote environment state before failing closed.'
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -WorkerMemory '512m' `
+            -WorkerMemorySwap '1g' `
+            -WorkerCpus '2.5' `
+            -WorkerPids 256 `
+            -Repos 'https://github.com/example/project=1'
+        $fixedResourceEnvironment = Get-Content `
+            -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'Fixed setup did not activate manager contract 11.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=256$') 'The fixed manager did not receive the canonical worker PID limit.'
+        $fixedResourceCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($fixedResourceCommands -match "`tdown`t")) 'Activating a resource policy tore down the running pool.'
+        Add-Check (-not ($fixedResourceCommands -match "^rm`t-f`t")) 'Activating a resource policy force-removed existing workers.'
+        Remove-Item -LiteralPath (Join-Path $fixtureRoot '.env') -Force
+        Remove-Item -LiteralPath (Join-Path $fixtureRoot '.pitcrew-state') -Recurse -Force
 
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
-        Add-ThrowsCheck `
-            -Action {
-                & $fixtureSetup `
-                    -Token 'test-registration-token' `
-                    -Autoscale `
-                    -MaximumActiveWorkers 4 `
-                    -Repos 'https://github.com/example/project=2'
-            } `
-            -ExpectedMessage 'require manager contract 11.*contract 10' `
-            -Failure 'Setup accepted an admission ceiling before manager contract 11 activation.'
-        $admissionGuardCommands = @(
-            Get-Content -LiteralPath $dockerLog -Encoding UTF8 |
-                Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-        )
-        Add-Check ($admissionGuardCommands.Count -eq 0) 'The admission activation guard ran Docker before failing closed.'
-        Add-Check (-not (Test-Path -LiteralPath (Join-Path $fixtureRoot '.env'))) 'The admission activation guard wrote environment state before failing closed.'
+        & $fixtureSetup `
+            -Token 'test-registration-token' `
+            -Autoscale `
+            -MaximumActiveWorkers 4 `
+            -WorkerMemory '512m' `
+            -Repos 'https://github.com/example/project=2'
+        $autoscaledAdmissionEnvironment = Get-Content `
+            -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'Autoscaled setup did not activate manager contract 11.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
+        $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($admissionCommands -match "`tdown`t")) 'Activating an admission ceiling tore down the running pool.'
+        Add-Check (-not ($admissionCommands -match "^rm`t-f`t")) 'Activating an admission ceiling force-removed existing workers.'
+        Remove-Item -LiteralPath (Join-Path $fixtureRoot '.env') -Force
+        Remove-Item -LiteralPath (Join-Path $fixtureRoot '.pitcrew-state') -Recurse -Force
 
         @(
             'ACCESS_TOKEN=legacy-registration-token'
@@ -3241,9 +3254,9 @@ Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-10}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-11}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=10$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'
