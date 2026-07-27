@@ -123,6 +123,186 @@ observed_state_is_valid() {
             and (.currentWorkers | nonnegative_integer)
             and (.staleWorkers | nonnegative_integer)
             and (.lastError == null or (.lastError | type == "string"));
+        def valid_sanitized_evidence:
+            . == null
+            or (
+                type == "string"
+                and length <= 160
+                and test("^[A-Za-z0-9][A-Za-z0-9 .,_()'"'"'-]*$")
+            );
+        def valid_event_operation:
+            . as $operation
+            | [
+                "docker-ping", "docker-run", "docker-inspect", "docker-remove",
+                "docker-events", "registration-token-request", "runner-registration",
+                "runner-removal", "session-create", "session-refresh", "session-delete",
+                "message-poll", "message-acknowledge", "jit-config-generate",
+                "worker-launch", "worker-exit", "telemetry-sample", "desired-state-load",
+                "desired-state-apply", "capacity-acknowledge", "observed-state-publish",
+                "registration-cleanup", "container-cleanup", "admission-reserve",
+                "admission-settle", "manager-start", "manager-shutdown", "journal-restore"
+            ]
+            | any(. == $operation);
+        def valid_event_reason:
+            . as $reason
+            | [
+                "none", "docker-unavailable", "docker-failed", "timeout", "rate-limited",
+                "authorization-failed", "not-found", "conflict", "invalid-state",
+                "capacity-ceiling", "retry-backoff", "cancelled", "recovered", "unknown"
+            ]
+            | any(. == $reason);
+        def valid_manager_event:
+            type == "object"
+            and (.sequence | nonnegative_integer and . >= 1)
+            and (.managerInstanceId | type == "string" and length > 0 and length <= 128)
+            and (.observedAt | type == "string" and length > 0)
+            and (
+                .subsystem as $subsystem
+                | [
+                    "docker", "registration", "scale-set-session", "listener", "jit",
+                    "worker-launch", "worker-exit", "telemetry", "reconciliation",
+                    "cleanup", "admission", "recovery"
+                ]
+                | any(. == $subsystem)
+            )
+            and (.operation | valid_event_operation)
+            and (.target == null or (.target | type == "string" and length > 0 and length <= 128))
+            and (
+                .outcome as $outcome
+                | [
+                    "succeeded", "failed", "timed-out", "retry-scheduled", "blocked",
+                    "recovered", "unknown"
+                ]
+                | any(. == $outcome)
+            )
+            and (
+                .durationMilliseconds == null
+                or (.durationMilliseconds | nonnegative_integer and . <= 86400000)
+            )
+            and (.attempt == null or (.attempt | nonnegative_integer and . >= 1 and . <= 1000))
+            and (
+                .consecutiveFailures == null
+                or (.consecutiveFailures | nonnegative_integer and . <= 1000)
+            )
+            and (.retryAt == null or (.retryAt | type == "string" and length > 0))
+            and (.reason | valid_event_reason)
+            and has("evidence")
+            and (.evidence | valid_sanitized_evidence)
+            and (
+                if .outcome == "succeeded" then
+                    .reason == "none" or .reason == "recovered"
+                else true end
+            )
+            and (
+                if .outcome == "failed" or .outcome == "timed-out" or .outcome == "blocked" then
+                    .reason != "none"
+                else true end
+            )
+            and (if .outcome == "retry-scheduled" then .retryAt != null else true end);
+        def valid_operation_journal:
+            type == "object"
+            and (.status == "current" or .status == "truncated" or .status == "unavailable")
+            and (.capacity | nonnegative_integer and . >= 1 and . <= 64)
+            and (.highestSequence == null or (.highestSequence | nonnegative_integer and . >= 1))
+            and (.droppedEvents | nonnegative_integer)
+            and (.events | type == "array")
+            and (.events | length) <= 64
+            and (.events | length) <= .capacity
+            and all(.events[]; valid_manager_event)
+            and (([.events[].sequence] | unique | length) == (.events | length))
+            and (if .status == "unavailable" then
+                    (.events | length) == 0 and .highestSequence == null
+                else true end)
+            and (if .status == "truncated" then .droppedEvents >= 1 else true end)
+            and (if (.events | length) > 0 then
+                    .highestSequence == ([.events[].sequence] | max)
+                else true end)
+            and ((. | tojson | length) <= 16384);
+        def valid_subsystem_evidence:
+            type == "object"
+            and (.operation | valid_event_operation)
+            and (.observedAt | type == "string" and length > 0)
+            and (
+                .durationMilliseconds == null
+                or (.durationMilliseconds | nonnegative_integer and . <= 86400000)
+            )
+            and (.reason | valid_event_reason)
+            and (.evidence | valid_sanitized_evidence);
+        def valid_subsystem_summary:
+            type == "object"
+            and (
+                .state == "healthy"
+                or .state == "degraded"
+                or .state == "unavailable"
+                or .state == "unknown"
+            )
+            and (.observedAt | type == "string" and length > 0)
+            and (.consecutiveFailures | nonnegative_integer and . <= 1000)
+            and (.retryAt == null or (.retryAt | type == "string" and length > 0))
+            and (.lastSuccess == null or (.lastSuccess | valid_subsystem_evidence))
+            and (.lastFailure == null or (.lastFailure | valid_subsystem_evidence))
+            and (if .state == "healthy" then
+                    .consecutiveFailures == 0 and .lastSuccess != null
+                else true end)
+            and (if .state == "degraded" or .state == "unavailable" then
+                    .consecutiveFailures >= 1 and .lastFailure != null
+                else true end)
+            and (if .state == "unknown" then
+                    .consecutiveFailures == 0
+                    and .lastSuccess == null
+                    and .lastFailure == null
+                    and .retryAt == null
+                else true end);
+        def valid_subsystem_health:
+            type == "object"
+            and (.docker | valid_subsystem_summary)
+            and (.github | valid_subsystem_summary);
+        def valid_capacity_deficit:
+            type == "object"
+            and (.observedAt | type == "string" and length > 0)
+            and (
+                .freshness == "current"
+                or .freshness == "stale"
+                or .freshness == "unavailable"
+            )
+            and (.targetSlots | nonnegative_integer)
+            and (.activeWorkers | nonnegative_integer)
+            and (.startingWorkers | nonnegative_integer)
+            and (.drainingWorkers | nonnegative_integer)
+            and (.cleanupPendingWorkers | nonnegative_integer)
+            and (.eligibleWorkers == null or (.eligibleWorkers | nonnegative_integer))
+            and (.localDeficit | nonnegative_integer)
+            and (.eligibilityDeficit == null or (.eligibilityDeficit | nonnegative_integer))
+            and (
+                .reason as $reason
+                | [
+                    "none", "admission-ceiling", "launch-pending", "docker-unavailable",
+                    "docker-failed", "jit-pending", "jit-failed", "listener-unavailable",
+                    "session-unavailable", "registration-cleanup-pending", "worker-draining",
+                    "invalid-desired-state", "retry-backoff", "unknown"
+                ]
+                | any(. == $reason)
+            )
+            and has("evidence")
+            and (.evidence | valid_sanitized_evidence)
+            and (if .localDeficit >= 1 then .reason != "none" else true end)
+            and (
+                if .eligibleWorkers == null then
+                    .eligibilityDeficit == null
+                else
+                    .eligibilityDeficit != null
+                end
+            )
+            and (
+                if .freshness == "unavailable" then
+                    .eligibleWorkers == null and .reason == "unknown"
+                else true end
+            );
+        def valid_capacity_evidence:
+            type == "object"
+            and has("fixed")
+            and (.targets | type == "array")
+            and (.fixed == null or (.fixed | valid_capacity_deficit));
         def valid_slot:
             type == "object"
             and (.key | type == "string" and length > 0)
@@ -239,6 +419,38 @@ observed_state_is_valid() {
                     has("imageId")
                     and has("lastExit")
                     and (.resources == null or (.resources | valid_io_counters)))
+            else
+                true
+            end
+        )
+        and (
+            .operationJournal == null
+            or (.operationJournal | valid_operation_journal)
+        )
+        and (
+            .subsystemHealth == null
+            or (.subsystemHealth | valid_subsystem_health)
+        )
+        and (
+            .capacityEvidence == null
+            or (.capacityEvidence | valid_capacity_evidence)
+        )
+        and (
+            if .managerContractVersion >= 12 then
+                has("operationJournal")
+                and has("subsystemHealth")
+                and has("capacityEvidence")
+                and (.operationJournal | valid_operation_journal)
+                and (.subsystemHealth | valid_subsystem_health)
+                and (.capacityEvidence | valid_capacity_evidence)
+                and (
+                    if .autoscaling == null then
+                        .capacityEvidence.fixed != null
+                        and (.capacityEvidence.targets | length) == 0
+                    else
+                        .capacityEvidence.fixed == null
+                    end
+                )
             else
                 true
             end
@@ -828,6 +1040,13 @@ remove_observed_policy_snapshot() {
     return 0
 }
 
+remove_observed_optional_snapshots() {
+    # Only manager-owned temporary projection paths reach this helper.
+    # shellcheck disable=SC2086
+    [ -n "$1" ] && rm -f $1
+    return 0
+}
+
 write_manager_observed_state() {
     output_path="$1"
     profile_id="$2"
@@ -844,6 +1063,28 @@ write_manager_observed_state() {
     worker_revision="${13}"
     stale_workers="${14}"
     resource_policy_path="${15:-}"
+    operation_journal_path="${16:-}"
+    subsystem_health_path="${17:-}"
+    capacity_evidence_path="${18:-}"
+
+    observed_optional_snapshots=""
+    for optional_projection in operation_journal subsystem_health capacity_evidence; do
+        case "${optional_projection}" in
+            operation_journal) optional_path="${operation_journal_path}" ;;
+            subsystem_health) optional_path="${subsystem_health_path}" ;;
+            *) optional_path="${capacity_evidence_path}" ;;
+        esac
+        if [ -z "${optional_path}" ] || [ ! -f "${optional_path}" ]; then
+            optional_path="${output_path%/*}/.${optional_projection}.$$.tmp"
+            printf 'null\n' > "${optional_path}" || return 1
+            observed_optional_snapshots="${observed_optional_snapshots} ${optional_path}"
+        fi
+        case "${optional_projection}" in
+            operation_journal) operation_journal_path="${optional_path}" ;;
+            subsystem_health) subsystem_health_path="${optional_path}" ;;
+            *) capacity_evidence_path="${optional_path}" ;;
+        esac
+    done
 
     if [ -z "${resource_policy_path}" ] || [ ! -f "${resource_policy_path}" ]; then
         resource_policy_path="${output_path%/*}/.resource-policy.$$.tmp"
@@ -869,6 +1110,9 @@ write_manager_observed_state() {
         --slurpfile slots "${slots_path}" \
         --slurpfile resourceTelemetry "${resource_telemetry_path}" \
         --slurpfile resourcePolicy "${resource_policy_path}" \
+        --slurpfile operationJournal "${operation_journal_path}" \
+        --slurpfile subsystemHealth "${subsystem_health_path}" \
+        --slurpfile capacityEvidence "${capacity_evidence_path}" \
         --arg workerRevision "${worker_revision}" \
         --argjson staleWorkers "${stale_workers}" \
         '{
@@ -894,6 +1138,9 @@ write_manager_observed_state() {
             slots: $slots[0],
             resourceTelemetry: ($resourceTelemetry[0] | del(.slots)),
             resourcePolicy: $resourcePolicy[0],
+            operationJournal: $operationJournal[0],
+            subsystemHealth: $subsystemHealth[0],
+            capacityEvidence: $capacityEvidence[0],
             autoscaling: null,
             update: {
                 status: (if $staleWorkers > 0 then "rolling" else "current" end),
@@ -907,10 +1154,12 @@ write_manager_observed_state() {
             }
         }' > "${observed_temporary}"; then
         remove_observed_policy_snapshot "${resource_policy_path}" "${remove_resource_policy_snapshot}"
+        remove_observed_optional_snapshots "${observed_optional_snapshots}"
         rm -f "${observed_temporary}"
         return 1
     fi
     remove_observed_policy_snapshot "${resource_policy_path}" "${remove_resource_policy_snapshot}"
+    remove_observed_optional_snapshots "${observed_optional_snapshots}"
     if ! observed_state_is_valid "${observed_temporary}"; then
         rm -f "${observed_temporary}"
         return 1

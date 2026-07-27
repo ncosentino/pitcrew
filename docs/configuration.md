@@ -395,6 +395,20 @@ generated state mutation if a contract ahead of both implementations is
 selected. Contract-11 resource, image, exit, and worker-revision semantics are
 unchanged.
 
+The fixed shell manager already publishes these three projections additively
+while it reports contract 10, so a reader that ignores them sees the same
+observed state as before. It keeps the journal, the Docker summary, and the
+GitHub summary under `diagnostics/` inside the profile state directory and
+writes each file atomically, so an ordinary manager restart or handoff
+preserves the preceding causal sequence without replaying events. The retained
+window is bounded to 32 events and a bounded serialized size; older events are
+dropped into `droppedEvents` and the journal reports `truncated`. A corrupt or
+unreadable journal degrades only the journal, and a failed diagnostic write
+never stops a worker, changes cleanup selectors, or discards desired state.
+Healthy reconciliation is not journaled: the fixed manager records state
+transitions, failures, retry scheduling, recovery, and unusually slow
+operations rather than every loop.
+
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify
 whether a runner is busy, so consumers must not infer job state from CPU or

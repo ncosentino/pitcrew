@@ -5,6 +5,7 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "${ROOT}/manager/reconciliation.sh"
 . "${ROOT}/manager/observability.sh"
 . "${ROOT}/manager/registration.sh"
+. "${ROOT}/manager/diagnostics.sh"
 
 TEMP_DIRECTORY=$(mktemp -d)
 trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
@@ -978,5 +979,262 @@ assert_equals \
 assert_equals "0" "$(parse_size_bytes '0B')" "Byte parsing changed zero bytes."
 assert_equals "44312822" "$(parse_size_bytes '42.26MiB')" "Byte parsing did not preserve Docker binary units."
 assert_equals "0.125" "$(parse_cpu_cores '12.5%')" "CPU parsing did not convert Docker percent to cores."
+
+json_condition_holds() {
+    jq -e --argjson expected "${3:-null}" "$2" "$1" >/dev/null 2>&1
+}
+
+diagnostics_directory="${TEMP_DIRECTORY}/diagnostics"
+journal_state="${diagnostics_directory}/journal.json"
+docker_health_state="${diagnostics_directory}/subsystem-docker.json"
+github_health_state="${diagnostics_directory}/subsystem-github.json"
+assert_true "Operation diagnostics could not be initialized." \
+    diagnostics_initialize "${diagnostics_directory}" manager-instance-a
+assert_equals "current" "$(jq -r '.status' "${journal_state}")" "A fresh operation journal was not reported as current."
+assert_equals "0" "$(jq -r '.events | length' "${journal_state}")" "A fresh operation journal retained events."
+assert_equals "unknown" "$(jq -r '.state' "${docker_health_state}")" "A manager without Docker evidence claimed Docker health."
+assert_equals "unknown" "$(jq -r '.state' "${github_health_state}")" "A manager without GitHub evidence claimed GitHub health."
+
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    telemetry telemetry-sample "" succeeded 40 none "" || true
+assert_equals "1" "$(jq -r '.events | length' "${journal_state}")" "The first Docker success was not journaled as a state transition."
+assert_equals "healthy" "$(jq -r '.state' "${docker_health_state}")" "A successful Docker operation did not report healthy."
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    telemetry telemetry-sample "" succeeded 40 none "" || true
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    telemetry telemetry-sample "" succeeded 40 none "" || true
+assert_equals "1" "$(jq -r '.events | length' "${journal_state}")" "Healthy reconciliation churned the operation journal."
+
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    docker docker-inspect "" timed-out 5000 timeout "Managed worker discovery exceeded its deadline" || true
+assert_equals "2" "$(jq -r '.events | length' "${journal_state}")" "A Docker timeout was not journaled."
+assert_equals "timed-out" "$(jq -r '.events[-1].outcome' "${journal_state}")" "A Docker timeout lost its outcome."
+assert_equals "degraded" "$(jq -r '.state' "${docker_health_state}")" "A failed Docker operation did not degrade Docker health."
+assert_equals "1" "$(jq -r '.consecutiveFailures' "${docker_health_state}")" "A failed Docker operation lost its failure count."
+
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    worker-launch worker-launch repo-example-000001 retry-scheduled "" retry-backoff \
+    "Worker slot is waiting for its launch backoff window" "2026-07-27T00:00:30Z" || true
+assert_equals "retry-scheduled" "$(jq -r '.events[-1].outcome' "${journal_state}")" "A scheduled retry was not journaled."
+assert_equals "2026-07-27T00:00:30Z" "$(jq -r '.events[-1].retryAt' "${journal_state}")" "A scheduled retry lost its retry timestamp."
+assert_equals "repo-example-000001" "$(jq -r '.events[-1].target' "${journal_state}")" "A slot-scoped event lost its slot key."
+assert_false \
+    "A scheduled retry without a retry timestamp was accepted." \
+    record_manager_event "${diagnostics_directory}" manager-instance-a \
+        worker-launch worker-launch repo-example-000001 retry-scheduled "" retry-backoff "Missing retry window" ""
+assert_false \
+    "An operation outside the closed contract vocabulary was accepted." \
+    record_manager_event "${diagnostics_directory}" manager-instance-a \
+        docker docker-freeze "" failed "" unknown "Invented operation"
+
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    telemetry telemetry-sample "" succeeded 20 none "" || true
+assert_equals "succeeded" "$(jq -r '.events[-1].outcome' "${journal_state}")" "Recovery after failure was not journaled."
+assert_equals "recovered" "$(jq -r '.events[-1].reason' "${journal_state}")" "Recovery after failure lost its recovery reason."
+assert_equals "healthy" "$(jq -r '.state' "${docker_health_state}")" "Recovery did not restore Docker health."
+assert_equals "0" "$(jq -r '.consecutiveFailures' "${docker_health_state}")" "Recovery did not clear the Docker failure count."
+
+registration_evidence_endpoint="https://api.github.com/repos/example/project/actions/runners"
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    registration runner-registration "" failed 900 unknown \
+    "Inventory request to ${registration_evidence_endpoint} failed" || true
+assert_equals \
+    "Inventory request to https api.github.com repos example project actions runners failed" \
+    "$(jq -r '.events[-1].evidence' "${journal_state}")" \
+    "Journal evidence did not strip credential and URL punctuation."
+assert_false "The operation journal exposed an access token field." \
+    contains_access_token_field "${journal_state}"
+
+journal_sequence_before=$(jq -r '.highestSequence' "${journal_state}")
+journal_events_before=$(jq -r '.events | length' "${journal_state}")
+assert_true "A manager restart could not restore its operation journal." \
+    diagnostics_initialize "${diagnostics_directory}" manager-instance-b
+assert_equals "${journal_sequence_before}" "$(jq -r '.highestSequence' "${journal_state}")" "Manager restart lost the durable journal sequence."
+assert_equals "${journal_events_before}" "$(jq -r '.events | length' "${journal_state}")" "Manager restart lost retained journal events."
+record_manager_event "${diagnostics_directory}" manager-instance-b \
+    recovery manager-start "" recovered "" recovered "Manager adopted managed workers left by its predecessor" || true
+assert_equals \
+    "$((journal_sequence_before + 1))" \
+    "$(jq -r '.highestSequence' "${journal_state}")" \
+    "Adoption after restart did not continue the durable sequence."
+assert_equals \
+    "$(jq -r '[.events[].sequence] | unique | length' "${journal_state}")" \
+    "$(jq -r '.events | length' "${journal_state}")" \
+    "Adoption duplicated journal events."
+
+journal_events_bounded=0
+while [ "${journal_events_bounded}" -lt 40 ]; do
+    record_manager_event "${diagnostics_directory}" manager-instance-b \
+        reconciliation desired-state-apply "" succeeded "" none "Accepted a new desired capacity generation" || true
+    journal_events_bounded=$((journal_events_bounded + 1))
+done
+assert_equals "32" "$(jq -r '.events | length' "${journal_state}")" "The operation journal exceeded its retained window."
+assert_equals "truncated" "$(jq -r '.status' "${journal_state}")" "A trimmed operation journal was not reported as truncated."
+assert_true \
+    "A trimmed operation journal did not count dropped events." \
+    json_condition_holds "${journal_state}" '.droppedEvents >= 1' 
+assert_true \
+    "The serialized operation journal exceeded its byte budget." \
+    json_condition_holds "${journal_state}" \
+        '({status, capacity, highestSequence, droppedEvents, events} | tojson | length) <= 16384' 
+
+jq '.events[0] = {"sequence":"not-a-sequence"}' "${journal_state}" > "${journal_state}.malformed"
+mv -f "${journal_state}.malformed" "${journal_state}"
+dropped_before=$(jq -r '.droppedEvents' "${journal_state}")
+assert_true "A malformed journal entry stopped diagnostics restore." \
+    diagnostics_initialize "${diagnostics_directory}" manager-instance-c
+assert_true \
+    "A malformed journal entry was retained instead of discarded." \
+    json_condition_holds "${journal_state}" '.droppedEvents > $expected' "${dropped_before}"
+assert_equals \
+    "journal-restore" \
+    "$(jq -r '.events[-1].operation' "${journal_state}")" \
+    "Discarding malformed journal entries was not reported."
+
+printf '%s' 'this is not json' > "${journal_state}"
+assert_true "A corrupt journal blocked manager diagnostics restore." \
+    diagnostics_initialize "${diagnostics_directory}" manager-instance-d
+assert_true \
+    "A corrupt journal was reset without reporting the loss." \
+    json_condition_holds "${journal_state}" '.droppedEvents >= 1' 
+assert_equals \
+    "journal-restore" \
+    "$(jq -r '.events[-1].operation' "${journal_state}")" \
+    "A corrupt journal reset was not reported as a journal restore failure."
+assert_equals "healthy" "$(jq -r '.state' "${docker_health_state}")" "A corrupt journal discarded durable subsystem health."
+
+unreadable_journal_directory="${TEMP_DIRECTORY}/unreadable-diagnostics"
+mkdir -p "${unreadable_journal_directory}"
+printf '%s' 'not json' > "${unreadable_journal_directory}/journal.json"
+unreadable_journal_projection="${TEMP_DIRECTORY}/unreadable-journal.json"
+render_operation_journal "${unreadable_journal_directory}" "${unreadable_journal_projection}"
+assert_equals "unavailable" "$(jq -r '.status' "${unreadable_journal_projection}")" "An unreadable journal was not projected as unavailable."
+assert_equals "0" "$(jq -r '.events | length' "${unreadable_journal_projection}")" "An unavailable journal projected events."
+
+diagnostics_journal_projection="${TEMP_DIRECTORY}/operation-journal.json"
+diagnostics_health_projection="${TEMP_DIRECTORY}/subsystem-health.json"
+diagnostics_capacity_projection="${TEMP_DIRECTORY}/capacity-evidence.json"
+render_operation_journal "${diagnostics_directory}" "${diagnostics_journal_projection}"
+render_subsystem_health "${diagnostics_directory}" "${diagnostics_health_projection}"
+assert_equals "healthy" "$(jq -r '.docker.state' "${diagnostics_health_projection}")" "The published Docker summary lost its state."
+assert_true \
+    "The published subsystem summary exposed unexpected fields." \
+    json_condition_holds "${diagnostics_health_projection}" \
+        '[.docker, .github] | all(keys == ["consecutiveFailures", "lastFailure", "lastSuccess", "observedAt", "retryAt", "state"])' 
+
+capacity_slots_json="${TEMP_DIRECTORY}/capacity-slots.json"
+cat > "${capacity_slots_json}" <<'EOF'
+[
+  {"key":"repo-example-000001","desired":true,"processRunning":true,"state":"online","registrationStatus":"connected"},
+  {"key":"repo-example-000002","desired":true,"processRunning":true,"state":"backoff","registrationStatus":"registration-missing"}
+]
+EOF
+render_fixed_capacity_evidence \
+    "${capacity_slots_json}" \
+    2 \
+    accepted \
+    "${diagnostics_health_projection}" \
+    "${diagnostics_capacity_projection}"
+assert_equals "2" "$(jq -r '.fixed.targetSlots' "${diagnostics_capacity_projection}")" "Capacity evidence did not use the accepted desired slot count."
+assert_equals "1" "$(jq -r '.fixed.activeWorkers' "${diagnostics_capacity_projection}")" "Capacity evidence miscounted local workers."
+assert_equals "1" "$(jq -r '.fixed.localDeficit' "${diagnostics_capacity_projection}")" "Capacity evidence lost the local shortfall."
+assert_equals "retry-backoff" "$(jq -r '.fixed.reason' "${diagnostics_capacity_projection}")" "A shortfall did not report the manager's observed blocking state."
+assert_equals "1" "$(jq -r '.fixed.cleanupPendingWorkers' "${diagnostics_capacity_projection}")" "Capacity evidence lost cleanup-pending workers."
+assert_equals "0" "$(jq -r '.fixed.targets | length' "${diagnostics_capacity_projection}")" "A fixed profile published autoscaling target evidence."
+
+unknown_github_health="${TEMP_DIRECTORY}/unknown-github-health.json"
+jq '.github = {state:"unknown", observedAt:"2026-07-27T00:00:00Z", consecutiveFailures:0, retryAt:null, lastSuccess:null, lastFailure:null}' \
+    "${diagnostics_health_projection}" > "${unknown_github_health}"
+render_fixed_capacity_evidence \
+    "${capacity_slots_json}" \
+    2 \
+    accepted \
+    "${unknown_github_health}" \
+    "${diagnostics_capacity_projection}"
+assert_equals "null" "$(jq -r '.fixed.eligibleWorkers' "${diagnostics_capacity_projection}")" "Unavailable GitHub eligibility was reported as an observed count."
+assert_equals "null" "$(jq -r '.fixed.eligibilityDeficit' "${diagnostics_capacity_projection}")" "Unavailable GitHub eligibility produced an eligibility shortfall."
+
+invalid_desired_capacity="${TEMP_DIRECTORY}/invalid-desired-capacity.json"
+render_fixed_capacity_evidence \
+    "${capacity_slots_json}" \
+    2 \
+    invalid \
+    "${diagnostics_health_projection}" \
+    "${invalid_desired_capacity}"
+assert_equals "invalid-desired-state" "$(jq -r '.fixed.reason' "${invalid_desired_capacity}")" "A rejected desired state was not reported as the blocking reason."
+
+satisfied_capacity="${TEMP_DIRECTORY}/satisfied-capacity.json"
+satisfied_slots_json="${TEMP_DIRECTORY}/satisfied-slots.json"
+jq '[.[0], (.[1] | .state = "online" | .registrationStatus = "connected")]' \
+    "${capacity_slots_json}" > "${satisfied_slots_json}"
+render_fixed_capacity_evidence \
+    "${satisfied_slots_json}" \
+    2 \
+    accepted \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}"
+assert_equals "none" "$(jq -r '.fixed.reason' "${satisfied_capacity}")" "Satisfied capacity reported a deficit reason."
+assert_equals "0" "$(jq -r '.fixed.localDeficit' "${satisfied_capacity}")" "Satisfied capacity reported a local shortfall."
+assert_equals "2" "$(jq -r '.fixed.eligibleWorkers' "${satisfied_capacity}")" "Satisfied capacity lost observed GitHub eligibility."
+
+contract_twelve_state_json="${TEMP_DIRECTORY}/contract-twelve-state.json"
+write_manager_observed_state \
+    "${contract_twelve_state_json}" \
+    default \
+    manager-instance \
+    12 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_eleven_telemetry_json}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}"
+assert_true "Contract-twelve observed manager state was rejected." observed_state_is_valid "${contract_twelve_state_json}"
+assert_equals "truncated" "$(jq -r '.operationJournal.status' "${contract_twelve_state_json}")" "Observed state lost the operation journal status."
+assert_equals "healthy" "$(jq -r '.subsystemHealth.docker.state' "${contract_twelve_state_json}")" "Observed state lost Docker subsystem health."
+assert_equals "2" "$(jq -r '.capacityEvidence.fixed.targetSlots' "${contract_twelve_state_json}")" "Observed state lost fixed capacity evidence."
+assert_false "Contract-twelve observed state exposed an access token field." \
+    contains_access_token_field "${contract_twelve_state_json}"
+assert_false "Contract-twelve observed state exposed runner names or derived tags." \
+    contains_runner_identity_field "${contract_twelve_state_json}"
+
+invalid_contract_twelve_state="${TEMP_DIRECTORY}/invalid-contract-twelve-state.json"
+jq 'del(.operationJournal)' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "Manager contract twelve accepted a missing operation journal." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq 'del(.subsystemHealth)' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "Manager contract twelve accepted missing subsystem health." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq 'del(.capacityEvidence)' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "Manager contract twelve accepted missing capacity evidence." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.capacityEvidence.fixed = null' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "A fixed profile published null capacity evidence." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.operationJournal.events[0].evidence = "token: https://example.com?x=1"' \
+    "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "Observed state accepted unsanitized journal evidence." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.operationJournal.events[0].operation = "docker-freeze"' \
+    "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "Observed state accepted an operation outside the closed vocabulary." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.operationJournal.status = "unavailable"' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "An unavailable journal published retained events." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.subsystemHealth.github.state = "healthy"' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "A healthy subsystem summary was accepted without a last success." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.capacityEvidence.fixed.localDeficit = 1' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "A shortfall was accepted without an observed reason." observed_state_is_valid "${invalid_contract_twelve_state}"
+jq '.capacityEvidence.fixed.eligibleWorkers = null' "${contract_twelve_state_json}" > "${invalid_contract_twelve_state}"
+assert_false "Unavailable eligibility was accepted with an eligibility shortfall." observed_state_is_valid "${invalid_contract_twelve_state}"
+
+legacy_contract_twelve_state="${TEMP_DIRECTORY}/legacy-contract-twelve-state.json"
+jq '.managerContractVersion = 10' "${contract_twelve_state_json}" > "${legacy_contract_twelve_state}"
+assert_true \
+    "Additive contract-twelve evidence was rejected for an older active contract." \
+    observed_state_is_valid "${legacy_contract_twelve_state}"
+
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."
