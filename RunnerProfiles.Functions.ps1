@@ -663,11 +663,11 @@ function Get-RunnerImplementedManagerContract {
     Rejects a manager contract that both manager modes do not implement.
 
 .DESCRIPTION
-    Contract 11 resilience evidence and contract 12 operation, subsystem-health,
-    and capacity-deficit evidence are defined before the fixed manager and the
-    autoscaler publish them. Setup selects a contract for the manager through the
-    generated environment, so a selection ahead of either implementation must fail
-    before Docker, image, or generated state mutation.
+    Contract 12 operation, subsystem-health, and capacity-deficit evidence is
+    defined before the fixed manager and the autoscaler publish it. Setup selects
+    a contract for the manager through the generated environment, so a selection
+    ahead of either implementation must fail before Docker, image, or generated
+    state mutation.
 
 .PARAMETER Profile
     Effective profile returned by Resolve-RunnerProfile.
@@ -807,9 +807,10 @@ function Test-RunnerManagerJournalBudget {
     Rejects resilience settings that the active manager contract cannot enforce.
 
 .DESCRIPTION
-    Contract 11 configuration is resolved and testable before both manager modes
-    implement it, but setup must not activate resource or admission policies
-    through a contract-10 manager.
+    Resource and profile-wide admission policies require the manager contract that
+    defines them. This release activates that contract, so the guard passes for a
+    supported policy and continues to fail closed if the active contract is ever
+    older than the contract those policies require.
 
 .PARAMETER Profile
     Effective profile returned by Resolve-RunnerProfile.

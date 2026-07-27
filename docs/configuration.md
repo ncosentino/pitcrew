@@ -119,12 +119,14 @@ accepted. CPU values are stored as invariant decimal strings without
 insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
-Manager contract 11 is defined but not active in this release. The active
-fixed and autoscaled managers still use contract 10, so setup rejects any
-resource policy or `maximumActiveWorkers` before Docker, image, or generated
-state mutation. `-Down` remains available so unsupported configuration cannot
-block an emergency shutdown. Activation occurs only after both manager modes
-implement the same contract.
+Manager contract 11 is active in this release. Both the fixed and autoscaled
+managers implement it, so setup accepts a resource policy and
+`maximumActiveWorkers` and pins the contract in generated state. A profile that
+still runs a contract-10 manager upgrades through the established manager
+hot-swap, and its existing workers are preserved and converge naturally.
+Activation occurs only after both manager modes implement the same contract, so
+a newer contract is still refused before Docker, image, or generated state
+mutation.
 
 ## Worker image shutdown contract
 
@@ -388,8 +390,8 @@ blame. `reason` is observed manager state, never a diagnosis inferred by a
 dashboard.
 
 Manager contract 12 is defined but not active in this release. Both manager
-modes still implement contract 10, so setup fails closed before Docker, image,
-or generated state mutation if a contract ahead of both implementations is
+modes implement contract 11, so setup fails closed before Docker, image, or
+generated state mutation if a contract ahead of both implementations is
 selected. Contract-11 resource, image, exit, and worker-revision semantics are
 unchanged.
 
