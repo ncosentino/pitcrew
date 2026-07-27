@@ -29,6 +29,7 @@ $managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
 $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
+$diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
@@ -295,6 +296,7 @@ $requiredPaths = @(
     $autoscalerModulePath,
     $managerDockerfilePath,
     $observabilityPath,
+    $diagnosticsPath,
     $reconciliationPath,
     $composePath,
     $routingPath
@@ -3198,6 +3200,7 @@ $managerEntrypoint = Get-Content -LiteralPath $managerEntrypointPath -Raw -Encod
 $autoscalerModule = Get-Content -LiteralPath $autoscalerModulePath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
 $observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
+$diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
 $exampleEnvironment = Get-Content -LiteralPath (Join-Path $runnerRoot '.env.example') -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
@@ -3217,6 +3220,9 @@ Add-Check ($manager -match [regex]::Escape('pitcrew-worker-revision')) 'Worker c
 Add-Check ($manager -match [regex]::Escape('restore_managed_slots')) 'A replacement manager cannot adopt workers from its predecessor.'
 Add-Check ($manager -match [regex]::Escape('received manager handoff signal; preserving managed runner containers')) 'Manager handoff still tears down profile workers.'
 Add-Check ($manager -match [regex]::Escape('docker run --rm --detach')) 'Fixed workers are not detached for manager adoption.'
+Add-Check ($manager -match [regex]::Escape('consume_slot_connect_marker "${slot_state_path}"')) 'Manager recovery still promotes an adopted worker from worker output produced before adoption.'
+Add-Check ($manager -match [regex]::Escape('slot_connect_marker_is_pending "${monitored_slot_path}"')) 'Worker output can promote a slot whose connect marker was already consumed.'
+Add-Check ($manager -notmatch [regex]::Escape('rm -f "${slot_state_path}/connected"')) 'The connect-marker transition is still opened outside a fresh worker launch.'
 Add-Check ($manager -notmatch 'clearing any leftover managed runners') 'Manager startup still destroys workers left by its predecessor.'
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
 Add-Check ($manager -match [regex]::Escape('PITCREW_OBSERVED_STATE_INTERVAL:-30')) 'The manager does not bound observed-state heartbeat writes.'
@@ -3242,6 +3248,16 @@ Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The man
 Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
 Add-Check ($managerDockerfile -match [regex]::Escape('ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]')) 'The manager image does not use the mode-selecting entrypoint.'
+Add-Check ($manager -match [regex]::Escape('diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}"')) 'The fixed manager does not restore its durable operation journal.'
+Add-Check ($manager -match [regex]::Escape('record_manager_diagnostic')) 'The fixed manager does not record operation evidence.'
+Add-Check ($manager -match [regex]::Escape('render_fixed_capacity_evidence')) 'The fixed manager does not publish capacity-deficit evidence.'
+Add-Check ($manager -match [regex]::Escape('"${DIAGNOSTICS_DIRECTORY}" \
+        "${MANAGER_INSTANCE_ID}" \')) 'Recorded operation evidence is not attributed to the observing manager instance.'
+Add-Check ($manager -match [regex]::Escape('DIAGNOSTICS_DIRECTORY="${STATE_DIRECTORY}/diagnostics"')) 'The operation journal is not persisted in the profile state directory.'
+Add-Check ($diagnostics -match [regex]::Escape('DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384')) 'The operation journal does not bound its serialized size.'
+Add-Check ($diagnostics -match [regex]::Escape('sanitize_diagnostic_evidence')) 'Operation evidence is not sanitized before publication.'
+Add-Check ($diagnostics -match [regex]::Escape('mv -f "${append_temporary}" "${append_path}"')) 'The operation journal is not persisted atomically.'
+Add-Check ($managerDockerfile -match [regex]::Escape('COPY diagnostics.sh /usr/local/bin/diagnostics.sh')) 'The manager image does not ship the operation diagnostics helper.'
 Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
 Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'
 Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'

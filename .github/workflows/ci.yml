@@ -64,6 +64,7 @@ jobs:
           sh -n manager/entrypoint.sh
           sh -n manager/observability.sh
           sh -n manager/registration.sh
+          sh -n manager/diagnostics.sh
           sh -n manager/reconciliation.sh
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/integration/fake-runner/fake-runner.sh

@@ -8,6 +8,7 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"
 . "${SCRIPT_DIRECTORY}/observability.sh"
 . "${SCRIPT_DIRECTORY}/registration.sh"
+. "${SCRIPT_DIRECTORY}/diagnostics.sh"
 
 MANAGER_CONTRACT_VERSION=11
 EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-11}"
@@ -31,6 +32,7 @@ DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE_PATH="${STATE_DIRECTORY}/observed-state.json"
+DIAGNOSTICS_DIRECTORY="${STATE_DIRECTORY}/diagnostics"
 SHUTDOWN_REQUEST_PATH="${STATE_DIRECTORY}/manager-shutdown.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
@@ -174,6 +176,25 @@ mark_observed_state_dirty() {
     : > "${OBSERVED_STATE_DIRTY}"
 }
 
+# Diagnostic writes are best effort. A failed journal or health write never
+# stops, drains, or tears down a worker.
+record_manager_diagnostic() {
+    record_manager_event \
+        "${DIAGNOSTICS_DIRECTORY}" \
+        "${MANAGER_INSTANCE_ID}" \
+        "$@" || true
+    return 0
+}
+
+elapsed_milliseconds() {
+    printf '%s' "$(( ($(date +%s) - $1) * 1000 ))"
+}
+
+diagnostic_retry_timestamp() {
+    date -u -d "@$(( $(date +%s) + $1 ))" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null ||
+        date -u +%Y-%m-%dT%H:%M:%SZ
+}
+
 report_resource_telemetry_status() {
     resource_status="$1"
     [ "${resource_status}" = "${LAST_RESOURCE_TELEMETRY_STATUS}" ] && return
@@ -211,6 +232,7 @@ publish_observed_state() {
         fi
     elif [ ! -f "${RESOURCE_TELEMETRY_PATH}" ] ||
         [ $((resource_now - LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH)) -ge "${OBSERVED_STATE_INTERVAL}" ]; then
+        telemetry_started_epoch=$(date +%s)
         if collect_resource_telemetry \
             "${RESOURCE_TELEMETRY_PATH}" \
             "${MANAGED_LABEL}" \
@@ -220,7 +242,35 @@ publish_observed_state() {
             LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH="${resource_now}"
             resource_status=$(jq -r '.status' "${RESOURCE_TELEMETRY_PATH}")
             report_resource_telemetry_status "${resource_status}"
+            if [ "${resource_status}" = "available" ]; then
+                record_manager_diagnostic \
+                    telemetry \
+                    telemetry-sample \
+                    "" \
+                    succeeded \
+                    "$(elapsed_milliseconds "${telemetry_started_epoch}")" \
+                    none \
+                    ""
+            else
+                record_manager_diagnostic \
+                    telemetry \
+                    telemetry-sample \
+                    "" \
+                    failed \
+                    "$(elapsed_milliseconds "${telemetry_started_epoch}")" \
+                    docker-failed \
+                    "Resource telemetry collection was incomplete"
+            fi
         else
+            record_manager_diagnostic \
+                telemetry \
+                telemetry-sample \
+                "" \
+                failed \
+                "$(elapsed_milliseconds "${telemetry_started_epoch}")" \
+                docker-unavailable \
+                "Resource telemetry collection failed"
+
             if ! write_unavailable_resource_telemetry "${RESOURCE_TELEMETRY_PATH}"; then
                 mark_observed_state_dirty
                 echo "[manager:${PROFILE_ID}] could not write unavailable resource telemetry" >&2
@@ -265,6 +315,21 @@ publish_observed_state() {
             observed_stale_count=$((observed_stale_count + 1))
     done
 
+    observed_journal_path="/tmp/pitcrew-observed-journal.json"
+    observed_health_path="/tmp/pitcrew-observed-subsystem-health.json"
+    observed_capacity_path="/tmp/pitcrew-observed-capacity-evidence.json"
+    render_operation_journal "${DIAGNOSTICS_DIRECTORY}" "${observed_journal_path}" || true
+    if render_subsystem_health "${DIAGNOSTICS_DIRECTORY}" "${observed_health_path}"; then
+        render_fixed_capacity_evidence \
+            "${observed_slots_path}" \
+            "${observed_desired_count}" \
+            "${observed_desired_status}" \
+            "${observed_health_path}" \
+            "${observed_capacity_path}" || true
+    else
+        write_unavailable_capacity_evidence "${observed_capacity_path}" || true
+    fi
+
     if write_manager_observed_state \
         "${OBSERVED_STATE_PATH}" \
         "${PROFILE_ID}" \
@@ -280,13 +345,28 @@ publish_observed_state() {
         "${RESOURCE_TELEMETRY_PATH}" \
         "${WORKER_REVISION}" \
         "${observed_stale_count}" \
-        "${RESOURCE_POLICY_PATH}"; then
+        "${RESOURCE_POLICY_PATH}" \
+        "${observed_journal_path}" \
+        "${observed_health_path}" \
+        "${observed_capacity_path}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty
         echo "[manager:${PROFILE_ID}] could not publish observed state" >&2
+        record_manager_diagnostic \
+            reconciliation \
+            observed-state-publish \
+            "" \
+            failed \
+            "" \
+            invalid-state \
+            "Observed state could not be published"
     fi
-    rm -f "${observed_slots_path}"
+    rm -f \
+        "${observed_slots_path}" \
+        "${observed_journal_path}" \
+        "${observed_health_path}" \
+        "${observed_capacity_path}"
 }
 
 wait_for_cleanup_commands() {
@@ -347,12 +427,28 @@ shutdown() {
             and (.requestedAt | type == "string" and length > 0)
         ' "${SHUTDOWN_REQUEST_PATH}" >/dev/null 2>&1; then
         echo "[manager:${PROFILE_ID}] received manager handoff signal; preserving managed runner containers"
+        record_manager_diagnostic \
+            recovery \
+            manager-shutdown \
+            "" \
+            succeeded \
+            "" \
+            none \
+            "Manager handoff preserved managed workers"
         mark_observed_state_dirty
         publish_observed_state 1
         exit 0
     fi
 
     echo "[manager:${PROFILE_ID}] received explicit shutdown request; stopping managed runner containers"
+    record_manager_diagnostic \
+        recovery \
+        manager-shutdown \
+        "" \
+        succeeded \
+        "" \
+        none \
+        "Manager shutdown is stopping managed workers"
     for stopping_path in "${SLOT_DIRECTORY}"/*; do
         [ -d "${stopping_path}" ] || continue
         : > "${stopping_path}/drain"
@@ -406,6 +502,14 @@ shutdown() {
     done
     if ! remove_managed_strict; then
         echo "[manager:${PROFILE_ID}] managed runners remain after shutdown cleanup" >&2
+        record_manager_diagnostic \
+            cleanup \
+            container-cleanup \
+            "" \
+            failed \
+            "" \
+            docker-failed \
+            "Managed workers remained after shutdown cleanup"
         MANAGER_STATUS="stopping"
         mark_observed_state_dirty
         publish_observed_state 1
@@ -476,8 +580,8 @@ monitor_runner_container() {
             printf '%s\n' "${output_line}" >> "${monitored_log_path}"
             case "${output_line}" in
                 *"${CONNECT_MARKER}"*)
-                    if [ ! -f "${monitored_slot_path}/connected" ]; then
-                        : > "${monitored_slot_path}/connected"
+                    if slot_connect_marker_is_pending "${monitored_slot_path}"; then
+                        consume_slot_connect_marker "${monitored_slot_path}"
                         write_slot_runtime_state \
                             "${monitored_slot_path}" \
                             "${OBSERVED_STATE_DIRTY}" \
@@ -542,6 +646,25 @@ monitor_runner_container() {
         "${exit_evidence}" \
         "${exit_code}" \
         "${exit_oom_killed}" || true
+    if [ "${exit_oom_killed}" = "true" ]; then
+        record_manager_diagnostic \
+            worker-exit \
+            worker-exit \
+            "${monitored_slot_path##*/}" \
+            failed \
+            "" \
+            invalid-state \
+            "Worker was terminated by a confirmed out of memory kill"
+    elif [ "${exit_code}" != "0" ]; then
+        record_manager_diagnostic \
+            worker-exit \
+            worker-exit \
+            "${monitored_slot_path##*/}" \
+            failed \
+            "" \
+            unknown \
+            "Worker exited without a clean status"
+    fi
 
     rm -f \
         "${monitored_slot_path}/container-id" \
@@ -566,7 +689,7 @@ run_slot() {
     if [ -f "${slot_state_path}/recovered-container-id" ]; then
         recovered_id=$(cat "${slot_state_path}/recovered-container-id")
         recovered_name=$(cat "${slot_state_path}/recovered-container-name")
-        rm -f "${slot_state_path}/connected"
+        consume_slot_connect_marker "${slot_state_path}"
         printf '%s\n' "${recovered_id}" > "${slot_state_path}/container-id"
         printf '%s\n' "${recovered_name}" > "${slot_state_path}/container-name"
         write_slot_runtime_state \
@@ -612,7 +735,7 @@ run_slot() {
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
         echo "[slot ${slot_key}] starting fresh ephemeral runner: ${name} -> ${repo:-<scope>}"
         : > "${log_path}"
-        rm -f "${slot_state_path}/connected"
+        reset_slot_connect_marker "${slot_state_path}"
         write_slot_runtime_state \
             "${slot_state_path}" \
             "${OBSERVED_STATE_DIRTY}" \
@@ -654,9 +777,18 @@ run_slot() {
         # Canonical policy values are validated at startup, so unquoted expansion
         # only splits manager-owned Docker arguments.
         set -- "$@" ${WORKER_RESOURCE_ARGUMENTS} "${IMAGE}"
+        launch_started_epoch=$(date +%s)
         launch_output=$("$@" 2>&1)
         launch_status=$?
         if [ "${launch_status}" -eq 0 ] && [ -n "${launch_output}" ]; then
+            record_manager_diagnostic \
+                worker-launch \
+                worker-launch \
+                "${slot_key}" \
+                succeeded \
+                "$(elapsed_milliseconds "${launch_started_epoch}")" \
+                none \
+                ""
             container_id=$(printf '%s\n' "${launch_output}" | tail -n 1)
             printf '%s\n' "${container_id}" > "${slot_state_path}/container-id"
             printf '%s\n' "${name}" > "${slot_state_path}/container-name"
@@ -669,6 +801,14 @@ run_slot() {
                 "${log_path}" \
                 "" || true
         else
+            record_manager_diagnostic \
+                worker-launch \
+                worker-launch \
+                "${slot_key}" \
+                failed \
+                "$(elapsed_milliseconds "${launch_started_epoch}")" \
+                docker-failed \
+                "Worker launch command did not return a container"
             printf '%s\n' "${launch_output}" | tee -a "${log_path}" >&2
             write_slot_exit_evidence \
                 "${slot_state_path}" \
@@ -709,6 +849,15 @@ run_slot() {
                 "${name}" \
                 "${failures}" \
                 "${wait_seconds}" || true
+            record_manager_diagnostic \
+                worker-launch \
+                worker-launch \
+                "${slot_key}" \
+                retry-scheduled \
+                "" \
+                retry-backoff \
+                "Worker slot is waiting for its launch backoff window" \
+                "$(diagnostic_retry_timestamp "${wait_seconds}")"
         fi
         rm -f "${log_path}"
 
@@ -784,6 +933,7 @@ reconcile_runner_registrations() {
             "${endpoint}" >> "${slots_path}"
     done
 
+    inventory_started_epoch=$(date +%s)
     inventory_pids=""
     tab=$(printf '\t')
     while IFS="${tab}" read -r target_hash endpoint; do
@@ -802,6 +952,33 @@ reconcile_runner_registrations() {
     for inventory_pid in ${inventory_pids}; do
         wait "${inventory_pid}" 2>/dev/null || true
     done
+    inventory_targets=$(count_lines "${targets_path}")
+    inventory_failures=0
+    for inventory_error in "${REGISTRATION_INVENTORY_DIRECTORY}"/*.error; do
+        [ -f "${inventory_error}" ] || continue
+        inventory_failures=$((inventory_failures + 1))
+    done
+    if [ "${inventory_targets}" -gt 0 ]; then
+        if [ "${inventory_failures}" -gt 0 ]; then
+            record_manager_diagnostic \
+                registration \
+                runner-registration \
+                "" \
+                failed \
+                "$(elapsed_milliseconds "${inventory_started_epoch}")" \
+                unknown \
+                "GitHub runner inventory could not be reconciled"
+        else
+            record_manager_diagnostic \
+                registration \
+                runner-registration \
+                "" \
+                succeeded \
+                "$(elapsed_milliseconds "${inventory_started_epoch}")" \
+                none \
+                ""
+        fi
+    fi
 
     while IFS="${tab}" read -r registration_slot_path target_hash runner_name endpoint; do
         [ -d "${registration_slot_path}" ] || continue
@@ -848,6 +1025,14 @@ reconcile_runner_registrations() {
                     "unknown" \
                     0 || true
                 echo "[slot ${registration_slot_path##*/}] GitHub registration could not be rechecked; preserving container" >&2
+                record_manager_diagnostic \
+                    cleanup \
+                    registration-cleanup \
+                    "${registration_slot_path##*/}" \
+                    blocked \
+                    "" \
+                    unknown \
+                    "Registration cleanup was blocked because evidence could not be rechecked"
                 continue
             fi
             recheck_classification=$(classify_github_runner_registration \
@@ -870,16 +1055,42 @@ reconcile_runner_registrations() {
                     "${recheck_activity}" \
                     "${recheck_evidence_count}" || true
                 echo "[slot ${registration_slot_path##*/}] GitHub registration evidence changed before cleanup; preserving container" >&2
+                record_manager_diagnostic \
+                    cleanup \
+                    registration-cleanup \
+                    "${registration_slot_path##*/}" \
+                    blocked \
+                    "" \
+                    invalid-state \
+                    "Registration cleanup was blocked because evidence changed"
                 continue
             fi
-            stop_confirmed_ghost \
+            if stop_confirmed_ghost \
                 "${registration_slot_path}" \
                 "${runner_name}" \
                 "${PROFILE_ID}" \
                 "${MANAGED_LABEL_KEY}" \
                 "${SLOT_LABEL_KEY}" \
                 "${RUNNER_STOP_TIMEOUT}" \
-                "${REGISTRATION_CLEANUP_THRESHOLD}" || true
+                "${REGISTRATION_CLEANUP_THRESHOLD}"; then
+                record_manager_diagnostic \
+                    cleanup \
+                    registration-cleanup \
+                    "${registration_slot_path##*/}" \
+                    succeeded \
+                    "" \
+                    none \
+                    ""
+            else
+                record_manager_diagnostic \
+                    cleanup \
+                    container-cleanup \
+                    "${registration_slot_path##*/}" \
+                    failed \
+                    "" \
+                    docker-failed \
+                    "Confirmed ghost container could not be stopped"
+            fi
         fi
     done < "${slots_path}"
     rm -rf "${REGISTRATION_INVENTORY_DIRECTORY}"
@@ -1277,7 +1488,23 @@ process_desired_state() {
                 "${draining_file}" \
                 "${unchanged_file}"; then
                 echo "[manager:${PROFILE_ID}] generation ${CURRENT_GENERATION} was applied but acknowledgement could not be written" >&2
+                record_manager_diagnostic \
+                    reconciliation \
+                    capacity-acknowledge \
+                    "" \
+                    failed \
+                    "" \
+                    invalid-state \
+                    "Accepted capacity could not be acknowledged"
             fi
+            record_manager_diagnostic \
+                reconciliation \
+                desired-state-apply \
+                "" \
+                succeeded \
+                "" \
+                none \
+                "Accepted a new desired capacity generation"
             echo "[manager:${PROFILE_ID}] accepted generation ${CURRENT_GENERATION}: $(count_lines "${added_file}") added, $(count_lines "${draining_file}") draining, $(count_lines "${unchanged_file}") unchanged"
             rm -f "${added_file}" "${draining_file}" "${unchanged_file}"
             LAST_REJECTION=""
@@ -1294,6 +1521,14 @@ process_desired_state() {
             rejection="${classification}:${snapshot_document_hash:-unreadable}"
             if [ "${rejection}" != "${LAST_REJECTION}" ]; then
                 echo "[manager:${PROFILE_ID}] rejected ${classification} desired-capacity state; retaining generation ${CURRENT_GENERATION}" >&2
+                record_manager_diagnostic \
+                    reconciliation \
+                    desired-state-load \
+                    "" \
+                    blocked \
+                    "" \
+                    invalid-state \
+                    "Desired capacity was rejected and the accepted generation was retained"
                 LAST_REJECTION="${rejection}"
                 mark_observed_state_dirty
             fi
@@ -1309,6 +1544,8 @@ mkdir -p "${STATE_DIRECTORY}"
 if [ "$(stat -c '%u' "${STATE_DIRECTORY}")" = "0" ]; then
     chmod 0777 "${STATE_DIRECTORY}"
 fi
+diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}" "${MANAGER_INSTANCE_ID}" ||
+    echo "[manager:${PROFILE_ID}] operation diagnostics could not be initialized" >&2
 rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
@@ -1337,7 +1574,39 @@ load_accepted_state
 echo "[manager:${PROFILE_ID}] adopting any managed runners left by the previous manager"
 if ! restore_managed_slots; then
     echo "[manager:${PROFILE_ID}] managed runner recovery failed; preserving containers and stopping" >&2
+    record_manager_diagnostic \
+        docker \
+        docker-inspect \
+        "" \
+        failed \
+        "" \
+        docker-unavailable \
+        "Managed worker discovery failed during manager adoption"
     exit 1
+fi
+adopted_slot_count=0
+for adopted_slot_path in "${SLOT_DIRECTORY}"/*; do
+    [ -d "${adopted_slot_path}" ] || continue
+    adopted_slot_count=$((adopted_slot_count + 1))
+done
+if [ "${adopted_slot_count}" -gt 0 ]; then
+    record_manager_diagnostic \
+        recovery \
+        manager-start \
+        "" \
+        recovered \
+        "" \
+        recovered \
+        "Manager adopted managed workers left by its predecessor"
+else
+    record_manager_diagnostic \
+        recovery \
+        manager-start \
+        "" \
+        succeeded \
+        "" \
+        none \
+        "Manager started with no adopted workers"
 fi
 if [ "${CURRENT_GENERATION}" -gt 0 ]; then
     startup_added="/tmp/pitcrew-startup-added.$$"
