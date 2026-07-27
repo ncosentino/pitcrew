@@ -587,7 +587,9 @@ run_slot() {
             > "${slot_state_path}/registration-grace-until"
         if docker inspect "${recovered_id}" >/dev/null 2>&1; then
             record_container_image_identity "${slot_state_path}" "${recovered_id}"
-            recovered_logs_since=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+            # Docker's --since boundary is inclusive. Skip the current second so
+            # a pre-handoff connect marker cannot be replayed as fresh evidence.
+            recovered_logs_since=$(( $(date +%s) + 1 ))
             monitor_runner_container \
                 "${slot_state_path}" \
                 "${recovered_name}" \
