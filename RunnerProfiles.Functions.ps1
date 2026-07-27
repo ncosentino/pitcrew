@@ -5,7 +5,11 @@ $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerManagerContractVersion = 10
 $script:RunnerDefinedManagerContractVersion = 11
+$script:RunnerDefinedDiagnosticsContractVersion = 12
 $script:RunnerWorkerRuntimeContractVersion = 2
+$script:RunnerManagerJournalMaximumEvents = 64
+$script:RunnerManagerJournalMaximumBytes = 16384
+$script:RunnerManagerJournalMaximumEvidenceLength = 160
 
 function ConvertTo-RunnerLabelList {
     param(
@@ -583,6 +587,7 @@ function Resolve-RunnerProfile {
         ManagedRunnerLabel = "ephemeral-managed-runner-profile=$profileName"
         ManagerContractVersion = $script:RunnerManagerContractVersion
         DefinedManagerContractVersion = $script:RunnerDefinedManagerContractVersion
+        DefinedDiagnosticsContractVersion = $script:RunnerDefinedDiagnosticsContractVersion
         Image = $effectiveImage
         Replicas = $effectiveReplicas
         Labels = @($labelList)
@@ -596,6 +601,205 @@ function Resolve-RunnerProfile {
         Build = $build
         PullImage = $effectivePullImage
     }
+}
+
+<#
+.SYNOPSIS
+    Reports the manager contract both manager implementations provide.
+
+.DESCRIPTION
+    Reads the contract version declared by the POSIX fixed manager and by the Go
+    autoscaler. The implemented contract is the lower of the two, so a contract
+    that only one manager mode provides is never treated as available. An
+    unreadable or unparsable declaration reports zero so activation fails closed.
+
+.PARAMETER RootPath
+    Installation root that contains the manager sources.
+
+.OUTPUTS
+    Object with Fixed, Autoscaling, and Implemented contract versions.
+#>
+function Get-RunnerImplementedManagerContract {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$RootPath
+    )
+
+    $declarations = @(
+        [PSCustomObject]@{
+            Name = 'Fixed'
+            Path = Join-Path $RootPath 'manager' 'manage-runners.sh'
+            Pattern = '(?m)^MANAGER_CONTRACT_VERSION=(\d+)\s*$'
+        },
+        [PSCustomObject]@{
+            Name = 'Autoscaling'
+            Path = Join-Path $RootPath 'manager' 'autoscaler' 'config.go'
+            Pattern = '(?m)^const\s+managerContractVersion\s*=\s*(\d+)\s*$'
+        }
+    )
+    $versions = [ordered]@{}
+    foreach ($declaration in $declarations) {
+        $version = 0
+        if (Test-Path -LiteralPath $declaration.Path) {
+            $content = Get-Content -LiteralPath $declaration.Path -Raw
+            $match = [regex]::Match($content, $declaration.Pattern)
+            if ($match.Success) {
+                $version = [int]$match.Groups[1].Value
+            }
+        }
+        $versions[$declaration.Name] = $version
+    }
+
+    return [PSCustomObject]@{
+        Fixed = $versions['Fixed']
+        Autoscaling = $versions['Autoscaling']
+        Implemented = [Math]::Min($versions['Fixed'], $versions['Autoscaling'])
+    }
+}
+
+<#
+.SYNOPSIS
+    Rejects a manager contract that both manager modes do not implement.
+
+.DESCRIPTION
+    Contract 11 resilience evidence and contract 12 operation, subsystem-health,
+    and capacity-deficit evidence are defined before the fixed manager and the
+    autoscaler publish them. Setup selects a contract for the manager through the
+    generated environment, so a selection ahead of either implementation must fail
+    before Docker, image, or generated state mutation.
+
+.PARAMETER Profile
+    Effective profile returned by Resolve-RunnerProfile.
+
+.EXCEPTION
+    Throws when the selected contract exceeds the contract both managers provide.
+#>
+function Assert-RunnerManagerContractActivation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile
+    )
+
+    $implemented = Get-RunnerImplementedManagerContract -RootPath $Profile.RootPath
+    if ($Profile.ManagerContractVersion -gt $implemented.Implemented) {
+        throw (
+            "Manager contract $($Profile.ManagerContractVersion) cannot activate because the fixed manager " +
+            "implements contract $($implemented.Fixed) and the autoscaler implements contract " +
+            "$($implemented.Autoscaling). Activate a contract only after both manager modes implement it; " +
+            'no Docker, image, or generated state was changed.'
+        )
+    }
+}
+
+<#
+.SYNOPSIS
+    Reads an optional member from projected manager state.
+
+.DESCRIPTION
+    Observed state is deserialized from a file a manager wrote, so a member can
+    be missing. Strict mode turns a missing member into a terminating error, and
+    contract 12 requires malformed evidence to be discarded rather than to fail
+    the whole projection.
+
+.PARAMETER Value
+    Deserialized object or dictionary.
+
+.PARAMETER Name
+    Member name to read.
+
+.OUTPUTS
+    Member value, or null when the member is absent.
+#>
+function Get-RunnerOptionalMember {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$Value,
+
+        [Parameter(Mandatory)]
+        [string]$Name
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [Collections.IDictionary]) {
+        if ($Value.Contains($Name)) {
+            return ,$Value[$Name]
+        }
+
+        return $null
+    }
+    $property = $Value.PSObject.Properties[$Name]
+    if ($null -eq $property) {
+        return $null
+    }
+
+    return ,$property.Value
+}
+
+<#
+.SYNOPSIS
+    Reports whether a manager operation journal fits the contract-12 budget.
+
+.DESCRIPTION
+    Contract 12 keeps operation evidence bounded so a connector heartbeat stays
+    small and cannot relay unbounded manager output. The journal is limited to a
+    fixed retained-event count, a short sanitized evidence field per event, and a
+    strict total serialized size.
+
+.PARAMETER Journal
+    Operation journal projected in observed state, or null when a manager
+    predates contract 12.
+
+.OUTPUTS
+    Boolean that is true when the journal is absent or within every documented
+    limit. A malformed journal is out of budget rather than an error, so a
+    caller can discard it without discarding valid observed state.
+#>
+function Test-RunnerManagerJournalBudget {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [object]$Journal
+    )
+
+    if ($null -eq $Journal) {
+        return $true
+    }
+
+    $capacity = Get-RunnerOptionalMember -Value $Journal -Name 'capacity'
+    if ($capacity -isnot [int] -and $capacity -isnot [long]) {
+        return $false
+    }
+    if ($capacity -gt $script:RunnerManagerJournalMaximumEvents) {
+        return $false
+    }
+    $declaredEvents = Get-RunnerOptionalMember -Value $Journal -Name 'events'
+    if ($null -eq $declaredEvents) {
+        return $false
+    }
+    $events = @($declaredEvents)
+    if ($events.Count -gt $script:RunnerManagerJournalMaximumEvents) {
+        return $false
+    }
+    foreach ($event in $events) {
+        $evidence = Get-RunnerOptionalMember -Value $event -Name 'evidence'
+        if (
+            $null -ne $evidence -and
+            "$evidence".Length -gt $script:RunnerManagerJournalMaximumEvidenceLength
+        ) {
+            return $false
+        }
+    }
+
+    $serialized = $Journal | ConvertTo-Json -Depth 12 -Compress
+    $serializedBytes = [Text.UTF8Encoding]::new($false).GetByteCount($serialized)
+    return $serializedBytes -le $script:RunnerManagerJournalMaximumBytes
 }
 
 <#

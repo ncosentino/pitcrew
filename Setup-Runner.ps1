@@ -239,6 +239,7 @@ foreach ($parameterName in @(
 }
 $profileConfig = Resolve-RunnerProfile @resolveArguments
 if (-not $Down -and -not $RecoverManager) {
+    Assert-RunnerManagerContractActivation -Profile $profileConfig
     Assert-RunnerResilienceContractActivation -Profile $profileConfig
 }
 

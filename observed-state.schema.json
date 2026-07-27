@@ -425,6 +425,735 @@
         }
       }
     },
+    "sanitizedEvidence": {
+      "type": ["string", "null"],
+      "maxLength": 160,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9 .,_()'-]*$",
+      "$comment": "Short operator-facing explanation. The character set excludes ':', '/', '@', '?', '=', and '&' so URLs, tokens, headers, and raw command output cannot be relayed."
+    },
+    "managerEventSubsystem": {
+      "enum": [
+        "docker",
+        "registration",
+        "scale-set-session",
+        "listener",
+        "jit",
+        "worker-launch",
+        "worker-exit",
+        "telemetry",
+        "reconciliation",
+        "cleanup",
+        "admission",
+        "recovery"
+      ]
+    },
+    "managerEventOperation": {
+      "enum": [
+        "docker-ping",
+        "docker-run",
+        "docker-inspect",
+        "docker-remove",
+        "docker-events",
+        "registration-token-request",
+        "runner-registration",
+        "runner-removal",
+        "session-create",
+        "session-refresh",
+        "session-delete",
+        "message-poll",
+        "message-acknowledge",
+        "jit-config-generate",
+        "worker-launch",
+        "worker-exit",
+        "telemetry-sample",
+        "desired-state-load",
+        "desired-state-apply",
+        "capacity-acknowledge",
+        "observed-state-publish",
+        "registration-cleanup",
+        "container-cleanup",
+        "admission-reserve",
+        "admission-settle",
+        "manager-start",
+        "manager-shutdown",
+        "journal-restore"
+      ],
+      "$comment": "Closed vocabulary. Managers must not invent operation names; a new operation requires a new manager contract version."
+    },
+    "managerEventOutcome": {
+      "enum": [
+        "succeeded",
+        "failed",
+        "timed-out",
+        "retry-scheduled",
+        "blocked",
+        "recovered",
+        "unknown"
+      ]
+    },
+    "managerEventReason": {
+      "enum": [
+        "none",
+        "docker-unavailable",
+        "docker-failed",
+        "timeout",
+        "rate-limited",
+        "authorization-failed",
+        "not-found",
+        "conflict",
+        "invalid-state",
+        "capacity-ceiling",
+        "retry-backoff",
+        "cancelled",
+        "recovered",
+        "unknown"
+      ]
+    },
+    "managerEvent": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "managerInstanceId",
+        "observedAt",
+        "subsystem",
+        "operation",
+        "target",
+        "outcome",
+        "durationMilliseconds",
+        "attempt",
+        "consecutiveFailures",
+        "retryAt",
+        "reason",
+        "evidence"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "managerInstanceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "subsystem": {
+          "$ref": "#/$defs/managerEventSubsystem"
+        },
+        "operation": {
+          "$ref": "#/$defs/managerEventOperation"
+        },
+        "target": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 128,
+          "$comment": "Slot key or autoscaling target key that already appears in non-secret observed state. No container identity, URL, or free-form identifier."
+        },
+        "outcome": {
+          "$ref": "#/$defs/managerEventOutcome"
+        },
+        "durationMilliseconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 86400000,
+          "$comment": "null means the manager did not measure the operation; 0 means it measured a sub-millisecond operation."
+        },
+        "attempt": {
+          "type": ["integer", "null"],
+          "minimum": 1,
+          "maximum": 1000
+        },
+        "consecutiveFailures": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "retryAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "reason": {
+          "$ref": "#/$defs/managerEventReason"
+        },
+        "evidence": {
+          "$ref": "#/$defs/sanitizedEvidence"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "succeeded"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "enum": [
+                  "none",
+                  "recovered"
+                ]
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "enum": [
+                  "failed",
+                  "timed-out",
+                  "blocked"
+                ]
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "not": {
+                  "const": "none"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "outcome": {
+                "const": "retry-scheduled"
+              }
+            },
+            "required": [
+              "outcome"
+            ]
+          },
+          "then": {
+            "properties": {
+              "retryAt": {
+                "type": "string"
+              }
+            }
+          }
+        }
+      ],
+      "$comment": "Dashboards deduplicate on profileId plus sequence. Sequence is durable and monotonic across manager restart and hot-swap, so managerInstanceId identifies the observer rather than the identity of the event."
+    },
+    "managerOperationJournal": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "capacity",
+        "highestSequence",
+        "droppedEvents",
+        "events"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["current", "truncated", "unavailable"],
+          "$comment": "current means the retained window is intact, truncated means older or rejected entries were discarded, unavailable means the manager could not read or restore its journal."
+        },
+        "capacity": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 64
+        },
+        "highestSequence": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "droppedEvents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "events": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/managerEvent"
+          }
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "events": {
+                "maxItems": 0
+              },
+              "highestSequence": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "truncated"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          "then": {
+            "properties": {
+              "droppedEvents": {
+                "minimum": 1
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "events": {
+                "minItems": 1
+              }
+            },
+            "required": [
+              "events"
+            ]
+          },
+          "then": {
+            "properties": {
+              "highestSequence": {
+                "type": "integer"
+              }
+            }
+          }
+        }
+      ],
+      "$comment": "The journal retains failures, state transitions, retries, and recovery rather than every reconciliation pass. An empty events array with status current means no notable event has occurred. Malformed or oversized persisted entries are discarded into droppedEvents; the rest of observed state stays valid. Serialized journal size is capped at 16384 bytes."
+    },
+    "subsystemOperationEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "operation",
+        "observedAt",
+        "durationMilliseconds",
+        "reason",
+        "evidence"
+      ],
+      "properties": {
+        "operation": {
+          "$ref": "#/$defs/managerEventOperation"
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "durationMilliseconds": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "maximum": 86400000
+        },
+        "reason": {
+          "$ref": "#/$defs/managerEventReason"
+        },
+        "evidence": {
+          "$ref": "#/$defs/sanitizedEvidence"
+        }
+      }
+    },
+    "subsystemHealthSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "state",
+        "observedAt",
+        "consecutiveFailures",
+        "retryAt",
+        "lastSuccess",
+        "lastFailure"
+      ],
+      "properties": {
+        "state": {
+          "enum": ["healthy", "degraded", "unavailable", "unknown"]
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "consecutiveFailures": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000
+        },
+        "retryAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "lastSuccess": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/subsystemOperationEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastFailure": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/subsystemOperationEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "healthy"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "consecutiveFailures": {
+                "const": 0
+              },
+              "lastSuccess": {
+                "$ref": "#/$defs/subsystemOperationEvidence"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "enum": ["degraded", "unavailable"]
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "consecutiveFailures": {
+                "minimum": 1
+              },
+              "lastFailure": {
+                "$ref": "#/$defs/subsystemOperationEvidence"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "state": {
+                "const": "unknown"
+              }
+            },
+            "required": [
+              "state"
+            ]
+          },
+          "then": {
+            "properties": {
+              "consecutiveFailures": {
+                "const": 0
+              },
+              "lastSuccess": {
+                "type": "null"
+              },
+              "lastFailure": {
+                "type": "null"
+              },
+              "retryAt": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "$comment": "These summaries describe operations this manager performed. They never claim that the host, Docker daemon, network, or GitHub service as a whole is healthy."
+    },
+    "managerSubsystemHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "docker",
+        "github"
+      ],
+      "properties": {
+        "docker": {
+          "$ref": "#/$defs/subsystemHealthSummary"
+        },
+        "github": {
+          "$ref": "#/$defs/subsystemHealthSummary"
+        }
+      }
+    },
+    "capacityDeficitReason": {
+      "enum": [
+        "none",
+        "admission-ceiling",
+        "launch-pending",
+        "docker-unavailable",
+        "docker-failed",
+        "jit-pending",
+        "jit-failed",
+        "listener-unavailable",
+        "session-unavailable",
+        "registration-cleanup-pending",
+        "worker-draining",
+        "invalid-desired-state",
+        "retry-backoff",
+        "unknown"
+      ],
+      "$comment": "Observed manager state, not a diagnosis inferred by a dashboard. A configured autoscaling maximum is not a health target and never creates a deficit by itself."
+    },
+    "capacityDeficitCore": {
+      "type": "object",
+      "required": [
+        "observedAt",
+        "freshness",
+        "targetSlots",
+        "activeWorkers",
+        "startingWorkers",
+        "drainingWorkers",
+        "cleanupPendingWorkers",
+        "eligibleWorkers",
+        "localDeficit",
+        "eligibilityDeficit",
+        "reason",
+        "evidence"
+      ],
+      "properties": {
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "freshness": {
+          "enum": ["current", "stale", "unavailable"]
+        },
+        "targetSlots": {
+          "type": "integer",
+          "minimum": 0,
+          "$comment": "desiredSlots for fixed profiles and the activation targetSlots for an autoscaling target. It is never the configured maximum."
+        },
+        "activeWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "startingWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "drainingWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "cleanupPendingWorkers": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligibleWorkers": {
+          "type": ["integer", "null"],
+          "minimum": 0,
+          "$comment": "GitHub-registered or scale-set-eligible evidence. null means the manager has no current control-plane evidence; 0 means it observed none."
+        },
+        "localDeficit": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "eligibilityDeficit": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "reason": {
+          "$ref": "#/$defs/capacityDeficitReason"
+        },
+        "evidence": {
+          "$ref": "#/$defs/sanitizedEvidence"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "localDeficit": {
+                "minimum": 1
+              }
+            },
+            "required": [
+              "localDeficit"
+            ]
+          },
+          "then": {
+            "properties": {
+              "reason": {
+                "not": {
+                  "const": "none"
+                }
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "eligibleWorkers": {
+                "type": "null"
+              }
+            },
+            "required": [
+              "eligibleWorkers"
+            ]
+          },
+          "then": {
+            "properties": {
+              "eligibilityDeficit": {
+                "type": "null"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "eligibleWorkers": {
+                "type": "integer"
+              }
+            },
+            "required": [
+              "eligibleWorkers"
+            ]
+          },
+          "then": {
+            "properties": {
+              "eligibilityDeficit": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "freshness": {
+                "const": "unavailable"
+              }
+            },
+            "required": [
+              "freshness"
+            ]
+          },
+          "then": {
+            "properties": {
+              "eligibleWorkers": {
+                "type": "null"
+              },
+              "reason": {
+                "const": "unknown"
+              }
+            }
+          }
+        }
+      ]
+    },
+    "capacityDeficitEvidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/capacityDeficitCore"
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "targetCapacityDeficitEvidence": {
+      "allOf": [
+        {
+          "$ref": "#/$defs/capacityDeficitCore"
+        },
+        {
+          "type": "object",
+          "required": [
+            "key",
+            "repository"
+          ],
+          "properties": {
+            "key": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "repository": {
+              "type": ["string", "null"]
+            }
+          }
+        }
+      ],
+      "unevaluatedProperties": false
+    },
+    "managerCapacityEvidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "fixed",
+        "targets"
+      ],
+      "properties": {
+        "fixed": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/capacityDeficitEvidence"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "$comment": "null for an autoscaled profile, which reports per-target evidence instead."
+        },
+        "targets": {
+          "type": "array",
+          "maxItems": 64,
+          "items": {
+            "$ref": "#/$defs/targetCapacityDeficitEvidence"
+          }
+        }
+      }
+    },
     "updateState": {
         "type": "object",
         "additionalProperties": false,
@@ -564,6 +1293,36 @@
       "oneOf": [
         {
           "$ref": "#/$defs/updateState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "operationJournal": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/managerOperationJournal"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "subsystemHealth": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/managerSubsystemHealth"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "capacityEvidence": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/managerCapacityEvidence"
         },
         {
           "type": "null"
@@ -959,6 +1718,76 @@
           }
         },
         "$comment": "Local worker counts and timestamped GitHub scale-set statistics are separate evidence. Neither source makes a mismatched runner automatically removable."
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 12
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "operationJournal",
+          "subsystemHealth",
+          "capacityEvidence"
+        ],
+        "properties": {
+          "operationJournal": {
+            "$ref": "#/$defs/managerOperationJournal"
+          },
+          "subsystemHealth": {
+            "$ref": "#/$defs/managerSubsystemHealth"
+          },
+          "capacityEvidence": {
+            "$ref": "#/$defs/managerCapacityEvidence"
+          }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "autoscaling": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "autoscaling"
+              ]
+            },
+            "then": {
+              "properties": {
+                "capacityEvidence": {
+                  "properties": {
+                    "fixed": {
+                      "type": "null"
+                    }
+                  }
+                }
+              }
+            },
+            "else": {
+              "properties": {
+                "capacityEvidence": {
+                  "properties": {
+                    "fixed": {
+                      "$ref": "#/$defs/capacityDeficitEvidence"
+                    },
+                    "targets": {
+                      "maxItems": 0
+                    }
+                  }
+                }
+              }
+            }
+          }
+        ],
+        "$comment": "Contract 12 adds durable operation evidence. The journal, subsystem summaries, and capacity evidence are additive and nullable for contract 11 and older observations, so contract-10 and contract-11 readers are unaffected."
       }
     }
   ]
