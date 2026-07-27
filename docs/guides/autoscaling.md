@@ -91,6 +91,40 @@ starts. Unset values mean no configured limit and are never treated as zero.
 Manager contract 11 is not active in this release, so setup still rejects a
 resource policy or aggregate ceiling until both manager modes implement it.
 
+## Operation evidence
+
+Autoscaled profiles publish additional, credential-free diagnostics in the
+observed state so operators can tell an idle pool apart from a stuck one:
+
+- `operationJournal` is a bounded, durable record of failures, timeouts,
+  retries, recoveries, and meaningful transitions. Successful routine polls and
+  reconciliation ticks are not recorded. Events carry a stable sequence and
+  observer identity so connectors can deduplicate them, and the journal survives
+  a manager restart, so a Docker or listener failure that preceded recovery is
+  still visible.
+- `subsystemHealth` summarizes Docker and GitHub operations as `healthy`,
+  `degraded`, `unavailable`, or `unknown`, with the last success, last failure,
+  and consecutive failure count. A subsystem that has not been observed stays
+  `unknown` rather than reporting a fabricated success.
+- `capacityEvidence` reports per-target deficits against the target's current
+  activation target, never the configured maximum, so a healthy pool below its
+  ceiling is never presented as an unmet health target. Local Docker worker
+  counts and timestamped GitHub registered, busy, and idle counts stay separate
+  sources, so `2 local / 8 registered` is reported as stale GitHub registrations
+  rather than eight local workers.
+
+When a target cannot reach its activation target, the manager publishes the
+actual blocking reason: the profile-wide admission ceiling, an unavailable
+listener or scale-set session, pending or failed JIT configuration, a Docker
+launch failure, pending registration cleanup, draining, retry backoff, or
+`unknown`.
+
+Diagnostics never retain access tokens, JIT payloads, HTTP bodies, raw API or
+Docker error output, job output, or environment values; evidence is reduced to a
+short, sanitized summary. Diagnostics are best-effort: a corrupt or unwritable
+journal is reported through the journal status and never stops scaling, removes
+workers, or discards retirement, cleanup, or accepted capacity state.
+
 ## Compatibility
 
 Autoscaling uses the same multi-label workflow routing as fixed profiles. The

@@ -114,6 +114,13 @@ type observedState struct {
 	ResourcePolicy         *observedResourcePolicy `json:"resourcePolicy"`
 	Autoscaling            observedAutoscaling     `json:"autoscaling"`
 	Update                 observedUpdate          `json:"update"`
+
+	// Contract-12 diagnostics stay additive until every manager mode
+	// publishes them, so a connector built for an earlier contract keeps
+	// working while these fields are populated.
+	OperationJournal *managerOperationJournal `json:"operationJournal,omitempty"`
+	SubsystemHealth  *managerSubsystemHealth  `json:"subsystemHealth,omitempty"`
+	CapacityEvidence *managerCapacityEvidence `json:"capacityEvidence,omitempty"`
 }
 
 func buildObservedState(

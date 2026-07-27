@@ -72,7 +72,15 @@ type scalerStatistics struct {
 	idleRunners       int
 }
 
+// capacityBlock records why the scaler could not reach its activation target
+// during the most recent reconciliation.
+type capacityBlock struct {
+	reason   string
+	evidence string
+}
+
 type scalerSnapshot struct {
+	blocking         capacityBlock
 	target           targetSpec
 	scaleSetID       int
 	targetSlots      int
@@ -122,6 +130,8 @@ type runnerScaler struct {
 	cleanupStore         registrationCleanupStore
 	pendingRegistrations map[string]registrationCleanupRecord
 	admission            *admissionController
+	diagnostics          *diagnosticsRecorder
+	blocking             capacityBlock
 }
 
 func newRunnerScaler(
@@ -133,6 +143,7 @@ func newRunnerScaler(
 	docker dockerClient,
 	scalerClock clock,
 	admission *admissionController,
+	diagnostics *diagnosticsRecorder,
 	logger *slog.Logger,
 	onChange func(),
 	onError func(error),
@@ -178,6 +189,7 @@ func newRunnerScaler(
 		),
 		pendingRegistrations: make(map[string]registrationCleanupRecord),
 		admission:            admission,
+		diagnostics:          diagnostics,
 	}
 	scaler.restorePendingRegistrations()
 	scaler.admission.join(target.key, scaler.runnerCount)
@@ -515,6 +527,10 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 				blocked = missing
 			}
 			missing -= blocked
+			s.setBlocking(
+				deficitCleanupPending,
+				"replacement capacity waits for exact registration cleanup",
+			)
 			s.logger.Warn(
 				"Deferring replacement capacity until registration cleanup completes",
 				"blockedSlots", blocked,
@@ -522,11 +538,25 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		}
 		admitted := s.admission.reserve(s.target.key, missing)
 		if admitted < missing {
+			s.setBlocking(
+				deficitAdmissionCeiling,
+				"profile active-worker ceiling deferred requested capacity",
+			)
 			s.logger.Warn(
 				"Deferring capacity to respect the profile active-worker ceiling",
 				"requestedSlots", missing,
 				"admittedSlots", admitted,
 			)
+			s.diagnostics.record(diagnosticsObservation{
+				subsystem: subsystemAdmission,
+				operation: operationAdmissionReserve,
+				target:    s.target.key,
+				outcome:   outcomeBlocked,
+				reason:    reasonCapacityCeiling,
+				evidence:  "profile active-worker ceiling deferred requested capacity",
+			})
+		} else if admitted > 0 {
+			s.setBlocking(deficitLaunchPending, "admitted workers are still starting")
 		}
 		for ; admitted > 0; admitted-- {
 			_, err := s.startRunner(ctx)
@@ -543,8 +573,10 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
 	if target == current {
+		s.clearBlocking()
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
+	s.clearBlocking()
 
 	now := s.clock.now().UTC()
 	s.mu.Lock()
@@ -634,6 +666,20 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		s.mu.Unlock()
 		s.onChange()
 	}
+}
+
+// setBlocking records why the scaler could not reach its activation target, so
+// published capacity evidence carries the manager's actual blocking reason.
+func (s *runnerScaler) setBlocking(reason string, evidence string) {
+	s.mu.Lock()
+	s.blocking = capacityBlock{reason: reason, evidence: evidence}
+	s.mu.Unlock()
+}
+
+func (s *runnerScaler) clearBlocking() {
+	s.mu.Lock()
+	s.blocking = capacityBlock{}
+	s.mu.Unlock()
 }
 
 func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {
@@ -728,6 +774,17 @@ func (s *runnerScaler) markPendingRegistrationAttempt(
 	s.mu.Unlock()
 	s.reportEvictedRegistrations(evicted)
 	s.persistPendingRegistrations(records)
+	retryAt := now.Add(registrationCleanupRetryDelay)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemCleanup,
+		operation: operationRegistrationCleanup,
+		target:    current.SlotKey,
+		outcome:   outcomeRetry,
+		reason:    classifyFailure(cause),
+		evidence:  "exact runner registration removal is still pending",
+		attempt:   current.Attempts,
+		retryAt:   &retryAt,
+	})
 	s.logger.Warn(
 		"Runner registration cleanup is pending",
 		"slotKey", current.SlotKey,
@@ -751,6 +808,14 @@ func (s *runnerScaler) resolvePendingRegistration(slotKey string, reason string)
 		return
 	}
 	s.persistPendingRegistrations(records)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemCleanup,
+		operation: operationRegistrationCleanup,
+		target:    slotKey,
+		outcome:   outcomeSucceeded,
+		reason:    reasonNone,
+		evidence:  "exact runner registration cleanup resolved as " + reason,
+	})
 	s.logger.Info(
 		"Runner registration cleanup completed",
 		"slotKey", slotKey,
@@ -901,8 +966,19 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	if err != nil {
 		return nil, err
 	}
+	launchStartedAt := s.clock.now()
 	jit, err := s.api.generateJIT(ctx, s.scaleSetID, requestedName)
 	if err != nil {
+		s.setBlocking(
+			deficitJITFailed,
+			"just-in-time runner configuration could not be generated",
+		)
+		s.recordLaunchFailure(
+			"",
+			classifyFailure(err),
+			"just-in-time runner configuration could not be generated",
+			launchStartedAt,
+		)
 		return nil, err
 	}
 
@@ -937,6 +1013,13 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	})
 	if err != nil {
 		launchFailure := launchFailureDiagnostic(s.clock.now())
+		s.setBlocking(deficitDockerFailed, "worker container launch failed")
+		s.recordLaunchFailure(
+			slotKey,
+			dockerFailureReason(err),
+			"worker container launch failed",
+			launchStartedAt,
+		)
 		s.logger.Warn(
 			"Runner container launch failed",
 			"slotKey", slotKey,
@@ -999,9 +1082,56 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	}
 	s.runners[runner.key] = runner
 	s.mu.Unlock()
+	s.recordLaunchOutcome(runner.key, launchStartedAt)
 	s.monitorRunner(runner, now)
 	s.onChange()
 	return runner, nil
+}
+
+// recordLaunchFailure journals a failed worker launch with the manager's own
+// classification instead of raw Docker or API output.
+func (s *runnerScaler) recordLaunchFailure(
+	slotKey string,
+	reason string,
+	evidence string,
+	startedAt time.Time,
+) {
+	target := slotKey
+	if target == "" {
+		target = s.target.key
+	}
+	duration := s.clock.now().Sub(startedAt)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemWorkerLaunch,
+		operation: operationWorkerLaunch,
+		target:    target,
+		outcome:   launchOutcome(reason),
+		reason:    reason,
+		evidence:  evidence,
+		duration:  &duration,
+		attempt:   1,
+	})
+}
+
+func launchOutcome(reason string) string {
+	if reason == reasonTimeout {
+		return outcomeTimedOut
+	}
+	return outcomeFailed
+}
+
+func (s *runnerScaler) recordLaunchOutcome(slotKey string, startedAt time.Time) {
+	duration := s.clock.now().Sub(startedAt)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemWorkerLaunch,
+		operation: operationWorkerLaunch,
+		target:    slotKey,
+		outcome:   outcomeSucceeded,
+		reason:    reasonNone,
+		evidence:  "worker launched for one job",
+		duration:  &duration,
+		attempt:   1,
+	})
 }
 
 func (s *runnerScaler) recover(container recoveredContainer) error {
@@ -1335,6 +1465,14 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	s.mu.Unlock()
 	s.onChange()
 
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemWorkerExit,
+		operation: operationWorkerExit,
+		target:    exited.key,
+		outcome:   workerExitOutcome(unexpected, diagnostic.Classification),
+		reason:    workerExitReason(unexpected, diagnostic.Classification),
+		evidence:  "worker container exited with classification " + diagnostic.Classification,
+	})
 	s.logger.Info(
 		"Runner container exited",
 		"slotKey", exited.key,
@@ -1356,6 +1494,22 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 			s.onError(fmt.Errorf("restore runner target after container exit: %w", err))
 		}
 	}
+}
+
+// workerExitOutcome separates an expected worker retirement from a worker that
+// disappeared while it was still wanted.
+func workerExitOutcome(unexpected bool, classification string) string {
+	if unexpected && classification != "clean" {
+		return outcomeFailed
+	}
+	return outcomeSucceeded
+}
+
+func workerExitReason(unexpected bool, classification string) string {
+	if unexpected && classification != "clean" {
+		return reasonUnknown
+	}
+	return reasonNone
 }
 
 func (s *runnerScaler) shutdown(ctx context.Context) error {
@@ -1441,6 +1595,7 @@ func (s *runnerScaler) snapshot() scalerSnapshot {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	snapshot := scalerSnapshot{
+		blocking:    s.blocking,
 		target:      s.target,
 		scaleSetID:  s.scaleSetID,
 		targetSlots: s.targetSlots,

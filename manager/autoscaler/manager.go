@@ -16,14 +16,15 @@ import (
 const managerShutdownTimeout = 50 * time.Second
 
 type autoscalerManager struct {
-	cfg        config
-	paths      statePaths
-	factory    scaleSetServiceFactory
-	docker     dockerClient
-	clock      clock
-	logger     *slog.Logger
-	instanceID string
-	admission  *admissionController
+	cfg         config
+	paths       statePaths
+	factory     scaleSetServiceFactory
+	docker      dockerClient
+	clock       clock
+	logger      *slog.Logger
+	instanceID  string
+	admission   *admissionController
+	diagnostics *diagnosticsRecorder
 
 	controllers          map[string]*targetController
 	retiring             map[string]*targetController
@@ -80,15 +81,20 @@ func newAutoscalerManager(
 	logger *slog.Logger,
 	instanceID string,
 ) *autoscalerManager {
+	diagnostics := newDiagnosticsRecorder(cfg.stateDirectory, instanceID, managerClock)
 	return &autoscalerManager{
-		cfg:                   cfg,
-		paths:                 newStatePaths(cfg.stateDirectory),
-		factory:               boundScaleSetServiceFactory(factory),
-		docker:                boundDockerClient(docker),
+		cfg:   cfg,
+		paths: newStatePaths(cfg.stateDirectory),
+		factory: instrumentScaleSetServiceFactory(
+			boundScaleSetServiceFactory(factory),
+			diagnostics,
+		),
+		docker:                instrumentDockerClient(boundDockerClient(docker), diagnostics),
 		clock:                 managerClock,
 		logger:                logger,
 		instanceID:            instanceID,
 		admission:             newAdmissionController(cfg.maximumActiveWorkers),
+		diagnostics:           diagnostics,
 		controllers:           make(map[string]*targetController),
 		retiring:              make(map[string]*targetController),
 		pending:               make(map[string]pendingScaleSet),
@@ -110,6 +116,14 @@ func (m *autoscalerManager) run(ctx context.Context) error {
 	if err := os.MkdirAll(m.cfg.stateDirectory, 0o755); err != nil {
 		return fmt.Errorf("create autoscaler state directory: %w", err)
 	}
+	m.diagnostics.restore()
+	m.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemRecovery,
+		operation: operationManagerStart,
+		outcome:   outcomeSucceeded,
+		reason:    reasonNone,
+		evidence:  "manager instance started and resumed durable state",
+	})
 	if _, err := bootstrapLegacyDesiredState(m.cfg, m.paths); err != nil {
 		return err
 	}
@@ -319,11 +333,13 @@ func (m *autoscalerManager) processDesired(ctx context.Context) error {
 	case classificationInvalid:
 		m.lastDocumentHash = documentHash
 		m.desiredStatus = "invalid"
+		m.recordDesiredRejection("invalid")
 		m.markDirty()
 		return fmt.Errorf("reject invalid desired-capacity document: %w", classificationErr)
 	case classificationStale:
 		m.lastDocumentHash = documentHash
 		m.desiredStatus = "stale"
+		m.recordDesiredRejection("stale")
 		m.markDirty()
 		return fmt.Errorf(
 			"reject stale desired-capacity generation %d; current generation is %d",
@@ -333,6 +349,7 @@ func (m *autoscalerManager) processDesired(ctx context.Context) error {
 	case classificationConflict:
 		m.lastDocumentHash = documentHash
 		m.desiredStatus = "conflict"
+		m.recordDesiredRejection("conflict")
 		m.markDirty()
 		return fmt.Errorf(
 			"reject conflicting desired-capacity generation %d",
@@ -384,8 +401,27 @@ func (m *autoscalerManager) acceptDesiredTransition(
 	if err := m.ensureRetirementStateCurrent(); err != nil {
 		return err
 	}
+	m.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemReconciliation,
+		operation: operationDesiredStateApply,
+		outcome:   outcomeSucceeded,
+		reason:    reasonNone,
+		evidence:  "accepted a new desired capacity generation",
+	})
 	m.markDirty()
 	return nil
+}
+
+// recordDesiredRejection journals a rejected desired-capacity document without
+// retaining its contents.
+func (m *autoscalerManager) recordDesiredRejection(status string) {
+	m.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemReconciliation,
+		operation: operationDesiredStateLoad,
+		outcome:   outcomeBlocked,
+		reason:    reasonInvalidState,
+		evidence:  "desired capacity was rejected as " + status,
+	})
 }
 
 func (m *autoscalerManager) recordsWithNewRetirements(
@@ -575,6 +611,7 @@ func (m *autoscalerManager) startDesiredController(
 		m.docker,
 		m.clock,
 		m.admission,
+		m.diagnostics,
 		m.cfg.sessionOwner,
 		m.recovered[target.key],
 		m.logger,
@@ -728,6 +765,7 @@ func (m *autoscalerManager) startRetiringController(
 		m.docker,
 		m.clock,
 		m.admission,
+		m.diagnostics,
 		m.cfg.sessionOwner,
 		m.recovered[target.key],
 		m.logger,
@@ -832,8 +870,20 @@ func (m *autoscalerManager) tryPublishObserved() {
 	m.observedError = nil
 	if err := m.publishObserved(); err != nil {
 		m.observedError = err
+		m.diagnostics.record(diagnosticsObservation{
+			subsystem: subsystemReconciliation,
+			operation: operationObservedStatePublish,
+			outcome:   failureOutcome(err),
+			reason:    classifyFailure(err),
+			evidence:  "observed-state publication failed and will be retried",
+		})
 		m.logger.Error("Observed-state publication failed; retrying", "error", err)
 		return
+	}
+	if m.diagnostics.persistenceDegraded() {
+		m.logger.Warn(
+			"Operation journal persistence is degraded; live workers are unaffected",
+		)
 	}
 }
 
@@ -889,6 +939,7 @@ func (m *autoscalerManager) publishObserved() error {
 		}
 	}
 	applyResourceSample(&state, resourceSample)
+	m.applyDiagnostics(&state, snapshots)
 	sort.Slice(state.Slots, func(i, j int) bool {
 		return state.Slots[i].Key < state.Slots[j].Key
 	})
@@ -896,6 +947,59 @@ func (m *autoscalerManager) publishObserved() error {
 		return fmt.Errorf("publish observed state: %w", err)
 	}
 	return nil
+}
+
+// applyDiagnostics publishes contract-12 durable operation evidence, subsystem
+// health, and per-target capacity-deficit evidence. Diagnostics are derived
+// from state the manager already holds, so they can never change scaling
+// decisions.
+func (m *autoscalerManager) applyDiagnostics(
+	state *observedState,
+	snapshots []scalerSnapshot,
+) {
+	if m.diagnostics == nil {
+		return
+	}
+	journal := m.diagnostics.journal()
+	health := m.diagnostics.subsystemHealth()
+	evidence := buildCapacityEvidence(
+		snapshots,
+		m.targetCapacityConditions(),
+		health,
+		m.clock.now(),
+	)
+	state.OperationJournal = &journal
+	state.SubsystemHealth = &health
+	state.CapacityEvidence = &evidence
+}
+
+// targetCapacityConditions reports the manager-owned blocking state for each
+// target so published deficit reasons describe what this manager observed.
+func (m *autoscalerManager) targetCapacityConditions() map[string]targetCapacityCondition {
+	conditions := make(map[string]targetCapacityCondition)
+	controllers := make(map[string]*targetController, len(m.controllers)+len(m.retiring))
+	for key, controller := range m.retiring {
+		controllers[key] = controller
+	}
+	for key, controller := range m.controllers {
+		controllers[key] = controller
+	}
+	for key, controller := range controllers {
+		_, restarting := m.restarts[key]
+		conditions[key] = targetCapacityCondition{
+			listenerStopped: controller.listenerStopped(),
+			sessionMissing:  controller.closed(),
+			restartPending:  restarting,
+			desiredStatus:   m.desiredStatus,
+		}
+	}
+	for key := range m.pending {
+		conditions[key] = targetCapacityCondition{
+			sessionMissing: true,
+			desiredStatus:  m.desiredStatus,
+		}
+	}
+	return conditions
 }
 
 func (m *autoscalerManager) sampleResourceTelemetry(
@@ -1096,6 +1200,15 @@ func (m *autoscalerManager) processListenerFailures() bool {
 			"targetKey", key,
 			"error", err,
 		)
+		m.diagnostics.record(diagnosticsObservation{
+			subsystem:  subsystemListener,
+			operation:  operationMessagePoll,
+			target:     key,
+			outcome:    failureOutcome(err),
+			reason:     classifyFailure(err),
+			evidence:   "scale-set listener stopped for this target",
+			healthKind: healthGitHub,
+		})
 		m.scheduleRestart(key)
 	}
 	return len(keys) > 0
@@ -1138,6 +1251,14 @@ func (m *autoscalerManager) detectStoppedListeners() bool {
 			"Stopped scale-set listener detected; restart scheduled",
 			"targetKey", key,
 		)
+		m.diagnostics.record(diagnosticsObservation{
+			subsystem: subsystemListener,
+			operation: operationMessagePoll,
+			target:    key,
+			outcome:   outcomeFailed,
+			reason:    reasonInvalidState,
+			evidence:  "stopped scale-set listener detected for this target",
+		})
 		m.scheduleRestart(key)
 		detected = true
 	}
@@ -1153,6 +1274,17 @@ func (m *autoscalerManager) scheduleRestart(key string) {
 	}
 	state.at = m.clock.now().Add(delay)
 	m.restarts[key] = state
+	retryAt := state.at
+	m.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemListener,
+		operation: operationSessionCreate,
+		target:    key,
+		outcome:   outcomeRetry,
+		reason:    reasonRetryBackoff,
+		evidence:  "scale-set listener restart scheduled after backoff",
+		attempt:   state.attempts,
+		retryAt:   &retryAt,
+	})
 }
 
 func (m *autoscalerManager) restartFailedListeners(ctx context.Context) error {
@@ -1175,6 +1307,16 @@ func (m *autoscalerManager) restartFailedListeners(ctx context.Context) error {
 			continue
 		}
 		if err := controller.restartListener(ctx); err != nil {
+			m.diagnostics.record(diagnosticsObservation{
+				subsystem:  subsystemListener,
+				operation:  operationSessionCreate,
+				target:     key,
+				outcome:    failureOutcome(err),
+				reason:     classifyFailure(err),
+				evidence:   "scale-set listener restart failed",
+				attempt:    m.restarts[key].attempts,
+				healthKind: healthGitHub,
+			})
 			restartErrors = append(restartErrors, fmt.Errorf(
 				"restart listener for %s: %w",
 				key,
@@ -1238,6 +1380,13 @@ func (m *autoscalerManager) shutdown() error {
 	m.shutdownMu.Lock()
 	defer m.shutdownMu.Unlock()
 	m.managerStatus = "stopping"
+	m.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemRecovery,
+		operation: operationManagerShutdown,
+		outcome:   outcomeSucceeded,
+		reason:    reasonNone,
+		evidence:  "manager instance began shutdown and handed off durable state",
+	})
 	var shutdownErrors []error
 	if err := m.publishObserved(); err != nil {
 		shutdownErrors = append(shutdownErrors, err)
