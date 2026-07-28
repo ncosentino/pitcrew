@@ -53,5 +53,37 @@ docker compose --file docker-compose.yml config --quiet
 python -m mkdocs build --strict
 ```
 
+## Pull Request Delivery
+
+- Local commits are unrestricted checkpoints. Push only feature branches;
+  direct updates or deletion of `main` are blocked by `.githooks/pre-push`.
+- Run targeted checks while iterating. Before final validation, inspect the
+  actual CI runner routing and validate locally enough to avoid repeated
+  hosted-CI failures.
+- Agent-initiated PRs default to draft. "Open a PR" and "publish a PR" mean
+  ready for review; "open a draft PR" and "open a PR so I can review" mean
+  draft.
+- Genesis drafts run the runner-contract subset and publish `Draft CI`. Moving
+  a PR to ready starts fresh full validation and publishes the required `CI`
+  check.
+- Ready Copilot-authored PRs require one trusted human approval on the current
+  SHA when `GENESIS_REVIEW_POLICY=copilot-one-approval`.
+- Public external fork workflows from all contributors require explicit
+  maintainer approval before they run. Approval authorizes the complete
+  proposed workflow, including any runner selection.
+- Native merges use GitHub's branch auto-delete setting. The inactive private
+  workflow-run template is retained only for repositories that cannot use
+  protected native delivery.
+
+Before opening a ready PR, publishing a draft, or pushing more commits to an
+already-ready PR:
+
+1. Confirm the PR title follows conventional commit semantics.
+2. Record validation evidence and assess omitted behavior, implementation gaps,
+   failing or missing tests, technical debt, missing coverage, weak assertions,
+   and assumptions.
+3. Fix every high-severity issue or keep the PR in draft. Disclose remaining
+   medium- and low-severity findings in the PR body.
+
 Keep documentation URLs canonical under
 `https://www.devleader.ca/projects/pitcrew` without trailing slashes.

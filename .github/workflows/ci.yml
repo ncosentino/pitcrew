@@ -1,18 +1,67 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+    types: [opened, synchronize, reopened, ready_for_review, converted_to_draft]
+  push:
+    branches: [main]
   workflow_dispatch:
+    inputs:
+      validation_scope:
+        description: 'Validation scope for this branch dispatch'
+        required: false
+        default: 'full'
+        type: choice
+        options: [full, subset]
 
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  validation-plan:
+    name: Validation plan
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      scope: ${{ steps.scope.outputs.scope }}
+    steps:
+      - name: Resolve validation scope
+        id: scope
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          IS_DRAFT: ${{ github.event.pull_request.draft || false }}
+          REQUESTED_SCOPE: ${{ inputs.validation_scope || '' }}
+          DRAFT_MODE: ${{ vars.CI_DRAFT_MODE || 'subset' }}
+        run: |
+          scope=full
+          if [ "$EVENT_NAME" = "workflow_dispatch" ]; then
+            scope="$REQUESTED_SCOPE"
+          elif [ "$EVENT_NAME" = "pull_request" ] && [ "$IS_DRAFT" = "true" ]; then
+            scope="$DRAFT_MODE"
+          fi
+
+          case "$scope" in
+            full|subset|ready-only) ;;
+            *)
+              echo "::error::Unsupported validation scope '$scope'."
+              exit 1
+              ;;
+          esac
+
+          echo "scope=$scope" >> "$GITHUB_OUTPUT"
+          echo "Validation scope: $scope"
+
   contracts:
     name: Runner contracts
+    needs: validation-plan
+    if: >-
+      needs.validation-plan.outputs.scope == 'full' ||
+      needs.validation-plan.outputs.scope == 'subset'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -78,7 +127,10 @@ jobs:
 
   docker-integration:
     name: Real Docker capacity reconciliation
-    needs: contracts
+    needs: [validation-plan, contracts]
+    if: >-
+      needs.validation-plan.outputs.scope == 'full' &&
+      needs.contracts.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -86,3 +138,56 @@ jobs:
 
       - name: Run real Docker reconciliation
         run: bash ./tests/integration/Test-CapacityReconciliation.sh
+
+  ci:
+    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
+    needs: [validation-plan, contracts, docker-integration]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      SCOPE: ${{ needs.validation-plan.outputs.scope }}
+      PLAN_RESULT: ${{ needs.validation-plan.result }}
+      CONTRACTS_RESULT: ${{ needs.contracts.result }}
+      DOCKER_RESULT: ${{ needs.docker-integration.result }}
+    steps:
+      - name: Check validation results
+        run: |
+          if [ "$PLAN_RESULT" != "success" ]; then
+            echo "::error::Validation planning failed."
+            exit 1
+          fi
+
+          for result in "$CONTRACTS_RESULT" "$DOCKER_RESULT"; do
+            if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
+              echo "::error::A required validation job failed or was cancelled."
+              exit 1
+            fi
+          done
+
+          case "$SCOPE" in
+            full)
+              if [ "$CONTRACTS_RESULT" != "success" ] || [ "$DOCKER_RESULT" != "success" ]; then
+                echo "::error::Full validation did not complete successfully."
+                exit 1
+              fi
+              ;;
+            subset)
+              if [ "$CONTRACTS_RESULT" != "success" ] || [ "$DOCKER_RESULT" != "skipped" ]; then
+                echo "::error::Draft subset validation did not complete as planned."
+                exit 1
+              fi
+              ;;
+            ready-only)
+              if [ "$CONTRACTS_RESULT" != "skipped" ] || [ "$DOCKER_RESULT" != "skipped" ]; then
+                echo "::error::Ready-only draft validation ran unexpected jobs."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Validation plan produced unsupported scope '$SCOPE'."
+              exit 1
+              ;;
+          esac
+
+          echo "Validation scope '$SCOPE' passed."
