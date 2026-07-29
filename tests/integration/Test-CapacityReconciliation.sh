@@ -11,6 +11,7 @@ LEGACY_PROFILE_LABEL="ephemeral-managed-runner-profile=${LEGACY_PROFILE_NAME}"
 LEGACY_MANAGER_LABEL="ephemeral-runner-manager-profile=${LEGACY_PROFILE_NAME}"
 SLOT_LABEL="ephemeral-managed-runner-slot"
 FAKE_IMAGE="pitcrew-fake-runner:${PROFILE_NAME}"
+VOLUME_NAME="pitcrew-integration-data-${RUN_ID}"
 REPOSITORY_URL="https://github.com/example/integration"
 STATE_DIRECTORY="${ROOT}/.pitcrew-state/${PROFILE_NAME}"
 DESIRED_STATE="${STATE_DIRECTORY}/desired-capacity.json"
@@ -225,6 +226,7 @@ cleanup() {
     docker ps -aq --filter "label=${LEGACY_PROFILE_LABEL}" |
         xargs -r docker rm -f >/dev/null 2>&1 || true
     docker image rm -f "${FAKE_IMAGE}" >/dev/null 2>&1 || true
+    docker volume rm "${VOLUME_NAME}" >/dev/null 2>&1 || true
     rm -f "${ROOT}/.env.${PROFILE_NAME}"
     rm -rf "${STATE_DIRECTORY}" "${LEGACY_STATE_DIRECTORY}" "${FIXTURE_DIRECTORY}"
     rmdir "${ROOT}/.pitcrew-state" >/dev/null 2>&1 || true
@@ -242,7 +244,16 @@ cat > "${PROFILE_PATH}" <<EOF
   "labels": ["integration"],
   "replicas": 1,
   "pullImage": false,
-  "disableDefaultLabels": true
+  "disableDefaultLabels": true,
+  "readOnlyVolumes": [
+    {
+      "name": "reference-data",
+      "source": "${VOLUME_NAME}"
+    }
+  ],
+  "verificationCommands": [
+    "test -f /mnt/pitcrew-data/reference-data/marker.txt"
+  ]
 }
 EOF
 
@@ -250,6 +261,13 @@ docker build \
     --tag "${FAKE_IMAGE}" \
     "${ROOT}/tests/integration/fake-runner"
 FAKE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${FAKE_IMAGE}")
+docker volume create "${VOLUME_NAME}" >/dev/null
+docker run \
+    --rm \
+    --mount "type=volume,src=${VOLUME_NAME},dst=/data" \
+    --entrypoint /bin/sh \
+    "${FAKE_IMAGE}" \
+    -c "printf 'verified\n' > /data/marker.txt"
 
 mkdir -p "${ROOT}/.pitcrew-state"
 start_legacy_compose
@@ -368,6 +386,19 @@ MANAGER_ID=$(manager_id)
 }
 mapfile -t original_workers < <(worker_ids)
 [ "${#original_workers[@]}" -eq 5 ]
+worker_mount=$(docker inspect \
+    --format '{{json .Mounts}}' \
+    "${original_workers[0]}")
+[ "$(printf '%s' "${worker_mount}" | jq -r \
+    --arg volume "${VOLUME_NAME}" \
+    '[.[] | select(
+        .Type == "volume"
+        and .Name == $volume
+        and .Destination == "/mnt/pitcrew-data/reference-data"
+        and .RW == false)] | length')" -eq 1 ] || {
+    echo "Worker did not receive the required external volume read-only." >&2
+    exit 1
+}
 
 [ "$(jq -r --arg imageId "${FAKE_IMAGE_ID}" \
     '[.slots[] | select(.imageId == $imageId)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
@@ -580,6 +611,10 @@ manager_after_refresh=$(manager_id)
 mapfile -t workers_after_refresh < <(worker_ids)
 [ "${workers_before_refresh[*]}" = "${workers_after_refresh[*]}" ] || {
     echo "Manager refresh replaced workers instead of handing them off." >&2
+    exit 1
+}
+docker volume inspect "${VOLUME_NAME}" >/dev/null || {
+    echo "Manager refresh removed the operator-owned external volume." >&2
     exit 1
 }
 MANAGER_ID="${manager_after_refresh}"

@@ -108,6 +108,11 @@ reports target image identity plus current and stale workers. A rolling state is
 successful partial convergence, so the skill never waits for active jobs or
 restarts Docker.
 
+Read-only external volume additions, removals, and source changes are reported
+separately and roll with the worker revision. The skill verifies each existing
+named volume before mutation and never creates, populates, removes, or reveals
+driver options for external storage.
+
 ## Dashboard update skill
 
 `pitcrew-dashboard-update` updates a hosted PitCrew Dashboard deployment using

@@ -33,12 +33,93 @@ type config struct {
 	maximumActiveWorkers int
 	workerImageID        string
 	resources            workerResourcePolicy
+	readOnlyVolumes      []readOnlyVolume
 	scaleDownDelay       time.Duration
 	observedInterval     time.Duration
 	architectureLabel    string
 	legacyRepositoryURLs string
 	legacyRepositoryURL  string
 	legacyReplicas       string
+}
+
+type readOnlyVolume struct {
+	name   string
+	source string
+}
+
+func (v readOnlyVolume) target() string {
+	return "/mnt/pitcrew-data/" + v.name
+}
+
+func parseReadOnlyVolumes(value string) ([]readOnlyVolume, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil, nil
+	}
+	entries := strings.Split(value, ",")
+	if len(entries) > 8 {
+		return nil, errors.New("PITCREW_READ_ONLY_VOLUMES supports at most 8 volumes")
+	}
+	names := make(map[string]struct{}, len(entries))
+	sources := make(map[string]struct{}, len(entries))
+	volumes := make([]readOnlyVolume, 0, len(entries))
+	for _, entry := range entries {
+		name, source, found := strings.Cut(entry, "=")
+		if !found || !validReadOnlyVolumeName(name) || !validDockerVolumeName(source) {
+			return nil, fmt.Errorf(
+				"PITCREW_READ_ONLY_VOLUMES contains invalid entry %q",
+				entry,
+			)
+		}
+		if _, exists := names[name]; exists {
+			return nil, fmt.Errorf(
+				"PITCREW_READ_ONLY_VOLUMES duplicates logical name %q",
+				name,
+			)
+		}
+		if _, exists := sources[source]; exists {
+			return nil, fmt.Errorf(
+				"PITCREW_READ_ONLY_VOLUMES duplicates source volume %q",
+				source,
+			)
+		}
+		names[name] = struct{}{}
+		sources[source] = struct{}{}
+		volumes = append(volumes, readOnlyVolume{name: name, source: source})
+	}
+	return volumes, nil
+}
+
+func validReadOnlyVolumeName(value string) bool {
+	if len(value) < 1 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
+		return false
+	}
+	for _, character := range value {
+		if (character < 'a' || character > 'z') &&
+			(character < '0' || character > '9') &&
+			character != '-' {
+			return false
+		}
+	}
+	return true
+}
+
+func validDockerVolumeName(value string) bool {
+	if len(value) < 1 || len(value) > 128 {
+		return false
+	}
+	for index, character := range value {
+		if (character >= 'a' && character <= 'z') ||
+			(character >= 'A' && character <= 'Z') ||
+			(character >= '0' && character <= '9') {
+			continue
+		}
+		if index > 0 && (character == '_' || character == '.' || character == '-') {
+			continue
+		}
+		return false
+	}
+	return true
 }
 
 func loadConfig(lookup func(string) (string, bool), architecture string) (config, error) {
@@ -140,6 +221,12 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 	if err != nil {
 		return config{}, err
 	}
+	readOnlyVolumes, err := parseReadOnlyVolumes(
+		value("PITCREW_READ_ONLY_VOLUMES", ""),
+	)
+	if err != nil {
+		return config{}, err
+	}
 
 	cfg := config{
 		accessToken:          strings.TrimSpace(value("ACCESS_TOKEN", "")),
@@ -160,6 +247,7 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		maximumActiveWorkers: maximumActiveWorkers,
 		workerImageID:        workerImageID,
 		resources:            resources,
+		readOnlyVolumes:      readOnlyVolumes,
 		scaleDownDelay:       scaleDownDelay,
 		observedInterval:     observedInterval,
 		architectureLabel:    normalizeArchitecture(architecture),

@@ -39,6 +39,7 @@ Use `static-profile.json.configuration` to preserve:
 - runner group
 - runner name prefix
 - autoscaling mode, minimum idle runners, and scale-down delay
+- operator-approved read-only external volume names and sources
 
 For the default profile, use `-Profile default`. For a built-in named profile,
 use `-Profile <name>` and confirm `profiles/<name>/profile.json` exists.

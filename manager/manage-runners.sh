@@ -25,6 +25,7 @@ WORKER_MEMORY_BYTES="${PITCREW_WORKER_MEMORY_BYTES:-}"
 WORKER_MEMORY_SWAP_BYTES="${PITCREW_WORKER_MEMORY_SWAP_BYTES:-}"
 WORKER_CPU_CORES="${PITCREW_WORKER_CPU_CORES:-}"
 WORKER_PIDS_LIMIT="${PITCREW_WORKER_PIDS_LIMIT:-}"
+READ_ONLY_VOLUMES="${PITCREW_READ_ONLY_VOLUMES:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
@@ -55,6 +56,52 @@ MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"
 MANAGER_LABEL="ephemeral-runner-manager-profile=${PROFILE_ID}"
 SLOT_LABEL_KEY="ephemeral-managed-runner-slot"
 WORKER_REVISION_LABEL_KEY="pitcrew-worker-revision"
+
+read_only_volumes_are_valid() (
+    configured_volumes="$1"
+    [ -z "${configured_volumes}" ] && exit 0
+    IFS=','
+    volume_count=0
+    seen_names=","
+    seen_sources=","
+    for configured_volume in ${configured_volumes}; do
+        volume_count=$((volume_count + 1))
+        [ "${volume_count}" -le 8 ] || exit 1
+        case "${configured_volume}" in
+            *=*) ;;
+            *) exit 1 ;;
+        esac
+        volume_name=${configured_volume%%=*}
+        volume_source=${configured_volume#*=}
+        printf '%s' "${volume_name}" |
+            grep -Eq '^[a-z][a-z0-9-]{0,31}$' || exit 1
+        printf '%s' "${volume_source}" |
+            grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$' || exit 1
+        case "${seen_names}" in
+            *,"${volume_name}",*) exit 1 ;;
+        esac
+        case "${seen_sources}" in
+            *,"${volume_source}",*) exit 1 ;;
+        esac
+        seen_names="${seen_names}${volume_name},"
+        seen_sources="${seen_sources}${volume_source},"
+    done
+)
+
+verify_read_only_volumes() (
+    configured_volumes="$1"
+    [ -z "${configured_volumes}" ] && exit 0
+    IFS=','
+    for configured_volume in ${configured_volumes}; do
+        volume_source=${configured_volume#*=}
+        inspected_name=$(
+            docker volume inspect \
+                --format '{{.Name}}' \
+                "${volume_source}" 2>/dev/null
+        ) || exit 1
+        [ "${inspected_name}" = "${volume_source}" ] || exit 1
+    done
+)
 
 case "${RECONCILE_INTERVAL}" in
     ''|*[!0-9]*|0)
@@ -114,6 +161,14 @@ if ! worker_resource_policy_is_valid \
     "${WORKER_CPU_CORES}" \
     "${WORKER_PIDS_LIMIT}"; then
     echo "[manager:${PROFILE_ID}] worker resource policy is invalid; refusing to launch unlimited workers." >&2
+    exit 1
+fi
+if ! read_only_volumes_are_valid "${READ_ONLY_VOLUMES}"; then
+    echo "[manager:${PROFILE_ID}] PITCREW_READ_ONLY_VOLUMES is invalid." >&2
+    exit 1
+fi
+if ! verify_read_only_volumes "${READ_ONLY_VOLUMES}"; then
+    echo "[manager:${PROFILE_ID}] a required external read-only volume is unavailable." >&2
     exit 1
 fi
 WORKER_RESOURCE_ARGUMENTS=$(render_worker_resource_arguments \
@@ -775,6 +830,18 @@ run_slot() {
         fi
         if [ -n "${RUNNER_GROUP:-}" ]; then
             set -- "$@" -e RUNNER_GROUP="${RUNNER_GROUP}"
+        fi
+        if [ -n "${READ_ONLY_VOLUMES}" ]; then
+            previous_ifs=${IFS}
+            IFS=','
+            for configured_volume in ${READ_ONLY_VOLUMES}; do
+                volume_name=${configured_volume%%=*}
+                volume_source=${configured_volume#*=}
+                set -- "$@" \
+                    --mount \
+                    "type=volume,src=${volume_source},dst=/mnt/pitcrew-data/${volume_name},readonly,volume-nocopy"
+            done
+            IFS=${previous_ifs}
         fi
         # Canonical policy values are validated at startup, so unquoted expansion
         # only splits manager-owned Docker arguments.

@@ -47,6 +47,36 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	if !cfg.noDefaultLabels {
 		t.Fatal("expected RUNNER_NO_DEFAULT_LABELS=1 to be enabled")
 	}
+	if len(cfg.readOnlyVolumes) != 0 {
+		t.Fatalf("unexpected default read-only volumes: %#v", cfg.readOnlyVolumes)
+	}
+}
+
+func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
+	values := map[string]string{
+		"ACCESS_TOKEN":              "pat-value",
+		"RUNNER_PROFILE_ID":         "profile-a",
+		"RUNNER_IMAGE":              "example/runner:latest",
+		"PITCREW_WORKER_REVISION":   testWorkerRevision,
+		"PITCREW_SESSION_OWNER":     "pitcrew-profile-a",
+		"RUNNER_SCOPE":              "repo",
+		"RUNNER_NAME_PREFIX":        "runner",
+		"PITCREW_READ_ONLY_VOLUMES": "reference-data=pitcrew-reference-data-v1,fixtures=pitcrew-fixtures",
+	}
+	cfg, err := loadConfig(func(name string) (string, bool) {
+		value, exists := values[name]
+		return value, exists
+	}, "amd64")
+	if err != nil {
+		t.Fatalf("loadConfig returned an error: %v", err)
+	}
+	if len(cfg.readOnlyVolumes) != 2 {
+		t.Fatalf("unexpected read-only volume count: %#v", cfg.readOnlyVolumes)
+	}
+	if cfg.readOnlyVolumes[0].target() != "/mnt/pitcrew-data/reference-data" ||
+		cfg.readOnlyVolumes[1].source != "pitcrew-fixtures" {
+		t.Fatalf("unexpected read-only volume contract: %#v", cfg.readOnlyVolumes)
+	}
 }
 
 func TestLoadConfigRejectsInvalidValues(t *testing.T) {
@@ -76,6 +106,10 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		{name: "invalid session owner", key: "PITCREW_SESSION_OWNER", value: "bad owner"},
 		{name: "invalid no-default flag", key: "RUNNER_NO_DEFAULT_LABELS", value: "true"},
 		{name: "empty custom label", key: "RUNNER_LABELS", value: "one,,two"},
+		{name: "invalid read-only volume", key: "PITCREW_READ_ONLY_VOLUMES", value: "missing-separator"},
+		{name: "duplicate read-only volume name", key: "PITCREW_READ_ONLY_VOLUMES", value: "data=one,data=two"},
+		{name: "duplicate read-only volume source", key: "PITCREW_READ_ONLY_VOLUMES", value: "one=data,two=data"},
+		{name: "invalid read-only volume target name", key: "PITCREW_READ_ONLY_VOLUMES", value: "Upper=data"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

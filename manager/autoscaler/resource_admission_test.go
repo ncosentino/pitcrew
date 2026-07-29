@@ -137,6 +137,9 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 			cpuCores:        "2.5",
 			pids:            &pids,
 		},
+		volumes: []readOnlyVolume{
+			{name: "reference-data", source: "pitcrew-reference-data-v1"},
+		},
 	})
 	joined := strings.Join(arguments, " ")
 	for _, expected := range []string{
@@ -144,6 +147,7 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 		"--memory-swap 10737418240",
 		"--cpus 2.5",
 		"--pids-limit 1024",
+		"--mount type=volume,src=pitcrew-reference-data-v1,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected %q in %q", expected, joined)
@@ -171,6 +175,37 @@ func TestDockerRunRejectsInvalidResourcePolicyBeforeLaunch(t *testing.T) {
 	}
 }
 
+func TestDockerVolumePreflightRequiresExactExistingNames(t *testing.T) {
+	executor := newScriptedCommandExecutor(map[string][]scriptedCommandResult{
+		"volume": {
+			{output: "pitcrew-reference-data-v1\n"},
+			{output: "wrong-volume\n"},
+		},
+	})
+	client := &dockerCLI{executor: executor}
+	volumes := []readOnlyVolume{
+		{name: "reference-data", source: "pitcrew-reference-data-v1"},
+	}
+	if err := client.validateVolumes(context.Background(), volumes); err != nil {
+		t.Fatalf("valid external volume was rejected: %v", err)
+	}
+	if err := client.validateVolumes(context.Background(), volumes); err == nil {
+		t.Fatal("ambiguous external volume identity was accepted")
+	}
+	if len(executor.calls) != 2 {
+		t.Fatalf("unexpected volume preflight calls: %#v", executor.calls)
+	}
+	for _, call := range executor.calls {
+		joined := strings.Join(call.arguments, " ")
+		if joined != "volume inspect --format {{.Name}} pitcrew-reference-data-v1" {
+			t.Fatalf("unexpected volume preflight command: %s", joined)
+		}
+		if !call.hasDeadline {
+			t.Fatal("external volume preflight had no deadline")
+		}
+	}
+}
+
 type failingExecutor struct{}
 
 func (failingExecutor) run(context.Context, ...string) ([]byte, error) {
@@ -192,6 +227,9 @@ func TestScalerLaunchesWorkersUnderConfiguredResourcePolicy(t *testing.T) {
 		func(cfg *config) {
 			cfg.resources = workerResourcePolicy{memoryBytes: &memory, pids: &pids}
 			cfg.workerImageID = "sha256:" + strings.Repeat("a", 64)
+			cfg.readOnlyVolumes = []readOnlyVolume{
+				{name: "reference-data", source: "pitcrew-reference-data-v1"},
+			}
 		},
 	)
 	defer cancel()
@@ -205,6 +243,10 @@ func TestScalerLaunchesWorkersUnderConfiguredResourcePolicy(t *testing.T) {
 	if launch.resources.memoryBytes == nil || *launch.resources.memoryBytes != memory ||
 		launch.resources.pids == nil || *launch.resources.pids != pids {
 		t.Fatalf("worker launched without the configured policy: %+v", launch.resources)
+	}
+	if len(launch.volumes) != 1 ||
+		launch.volumes[0].source != "pitcrew-reference-data-v1" {
+		t.Fatalf("worker launched without the configured read-only volume: %+v", launch.volumes)
 	}
 }
 

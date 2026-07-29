@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.7.0') 'The operations plugin version was not advanced for worker-image rollouts.'
+Add-Check ($plugin.version -eq '1.8.0') 'The operations plugin version was not advanced for read-only external volumes.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -284,6 +284,11 @@ Add-Check (
     $profileRolloutSkill -match 'update\.staleWorkers' -and
     $profileRolloutSkill -match 'rolling.*successful partial convergence'
 ) 'The profile rollout skill does not verify truthful rolling convergence.'
+Add-Check (
+    $profileRolloutSkill -match 'read-only external volume' -and
+    $profileRolloutSkill -match '/mnt/pitcrew-data/<name>' -and
+    $profileRolloutSkill -match 'never creates, populates, removes'
+) 'The profile rollout skill does not preserve external-volume safety.'
 Add-Check (
     $profileRolloutSkill -match 'Never restart Docker' -and
     $profileRolloutSkill -match 'Never stop.*worker' -and
