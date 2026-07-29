@@ -101,6 +101,20 @@ Report the reference, the resolved local image ID, and the repository digests.
 When an image is not present locally, report it as unavailable; never pull it
 during diagnostics.
 
+Also report the profile rollout projection from `observed-state.json`:
+
+- `update.status`
+- `update.targetImage`
+- `update.targetImageId`
+- `update.targetRevision`
+- `update.currentWorkers`
+- `update.staleWorkers`
+- `update.lastError`
+
+Compare the target image identity with each live worker's exact image ID.
+Missing target evidence is unavailable, not evidence that every worker is
+current.
+
 ## Container resource evidence
 
 Use exact PitCrew labels for every selection:

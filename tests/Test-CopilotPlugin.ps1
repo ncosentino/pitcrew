@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.6.0') 'The operations plugin version was not advanced for profile recovery.'
+Add-Check ($plugin.version -eq '1.7.0') 'The operations plugin version was not advanced for worker-image rollouts.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -55,7 +55,8 @@ $expectedSkills = @(
     'pitcrew-dashboard-update',
     'pitcrew-host-diagnostics',
     'pitcrew-pool-update',
-    'pitcrew-profile-recover'
+    'pitcrew-profile-recover',
+    'pitcrew-profile-rollout'
 )
 $skillDirectories = @(
     Get-ChildItem -LiteralPath $skillsRoot -Directory |
@@ -147,7 +148,9 @@ foreach ($requiredLabel in @(
 }
 Add-Check (
     $hostDiagnosticsSkill -match 'docker image inspect' -and
-    $hostDiagnosticsSkill -match 'RepoDigests'
+    $hostDiagnosticsSkill -match 'RepoDigests' -and
+    $hostDiagnosticsSkill -match 'update\.targetImageId' -and
+    $hostDiagnosticsSkill -match 'update\.staleWorkers'
 ) 'The host diagnostics skill does not resolve exact local image IDs and digests.'
 Add-Check (
     $hostDiagnosticsSkill -match 'docker stats --no-stream' -and
@@ -249,6 +252,43 @@ Add-Check (
     $hostDiagnosticsSkill -match 'Never run `docker system prune`' -and
     $hostDiagnosticsSkill -match 'Never enter a running worker with `docker exec`'
 ) 'The host diagnostics skill does not forbid destructive host operations.'
+
+$profileRolloutSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-profile-rollout' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+foreach ($requiredReference in @(
+        '../../references/safety.md',
+        '../../references/profile-replay.md')) {
+    Add-Check (
+        $profileRolloutSkill -match [regex]::Escape($requiredReference)
+    ) "The profile rollout skill does not read '$requiredReference'."
+}
+Add-Check (
+    $profileRolloutSkill -match '(?m)^## Dry-run mode' -and
+    $profileRolloutSkill -match 'Change nothing during the dry run\.'
+) 'The profile rollout skill has no state-preserving dry-run mode.'
+Add-Check (
+    $profileRolloutSkill -match 'Get-RunnerRollingCompatibilityConfiguration' -and
+    $profileRolloutSkill -match 'registration topology' -and
+    $profileRolloutSkill -match 'routing'
+) 'The profile rollout skill does not reject non-rolling topology changes.'
+Add-Check (
+    $profileRolloutSkill -match 'complete setup command' -and
+    $profileRolloutSkill -match 'omit `-Token`' -and
+    $profileRolloutSkill -match 'Never use `-Refresh` or `-CapacityOnly`'
+) 'The profile rollout skill does not replay the complete stored profile.'
+Add-Check (
+    $profileRolloutSkill -match 'update\.targetImageId' -and
+    $profileRolloutSkill -match 'update\.currentWorkers' -and
+    $profileRolloutSkill -match 'update\.staleWorkers' -and
+    $profileRolloutSkill -match 'rolling.*successful partial convergence'
+) 'The profile rollout skill does not verify truthful rolling convergence.'
+Add-Check (
+    $profileRolloutSkill -match 'Never restart Docker' -and
+    $profileRolloutSkill -match 'Never stop.*worker' -and
+    $profileRolloutSkill -match 'Never accept.*workflow'
+) 'The profile rollout skill omits critical safety boundaries.'
 
 $profileRecoverSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-profile-recover' 'SKILL.md') `

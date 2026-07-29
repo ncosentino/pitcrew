@@ -515,6 +515,11 @@ $fixedStateV11 = (
         ConvertFrom-Json -Depth 12
 )
 $fixedStateV11.managerContractVersion = 11
+$fixedStateV11.update |
+    Add-Member -NotePropertyName targetImage -NotePropertyValue 'example/runner:1.0'
+$fixedStateV11.update |
+    Add-Member -NotePropertyName targetImageId -NotePropertyValue (
+        'sha256:1111111111111111111111111111111111111111111111111111111111111111')
 $fixedStateV11 | Add-Member -NotePropertyName resourcePolicy -NotePropertyValue (
     [PSCustomObject][ordered]@{
         memoryBytes = 536870912
@@ -1997,6 +2002,25 @@ try {
     Add-Check ($externalProfile.Name -eq 'browser-testing') 'An external profile did not resolve its manifest name.'
     Add-Check ($externalProfile.Build.Context -eq $externalDirectory) 'External build context is not relative to the profile manifest.'
     Add-Check ($externalProfile.Replicas -eq 2) 'External profile replica defaults were not applied.'
+    Add-Check ($externalProfile.ManifestKind -eq 'external') 'An external profile did not retain its manifest source kind.'
+    Add-Check (
+        $externalProfile.ManifestSha256 -match '^[0-9a-f]{64}$'
+    ) 'An external profile did not retain its manifest content hash.'
+    $externalStaticProfile = New-RunnerStaticProfileState `
+        -Profile $externalProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $externalStaticProfile.manifest.sourcePath -ceq $externalManifestPath
+    ) 'Static profile state did not retain the external manifest source path.'
+    Add-Check (
+        $externalStaticProfile.manifest.sha256 -ceq $externalProfile.ManifestSha256
+    ) 'Static profile state did not retain the external manifest content hash.'
+    Add-Check (
+        $externalStaticProfile.manifest.document.name -eq 'browser-testing'
+    ) 'Static profile state did not retain the non-secret manifest document.'
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
     $secretManifest.build.args = [PSCustomObject]@{ API_TOKEN = 'not-a-real-token' }
@@ -3251,8 +3275,12 @@ Add-Check ($managerDockerfile -match [regex]::Escape('ENTRYPOINT ["/usr/local/bi
 Add-Check ($manager -match [regex]::Escape('diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}"')) 'The fixed manager does not restore its durable operation journal.'
 Add-Check ($manager -match [regex]::Escape('record_manager_diagnostic')) 'The fixed manager does not record operation evidence.'
 Add-Check ($manager -match [regex]::Escape('render_fixed_capacity_evidence')) 'The fixed manager does not publish capacity-deficit evidence.'
-Add-Check ($manager -match [regex]::Escape('"${DIAGNOSTICS_DIRECTORY}" \
-        "${MANAGER_INSTANCE_ID}" \')) 'Recorded operation evidence is not attributed to the observing manager instance.'
+$diagnosticAttributionPattern = (
+    [regex]::Escape('"${DIAGNOSTICS_DIRECTORY}" \') +
+    '\r?\n\s*' +
+    [regex]::Escape('"${MANAGER_INSTANCE_ID}" \')
+)
+Add-Check ($manager -match $diagnosticAttributionPattern) 'Recorded operation evidence is not attributed to the observing manager instance.'
 Add-Check ($manager -match [regex]::Escape('DIAGNOSTICS_DIRECTORY="${STATE_DIRECTORY}/diagnostics"')) 'The operation journal is not persisted in the profile state directory.'
 Add-Check ($diagnostics -match [regex]::Escape('DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384')) 'The operation journal does not bound its serialized size.'
 Add-Check ($diagnostics -match [regex]::Escape('sanitize_diagnostic_evidence')) 'Operation evidence is not sanitized before publication.'

@@ -263,14 +263,18 @@ function Resolve-RunnerProfile {
 
     $manifest = $null
     $manifestPath = $null
+    $manifestKind = 'implicit'
+    $manifestSha256 = $null
     if ($ProfilePath) {
         $manifestPath = (Resolve-Path -LiteralPath $ProfilePath).Path
+        $manifestKind = 'external'
     } elseif ($profileName -ne 'default') {
         $candidate = Join-Path $resolvedRoot 'profiles' $profileName 'profile.json'
         if (-not (Test-Path -LiteralPath $candidate -PathType Leaf)) {
             throw "Runner profile '$profileName' was not found at '$candidate'. Pass -ProfilePath for an external profile."
         }
         $manifestPath = (Resolve-Path -LiteralPath $candidate).Path
+        $manifestKind = 'built-in'
     }
 
     $effectiveImage = 'myoung34/github-runner:ubuntu-noble'
@@ -297,6 +301,9 @@ function Resolve-RunnerProfile {
         }
 
         $manifest = $manifestText | ConvertFrom-Json -Depth 20
+        $manifestSha256 = (
+            Get-FileHash -LiteralPath $manifestPath -Algorithm SHA256
+        ).Hash.ToLowerInvariant()
         $manifestName = ([string]$manifest.name).ToLowerInvariant()
         if ($profileName -ne 'default' -and $manifestName -ne $profileName) {
             throw "Runner profile name '$manifestName' does not match -Profile '$profileName'."
@@ -572,6 +579,9 @@ function Resolve-RunnerProfile {
         Name = $profileName
         IsDefault = $isDefault
         ManifestPath = $manifestPath
+        ManifestKind = $manifestKind
+        ManifestSha256 = $manifestSha256
+        ManifestDocument = $manifest
         EnvironmentPath = $environmentPath
         StateDirectory = $stateDirectory
         StateVolumePath = $stateVolumePath
@@ -1238,6 +1248,16 @@ function New-RunnerStaticProfileState {
         schemaVersion = $script:RunnerStaticProfileSchemaVersion
         fingerprint = $fingerprint
         workerRevision = $workerRevision
+        manifest = if ($Profile.ManifestPath) {
+            [PSCustomObject][ordered]@{
+                kind = [string]$Profile.ManifestKind
+                sourcePath = [string]$Profile.ManifestPath
+                sha256 = [string]$Profile.ManifestSha256
+                document = $Profile.ManifestDocument
+            }
+        } else {
+            $null
+        }
         configuration = $staticConfiguration
     }
 }

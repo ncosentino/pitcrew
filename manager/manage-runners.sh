@@ -348,7 +348,9 @@ publish_observed_state() {
         "${RESOURCE_POLICY_PATH}" \
         "${observed_journal_path}" \
         "${observed_health_path}" \
-        "${observed_capacity_path}"; then
+        "${observed_capacity_path}" \
+        "${IMAGE}" \
+        "${WORKER_IMAGE_ID}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty

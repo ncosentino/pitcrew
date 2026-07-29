@@ -1168,6 +1168,16 @@
           "status": {
             "enum": ["current", "rolling", "degraded"]
           },
+          "targetImage": {
+            "type": ["string", "null"],
+            "minLength": 1,
+            "maxLength": 2048,
+            "pattern": "^\\S+$"
+          },
+          "targetImageId": {
+            "type": ["string", "null"],
+            "pattern": "^sha256:[0-9a-f]{64}$"
+          },
           "targetRevision": {
             "type": "string",
             "pattern": "^[0-9a-f]{64}$"

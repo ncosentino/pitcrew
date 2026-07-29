@@ -43,9 +43,22 @@ Use `static-profile.json.configuration` to preserve:
 For the default profile, use `-Profile default`. For a built-in named profile,
 use `-Profile <name>` and confirm `profiles/<name>/profile.json` exists.
 
-When the stored configuration contains a build or verification contract that
-cannot be traced to a built-in manifest, require the external `-ProfilePath`
-from the user. Do not reconstruct or omit an unknown external profile contract.
+For a static-profile document with `manifest.kind: external`, use its
+`sourcePath`, `sha256`, and non-secret `document` together:
+
+1. If the source file still exists and its SHA-256 matches the stored hash, use
+   that exact path.
+2. If the source changed but its parent directory still exists, never apply the
+   unapproved new content during a PitCrew release update. Serialize the stored
+   document to a run-scoped temporary manifest beside the original source so
+   relative build paths retain their meaning, use that exact temporary path,
+   then delete only that exact file.
+3. If the source directory no longer exists, stop. Do not relocate a local
+   build context or reconstruct an external contract from effective fields.
+
+Legacy static-profile documents without manifest provenance still require the
+external `-ProfilePath` from the user. Do not reconstruct or omit an unknown
+external profile contract.
 
 Pass stored command-line overrides when they differ from the selected manifest.
 Do not change static settings during a capacity-only operation.

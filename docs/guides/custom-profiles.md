@@ -37,6 +37,9 @@ Create `profile.json` beside the profile's Dockerfile:
 Use `-ProfilePath` when the manifest is outside PitCrew's built-in
 `profiles/<name>/` directory.
 
+For a prebuilt image published by a workload repository, follow the complete
+[Repository-Owned Worker Images](repository-owned-images.md) lifecycle.
+
 ## Build the image
 
 When a manifest defines `build`, PitCrew builds the image before replacing the

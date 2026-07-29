@@ -36,6 +36,10 @@ Read these shared references before running commands:
    it.
 3. Build the complete replay inputs for every running profile before changing
    the checkout.
+   - For an external profile with stored manifest provenance, resolve the exact
+     approved manifest through the profile replay contract.
+   - Never let a changed source manifest silently combine an image rollout with
+     a PitCrew release update.
 4. Record each manager container ID, observed manager contract, desired
    generation, and worker update state. Do not use GitHub's classic runner
    `busy` field as an admission fence.
@@ -78,6 +82,8 @@ For every refreshed profile, verify:
 - `observed-state.json` is fresh and reports `managerStatus: running`
 - the desired generation is accepted
 - `update.targetRevision` matches the stored static worker revision
+- `update.targetImage` and `update.targetImageId` match the stored static image
+  reference and resolved image identity when the manager reports them
 
 For fixed profiles, verify desired capacity remains intact. `update.status:
 rolling` is valid while pre-revision or old-image workers finish naturally.
