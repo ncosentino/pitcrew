@@ -58,6 +58,9 @@ PitCrew records the manifest source, content hash, and non-secret document in
 local static state. This provenance lets release-update tooling replay the
 approved profile instead of silently applying later source changes.
 
+Keep large immutable datasets outside the runner image. Attach them through the
+[Read-Only External Data Volumes](external-data-volumes.md) contract instead.
+
 ## Install and route
 
 Apply the complete profile command with the approved targets and capacity:

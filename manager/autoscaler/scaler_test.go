@@ -772,6 +772,9 @@ func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
 			runnerNameLabelKey:     "runner-one",
 			runnerIDLabelKey:       "99",
 		},
+		volumes: []readOnlyVolume{
+			{name: "reference-data", source: "pitcrew-reference-data-v1"},
+		},
 	}
 	arguments := buildDockerRunArguments(launch)
 	command := strings.Join(arguments, " ")
@@ -792,6 +795,7 @@ func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
 		targetKeyLabelKey + "=repo-1",
 		runnerNameLabelKey + "=runner-one",
 		runnerIDLabelKey + "=99",
+		"--mount type=volume,src=pitcrew-reference-data-v1,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy",
 	} {
 		if !strings.Contains(command, expected) {
 			t.Fatalf("worker command omitted %q: %s", expected, command)

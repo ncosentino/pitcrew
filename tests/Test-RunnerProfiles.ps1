@@ -1870,6 +1870,7 @@ Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=$') 'The default memory-swap policy is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=$') 'The default CPU policy is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=$') 'The default PID policy is not represented as an empty manager-only value.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_READ_ONLY_VOLUMES=$') 'The default environment unexpectedly configures external data volumes.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$') 'The default admission ceiling is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SESSION_OWNER=pitcrew-default$') 'The environment does not pin the stable session owner.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=$') 'Fixed profiles unexpectedly enable autoscaling.'
@@ -1992,6 +1993,12 @@ try {
                 BROWSER_VERSION = '1.0.0'
             }
         }
+        readOnlyVolumes = @(
+            @{
+                name = 'reference-data'
+                source = 'pitcrew-reference-data-v1'
+            }
+        )
         verificationCommands = @('browser --version')
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $externalManifestPath -Encoding UTF8
 
@@ -2002,6 +2009,13 @@ try {
     Add-Check ($externalProfile.Name -eq 'browser-testing') 'An external profile did not resolve its manifest name.'
     Add-Check ($externalProfile.Build.Context -eq $externalDirectory) 'External build context is not relative to the profile manifest.'
     Add-Check ($externalProfile.Replicas -eq 2) 'External profile replica defaults were not applied.'
+    Add-Check ($externalProfile.ReadOnlyVolumes.Count -eq 1) 'External profile read-only volumes were not resolved.'
+    Add-Check (
+        $externalProfile.ReadOnlyVolumes[0].Target -eq '/mnt/pitcrew-data/reference-data'
+    ) 'External profile read-only volume target was not derived safely.'
+    Add-Check (
+        $externalProfile.ReadOnlyVolumesValue -eq 'reference-data=pitcrew-reference-data-v1'
+    ) 'External profile read-only volumes were not serialized canonically.'
     Add-Check ($externalProfile.ManifestKind -eq 'external') 'An external profile did not retain its manifest source kind.'
     Add-Check (
         $externalProfile.ManifestSha256 -match '^[0-9a-f]{64}$'
@@ -2021,6 +2035,139 @@ try {
     Add-Check (
         $externalStaticProfile.manifest.document.name -eq 'browser-testing'
     ) 'Static profile state did not retain the non-secret manifest document.'
+    Add-Check (
+        $externalStaticProfile.configuration.readOnlyVolumes[0].source -eq
+            'pitcrew-reference-data-v1'
+    ) 'Static profile state did not retain the read-only volume source.'
+    $externalEnvironment = New-RunnerEnvironmentContent `
+        -Profile $externalProfile `
+        -AccessToken 'test-registration-token' `
+        -WorkerRevision $externalStaticProfile.workerRevision `
+        -SessionOwner 'pitcrew-browser-testing' `
+        -AssumeUnversionedCurrent $false `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $externalEnvironment -match
+            '(?m)^PITCREW_READ_ONLY_VOLUMES=reference-data=pitcrew-reference-data-v1$'
+    ) 'External profile environment omitted its read-only volume contract.'
+
+    $changedVolumeManifestPath = Join-Path $externalDirectory 'changed-volume-profile.json'
+    $changedVolumeManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $changedVolumeManifest.readOnlyVolumes[0].source =
+        'pitcrew-reference-data-v2'
+    $changedVolumeManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $changedVolumeManifestPath -Encoding UTF8
+    $changedVolumeProfile = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $changedVolumeManifestPath `
+        -HostName 'test-host'
+    $changedVolumeStaticProfile = New-RunnerStaticProfileState `
+        -Profile $changedVolumeProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $externalStaticProfile.workerRevision -cne
+            $changedVolumeStaticProfile.workerRevision
+    ) 'Changing a read-only volume source did not advance the worker revision.'
+    Add-Check (
+        (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration `
+                    -Configuration $externalStaticProfile.configuration)
+        ) -ceq (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration `
+                    -Configuration $changedVolumeStaticProfile.configuration)
+        )
+    ) 'Changing a read-only volume source was not rolling-compatible.'
+    Add-Check (
+        (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRefreshCompatibilityConfiguration `
+                    -Configuration $externalStaticProfile.configuration)
+        ) -cne (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRefreshCompatibilityConfiguration `
+                    -Configuration $changedVolumeStaticProfile.configuration)
+        )
+    ) 'Manager refresh compatibility ignored read-only volume drift.'
+
+    $duplicateVolumeManifestPath = Join-Path $externalDirectory 'duplicate-volume-profile.json'
+    $duplicateVolumeManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $duplicateVolumeManifest.readOnlyVolumes = @(
+        $duplicateVolumeManifest.readOnlyVolumes[0],
+        @{
+            name = 'reference-data'
+            source = 'pitcrew-reference-data-v2'
+        }
+    )
+    $duplicateVolumeManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $duplicateVolumeManifestPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile `
+                -RootPath $runnerRoot `
+                -ProfilePath $duplicateVolumeManifestPath
+        } `
+        -ExpectedMessage 'read-only volume name' `
+        -Failure 'An external profile accepted duplicate read-only volume names.'
+
+    $invalidVolumeManifestPath = Join-Path $externalDirectory 'invalid-volume-profile.json'
+    $invalidVolumeManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $invalidVolumeManifest.readOnlyVolumes[0].source = 'host/path'
+    $invalidVolumeManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $invalidVolumeManifestPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile `
+                -RootPath $runnerRoot `
+                -ProfilePath $invalidVolumeManifestPath
+        } `
+        -ExpectedMessage 'not valid with the schema' `
+        -Failure 'An external profile accepted a host path as a volume source.'
+
+    $excessiveVolumeManifestPath = Join-Path $externalDirectory 'excessive-volume-profile.json'
+    $excessiveVolumeManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $excessiveVolumeManifest.readOnlyVolumes = @(
+        1..9 | ForEach-Object {
+            @{
+                name = "data-$_"
+                source = "pitcrew-data-$_"
+            }
+        }
+    )
+    $excessiveVolumeManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $excessiveVolumeManifestPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile `
+                -RootPath $runnerRoot `
+                -ProfilePath $excessiveVolumeManifestPath
+        } `
+        -ExpectedMessage 'not valid with the schema' `
+        -Failure 'An external profile accepted more than eight read-only volumes.'
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
     $secretManifest.build.args = [PSCustomObject]@{ API_TOKEN = 'not-a-real-token' }
@@ -2054,6 +2201,7 @@ try {
         'PITCREW_WORKER_MEMORY_SWAP_BYTES',
         'PITCREW_WORKER_CPU_CORES',
         'PITCREW_WORKER_PIDS_LIMIT',
+        'PITCREW_READ_ONLY_VOLUMES',
         'PITCREW_AUTOSCALING_MODE',
         'PITCREW_AUTOSCALING_MIN_IDLE',
         'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
@@ -2080,6 +2228,7 @@ try {
     $env:PITCREW_WORKER_MEMORY_SWAP_BYTES = '999'
     $env:PITCREW_WORKER_CPU_CORES = '9.9'
     $env:PITCREW_WORKER_PIDS_LIMIT = '9999'
+    $env:PITCREW_READ_ONLY_VOLUMES = 'ambient=wrong-volume'
     $env:PITCREW_AUTOSCALING_MODE = 'ambient-mode'
     $env:PITCREW_AUTOSCALING_MIN_IDLE = '99'
     $env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS = '999'
@@ -2097,7 +2246,7 @@ try {
         if ($dockerArguments[0] -eq 'compose') {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
-                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_READ_ONLY_VOLUMES=$env:PITCREW_READ_ONLY_VOLUMES`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
             if (
                 $dockerArguments -contains 'build' -and
                 $dockerArguments -contains 'runner-manager' -and
@@ -2176,6 +2325,16 @@ try {
             } else {
                 $testWorkerImageId
             })
+        }
+        if (
+            $dockerArguments[0] -eq 'volume' -and
+            $dockerArguments[1] -eq 'inspect'
+        ) {
+            if ($env:PITCREW_TEST_VOLUME_MISSING -eq '1') {
+                $global:LASTEXITCODE = 1
+                return
+            }
+            Write-Output ([string]$dockerArguments[-1])
         }
         if (
             $dockerArguments[0] -eq 'inspect' -and
@@ -2270,6 +2429,63 @@ try {
 
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup `
+            -ProfilePath $changedVolumeManifestPath `
+            -Token 'test-registration-token' `
+            -Repos 'https://github.com/example/project=1'
+        $volumeEnvironmentPath = Join-Path $fixtureRoot '.env.browser-testing'
+        $volumeStaticPath = Join-Path `
+            $fixtureRoot `
+            '.pitcrew-state' `
+            'browser-testing' `
+            'static-profile.json'
+        $volumeEnvironment = Get-Content `
+            -LiteralPath $volumeEnvironmentPath `
+            -Raw `
+            -Encoding UTF8
+        $volumeStatic = Get-Content `
+            -LiteralPath $volumeStaticPath `
+            -Raw `
+            -Encoding UTF8 |
+            ConvertFrom-Json -Depth 20
+        $volumeCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            $volumeEnvironment -match
+                '(?m)^PITCREW_READ_ONLY_VOLUMES=reference-data=pitcrew-reference-data-v2$'
+        ) 'Setup did not pass the approved read-only volume contract to the manager.'
+        Add-Check (
+            $volumeStatic.configuration.readOnlyVolumes[0].target -eq
+                '/mnt/pitcrew-data/reference-data'
+        ) 'Setup did not persist the deterministic read-only volume target.'
+        Add-Check (
+            $volumeCommands -match
+                "volume`tinspect`t--format`t\{\{\.Name\}\}`tpitcrew-reference-data-v2"
+        ) 'Setup did not preflight the exact external Docker volume.'
+        Add-Check (
+            $volumeCommands -match
+                "--mount`ttype=volume,src=pitcrew-reference-data-v2,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy"
+        ) 'Image verification did not receive the read-only external volume.'
+        Add-Check (-not ($volumeCommands -match "volume`tcreate")) 'Setup created an external Docker volume.'
+        Add-Check (-not ($volumeCommands -match "volume`trm")) 'Setup removed an external Docker volume.'
+
+        $env:PITCREW_TEST_VOLUME_MISSING = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -ProfilePath $changedVolumeManifestPath `
+                    -Token 'test-registration-token' `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Required external Docker volume' `
+            -Failure 'Setup accepted a missing required external Docker volume.'
+        $missingVolumeCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            -not ($missingVolumeCommands -match "compose`t.*`tup")
+        ) 'A missing external Docker volume reached manager startup.'
+        $env:PITCREW_TEST_VOLUME_MISSING = '0'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
             -Token 'test-registration-token' `
             -WorkerMemory '512m' `
             -WorkerMemorySwap '1g' `
@@ -2360,7 +2576,7 @@ try {
         Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
-        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
         Set-TestCapacityAcknowledgement `
@@ -3282,6 +3498,11 @@ $diagnosticAttributionPattern = (
 )
 Add-Check ($manager -match $diagnosticAttributionPattern) 'Recorded operation evidence is not attributed to the observing manager instance.'
 Add-Check ($manager -match [regex]::Escape('DIAGNOSTICS_DIRECTORY="${STATE_DIRECTORY}/diagnostics"')) 'The operation journal is not persisted in the profile state directory.'
+Add-Check (
+    $manager -match 'PITCREW_READ_ONLY_VOLUMES' -and
+    $manager -match 'docker volume inspect' -and
+    $manager -match 'type=volume,src=\$\{volume_source\},dst=/mnt/pitcrew-data/\$\{volume_name\},readonly,volume-nocopy'
+) 'The fixed manager does not validate and mount external volumes read-only.'
 Add-Check ($diagnostics -match [regex]::Escape('DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384')) 'The operation journal does not bound its serialized size.'
 Add-Check ($diagnostics -match [regex]::Escape('sanitize_diagnostic_evidence')) 'Operation evidence is not sanitized before publication.'
 Add-Check ($diagnostics -match [regex]::Escape('mv -f "${append_temporary}" "${append_path}"')) 'The operation journal is not persisted atomically.'
@@ -3297,6 +3518,7 @@ Add-Check ($compose -match 'stop_grace_period:\s*60s') 'Compose does not allow a
 Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-1}')) 'Compose does not expose the legacy capacity bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
 Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-11}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'

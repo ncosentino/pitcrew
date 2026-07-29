@@ -68,6 +68,7 @@ Named profiles conform to
 | `disableDefaultLabels` | No | Omit GitHub's broad default labels. Named profiles default to `true`. |
 | `runnerGroup` | No | Organization or enterprise runner group. |
 | `autoscaling` | No | Scale-set mode, minimum idle runners, scale-down stabilization delay, and optional aggregate admission ceiling. |
+| `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |
 | `build` | No | Local Docker build context, Dockerfile, and non-secret build arguments. |
@@ -84,6 +85,25 @@ Named profiles conform to
 `minimumIdle` and prewarming can reduce cold-start exposure, but they are
 operational mitigations rather than proof of any host, network, or package-feed
 root cause.
+
+### Read-only external volumes
+
+Each entry contains:
+
+| Field | Required | Description |
+|-------|----------|-------------|
+| `name` | Yes | Unique logical lowercase name; the worker target becomes `/mnt/pitcrew-data/<name>`. |
+| `source` | Yes | Existing external Docker named volume. PitCrew never creates or removes it. |
+
+Setup inspects every source before manager handoff and attaches the volumes to
+image-verification containers. The normalized contract contributes to worker
+revision, so source changes roll safely while busy workers retain their
+original mounts. Volume changes are rejected by `-Refresh` and
+`-CapacityOnly`.
+
+Only read-only named volumes are supported. Bind mounts, arbitrary targets,
+devices, sockets, driver options, and credentials are outside the profile
+contract. See [Read-Only External Data Volumes](guides/external-data-volumes.md).
 
 ### Contract-11 resource policy
 

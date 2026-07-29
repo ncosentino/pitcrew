@@ -284,6 +284,7 @@ function Resolve-RunnerProfile {
     $effectiveRunnerGroup = ''
     $effectivePullImage = $true
     $verificationCommands = @()
+    $effectiveReadOnlyVolumes = @()
     $build = $null
     $effectiveAutoscaling = $null
     $effectiveResources = [ordered]@{
@@ -327,6 +328,29 @@ function Resolve-RunnerProfile {
             @($manifest.verificationCommands)
         } else {
             @()
+        }
+        if ($manifest.PSObject.Properties['readOnlyVolumes']) {
+            $volumeNames = [Collections.Generic.HashSet[string]]::new(
+                [StringComparer]::Ordinal)
+            $volumeSources = [Collections.Generic.HashSet[string]]::new(
+                [StringComparer]::Ordinal)
+            $effectiveReadOnlyVolumes = @(
+                foreach ($volume in @($manifest.readOnlyVolumes)) {
+                    $name = [string]$volume.name
+                    $source = [string]$volume.source
+                    if (-not $volumeNames.Add($name)) {
+                        throw "Runner profile read-only volume name '$name' is duplicated."
+                    }
+                    if (-not $volumeSources.Add($source)) {
+                        throw "Runner profile read-only volume source '$source' is duplicated."
+                    }
+                    [PSCustomObject][ordered]@{
+                        Name = $name
+                        Source = $source
+                        Target = "/mnt/pitcrew-data/$name"
+                    }
+                }
+            ) | Sort-Object Name
         }
         if ($manifest.PSObject.Properties['autoscaling']) {
             $effectiveAutoscaling = [PSCustomObject][ordered]@{
@@ -606,6 +630,11 @@ function Resolve-RunnerProfile {
         RunnerGroup = $effectiveRunnerGroup
         Autoscaling = $effectiveAutoscaling
         Resources = $resourcePolicy
+        ReadOnlyVolumes = @($effectiveReadOnlyVolumes)
+        ReadOnlyVolumesValue = @(
+            $effectiveReadOnlyVolumes |
+                ForEach-Object { "$($_.Name)=$($_.Source)" }
+        ) -join ','
         NamePrefix = $effectiveNamePrefix
         VerificationCommands = @($verificationCommands)
         Build = $build
@@ -1237,6 +1266,16 @@ function New-RunnerStaticProfileState {
         } else {
             $null
         }
+        readOnlyVolumes = @(
+            $Profile.ReadOnlyVolumes |
+                ForEach-Object {
+                    [PSCustomObject][ordered]@{
+                        name = [string]$_.Name
+                        source = [string]$_.Source
+                        target = [string]$_.Target
+                    }
+                }
+        )
         namePrefix = [string]$Profile.NamePrefix
     }
     $fingerprint = Get-RunnerObjectFingerprint -Value $staticConfiguration
@@ -1329,6 +1368,13 @@ function Get-RunnerWorkerConfiguration {
         } else {
             $null
         }
+        readOnlyVolumes = if (
+            $Configuration.PSObject.Properties['readOnlyVolumes']
+        ) {
+            @($Configuration.readOnlyVolumes)
+        } else {
+            @()
+        }
         labels = @($Configuration.labels)
         disableDefaultLabels = [bool]$Configuration.disableDefaultLabels
         scope = [string]$Configuration.scope
@@ -1368,6 +1414,7 @@ function Get-RunnerRefreshCompatibilityConfiguration {
         resolvedImageId = $worker.resolvedImageId
         build = $worker.build
         resources = $worker.resources
+        readOnlyVolumes = @($worker.readOnlyVolumes)
         labels = @($worker.labels)
         disableDefaultLabels = [bool]$worker.disableDefaultLabels
         scope = [string]$worker.scope
@@ -1598,6 +1645,7 @@ function New-RunnerEnvironmentContent {
         $Profile.NamePrefix,
         $Profile.LabelsValue,
         $Profile.RunnerGroup,
+        $Profile.ReadOnlyVolumesValue,
         $WorkerRevision,
         $SessionOwner,
         $ResolvedImageId
@@ -1646,6 +1694,7 @@ function New-RunnerEnvironmentContent {
     } else {
         ''
     }
+    $readOnlyVolumes = [string]$Profile.ReadOnlyVolumesValue
     return @(
         "ACCESS_TOKEN=$AccessToken"
         "RUNNER_SCOPE=$Scope"
@@ -1664,6 +1713,7 @@ function New-RunnerEnvironmentContent {
         "PITCREW_WORKER_MEMORY_SWAP_BYTES=$memorySwapBytes"
         "PITCREW_WORKER_CPU_CORES=$cpuCores"
         "PITCREW_WORKER_PIDS_LIMIT=$pidsLimit"
+        "PITCREW_READ_ONLY_VOLUMES=$readOnlyVolumes"
         "PITCREW_SESSION_OWNER=$SessionOwner"
         "PITCREW_ASSUME_UNVERSIONED_CURRENT=$assumeUnversionedCurrentValue"
         "PITCREW_AUTOSCALING_MODE=$autoscalingMode"

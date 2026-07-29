@@ -30,10 +30,15 @@ func main() {
 	factory := githubScaleSetServiceFactory{
 		accessToken: cfg.accessToken,
 	}
+	docker := newDockerCLI()
+	if err := docker.validateVolumes(context.Background(), cfg.readOnlyVolumes); err != nil {
+		fmt.Fprintf(os.Stderr, "pitcrew autoscaler volume error: %v\n", err)
+		os.Exit(1)
+	}
 	manager := newAutoscalerManager(
 		cfg,
 		factory,
-		newDockerCLI(),
+		docker,
 		realClock{},
 		logger,
 		instanceID,

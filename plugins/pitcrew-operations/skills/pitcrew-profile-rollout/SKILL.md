@@ -64,8 +64,10 @@ including:
 - fixed versus scale-set mode
 
 Report image reference, verification, build-input, resource-policy, and
-scale-set tuning differences separately. Capacity must remain exactly equal to
-the accepted desired-capacity document.
+scale-set tuning differences separately. List read-only external volume
+additions, removals, and source changes by logical name; they are
+rolling-compatible worker changes, not routing changes. Capacity must remain
+exactly equal to the accepted desired-capacity document.
 
 ## Dry-run mode
 
@@ -78,6 +80,8 @@ Always dry run first. Display:
 5. current resolved image ID and worker revision
 6. preserved scope, targets, capacity, labels, runner group, prefix, and mode
 7. every rolling-compatible difference
+   - for read-only volumes, show only logical name, external Docker volume name,
+     and derived `/mnt/pitcrew-data/<name>` target
 8. the complete setup command that would run, with secret-free arguments and
    the candidate `-ProfilePath`
 9. the prior stored manifest snapshot that defines explicit rollback
@@ -96,6 +100,8 @@ After explicit operator confirmation of the dry-run plan:
 4. Omit `-Token` so setup securely reuses and validates the selected profile's
    stored registration credential.
 5. Let setup pull or build and verify the candidate before manager handoff.
+   Setup must also inspect every declared external volume and attach it
+   read-only to candidate verification.
 6. Stop on the first failure. Do not retry with a weaker command or route.
 
 ## Verification
@@ -124,3 +130,7 @@ command, and delete only the exact temporary manifest afterwards.
 Never roll back automatically after the new manager has accepted work. Report
 the prior image reference, image ID, worker revision, and the exact rollback
 command so the operator can choose deliberately.
+
+PitCrew never creates, populates, removes, or inspects driver options for an
+external data volume. Missing volumes reject the rollout before manager
+handoff.

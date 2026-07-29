@@ -22,6 +22,7 @@ type containerLaunch struct {
 	jitConfig string
 	labels    map[string]string
 	resources workerResourcePolicy
+	volumes   []readOnlyVolume
 }
 
 type recoveredContainer struct {
@@ -138,6 +139,38 @@ func (d *dockerCLI) run(ctx context.Context, launch containerLaunch) (string, er
 	return containerID, nil
 }
 
+func (d *dockerCLI) validateVolumes(
+	ctx context.Context,
+	volumes []readOnlyVolume,
+) error {
+	for _, volume := range volumes {
+		operationContext, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+		output, err := d.executor.run(
+			operationContext,
+			"volume",
+			"inspect",
+			"--format",
+			"{{.Name}}",
+			volume.source,
+		)
+		cancel()
+		if err != nil {
+			return fmt.Errorf(
+				"required external Docker volume %q is unavailable: %w",
+				volume.source,
+				err,
+			)
+		}
+		if strings.TrimSpace(string(output)) != volume.source {
+			return fmt.Errorf(
+				"required external Docker volume %q resolved ambiguously",
+				volume.source,
+			)
+		}
+	}
+	return nil
+}
+
 func buildDockerRunArguments(launch containerLaunch) []string {
 	arguments := []string{
 		"run",
@@ -149,6 +182,15 @@ func buildDockerRunArguments(launch containerLaunch) []string {
 		"--name", launch.name,
 	}
 	arguments = append(arguments, launch.resources.dockerArguments()...)
+	for _, volume := range launch.volumes {
+		arguments = append(
+			arguments,
+			"--mount",
+			"type=volume,src="+volume.source+
+				",dst="+volume.target()+
+				",readonly,volume-nocopy",
+		)
+	}
 	labelKeys := make([]string, 0, len(launch.labels))
 	for key := range launch.labels {
 		labelKeys = append(labelKeys, key)

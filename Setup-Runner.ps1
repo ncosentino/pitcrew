@@ -270,6 +270,7 @@ $composeEnvironmentNames = @(
     'PITCREW_WORKER_MEMORY_SWAP_BYTES',
     'PITCREW_WORKER_CPU_CORES',
     'PITCREW_WORKER_PIDS_LIMIT',
+    'PITCREW_READ_ONLY_VOLUMES',
     'PITCREW_SESSION_OWNER',
     'PITCREW_ASSUME_UNVERSIONED_CURRENT',
     'PITCREW_AUTOSCALING_MODE',
@@ -1712,6 +1713,22 @@ try {
     ) {
         throw "Profile '$($profileConfig.Name)' changes registration topology or routing that cannot roll safely. Stop the profile explicitly with -Down before applying this configuration."
     }
+    foreach ($volume in $profileConfig.ReadOnlyVolumes) {
+        $volumeOutput = & docker volume inspect `
+            --format '{{.Name}}' `
+            $volume.Source 2>$null
+        $volumeName = if ($null -eq $volumeOutput) {
+            ''
+        } else {
+            ([string]$volumeOutput).Trim()
+        }
+        if (
+            $LASTEXITCODE -ne 0 -or
+            $volumeName -cne [string]$volume.Source
+        ) {
+            throw "Required external Docker volume '$($volume.Source)' is unavailable for profile '$($profileConfig.Name)'. PitCrew never creates external data volumes."
+        }
+    }
     $capacityOnlyCompatible = (
         -not $Refresh -and
         $managerRunning -and
@@ -1825,8 +1842,19 @@ try {
             }
 
             Write-Host "[verify] Verifying runner image contract"
+            $verificationMountArguments = @(
+                foreach ($volume in $profileConfig.ReadOnlyVolumes) {
+                    '--mount'
+                    "type=volume,src=$($volume.Source),dst=$($volume.Target),readonly,volume-nocopy"
+                }
+            )
             foreach ($command in $profileConfig.VerificationCommands) {
-                & docker run --rm --entrypoint /bin/sh $profileConfig.Image -lc $command
+                & docker run `
+                    --rm `
+                    @verificationMountArguments `
+                    --entrypoint /bin/sh `
+                    $profileConfig.Image `
+                    -lc $command
                 if ($LASTEXITCODE -ne 0) {
                     Write-Error "Runner image verification failed for profile '$($profileConfig.Name)': $command"
                 }
@@ -1837,6 +1865,7 @@ try {
             if ($profileConfig.Autoscaling) {
                 & docker run `
                     --rm `
+                    @verificationMountArguments `
                     --entrypoint /bin/sh `
                     $profileConfig.Image `
                     -lc 'test -x /actions-runner/bin/Runner.Listener'
