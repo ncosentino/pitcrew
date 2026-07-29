@@ -675,7 +675,13 @@ write_manager_observed_state \
     "${observed_slots_json}" \
     "${resource_telemetry_json}" \
     aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
-    1
+    1 \
+    "" \
+    "" \
+    "" \
+    "" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111
 assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
 assert_equals "10" "$(jq -r '.managerContractVersion' "${observed_state_json}")" "Observed state reported the wrong manager contract."
 assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
@@ -683,6 +689,8 @@ assert_equals "1" "$(jq -r '.eligibleSlots' "${observed_state_json}")" "Observed
 assert_equals "2" "$(jq -r '.configuredSlots' "${observed_state_json}")" "Observed state reported the wrong configured slot count."
 assert_equals "null" "$(jq -r '.autoscaling' "${observed_state_json}")" "Fixed observed state reported autoscaling metadata."
 assert_equals "rolling" "$(jq -r '.update.status' "${observed_state_json}")" "Fixed observed state lost rolling-update status."
+assert_equals "example/runner:1.0" "$(jq -r '.update.targetImage' "${observed_state_json}")" "Fixed observed state lost the target image reference."
+assert_equals "sha256:1111111111111111111111111111111111111111111111111111111111111111" "$(jq -r '.update.targetImageId' "${observed_state_json}")" "Fixed observed state lost the target image identity."
 assert_equals "1" "$(jq -r '.update.staleWorkers' "${observed_state_json}")" "Fixed observed state reported the wrong stale-worker count."
 assert_equals "1" "$(jq -r '.drainingSlots' "${observed_state_json}")" "Observed state reported the wrong draining slot count."
 assert_equals "online" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .state' "${observed_state_json}")" "Observed state lost an online slot."

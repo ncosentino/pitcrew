@@ -45,6 +45,7 @@ nav:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md
       - Custom Profiles: guides/custom-profiles.md
+      - Repository-Owned Worker Images: guides/repository-owned-images.md
       - Routing Workloads: guides/routing-workloads.md
       - Demand-Driven Autoscaling: guides/autoscaling.md
       - Rolling Updates: guides/rolling-updates.md

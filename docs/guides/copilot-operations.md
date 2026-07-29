@@ -91,6 +91,23 @@ blocked by that rollout.
 `-Token` is omitted. Copilot never needs to display or place that token in a
 command.
 
+## Profile rollout skill
+
+`pitcrew-profile-rollout` applies one reviewed external profile image revision
+without changing routing, topology, capacity, or credentials.
+
+```text
+Use the pitcrew-profile-rollout skill to apply the reviewed project-ci profile
+manifest on this host.
+```
+
+The skill always performs a read-only compatibility dry run first. It rejects
+label, scope, runner-group, prefix, or manager-mode changes; replays the complete
+stored capacity; lets setup prepare and verify the candidate before handoff; and
+reports target image identity plus current and stale workers. A rolling state is
+successful partial convergence, so the skill never waits for active jobs or
+restarts Docker.
+
 ## Dashboard update skill
 
 `pitcrew-dashboard-update` updates a hosted PitCrew Dashboard deployment using

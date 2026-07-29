@@ -119,6 +119,24 @@ observed_state_is_valid() {
         def valid_update:
             type == "object"
             and (.status == "current" or .status == "rolling" or .status == "degraded")
+            and (
+                .targetImage == null
+                or (
+                    .targetImage
+                    | type == "string"
+                    and length >= 1
+                    and length <= 2048
+                    and test("^\\S+$")
+                )
+            )
+            and (
+                .targetImageId == null
+                or (
+                    .targetImageId
+                    | type == "string"
+                    and test("^sha256:[0-9a-f]{64}$")
+                )
+            )
             and (.targetRevision | type == "string" and test("^[0-9a-f]{64}$"))
             and (.currentWorkers | nonnegative_integer)
             and (.staleWorkers | nonnegative_integer)
@@ -1084,6 +1102,8 @@ write_manager_observed_state() {
     operation_journal_path="${16:-}"
     subsystem_health_path="${17:-}"
     capacity_evidence_path="${18:-}"
+    target_image="${19:-}"
+    target_image_id="${20:-}"
 
     observed_optional_snapshots=""
     for optional_projection in operation_journal subsystem_health capacity_evidence; do
@@ -1132,6 +1152,8 @@ write_manager_observed_state() {
         --slurpfile subsystemHealth "${subsystem_health_path}" \
         --slurpfile capacityEvidence "${capacity_evidence_path}" \
         --arg workerRevision "${worker_revision}" \
+        --arg targetImage "${target_image}" \
+        --arg targetImageId "${target_image_id}" \
         --argjson staleWorkers "${stale_workers}" \
         '{
             schemaVersion: $schemaVersion,
@@ -1162,6 +1184,8 @@ write_manager_observed_state() {
             autoscaling: null,
             update: {
                 status: (if $staleWorkers > 0 then "rolling" else "current" end),
+                targetImage: (if $targetImage == "" then null else $targetImage end),
+                targetImageId: (if $targetImageId == "" then null else $targetImageId end),
                 targetRevision: $workerRevision,
                 currentWorkers: (
                     (($slots[0] | map(select(.processRunning)) | length) - $staleWorkers)

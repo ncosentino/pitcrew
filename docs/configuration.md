@@ -179,6 +179,11 @@ the same credential-free connector boundary.
 Manager contract 9 adds worker revision and rolling-convergence state. Manager
 replacement preserves sibling workers; scale-set profiles safely replace stale
 idle JIT runners through GitHub's service-side removal fence.
+Current managers also identify the configured target image reference and its
+resolved immutable local image ID in that rollout projection. Legacy contract-9
+through contract-11 observations that omit those additive fields remain valid;
+consumers must report the target identity as unavailable rather than infer it
+from one live worker.
 Manager contract 10 adds GitHub registration reconciliation. Each slot reports
 whether its runner is connected, disconnected, missing from GitHub, or unknown,
 and the profile reports eligible capacity separately from running containers.
@@ -222,6 +227,15 @@ separate local worker counts. A representative field excerpt is:
         }
       }
     ]
+  },
+  "update": {
+    "status": "rolling",
+    "targetImage": "ghcr.io/example/project-runner@sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "targetImageId": "sha256:2222222222222222222222222222222222222222222222222222222222222222",
+    "targetRevision": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+    "currentWorkers": 1,
+    "staleWorkers": 1,
+    "lastError": null
   },
   "slots": [
     {
@@ -462,6 +476,12 @@ Setup records Docker's immutable local `sha256:<64 hex>` image ID after pull or
 build and includes it in worker revision and refresh compatibility. A legacy
 static profile without this identity requires one complete safe setup run; it
 cannot be migrated with `-Refresh` or `-CapacityOnly`.
+
+For a manifest-backed profile, `static-profile.json` also retains local
+non-secret manifest provenance: built-in or external kind, source path, SHA-256
+content hash, and the parsed manifest document. Operations tooling can replay
+the approved snapshot without accepting a later source change implicitly.
+These local paths and manifest documents are never copied into observed state.
 
 Locally built profiles also fingerprint their complete build-context inventory.
 Generated PitCrew state and the selected secret environment are excluded. The

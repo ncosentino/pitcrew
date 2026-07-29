@@ -87,6 +87,8 @@ type observedAutoscaling struct {
 
 type observedUpdate struct {
 	Status         string  `json:"status"`
+	TargetImage    string  `json:"targetImage"`
+	TargetImageID  *string `json:"targetImageId"`
 	TargetRevision string  `json:"targetRevision"`
 	CurrentWorkers int     `json:"currentWorkers"`
 	StaleWorkers   int     `json:"staleWorkers"`
@@ -178,6 +180,8 @@ func buildObservedState(
 		},
 		Update: observedUpdate{
 			Status:         "current",
+			TargetImage:    cfg.runnerImage,
+			TargetImageID:  slotImageID(cfg.workerImageID),
 			TargetRevision: cfg.workerRevision,
 		},
 	}

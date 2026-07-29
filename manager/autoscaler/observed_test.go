@@ -71,6 +71,8 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	cfg := config{
 		profileID:      "profile-a",
+		runnerImage:    "example/runner:1.0",
+		workerImageID:  "sha256:1111111111111111111111111111111111111111111111111111111111111111",
 		workerRevision: testWorkerRevision,
 		scope:          "org",
 		minimumIdle:    1,
@@ -102,6 +104,9 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		t.Fatalf("unexpected autoscaling projection: %#v", state.Autoscaling)
 	}
 	if state.Update.Status != "current" ||
+		state.Update.TargetImage != cfg.runnerImage ||
+		state.Update.TargetImageID == nil ||
+		*state.Update.TargetImageID != cfg.workerImageID ||
 		state.Update.TargetRevision != testWorkerRevision ||
 		state.Update.CurrentWorkers != 3 ||
 		state.Update.StaleWorkers != 0 {
@@ -137,7 +142,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		"managerInstanceId", "managerStatus", "observedAt", "scope",
 		"generation", "desiredStateHash", "desiredStateStatus",
 		"desiredSlots", "activeSlots", "eligibleSlots", "drainingSlots", "configuredSlots",
-		"slots", "resourceTelemetry", "autoscaling",
+		"slots", "resourceTelemetry", "autoscaling", "update",
 	} {
 		if _, exists := decoded[field]; !exists {
 			t.Fatalf("observed state omitted field %q", field)
