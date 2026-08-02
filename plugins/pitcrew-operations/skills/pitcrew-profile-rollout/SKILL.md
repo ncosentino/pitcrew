@@ -1,14 +1,14 @@
 ---
 name: pitcrew-profile-rollout
-description: Safely apply one operator-approved external PitCrew profile image revision after a read-only dry run, preserving credentials, capacity, routing, topology, and active jobs while reporting rolling worker convergence and an exact rollback contract.
+description: Safely apply one operator-approved external PitCrew worker revision, including image, resource, read-only volume, or service-network changes, after a read-only dry run while preserving credentials, capacity, routing, topology, and active jobs.
 license: MIT
 ---
 
 # PitCrew Profile Rollout
 
 Apply one reviewed external profile manifest to one configured PitCrew profile.
-The repository that owns the image publishes it; this skill only performs the
-operator-approved host rollout.
+The repository owns its image, while the operator owns external volumes and
+service networks. This skill only performs the approved host rollout.
 
 Read these shared references before running commands:
 
@@ -25,9 +25,11 @@ Read these shared references before running commands:
   credentials, connector identities, JIT payloads, or job output.
 - Never accept an image reference or manifest path from an untrusted workflow
   event. The operator must explicitly identify the reviewed local manifest.
-- Never combine an image rollout with registration topology, routing, capacity,
-  or credential changes.
-- Never use `-Refresh` or `-CapacityOnly` for a worker-image change.
+- Never combine a worker revision rollout with registration topology, routing,
+  capacity, or credential changes.
+- Never create, remove, or attach a Docker service network or its service.
+- Never select a PitCrew manager Compose network as a worker service network.
+- Never use `-Refresh` or `-CapacityOnly` for a worker revision change.
 
 ## Resolve the rollout
 
@@ -66,8 +68,10 @@ including:
 Report image reference, verification, build-input, resource-policy, and
 scale-set tuning differences separately. List read-only external volume
 additions, removals, and source changes by logical name; they are
-rolling-compatible worker changes, not routing changes. Capacity must remain
-exactly equal to the accepted desired-capacity document.
+rolling-compatible worker changes, not routing changes. Report an external
+service-network addition, removal, or source change separately; it is also a
+rolling-compatible worker change. Capacity must remain exactly equal to the
+accepted desired-capacity document.
 
 ## Dry-run mode
 
@@ -82,6 +86,8 @@ Always dry run first. Display:
 7. every rolling-compatible difference
    - for read-only volumes, show only logical name, external Docker volume name,
      and derived `/mnt/pitcrew-data/<name>` target
+   - for an external service network, show only the exact Docker network name
+     and whether setup verifies it as a local, non-internal bridge
 8. the complete setup command that would run, with secret-free arguments and
    the candidate `-ProfilePath`
 9. the prior stored manifest snapshot that defines explicit rollback
@@ -101,7 +107,9 @@ After explicit operator confirmation of the dry-run plan:
    stored registration credential.
 5. Let setup pull or build and verify the candidate before manager handoff.
    Setup must also inspect every declared external volume and attach it
-   read-only to candidate verification.
+   read-only to candidate verification. When `serviceNetwork` is declared,
+   setup must inspect that exact network and attach candidate verification to
+   it.
 6. Stop on the first failure. Do not retry with a weaker command or route.
 
 ## Verification
@@ -133,4 +141,7 @@ command so the operator can choose deliberately.
 
 PitCrew never creates, populates, removes, or inspects driver options for an
 external data volume. Missing volumes reject the rollout before manager
+handoff. PitCrew also never creates, removes, configures, or attaches an
+external service network or service. A missing, internal, non-local, non-bridge,
+built-in default, or reserved manager network rejects the rollout before
 handoff.

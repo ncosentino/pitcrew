@@ -140,6 +140,7 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 		volumes: []readOnlyVolume{
 			{name: "reference-data", source: "pitcrew-reference-data-v1"},
 		},
+		network: "pitcrew-profile-a-services",
 	})
 	joined := strings.Join(arguments, " ")
 	for _, expected := range []string{
@@ -147,6 +148,7 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 		"--memory-swap 10737418240",
 		"--cpus 2.5",
 		"--pids-limit 1024",
+		"--network pitcrew-profile-a-services",
 		"--mount type=volume,src=pitcrew-reference-data-v1,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy",
 	} {
 		if !strings.Contains(joined, expected) {
@@ -159,6 +161,9 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 	plain := buildDockerRunArguments(containerLaunch{name: "worker", image: "example/runner:latest"})
 	if strings.Contains(strings.Join(plain, " "), "--memory") {
 		t.Fatal("unconfigured policy produced resource arguments")
+	}
+	if strings.Contains(strings.Join(plain, " "), "--network") {
+		t.Fatal("unconfigured service network produced a Docker argument")
 	}
 }
 
@@ -206,6 +211,40 @@ func TestDockerVolumePreflightRequiresExactExistingNames(t *testing.T) {
 	}
 }
 
+func TestDockerNetworkPreflightRequiresCompatibleExactNetwork(t *testing.T) {
+	executor := newScriptedCommandExecutor(map[string][]scriptedCommandResult{
+		"network": {
+			{output: "pitcrew-profile-a-services|bridge|local|false\n"},
+			{output: "pitcrew-profile-a-services|bridge|local|true\n"},
+		},
+	})
+	client := &dockerCLI{executor: executor}
+	if err := client.validateNetwork(
+		context.Background(),
+		"pitcrew-profile-a-services",
+	); err != nil {
+		t.Fatalf("valid external service network was rejected: %v", err)
+	}
+	if err := client.validateNetwork(
+		context.Background(),
+		"pitcrew-profile-a-services",
+	); err == nil {
+		t.Fatal("incompatible external service network was accepted")
+	}
+	if len(executor.calls) != 2 {
+		t.Fatalf("unexpected service network preflight calls: %#v", executor.calls)
+	}
+	for _, call := range executor.calls {
+		joined := strings.Join(call.arguments, " ")
+		if joined != "network inspect --format {{.Name}}|{{.Driver}}|{{.Scope}}|{{.Internal}} pitcrew-profile-a-services" {
+			t.Fatalf("unexpected service network preflight command: %s", joined)
+		}
+		if !call.hasDeadline {
+			t.Fatal("external service network preflight had no deadline")
+		}
+	}
+}
+
 type failingExecutor struct{}
 
 func (failingExecutor) run(context.Context, ...string) ([]byte, error) {
@@ -230,6 +269,7 @@ func TestScalerLaunchesWorkersUnderConfiguredResourcePolicy(t *testing.T) {
 			cfg.readOnlyVolumes = []readOnlyVolume{
 				{name: "reference-data", source: "pitcrew-reference-data-v1"},
 			}
+			cfg.serviceNetwork = "pitcrew-profile-a-services"
 		},
 	)
 	defer cancel()
@@ -247,6 +287,9 @@ func TestScalerLaunchesWorkersUnderConfiguredResourcePolicy(t *testing.T) {
 	if len(launch.volumes) != 1 ||
 		launch.volumes[0].source != "pitcrew-reference-data-v1" {
 		t.Fatalf("worker launched without the configured read-only volume: %+v", launch.volumes)
+	}
+	if launch.network != "pitcrew-profile-a-services" {
+		t.Fatalf("worker launched without the configured service network: %q", launch.network)
 	}
 }
 

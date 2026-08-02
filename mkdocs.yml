@@ -47,6 +47,7 @@ nav:
       - Custom Profiles: guides/custom-profiles.md
       - Repository-Owned Worker Images: guides/repository-owned-images.md
       - Read-Only External Data Volumes: guides/external-data-volumes.md
+      - Pool-Local Services: guides/pool-local-services.md
       - Routing Workloads: guides/routing-workloads.md
       - Demand-Driven Autoscaling: guides/autoscaling.md
       - Rolling Updates: guides/rolling-updates.md

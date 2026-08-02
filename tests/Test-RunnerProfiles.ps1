@@ -33,7 +33,7 @@ $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 11
+$activeManagerContractVersion = 12
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -1524,7 +1524,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 11) 'The setup contract does not activate the resilience manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 12) 'The setup contract does not activate the service-network manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
     $defaultProfile.DefinedDiagnosticsContractVersion -eq 12
@@ -1535,17 +1535,17 @@ Add-Check (
     $implementedContract.Autoscaling -eq $defaultProfile.ManagerContractVersion
 ) 'The activated manager contract does not match both manager implementations.'
 Add-Check (
-    $implementedContract.Implemented -lt $defaultProfile.DefinedDiagnosticsContractVersion
-) 'The diagnostics contract was marked defined while a manager already implements it.'
+    $implementedContract.Implemented -eq $defaultProfile.DefinedDiagnosticsContractVersion
+) 'The active manager contract does not include the defined diagnostics contract.'
 Assert-RunnerManagerContractActivation -Profile $defaultProfile
-$diagnosticsProfile = $defaultProfile.PSObject.Copy()
-$diagnosticsProfile.ManagerContractVersion = $defaultProfile.DefinedDiagnosticsContractVersion
+$futureProfile = $defaultProfile.PSObject.Copy()
+$futureProfile.ManagerContractVersion = $defaultProfile.ManagerContractVersion + 1
 Add-ThrowsCheck `
     -Action {
-        Assert-RunnerManagerContractActivation -Profile $diagnosticsProfile
+        Assert-RunnerManagerContractActivation -Profile $futureProfile
     } `
-    -ExpectedMessage 'Manager contract 12 cannot activate' `
-    -Failure 'Contract 12 activated before both manager modes implement it.'
+    -ExpectedMessage 'Manager contract 13 cannot activate' `
+    -Failure 'A future manager contract activated before both manager modes implement it.'
 $missingManagerRoot = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $missingManagerRoot | Out-Null
 try {
@@ -1863,7 +1863,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -1871,6 +1871,7 @@ Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=$')
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=$') 'The default CPU policy is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=$') 'The default PID policy is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_READ_ONLY_VOLUMES=$') 'The default environment unexpectedly configures external data volumes.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SERVICE_NETWORK=$') 'The default environment unexpectedly configures an external service network.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$') 'The default admission ceiling is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SESSION_OWNER=pitcrew-default$') 'The environment does not pin the stable session owner.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MODE=$') 'Fixed profiles unexpectedly enable autoscaling.'
@@ -1999,6 +2000,9 @@ try {
                 source = 'pitcrew-reference-data-v1'
             }
         )
+        serviceNetwork = @{
+            source = 'pitcrew-browser-services-v1'
+        }
         verificationCommands = @('browser --version')
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $externalManifestPath -Encoding UTF8
 
@@ -2016,6 +2020,12 @@ try {
     Add-Check (
         $externalProfile.ReadOnlyVolumesValue -eq 'reference-data=pitcrew-reference-data-v1'
     ) 'External profile read-only volumes were not serialized canonically.'
+    Add-Check (
+        $externalProfile.ServiceNetwork.Source -eq 'pitcrew-browser-services-v1'
+    ) 'External profile service network was not resolved.'
+    Add-Check (
+        $externalProfile.ServiceNetworkValue -eq 'pitcrew-browser-services-v1'
+    ) 'External profile service network was not serialized canonically.'
     Add-Check ($externalProfile.ManifestKind -eq 'external') 'An external profile did not retain its manifest source kind.'
     Add-Check (
         $externalProfile.ManifestSha256 -match '^[0-9a-f]{64}$'
@@ -2039,6 +2049,10 @@ try {
         $externalStaticProfile.configuration.readOnlyVolumes[0].source -eq
             'pitcrew-reference-data-v1'
     ) 'Static profile state did not retain the read-only volume source.'
+    Add-Check (
+        $externalStaticProfile.configuration.serviceNetwork.source -eq
+            'pitcrew-browser-services-v1'
+    ) 'Static profile state did not retain the external service network.'
     $externalEnvironment = New-RunnerEnvironmentContent `
         -Profile $externalProfile `
         -AccessToken 'test-registration-token' `
@@ -2050,6 +2064,10 @@ try {
         $externalEnvironment -match
             '(?m)^PITCREW_READ_ONLY_VOLUMES=reference-data=pitcrew-reference-data-v1$'
     ) 'External profile environment omitted its read-only volume contract.'
+    Add-Check (
+        $externalEnvironment -match
+            '(?m)^PITCREW_SERVICE_NETWORK=pitcrew-browser-services-v1$'
+    ) 'External profile environment omitted its service network contract.'
 
     $changedVolumeManifestPath = Join-Path $externalDirectory 'changed-volume-profile.json'
     $changedVolumeManifest = Get-Content `
@@ -2098,6 +2116,112 @@ try {
                     -Configuration $changedVolumeStaticProfile.configuration)
         )
     ) 'Manager refresh compatibility ignored read-only volume drift.'
+
+    $changedNetworkManifestPath = Join-Path $externalDirectory 'changed-network-profile.json'
+    $changedNetworkManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $changedNetworkManifest.serviceNetwork.source =
+        'pitcrew-browser-services-v2'
+    $changedNetworkManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $changedNetworkManifestPath -Encoding UTF8
+    $changedNetworkProfile = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $changedNetworkManifestPath `
+        -HostName 'test-host'
+    $changedNetworkStaticProfile = New-RunnerStaticProfileState `
+        -Profile $changedNetworkProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $externalStaticProfile.workerRevision -cne
+            $changedNetworkStaticProfile.workerRevision
+    ) 'Changing the external service network did not advance the worker revision.'
+    Add-Check (
+        (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration `
+                    -Configuration $externalStaticProfile.configuration)
+        ) -ceq (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration `
+                    -Configuration $changedNetworkStaticProfile.configuration)
+        )
+    ) 'Changing the external service network was not rolling-compatible.'
+    Add-Check (
+        (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRefreshCompatibilityConfiguration `
+                    -Configuration $externalStaticProfile.configuration)
+        ) -cne (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRefreshCompatibilityConfiguration `
+                    -Configuration $changedNetworkStaticProfile.configuration)
+        )
+    ) 'Manager refresh compatibility ignored external service network drift.'
+
+    $invalidNetworkManifestPath = Join-Path $externalDirectory 'invalid-network-profile.json'
+    $invalidNetworkManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $invalidNetworkManifest.serviceNetwork.source = 'host/network'
+    $invalidNetworkManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $invalidNetworkManifestPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile `
+                -RootPath $runnerRoot `
+                -ProfilePath $invalidNetworkManifestPath
+        } `
+        -ExpectedMessage 'not valid with the schema' `
+        -Failure 'An external profile accepted an invalid service network name.'
+
+    $managerNetworkManifestPath = Join-Path $externalDirectory 'manager-network-profile.json'
+    $managerNetworkManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $managerNetworkManifest.serviceNetwork.source =
+        'self-hosted-runner-browser-testing_default'
+    $managerNetworkManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $managerNetworkManifestPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile `
+                -RootPath $runnerRoot `
+                -ProfilePath $managerNetworkManifestPath
+        } `
+        -ExpectedMessage 'reserved Docker or PitCrew manager network' `
+        -Failure 'An external profile accepted a PitCrew manager Compose network.'
+
+    $defaultBridgeManifestPath = Join-Path $externalDirectory 'default-bridge-profile.json'
+    $defaultBridgeManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $defaultBridgeManifest.serviceNetwork.source = 'bridge'
+    $defaultBridgeManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $defaultBridgeManifestPath -Encoding UTF8
+    Add-ThrowsCheck `
+        -Action {
+            Resolve-RunnerProfile `
+                -RootPath $runnerRoot `
+                -ProfilePath $defaultBridgeManifestPath
+        } `
+        -ExpectedMessage 'reserved Docker or PitCrew manager network' `
+        -Failure 'An external profile accepted Docker''s default bridge without stable service DNS.'
 
     $duplicateVolumeManifestPath = Join-Path $externalDirectory 'duplicate-volume-profile.json'
     $duplicateVolumeManifest = Get-Content `
@@ -2202,6 +2326,7 @@ try {
         'PITCREW_WORKER_CPU_CORES',
         'PITCREW_WORKER_PIDS_LIMIT',
         'PITCREW_READ_ONLY_VOLUMES',
+        'PITCREW_SERVICE_NETWORK',
         'PITCREW_AUTOSCALING_MODE',
         'PITCREW_AUTOSCALING_MIN_IDLE',
         'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
@@ -2229,6 +2354,7 @@ try {
     $env:PITCREW_WORKER_CPU_CORES = '9.9'
     $env:PITCREW_WORKER_PIDS_LIMIT = '9999'
     $env:PITCREW_READ_ONLY_VOLUMES = 'ambient=wrong-volume'
+    $env:PITCREW_SERVICE_NETWORK = 'ambient-wrong-network'
     $env:PITCREW_AUTOSCALING_MODE = 'ambient-mode'
     $env:PITCREW_AUTOSCALING_MIN_IDLE = '99'
     $env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS = '999'
@@ -2246,7 +2372,7 @@ try {
         if ($dockerArguments[0] -eq 'compose') {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
-                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_READ_ONLY_VOLUMES=$env:PITCREW_READ_ONLY_VOLUMES`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_READ_ONLY_VOLUMES=$env:PITCREW_READ_ONLY_VOLUMES`tPITCREW_SERVICE_NETWORK=$env:PITCREW_SERVICE_NETWORK`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
             if (
                 $dockerArguments -contains 'build' -and
                 $dockerArguments -contains 'runner-manager' -and
@@ -2335,6 +2461,21 @@ try {
                 return
             }
             Write-Output ([string]$dockerArguments[-1])
+        }
+        if (
+            $dockerArguments[0] -eq 'network' -and
+            $dockerArguments[1] -eq 'inspect'
+        ) {
+            if ($env:PITCREW_TEST_NETWORK_MISSING -eq '1') {
+                $global:LASTEXITCODE = 1
+                return
+            }
+            $networkName = [string]$dockerArguments[-1]
+            Write-Output $(if ($env:PITCREW_TEST_NETWORK_IDENTITY) {
+                $env:PITCREW_TEST_NETWORK_IDENTITY
+            } else {
+                "$networkName|bridge|local|false"
+            })
         }
         if (
             $dockerArguments[0] -eq 'inspect' -and
@@ -2453,6 +2594,10 @@ try {
                 '(?m)^PITCREW_READ_ONLY_VOLUMES=reference-data=pitcrew-reference-data-v2$'
         ) 'Setup did not pass the approved read-only volume contract to the manager.'
         Add-Check (
+            $volumeEnvironment -match
+                '(?m)^PITCREW_SERVICE_NETWORK=pitcrew-browser-services-v1$'
+        ) 'Setup did not pass the approved external service network to the manager.'
+        Add-Check (
             $volumeStatic.configuration.readOnlyVolumes[0].target -eq
                 '/mnt/pitcrew-data/reference-data'
         ) 'Setup did not persist the deterministic read-only volume target.'
@@ -2464,8 +2609,18 @@ try {
             $volumeCommands -match
                 "--mount`ttype=volume,src=pitcrew-reference-data-v2,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy"
         ) 'Image verification did not receive the read-only external volume.'
+        Add-Check (
+            $volumeCommands -match
+                "network`tinspect`t--format`t\{\{\.Name\}\}\|\{\{\.Driver\}\}\|\{\{\.Scope\}\}\|\{\{\.Internal\}\}`tpitcrew-browser-services-v1"
+        ) 'Setup did not preflight the exact external Docker service network.'
+        Add-Check (
+            $volumeCommands -match
+                "run`t--rm`t--network`tpitcrew-browser-services-v1"
+        ) 'Image verification did not join the external Docker service network.'
         Add-Check (-not ($volumeCommands -match "volume`tcreate")) 'Setup created an external Docker volume.'
         Add-Check (-not ($volumeCommands -match "volume`trm")) 'Setup removed an external Docker volume.'
+        Add-Check (-not ($volumeCommands -match "network`tcreate")) 'Setup created an external Docker service network.'
+        Add-Check (-not ($volumeCommands -match "network`trm")) 'Setup removed an external Docker service network.'
 
         $env:PITCREW_TEST_VOLUME_MISSING = '1'
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
@@ -2484,6 +2639,41 @@ try {
         ) 'A missing external Docker volume reached manager startup.'
         $env:PITCREW_TEST_VOLUME_MISSING = '0'
 
+        $env:PITCREW_TEST_NETWORK_MISSING = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -ProfilePath $changedVolumeManifestPath `
+                    -Token 'test-registration-token' `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Required external Docker service network' `
+            -Failure 'Setup accepted a missing required external Docker service network.'
+        $missingNetworkCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            -not ($missingNetworkCommands -match "compose`t.*`tup")
+        ) 'A missing external Docker service network reached manager startup.'
+        $env:PITCREW_TEST_NETWORK_MISSING = '0'
+
+        $env:PITCREW_TEST_NETWORK_IDENTITY =
+            'pitcrew-browser-services-v1|bridge|local|true'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -ProfilePath $changedVolumeManifestPath `
+                    -Token 'test-registration-token' `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'local, non-internal bridge network' `
+            -Failure 'Setup accepted an internal external Docker service network.'
+        $incompatibleNetworkCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            -not ($incompatibleNetworkCommands -match "compose`t.*`tup")
+        ) 'An incompatible external Docker service network reached manager startup.'
+        Remove-Item Env:PITCREW_TEST_NETWORK_IDENTITY -ErrorAction SilentlyContinue
+
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup `
             -Token 'test-registration-token' `
@@ -2494,7 +2684,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'Fixed setup did not activate manager contract 11.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'Fixed setup did not activate manager contract 12.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -2514,7 +2704,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'Autoscaled setup did not activate manager contract 11.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'Autoscaled setup did not activate manager contract 12.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -2576,7 +2766,7 @@ try {
         Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
-        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_SERVICE_NETWORK=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
         Set-TestCapacityAcknowledgement `
@@ -3503,6 +3693,11 @@ Add-Check (
     $manager -match 'docker volume inspect' -and
     $manager -match 'type=volume,src=\$\{volume_source\},dst=/mnt/pitcrew-data/\$\{volume_name\},readonly,volume-nocopy'
 ) 'The fixed manager does not validate and mount external volumes read-only.'
+Add-Check (
+    $manager -match 'PITCREW_SERVICE_NETWORK' -and
+    $manager -match 'docker network inspect' -and
+    $manager -match [regex]::Escape('set -- "$@" --network "${SERVICE_NETWORK}"')
+) 'The fixed manager does not validate and attach the external service network.'
 Add-Check ($diagnostics -match [regex]::Escape('DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384')) 'The operation journal does not bound its serialized size.'
 Add-Check ($diagnostics -match [regex]::Escape('sanitize_diagnostic_evidence')) 'Operation evidence is not sanitized before publication.'
 Add-Check ($diagnostics -match [regex]::Escape('mv -f "${append_temporary}" "${append_path}"')) 'The operation journal is not persisted atomically.'
@@ -3519,10 +3714,11 @@ Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-11}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-12}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=11$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

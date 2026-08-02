@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Operational skills for safely managing PitCrew runner pools and dashboards.",
-    "version": "1.8.0"
+    "version": "1.9.0"
   },
   "plugins": [
     {
       "name": "pitcrew-operations",
-      "description": "Use PitCrew's existing scripts and scoped Docker Compose commands for capacity, autoscaling, safe worker-image and read-only data-volume rollouts, version updates, host diagnostics, and manager-only recovery.",
-      "version": "1.8.0",
+      "description": "Use PitCrew's existing scripts and scoped Docker Compose commands for capacity, autoscaling, safe worker-image, read-only data-volume, and service-network rollouts, version updates, host diagnostics, and manager-only recovery.",
+      "version": "1.9.0",
       "source": "./plugins/pitcrew-operations",
       "homepage": "https://www.devleader.ca/projects/pitcrew",
       "repository": "https://github.com/ncosentino/pitcrew",

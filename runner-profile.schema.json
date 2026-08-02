@@ -99,6 +99,19 @@
         }
       }
     },
+    "serviceNetwork": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source"
+      ],
+      "properties": {
+        "source": {
+          "type": "string",
+          "pattern": "^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}$"
+        }
+      }
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,

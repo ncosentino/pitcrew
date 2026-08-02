@@ -107,6 +107,7 @@ type runnerScaler struct {
 	imageID           string
 	resources         workerResourcePolicy
 	volumes           []readOnlyVolume
+	network           string
 	workerRevision    string
 	assumeUnversioned bool
 	namePrefix        string
@@ -166,6 +167,7 @@ func newRunnerScaler(
 		imageID:           cfg.workerImageID,
 		resources:         cfg.resources,
 		volumes:           cfg.readOnlyVolumes,
+		network:           cfg.serviceNetwork,
 		workerRevision:    cfg.workerRevision,
 		assumeUnversioned: cfg.assumeUnversioned,
 		namePrefix:        cfg.namePrefix,
@@ -1013,6 +1015,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		labels:    labels,
 		resources: s.resources,
 		volumes:   s.volumes,
+		network:   s.network,
 	})
 	if err != nil {
 		launchFailure := launchFailureDiagnostic(s.clock.now())

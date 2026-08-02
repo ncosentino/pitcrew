@@ -88,7 +88,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		nil,
 		now,
 	)
-	if state.ManagerContractVersion != 11 || state.DesiredSlots != 3 ||
+	if state.ManagerContractVersion != managerContractVersion || state.DesiredSlots != 3 ||
 		state.ConfiguredSlots != 4 || state.ActiveSlots != 3 ||
 		state.EligibleSlots != 2 || state.DrainingSlots != 1 {
 		t.Fatalf("unexpected observed capacity fields: %#v", state)

@@ -69,6 +69,7 @@ Named profiles conform to
 | `runnerGroup` | No | Organization or enterprise runner group. |
 | `autoscaling` | No | Scale-set mode, minimum idle runners, scale-down stabilization delay, and optional aggregate admission ceiling. |
 | `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
+| `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned profile services. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |
 | `build` | No | Local Docker build context, Dockerfile, and non-secret build arguments. |
@@ -105,6 +106,24 @@ Only read-only named volumes are supported. Bind mounts, arbitrary targets,
 devices, sockets, driver options, and credentials are outside the profile
 contract. See [Read-Only External Data Volumes](guides/external-data-volumes.md).
 
+### External service network
+
+`serviceNetwork.source` names one existing user-defined Docker network. Setup
+requires the exact network to use the local `bridge` driver with
+`Internal=false`, rejects Docker's built-in `bridge`, then attaches
+image-verification containers and new workers with `--network <source>`.
+
+The network contributes to worker revision, so source changes roll while busy
+workers retain their original network. Service-network changes are rejected by
+`-Refresh` and `-CapacityOnly`.
+
+PitCrew never creates, configures, removes, or attaches the service itself.
+Aliases, ports, storage, credentials, and service health remain
+operator-owned. Manager Compose networks are reserved and cannot be selected.
+Use one service network per profile or trust boundary because containers on a
+shared bridge network can reach each other's exposed ports. See
+[Pool-Local Services](guides/pool-local-services.md).
+
 ### Contract-11 resource policy
 
 The profile schema defines the following future contract:
@@ -139,14 +158,12 @@ accepted. CPU values are stored as invariant decimal strings without
 insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
-Manager contract 11 is active in this release. Both the fixed and autoscaled
-managers implement it, so setup accepts a resource policy and
-`maximumActiveWorkers` and pins the contract in generated state. A profile that
-still runs a contract-10 manager upgrades through the established manager
-hot-swap, and its existing workers are preserved and converge naturally.
-Activation occurs only after both manager modes implement the same contract, so
-a newer contract is still refused before Docker, image, or generated state
-mutation.
+Resource policy and `maximumActiveWorkers` were introduced in manager contract
+11 and remain supported by the active contract 12 managers. A profile that
+still runs an older manager upgrades through the established manager hot-swap,
+and its existing workers are preserved and converge naturally. Activation
+occurs only after both manager modes implement the same contract, so a newer
+contract is still refused before Docker, image, or generated state mutation.
 
 ## Worker image shutdown contract
 
@@ -423,16 +440,15 @@ which reports the `unknown` reason because the manager observed nothing to
 blame. `reason` is observed manager state, never a diagnosis inferred by a
 dashboard.
 
-Manager contract 12 is defined but not active in this release. Both manager
-modes implement contract 11, so setup fails closed before Docker, image, or
-generated state mutation if a contract ahead of both implementations is
-selected. Contract-11 resource, image, exit, and worker-revision semantics are
-unchanged.
+Manager contract 12 is active in this release. Both manager modes implement
+the external service-network launch contract and continue publishing the
+contract-12 diagnostic projections. Setup fails closed before Docker, image,
+or generated state mutation if a contract ahead of both implementations is
+selected. Contract-11 resource, image, exit, and worker-revision semantics
+remain compatible.
 
-The fixed shell manager already publishes these three projections additively
-while it reports contract 10, so a reader that ignores them sees the same
-observed state as before. It keeps the journal, the Docker summary, and the
-GitHub summary under `diagnostics/` inside the profile state directory and
+The fixed shell manager keeps the journal, the Docker summary, and the GitHub
+summary under `diagnostics/` inside the profile state directory and
 writes each file atomically, so an ordinary manager restart or handoff
 preserves the preceding causal sequence without replaying events. The retained
 window is bounded to 32 events and a bounded serialized size; older events are

@@ -50,6 +50,9 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	if len(cfg.readOnlyVolumes) != 0 {
 		t.Fatalf("unexpected default read-only volumes: %#v", cfg.readOnlyVolumes)
 	}
+	if cfg.serviceNetwork != "" {
+		t.Fatalf("unexpected default service network: %q", cfg.serviceNetwork)
+	}
 }
 
 func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
@@ -62,6 +65,7 @@ func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
 		"RUNNER_SCOPE":              "repo",
 		"RUNNER_NAME_PREFIX":        "runner",
 		"PITCREW_READ_ONLY_VOLUMES": "reference-data=pitcrew-reference-data-v1,fixtures=pitcrew-fixtures",
+		"PITCREW_SERVICE_NETWORK":   "pitcrew-profile-a-services",
 	}
 	cfg, err := loadConfig(func(name string) (string, bool) {
 		value, exists := values[name]
@@ -76,6 +80,9 @@ func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
 	if cfg.readOnlyVolumes[0].target() != "/mnt/pitcrew-data/reference-data" ||
 		cfg.readOnlyVolumes[1].source != "pitcrew-fixtures" {
 		t.Fatalf("unexpected read-only volume contract: %#v", cfg.readOnlyVolumes)
+	}
+	if cfg.serviceNetwork != "pitcrew-profile-a-services" {
+		t.Fatalf("unexpected service network: %q", cfg.serviceNetwork)
 	}
 }
 
@@ -110,6 +117,9 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		{name: "duplicate read-only volume name", key: "PITCREW_READ_ONLY_VOLUMES", value: "data=one,data=two"},
 		{name: "duplicate read-only volume source", key: "PITCREW_READ_ONLY_VOLUMES", value: "one=data,two=data"},
 		{name: "invalid read-only volume target name", key: "PITCREW_READ_ONLY_VOLUMES", value: "Upper=data"},
+		{name: "invalid service network", key: "PITCREW_SERVICE_NETWORK", value: "host/network"},
+		{name: "default bridge network", key: "PITCREW_SERVICE_NETWORK", value: "bridge"},
+		{name: "reserved manager network", key: "PITCREW_SERVICE_NETWORK", value: "self-hosted-runner-profile-a_default"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

@@ -1,7 +1,7 @@
 {
   "name": "pitcrew-operations",
-  "description": "Safely manage PitCrew capacity and autoscaling, roll operator-approved worker images and read-only data volumes, update PitCrew or its optional dashboard, collect host diagnostics, and recover a degraded profile's manager.",
-  "version": "1.8.0",
+  "description": "Safely manage PitCrew capacity and autoscaling, roll operator-approved worker images, read-only data volumes, and service networks, update PitCrew or its optional dashboard, collect host diagnostics, and recover a degraded profile's manager.",
+  "version": "1.9.0",
   "author": {
     "name": "Nick Cosentino",
     "url": "https://www.devleader.ca"

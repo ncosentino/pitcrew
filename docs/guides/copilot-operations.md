@@ -113,6 +113,11 @@ separately and roll with the worker revision. The skill verifies each existing
 named volume before mutation and never creates, populates, removes, or reveals
 driver options for external storage.
 
+External service-network additions, removals, and source changes are also
+rolling worker revisions. The skill verifies the exact local, non-internal
+bridge network before mutation, reports only its non-secret name, and never
+creates, removes, configures, or attaches the service.
+
 ## Dashboard update skill
 
 `pitcrew-dashboard-update` updates a hosted PitCrew Dashboard deployment using

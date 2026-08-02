@@ -3,7 +3,7 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 11
+$script:RunnerManagerContractVersion = 12
 $script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerDefinedDiagnosticsContractVersion = 12
 $script:RunnerWorkerRuntimeContractVersion = 2
@@ -285,6 +285,7 @@ function Resolve-RunnerProfile {
     $effectivePullImage = $true
     $verificationCommands = @()
     $effectiveReadOnlyVolumes = @()
+    $effectiveServiceNetwork = $null
     $build = $null
     $effectiveAutoscaling = $null
     $effectiveResources = [ordered]@{
@@ -351,6 +352,19 @@ function Resolve-RunnerProfile {
                     }
                 }
             ) | Sort-Object Name
+        }
+        if ($manifest.PSObject.Properties['serviceNetwork']) {
+            $serviceNetworkSource = [string]$manifest.serviceNetwork.source
+            if (
+                $serviceNetworkSource -ceq 'bridge' -or
+                $serviceNetworkSource -match
+                    '^self-hosted-runner(?:-[a-z][a-z0-9-]{0,31})?_default$'
+            ) {
+                throw "Runner profile service network '$serviceNetworkSource' identifies a reserved Docker or PitCrew manager network."
+            }
+            $effectiveServiceNetwork = [PSCustomObject][ordered]@{
+                Source = $serviceNetworkSource
+            }
         }
         if ($manifest.PSObject.Properties['autoscaling']) {
             $effectiveAutoscaling = [PSCustomObject][ordered]@{
@@ -635,6 +649,12 @@ function Resolve-RunnerProfile {
             $effectiveReadOnlyVolumes |
                 ForEach-Object { "$($_.Name)=$($_.Source)" }
         ) -join ','
+        ServiceNetwork = $effectiveServiceNetwork
+        ServiceNetworkValue = if ($effectiveServiceNetwork) {
+            [string]$effectiveServiceNetwork.Source
+        } else {
+            ''
+        }
         NamePrefix = $effectiveNamePrefix
         VerificationCommands = @($verificationCommands)
         Build = $build
@@ -1276,6 +1296,13 @@ function New-RunnerStaticProfileState {
                     }
                 }
         )
+        serviceNetwork = if ($Profile.ServiceNetwork) {
+            [PSCustomObject][ordered]@{
+                source = [string]$Profile.ServiceNetwork.Source
+            }
+        } else {
+            $null
+        }
         namePrefix = [string]$Profile.NamePrefix
     }
     $fingerprint = Get-RunnerObjectFingerprint -Value $staticConfiguration
@@ -1375,6 +1402,13 @@ function Get-RunnerWorkerConfiguration {
         } else {
             @()
         }
+        serviceNetwork = if (
+            $Configuration.PSObject.Properties['serviceNetwork']
+        ) {
+            $Configuration.serviceNetwork
+        } else {
+            $null
+        }
         labels = @($Configuration.labels)
         disableDefaultLabels = [bool]$Configuration.disableDefaultLabels
         scope = [string]$Configuration.scope
@@ -1415,6 +1449,7 @@ function Get-RunnerRefreshCompatibilityConfiguration {
         build = $worker.build
         resources = $worker.resources
         readOnlyVolumes = @($worker.readOnlyVolumes)
+        serviceNetwork = $worker.serviceNetwork
         labels = @($worker.labels)
         disableDefaultLabels = [bool]$worker.disableDefaultLabels
         scope = [string]$worker.scope
@@ -1646,6 +1681,7 @@ function New-RunnerEnvironmentContent {
         $Profile.LabelsValue,
         $Profile.RunnerGroup,
         $Profile.ReadOnlyVolumesValue,
+        $Profile.ServiceNetworkValue,
         $WorkerRevision,
         $SessionOwner,
         $ResolvedImageId
@@ -1695,6 +1731,7 @@ function New-RunnerEnvironmentContent {
         ''
     }
     $readOnlyVolumes = [string]$Profile.ReadOnlyVolumesValue
+    $serviceNetwork = [string]$Profile.ServiceNetworkValue
     return @(
         "ACCESS_TOKEN=$AccessToken"
         "RUNNER_SCOPE=$Scope"
@@ -1714,6 +1751,7 @@ function New-RunnerEnvironmentContent {
         "PITCREW_WORKER_CPU_CORES=$cpuCores"
         "PITCREW_WORKER_PIDS_LIMIT=$pidsLimit"
         "PITCREW_READ_ONLY_VOLUMES=$readOnlyVolumes"
+        "PITCREW_SERVICE_NETWORK=$serviceNetwork"
         "PITCREW_SESSION_OWNER=$SessionOwner"
         "PITCREW_ASSUME_UNVERSIONED_CURRENT=$assumeUnversionedCurrentValue"
         "PITCREW_AUTOSCALING_MODE=$autoscalingMode"

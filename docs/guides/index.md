@@ -13,6 +13,9 @@ Use these guides after completing [Getting Started](../getting-started.md):
 - [Read-Only External Data Volumes](external-data-volumes.md) - attach
   operator-provisioned immutable datasets to workers without exposing storage
   credentials.
+- [Pool-Local Services](pool-local-services.md) - reach operator-owned services
+  through stable, profile-scoped Docker DNS without worker mounts or host
+  ports.
 - [Routing Workloads](routing-workloads.md) - target the correct pool from GitHub Actions.
 - [Demand-Driven Autoscaling](autoscaling.md) - shrink idle pools and
   automatically restore capacity for queued work.
