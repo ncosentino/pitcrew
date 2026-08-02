@@ -271,6 +271,7 @@ $composeEnvironmentNames = @(
     'PITCREW_WORKER_CPU_CORES',
     'PITCREW_WORKER_PIDS_LIMIT',
     'PITCREW_READ_ONLY_VOLUMES',
+    'PITCREW_SERVICE_NETWORK',
     'PITCREW_SESSION_OWNER',
     'PITCREW_ASSUME_UNVERSIONED_CURRENT',
     'PITCREW_AUTOSCALING_MODE',
@@ -1729,6 +1730,30 @@ try {
             throw "Required external Docker volume '$($volume.Source)' is unavailable for profile '$($profileConfig.Name)'. PitCrew never creates external data volumes."
         }
     }
+    if ($profileConfig.ServiceNetwork) {
+        $serviceNetworkSource = [string]$profileConfig.ServiceNetwork.Source
+        if (
+            $serviceNetworkSource -ceq 'bridge' -or
+            $serviceNetworkSource -match
+                '^self-hosted-runner(?:-[a-z][a-z0-9-]{0,31})?_default$'
+        ) {
+            throw "External service network '$serviceNetworkSource' is reserved. Workers require a user-defined bridge and must never join a manager network."
+        }
+        $networkOutput = & docker network inspect `
+            --format '{{.Name}}|{{.Driver}}|{{.Scope}}|{{.Internal}}' `
+            $serviceNetworkSource 2>$null
+        $networkIdentity = if ($null -eq $networkOutput) {
+            ''
+        } else {
+            ([string]$networkOutput).Trim()
+        }
+        if ($LASTEXITCODE -ne 0) {
+            throw "Required external Docker service network '$serviceNetworkSource' is unavailable for profile '$($profileConfig.Name)'. PitCrew never creates external service networks."
+        }
+        if ($networkIdentity -cne "$serviceNetworkSource|bridge|local|false") {
+            throw "External Docker service network '$serviceNetworkSource' must be an exact local, non-internal bridge network."
+        }
+    }
     $capacityOnlyCompatible = (
         -not $Refresh -and
         $managerRunning -and
@@ -1848,9 +1873,15 @@ try {
                     "type=volume,src=$($volume.Source),dst=$($volume.Target),readonly,volume-nocopy"
                 }
             )
+            $verificationNetworkArguments = if ($profileConfig.ServiceNetwork) {
+                @('--network', [string]$profileConfig.ServiceNetwork.Source)
+            } else {
+                @()
+            }
             foreach ($command in $profileConfig.VerificationCommands) {
                 & docker run `
                     --rm `
+                    @verificationNetworkArguments `
                     @verificationMountArguments `
                     --entrypoint /bin/sh `
                     $profileConfig.Image `
@@ -1865,6 +1896,7 @@ try {
             if ($profileConfig.Autoscaling) {
                 & docker run `
                     --rm `
+                    @verificationNetworkArguments `
                     @verificationMountArguments `
                     --entrypoint /bin/sh `
                     $profileConfig.Image `

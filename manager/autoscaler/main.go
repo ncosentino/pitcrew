@@ -35,6 +35,10 @@ func main() {
 		fmt.Fprintf(os.Stderr, "pitcrew autoscaler volume error: %v\n", err)
 		os.Exit(1)
 	}
+	if err := docker.validateNetwork(context.Background(), cfg.serviceNetwork); err != nil {
+		fmt.Fprintf(os.Stderr, "pitcrew autoscaler service network error: %v\n", err)
+		os.Exit(1)
+	}
 	manager := newAutoscalerManager(
 		cfg,
 		factory,

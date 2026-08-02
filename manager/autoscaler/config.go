@@ -12,7 +12,7 @@ import (
 	"github.com/actions/scaleset"
 )
 
-const managerContractVersion = 11
+const managerContractVersion = 12
 
 type config struct {
 	accessToken          string
@@ -34,6 +34,7 @@ type config struct {
 	workerImageID        string
 	resources            workerResourcePolicy
 	readOnlyVolumes      []readOnlyVolume
+	serviceNetwork       string
 	scaleDownDelay       time.Duration
 	observedInterval     time.Duration
 	architectureLabel    string
@@ -118,6 +119,33 @@ func validDockerVolumeName(value string) bool {
 			continue
 		}
 		return false
+	}
+	return true
+}
+
+func validDockerNetworkName(value string) bool {
+	if value == "" {
+		return true
+	}
+	if value == "bridge" {
+		return false
+	}
+	if !validDockerVolumeName(value) {
+		return false
+	}
+	if strings.HasPrefix(value, "self-hosted-runner") &&
+		strings.HasSuffix(value, "_default") {
+		middle := strings.TrimSuffix(
+			strings.TrimPrefix(value, "self-hosted-runner"),
+			"_default",
+		)
+		if middle == "" {
+			return false
+		}
+		if strings.HasPrefix(middle, "-") &&
+			validReadOnlyVolumeName(strings.TrimPrefix(middle, "-")) {
+			return false
+		}
 	}
 	return true
 }
@@ -227,6 +255,12 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 	if err != nil {
 		return config{}, err
 	}
+	serviceNetwork := strings.TrimSpace(value("PITCREW_SERVICE_NETWORK", ""))
+	if !validDockerNetworkName(serviceNetwork) {
+		return config{}, errors.New(
+			"PITCREW_SERVICE_NETWORK must be a Docker-safe external network name and cannot identify a reserved manager network",
+		)
+	}
 
 	cfg := config{
 		accessToken:          strings.TrimSpace(value("ACCESS_TOKEN", "")),
@@ -248,6 +282,7 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		workerImageID:        workerImageID,
 		resources:            resources,
 		readOnlyVolumes:      readOnlyVolumes,
+		serviceNetwork:       serviceNetwork,
 		scaleDownDelay:       scaleDownDelay,
 		observedInterval:     observedInterval,
 		architectureLabel:    normalizeArchitecture(architecture),
@@ -344,6 +379,7 @@ func (c config) validate() error {
 		c.namePrefix,
 		c.runnerGroup,
 		c.stateDirectory,
+		c.serviceNetwork,
 		c.legacyRepositoryURLs,
 		c.legacyRepositoryURL,
 		c.legacyReplicas,

@@ -88,8 +88,8 @@ Declared worker limits (`resources.memory`, `resources.memorySwap`,
 canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
-Manager contract 11 is active in this release, so setup accepts a resource
-policy and an aggregate ceiling and delivers both to the autoscaler.
+Resource policy and the aggregate ceiling were introduced in manager contract
+11 and remain supported by the active contract 12 autoscaler.
 
 ## Operation evidence
 

@@ -10,8 +10,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/registration.sh"
 . "${SCRIPT_DIRECTORY}/diagnostics.sh"
 
-MANAGER_CONTRACT_VERSION=11
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-11}"
+MANAGER_CONTRACT_VERSION=12
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-12}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -26,6 +26,7 @@ WORKER_MEMORY_SWAP_BYTES="${PITCREW_WORKER_MEMORY_SWAP_BYTES:-}"
 WORKER_CPU_CORES="${PITCREW_WORKER_CPU_CORES:-}"
 WORKER_PIDS_LIMIT="${PITCREW_WORKER_PIDS_LIMIT:-}"
 READ_ONLY_VOLUMES="${PITCREW_READ_ONLY_VOLUMES:-}"
+SERVICE_NETWORK="${PITCREW_SERVICE_NETWORK:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
@@ -103,6 +104,27 @@ verify_read_only_volumes() (
     done
 )
 
+service_network_is_valid() {
+    configured_network="$1"
+    [ -z "${configured_network}" ] && return 0
+    printf '%s' "${configured_network}" |
+        grep -Eq '^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$' || return 1
+    [ "${configured_network}" != "bridge" ] || return 1
+    ! printf '%s' "${configured_network}" |
+        grep -Eq '^self-hosted-runner(-[a-z][a-z0-9-]{0,31})?_default$'
+}
+
+verify_service_network() {
+    configured_network="$1"
+    [ -z "${configured_network}" ] && return 0
+    inspected_network=$(
+        docker network inspect \
+            --format '{{.Name}}|{{.Driver}}|{{.Scope}}|{{.Internal}}' \
+            "${configured_network}" 2>/dev/null
+    ) || return 1
+    [ "${inspected_network}" = "${configured_network}|bridge|local|false" ]
+}
+
 case "${RECONCILE_INTERVAL}" in
     ''|*[!0-9]*|0)
         echo "[manager:${PROFILE_ID}] PITCREW_RECONCILE_INTERVAL must be a positive integer." >&2
@@ -169,6 +191,14 @@ if ! read_only_volumes_are_valid "${READ_ONLY_VOLUMES}"; then
 fi
 if ! verify_read_only_volumes "${READ_ONLY_VOLUMES}"; then
     echo "[manager:${PROFILE_ID}] a required external read-only volume is unavailable." >&2
+    exit 1
+fi
+if ! service_network_is_valid "${SERVICE_NETWORK}"; then
+    echo "[manager:${PROFILE_ID}] PITCREW_SERVICE_NETWORK is invalid or identifies a reserved Docker or manager network." >&2
+    exit 1
+fi
+if ! verify_service_network "${SERVICE_NETWORK}"; then
+    echo "[manager:${PROFILE_ID}] the required external service network is unavailable or incompatible." >&2
     exit 1
 fi
 WORKER_RESOURCE_ARGUMENTS=$(render_worker_resource_arguments \
@@ -830,6 +860,9 @@ run_slot() {
         fi
         if [ -n "${RUNNER_GROUP:-}" ]; then
             set -- "$@" -e RUNNER_GROUP="${RUNNER_GROUP}"
+        fi
+        if [ -n "${SERVICE_NETWORK}" ]; then
+            set -- "$@" --network "${SERVICE_NETWORK}"
         fi
         if [ -n "${READ_ONLY_VOLUMES}" ]; then
             previous_ifs=${IFS}

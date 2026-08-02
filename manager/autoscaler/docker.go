@@ -23,6 +23,7 @@ type containerLaunch struct {
 	labels    map[string]string
 	resources workerResourcePolicy
 	volumes   []readOnlyVolume
+	network   string
 }
 
 type recoveredContainer struct {
@@ -171,6 +172,39 @@ func (d *dockerCLI) validateVolumes(
 	return nil
 }
 
+func (d *dockerCLI) validateNetwork(
+	ctx context.Context,
+	network string,
+) error {
+	if network == "" {
+		return nil
+	}
+	operationContext, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
+	defer cancel()
+	output, err := d.executor.run(
+		operationContext,
+		"network",
+		"inspect",
+		"--format",
+		"{{.Name}}|{{.Driver}}|{{.Scope}}|{{.Internal}}",
+		network,
+	)
+	if err != nil {
+		return fmt.Errorf(
+			"required external Docker service network %q is unavailable: %w",
+			network,
+			err,
+		)
+	}
+	if strings.TrimSpace(string(output)) != network+"|bridge|local|false" {
+		return fmt.Errorf(
+			"required external Docker service network %q must be an exact local, non-internal bridge network",
+			network,
+		)
+	}
+	return nil
+}
+
 func buildDockerRunArguments(launch containerLaunch) []string {
 	arguments := []string{
 		"run",
@@ -180,6 +214,9 @@ func buildDockerRunArguments(launch containerLaunch) []string {
 		"--workdir", "/actions-runner",
 		"--entrypoint", "/actions-runner/bin/Runner.Listener",
 		"--name", launch.name,
+	}
+	if launch.network != "" {
+		arguments = append(arguments, "--network", launch.network)
 	}
 	arguments = append(arguments, launch.resources.dockerArguments()...)
 	for _, volume := range launch.volumes {

@@ -12,6 +12,8 @@ LEGACY_MANAGER_LABEL="ephemeral-runner-manager-profile=${LEGACY_PROFILE_NAME}"
 SLOT_LABEL="ephemeral-managed-runner-slot"
 FAKE_IMAGE="pitcrew-fake-runner:${PROFILE_NAME}"
 VOLUME_NAME="pitcrew-integration-data-${RUN_ID}"
+SERVICE_NETWORK="pitcrew-integration-services-${RUN_ID}"
+SERVICE_CONTAINER="pitcrew-integration-service-${RUN_ID}"
 REPOSITORY_URL="https://github.com/example/integration"
 STATE_DIRECTORY="${ROOT}/.pitcrew-state/${PROFILE_NAME}"
 DESIRED_STATE="${STATE_DIRECTORY}/desired-capacity.json"
@@ -24,6 +26,12 @@ LEGACY_OBSERVED_STATE="${LEGACY_STATE_DIRECTORY}/observed-state.json"
 FAKE_IMAGE_ID=""
 FIXTURE_DIRECTORY=$(mktemp -d)
 PROFILE_PATH="${FIXTURE_DIRECTORY}/profile.json"
+POWERSHELL_ROOT="${ROOT}"
+POWERSHELL_PROFILE_PATH="${PROFILE_PATH}"
+if command -v cygpath >/dev/null 2>&1; then
+    POWERSHELL_ROOT=$(cygpath -w "${ROOT}")
+    POWERSHELL_PROFILE_PATH=$(cygpath -w "${PROFILE_PATH}")
+fi
 MANAGER_ID=""
 
 worker_ids() {
@@ -137,12 +145,12 @@ wait_for_slot_exit_classification() {
 run_setup() {
     workers="$1"
     pwsh -NoProfile -Command \
-        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
+        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${POWERSHELL_ROOT}\\Setup-Runner.ps1' -ProfilePath '${POWERSHELL_PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
 }
 
 run_refresh() {
     pwsh -NoProfile -Command \
-        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Refresh -Repos '${REPOSITORY_URL}=5'"
+        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${POWERSHELL_ROOT}\\Setup-Runner.ps1' -ProfilePath '${POWERSHELL_PROFILE_PATH}' -Token 'integration-token' -Refresh -Repos '${REPOSITORY_URL}=5'"
 }
 
 start_legacy_compose() {
@@ -171,7 +179,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="11" \
+        PITCREW_MANAGER_CONTRACT_VERSION="12" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -219,12 +227,14 @@ cleanup() {
         docker logs "${MANAGER_ID}" 2>&1 || true
     fi
     pwsh -NoProfile -Command \
-        "& '${ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Down" >/dev/null 2>&1 || true
+        "& '${POWERSHELL_ROOT}\\Setup-Runner.ps1' -ProfilePath '${POWERSHELL_PROFILE_PATH}' -Down" >/dev/null 2>&1 || true
     stop_legacy_compose >/dev/null 2>&1 || true
     docker ps -aq --filter "label=${PROFILE_LABEL}" |
         xargs -r docker rm -f >/dev/null 2>&1 || true
     docker ps -aq --filter "label=${LEGACY_PROFILE_LABEL}" |
         xargs -r docker rm -f >/dev/null 2>&1 || true
+    docker rm -f "${SERVICE_CONTAINER}" >/dev/null 2>&1 || true
+    docker network rm "${SERVICE_NETWORK}" >/dev/null 2>&1 || true
     docker image rm -f "${FAKE_IMAGE}" >/dev/null 2>&1 || true
     docker volume rm "${VOLUME_NAME}" >/dev/null 2>&1 || true
     rm -f "${ROOT}/.env.${PROFILE_NAME}"
@@ -251,8 +261,12 @@ cat > "${PROFILE_PATH}" <<EOF
       "source": "${VOLUME_NAME}"
     }
   ],
+  "serviceNetwork": {
+    "source": "${SERVICE_NETWORK}"
+  },
   "verificationCommands": [
-    "test -f /mnt/pitcrew-data/reference-data/marker.txt"
+    "test -f /mnt/pitcrew-data/reference-data/marker.txt",
+    "test \"\$(wget -qO- http://package-mirror:8080/health)\" = \"ready\""
   ]
 }
 EOF
@@ -268,6 +282,15 @@ docker run \
     --entrypoint /bin/sh \
     "${FAKE_IMAGE}" \
     -c "printf 'verified\n' > /data/marker.txt"
+docker network create --driver bridge "${SERVICE_NETWORK}" >/dev/null
+docker run \
+    --detach \
+    --name "${SERVICE_CONTAINER}" \
+    --network "${SERVICE_NETWORK}" \
+    --network-alias package-mirror \
+    --env PITCREW_FAKE_SERVICE=1 \
+    "${FAKE_IMAGE}" \
+    >/dev/null
 
 mkdir -p "${ROOT}/.pitcrew-state"
 start_legacy_compose
@@ -286,6 +309,10 @@ wait_for_legacy_worker_count 2
 }
 
 legacy_worker_sample=$(docker ps -q --filter "label=${LEGACY_PROFILE_LABEL}" | head -n 1)
+if docker exec "${legacy_worker_sample}" wget -qO- http://package-mirror:8080/health >/dev/null 2>&1; then
+    echo "A worker without serviceNetwork resolved the profile-scoped service alias." >&2
+    exit 1
+fi
 [ "$(docker inspect --format '{{.HostConfig.Memory}}' "${legacy_worker_sample}")" -eq 536870912 ] || {
     echo "The configured memory limit did not reach the worker container." >&2
     exit 1
@@ -352,8 +379,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 11 ] || {
-    echo "Observed state did not report manager contract version eleven." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 12 ] || {
+    echo "Observed state did not report manager contract version twelve." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
@@ -378,6 +405,24 @@ MANAGER_ID=$(manager_id)
 }
 [ "$(jq '[.slots[].resources | select(. != null)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
     echo "Observed state did not report resources for every live worker." >&2
+    exit 1
+}
+manager_full_id=$(docker inspect --format '{{.Id}}' "${MANAGER_ID}")
+docker network inspect --format '{{json .Containers}}' "${SERVICE_NETWORK}" |
+    jq -e --arg manager "${manager_full_id}" 'has($manager) | not' >/dev/null || {
+    echo "The socket-owning manager joined the worker service network." >&2
+    exit 1
+}
+for worker_id in $(worker_ids); do
+    docker inspect --format '{{json .NetworkSettings.Networks}}' "${worker_id}" |
+        jq -e --arg network "${SERVICE_NETWORK}" 'has($network)' >/dev/null || {
+        echo "Worker ${worker_id} did not join the configured service network." >&2
+        exit 1
+    }
+done
+service_worker=$(worker_ids | head -n 1)
+[ "$(docker exec "${service_worker}" wget -qO- http://package-mirror:8080/health)" = "ready" ] || {
+    echo "A managed worker could not reach the stable service alias." >&2
     exit 1
 }
 [ "$(jq '.eligibleSlots == ([.slots[] | select(.registrationStatus == "connected")] | length)' "${OBSERVED_STATE}")" = "true" ] || {
@@ -615,6 +660,10 @@ mapfile -t workers_after_refresh < <(worker_ids)
 }
 docker volume inspect "${VOLUME_NAME}" >/dev/null || {
     echo "Manager refresh removed the operator-owned external volume." >&2
+    exit 1
+}
+docker network inspect "${SERVICE_NETWORK}" >/dev/null || {
+    echo "Manager refresh removed the operator-owned external service network." >&2
     exit 1
 }
 MANAGER_ID="${manager_after_refresh}"

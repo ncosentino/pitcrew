@@ -45,6 +45,19 @@ that needs them.
 
 Never bake credentials into a runner image.
 
+## Isolate pool-local services
+
+An optional profile service network gives workers stable Docker DNS access to
+operator-owned services. Containers attached to one bridge network can reach
+each other's exposed ports, so use one network per profile or equivalent trust
+boundary.
+
+Never attach workers to the manager's Compose network. Keep service
+administration, publishing, deletion, and upstream credentials unreachable
+from workers. A shared trusted service can join several isolated profile
+networks under the same alias without placing those worker profiles on one
+network.
+
 ## Trust workflow triggers
 
 Do not run untrusted fork pull requests on self-hosted workers. A public
