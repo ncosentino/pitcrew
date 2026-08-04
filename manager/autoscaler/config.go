@@ -12,7 +12,7 @@ import (
 	"github.com/actions/scaleset"
 )
 
-const managerContractVersion = 12
+const managerContractVersion = 13
 
 type config struct {
 	accessToken          string

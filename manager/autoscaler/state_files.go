@@ -15,6 +15,7 @@ type statePaths struct {
 	lastValid       string
 	acknowledgement string
 	observed        string
+	hardware        string
 	retirements     string
 	shutdownRequest string
 }
@@ -44,6 +45,7 @@ func newStatePaths(directory string) statePaths {
 		lastValid:       filepath.Join(directory, "last-valid-capacity.json"),
 		acknowledgement: filepath.Join(directory, "acknowledged-capacity.json"),
 		observed:        filepath.Join(directory, "observed-state.json"),
+		hardware:        filepath.Join(directory, "host-hardware.json"),
 		retirements:     filepath.Join(directory, "retiring-targets.json"),
 		shutdownRequest: filepath.Join(directory, "manager-shutdown.json"),
 	}

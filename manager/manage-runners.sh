@@ -10,8 +10,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/registration.sh"
 . "${SCRIPT_DIRECTORY}/diagnostics.sh"
 
-MANAGER_CONTRACT_VERSION=12
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-12}"
+MANAGER_CONTRACT_VERSION=13
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-13}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -40,7 +40,10 @@ RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
 OBSERVED_STATE_INTERVAL="${PITCREW_OBSERVED_STATE_INTERVAL:-30}"
 RESOURCE_TELEMETRY_PATH="/tmp/pitcrew-resource-telemetry.json"
 RESOURCE_POLICY_PATH="/tmp/pitcrew-resource-policy.json"
+HOST_HARDWARE_PATH="${STATE_DIRECTORY}/host-hardware.json"
+HOST_HARDWARE_FALLBACK_PATH="/tmp/pitcrew-host-hardware.json"
 RESOURCE_TELEMETRY_COMMAND_TIMEOUT=3
+HOST_HARDWARE_INTERVAL=300
 EXIT_EVIDENCE_EVENT_GRACE_SECONDS=2
 EXIT_EVIDENCE_COMMAND_TIMEOUT=5
 REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
@@ -241,6 +244,7 @@ MANAGER_STATUS="starting"
 LAST_OBSERVED_STATE_PUBLISH_EPOCH=0
 LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH=0
 LAST_RESOURCE_TELEMETRY_STATUS=""
+LAST_HOST_HARDWARE_SAMPLE_EPOCH=0
 LAST_REGISTRATION_RECONCILE_EPOCH=0
 rand_hex() {
     tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 6
@@ -296,14 +300,46 @@ report_resource_telemetry_status() {
 publish_observed_state() {
     force="${1:-0}"
     observed_now=$(date +%s)
+    observed_hardware_path="${HOST_HARDWARE_PATH}"
     if [ "${force}" != "1" ] &&
         [ ! -f "${OBSERVED_STATE_DIRTY}" ] &&
         [ $((observed_now - LAST_OBSERVED_STATE_PUBLISH_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ] &&
         [ -f "${RESOURCE_TELEMETRY_PATH}" ] &&
-        [ $((observed_now - LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ]; then
+        [ $((observed_now - LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH)) -lt "${OBSERVED_STATE_INTERVAL}" ] &&
+        [ -f "${HOST_HARDWARE_PATH}" ] &&
+        [ $((observed_now - LAST_HOST_HARDWARE_SAMPLE_EPOCH)) -lt "${HOST_HARDWARE_INTERVAL}" ]; then
         return
     fi
-
+    if [ "${STOPPING}" -eq 0 ] &&
+        (
+            [ ! -f "${HOST_HARDWARE_PATH}" ] ||
+            [ $((observed_now - LAST_HOST_HARDWARE_SAMPLE_EPOCH)) -ge "${HOST_HARDWARE_INTERVAL}" ]
+        ); then
+        if ! collect_host_hardware \
+            "${HOST_HARDWARE_PATH}" \
+            "${RESOURCE_TELEMETRY_COMMAND_TIMEOUT}"; then
+            echo "[manager:${PROFILE_ID}] could not collect host hardware inventory" >&2
+            if ! write_stale_or_unavailable_host_hardware \
+                "${HOST_HARDWARE_PATH}" \
+                "${HOST_HARDWARE_FALLBACK_PATH}"; then
+                mark_observed_state_dirty
+                echo "[manager:${PROFILE_ID}] could not render fallback host hardware inventory" >&2
+                return
+            fi
+            observed_hardware_path="${HOST_HARDWARE_FALLBACK_PATH}"
+        fi
+        LAST_HOST_HARDWARE_SAMPLE_EPOCH="${observed_now}"
+    elif [ ! -f "${HOST_HARDWARE_PATH}" ]; then
+        if ! write_unavailable_host_hardware "${HOST_HARDWARE_PATH}"; then
+            if ! write_unavailable_host_hardware "${HOST_HARDWARE_FALLBACK_PATH}"; then
+                mark_observed_state_dirty
+                echo "[manager:${PROFILE_ID}] could not render unavailable host hardware inventory" >&2
+                return
+            fi
+            observed_hardware_path="${HOST_HARDWARE_FALLBACK_PATH}"
+        fi
+    fi
+    rm -f "${OBSERVED_STATE_DIRTY}"
     rm -f "${OBSERVED_STATE_DIRTY}"
     resource_now=$(date +%s)
     if [ "${STOPPING}" -eq 1 ]; then
@@ -435,7 +471,8 @@ publish_observed_state() {
         "${observed_health_path}" \
         "${observed_capacity_path}" \
         "${IMAGE}" \
-        "${WORKER_IMAGE_ID}"; then
+        "${WORKER_IMAGE_ID}" \
+        "${observed_hardware_path}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty
@@ -454,6 +491,7 @@ publish_observed_state() {
         "${observed_journal_path}" \
         "${observed_health_path}" \
         "${observed_capacity_path}"
+    rm -f "${HOST_HARDWARE_FALLBACK_PATH}"
 }
 
 wait_for_cleanup_commands() {

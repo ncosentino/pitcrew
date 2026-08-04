@@ -301,6 +301,167 @@
         }
       }
     },
+    "hostHardwareInventory": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "collectedAt",
+        "attemptedAt",
+        "inventoryHash",
+        "processorModel",
+        "architecture",
+        "physicalCoreCount",
+        "logicalProcessorCount",
+        "performanceCoreCount",
+        "efficiencyCoreCount",
+        "memoryBytes",
+        "operatingSystem",
+        "kernelVersion",
+        "dockerServerVersion",
+        "dockerStorageDriver",
+        "dockerBackingFilesystem"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["current", "stale", "unavailable"]
+        },
+        "collectedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "attemptedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "inventoryHash": {
+          "type": ["string", "null"],
+          "pattern": "^[0-9a-f]{64}$"
+        },
+        "processorModel": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "architecture": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "physicalCoreCount": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "logicalProcessorCount": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "performanceCoreCount": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "efficiencyCoreCount": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "memoryBytes": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "operatingSystem": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "kernelVersion": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "dockerServerVersion": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "dockerStorageDriver": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        },
+        "dockerBackingFilesystem": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001f\\u007f]+$"
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "collectedAt": { "type": "null" },
+              "inventoryHash": { "type": "null" },
+              "processorModel": { "type": "null" },
+              "architecture": { "type": "null" },
+              "physicalCoreCount": { "type": "null" },
+              "logicalProcessorCount": { "type": "null" },
+              "performanceCoreCount": { "type": "null" },
+              "efficiencyCoreCount": { "type": "null" },
+              "memoryBytes": { "type": "null" },
+              "operatingSystem": { "type": "null" },
+              "kernelVersion": { "type": "null" },
+              "dockerServerVersion": { "type": "null" },
+              "dockerStorageDriver": { "type": "null" },
+              "dockerBackingFilesystem": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "collectedAt": { "type": "string" },
+              "inventoryHash": { "type": "string" }
+            },
+            "anyOf": [
+              { "properties": { "processorModel": { "type": "string" } } },
+              { "properties": { "architecture": { "type": "string" } } },
+              { "properties": { "physicalCoreCount": { "type": "integer" } } },
+              { "properties": { "logicalProcessorCount": { "type": "integer" } } },
+              { "properties": { "performanceCoreCount": { "type": "integer" } } },
+              { "properties": { "efficiencyCoreCount": { "type": "integer" } } },
+              { "properties": { "memoryBytes": { "type": "integer" } } },
+              { "properties": { "operatingSystem": { "type": "string" } } },
+              { "properties": { "kernelVersion": { "type": "string" } } },
+              { "properties": { "dockerServerVersion": { "type": "string" } } },
+              { "properties": { "dockerStorageDriver": { "type": "string" } } },
+              { "properties": { "dockerBackingFilesystem": { "type": "string" } } }
+            ]
+          }
+        }
+      ]
+    },
+    "observedHost": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["hardware"],
+      "properties": {
+        "hardware": {
+          "$ref": "#/$defs/hostHardwareInventory"
+        }
+      }
+    },
     "managerResourceTelemetry": {
       "type": "object",
       "additionalProperties": false,
@@ -1279,6 +1440,9 @@
         }
       ]
     },
+    "host": {
+      "$ref": "#/$defs/observedHost"
+    },
     "resourcePolicy": {
       "oneOf": [
         {
@@ -1423,6 +1587,23 @@
     }
   },
   "allOf": [
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 13
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "host"
+        ]
+      }
+    },
     {
       "if": {
         "properties": {

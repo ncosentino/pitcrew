@@ -46,6 +46,9 @@ type autoscalerManager struct {
 	resourcesSampled  bool
 	resourcesAt       time.Time
 	resourceInventory string
+	latestHardware    hostHardwareInventory
+	hardwareLoaded    bool
+	hardwareAt        time.Time
 
 	dirty                 chan struct{}
 	errors                chan error
@@ -56,6 +59,7 @@ type autoscalerManager struct {
 	shutdownMu            sync.Mutex
 	shutdownTimeout       time.Duration
 	writeObserved         func(string, any) error
+	writeHardware         func(string, any) error
 }
 
 // recoveredAdmissionKey names the admission member that holds workers recovered
@@ -109,6 +113,7 @@ func newAutoscalerManager(
 		restarts:              make(map[string]restartState),
 		shutdownTimeout:       managerShutdownTimeout,
 		writeObserved:         writeJSONAtomically,
+		writeHardware:         writeJSONAtomically,
 	}
 }
 
@@ -890,6 +895,10 @@ func (m *autoscalerManager) tryPublishObserved() {
 func (m *autoscalerManager) publishObserved() error {
 	snapshots := m.snapshots()
 	resourceSample := m.sampleResourceTelemetry(snapshots)
+	hardware, err := m.sampleHostHardware()
+	if err != nil {
+		return err
+	}
 	observedCurrent := m.applied
 	if observedCurrent == nil {
 		observedCurrent = m.current
@@ -905,6 +914,7 @@ func (m *autoscalerManager) publishObserved() error {
 		m.clock.now(),
 	)
 	state.Autoscaling.ScaleSetCount += len(m.pending)
+	state.Host = observedHost{Hardware: hardware}
 	desiredKeys := m.desiredTargetKeys(observedCurrent)
 	for targetKey, containers := range m.recovered {
 		_, desired := desiredKeys[targetKey]
@@ -1030,6 +1040,52 @@ func (m *autoscalerManager) sampleResourceTelemetry(
 		m.resourceInventory = inventory
 	}
 	return m.latestResources
+}
+
+func (m *autoscalerManager) sampleHostHardware() (hostHardwareInventory, error) {
+	now := m.clock.now().UTC()
+	if !m.hardwareLoaded {
+		restored, err := readHostHardwareInventory(m.paths.hardware)
+		if err == nil {
+			m.latestHardware = restored
+		}
+		m.hardwareLoaded = true
+	}
+	if m.managerStatus == "stopping" || m.managerStatus == "stopped" {
+		if m.latestHardware.AttemptedAt != "" {
+			return m.latestHardware, nil
+		}
+		return unavailableHostHardwareInventory(now), nil
+	}
+	sampleDue := m.latestHardware.AttemptedAt == "" ||
+		now.Before(m.hardwareAt) ||
+		now.Sub(m.hardwareAt) >= hostHardwareInventoryInterval
+	if !sampleDue {
+		return m.latestHardware, nil
+	}
+	candidate := m.docker.sampleHardware(context.Background(), now)
+	inventory, err := reconcileHostHardwareInventory(
+		m.latestHardware,
+		candidate,
+		now,
+	)
+	if err != nil {
+		return hostHardwareInventory{}, err
+	}
+	writeHardware := m.writeHardware
+	if writeHardware == nil {
+		writeHardware = writeJSONAtomically
+	}
+	if err := writeHardware(m.paths.hardware, inventory); err != nil && m.logger != nil {
+		m.logger.Warn(
+			"Host hardware inventory persistence failed; publishing the in-memory sample",
+			"error",
+			err,
+		)
+	}
+	m.latestHardware = inventory
+	m.hardwareAt = now
+	return inventory, nil
 }
 
 func (m *autoscalerManager) resourceContainers(

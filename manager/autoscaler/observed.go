@@ -113,6 +113,7 @@ type observedState struct {
 	ConfiguredSlots        int                     `json:"configuredSlots"`
 	Slots                  []observedSlot          `json:"slots"`
 	ResourceTelemetry      resourceTelemetry       `json:"resourceTelemetry"`
+	Host                   observedHost            `json:"host"`
 	ResourcePolicy         *observedResourcePolicy `json:"resourcePolicy"`
 	Autoscaling            observedAutoscaling     `json:"autoscaling"`
 	Update                 observedUpdate          `json:"update"`
@@ -166,6 +167,9 @@ func buildObservedState(
 			Status:    "unavailable",
 			Host:      nil,
 			Manager:   nil,
+		},
+		Host: observedHost{
+			Hardware: unavailableHostHardwareInventory(now),
 		},
 		ResourcePolicy: observedResourcePolicyFrom(cfg.resources),
 		Autoscaling: observedAutoscaling{
