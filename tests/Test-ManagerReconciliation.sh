@@ -480,7 +480,28 @@ collected_resources="${TEMP_DIRECTORY}/collected-resources.json"
 partial_resources="${TEMP_DIRECTORY}/partial-resources.json"
 timed_resources="${TEMP_DIRECTORY}/timed-resources.json"
 host_partial_resources="${TEMP_DIRECTORY}/host-partial-resources.json"
+host_hardware="${TEMP_DIRECTORY}/host-hardware.json"
+unavailable_host_hardware="${TEMP_DIRECTORY}/unavailable-host-hardware.json"
+cpuinfo_fixture="${TEMP_DIRECTORY}/cpuinfo"
+kernel_fixture="${TEMP_DIRECTORY}/kernel-version"
 mkdir -p "${fake_docker_directory}"
+cat > "${cpuinfo_fixture}" <<'EOF'
+processor : 0
+physical id : 0
+core id : 0
+model name : Example Processor 9000
+
+processor : 1
+physical id : 0
+core id : 0
+model name : Example Processor 9000
+
+processor : 2
+physical id : 0
+core id : 1
+model name : Example Processor 9000
+EOF
+printf '%s\n' '6.12.34-test' > "${kernel_fixture}"
 cat > "${fake_docker_directory}/docker" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -488,7 +509,18 @@ case "$1" in
         if [ "${PITCREW_TEST_INFO_FAIL:-0}" = "1" ]; then
             exit 1
         fi
-        printf '%s\n' '{"logicalProcessorCount":16,"memoryBytes":34359738368}'
+        case "$*" in
+            *Backing\ Filesystem*)
+                printf '%s\n' 'extfs'
+                ;;
+            *operatingSystem*)
+                printf '%s\n' \
+                    '{"logicalProcessorCount":16,"memoryBytes":34359738368,"operatingSystem":"Docker Desktop","dockerServerVersion":"28.3.3","dockerStorageDriver":"overlayfs"}'
+                ;;
+            *)
+                printf '%s\n' '{"logicalProcessorCount":16,"memoryBytes":34359738368}'
+                ;;
+        esac
         ;;
     ps)
         printf '%s\n' 'worker123 slot-one runner-one'
@@ -510,6 +542,71 @@ case "$1" in
 esac
 EOF
 chmod +x "${fake_docker_directory}/docker"
+
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_host_hardware \
+        "${host_hardware}" \
+        1 \
+        "${cpuinfo_fixture}" \
+        "${kernel_fixture}" \
+        x86_64
+assert_equals "current" "$(jq -r '.status' "${host_hardware}")" "Complete hardware collection did not report current."
+assert_equals "Example Processor 9000" "$(jq -r '.processorModel' "${host_hardware}")" "Hardware collection lost the processor model."
+assert_equals "amd64" "$(jq -r '.architecture' "${host_hardware}")" "Hardware collection did not normalize architecture."
+assert_equals "2" "$(jq -r '.physicalCoreCount' "${host_hardware}")" "Hardware collection derived the wrong physical core count."
+assert_equals "16" "$(jq -r '.logicalProcessorCount' "${host_hardware}")" "Hardware collection lost Docker logical capacity."
+assert_equals "null" "$(jq -r '.performanceCoreCount' "${host_hardware}")" "Hardware collection guessed a performance-core count."
+assert_equals "null" "$(jq -r '.efficiencyCoreCount' "${host_hardware}")" "Hardware collection guessed an efficiency-core count."
+assert_equals "extfs" "$(jq -r '.dockerBackingFilesystem' "${host_hardware}")" "Hardware collection lost Docker backing filesystem."
+assert_true "Collected host hardware did not satisfy its persisted contract." host_hardware_inventory_is_valid "${host_hardware}"
+initial_hardware_hash=$(jq -r '.inventoryHash' "${host_hardware}")
+initial_hardware_collected_at=$(jq -r '.collectedAt' "${host_hardware}")
+
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_host_hardware \
+        "${host_hardware}" \
+        1 \
+        "${cpuinfo_fixture}" \
+        "${kernel_fixture}" \
+        x86_64
+assert_equals "${initial_hardware_hash}" "$(jq -r '.inventoryHash' "${host_hardware}")" "Stable hardware changed its inventory hash."
+assert_equals "${initial_hardware_collected_at}" "$(jq -r '.collectedAt' "${host_hardware}")" "Stable hardware changed its collection identity."
+
+PITCREW_TEST_INFO_FAIL=1 \
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_host_hardware \
+        "${host_hardware}" \
+        1 \
+        "${cpuinfo_fixture}" \
+        "${kernel_fixture}" \
+        x86_64
+assert_equals "stale" "$(jq -r '.status' "${host_hardware}")" "A failed hardware refresh did not preserve stale inventory."
+assert_equals "${initial_hardware_hash}" "$(jq -r '.inventoryHash' "${host_hardware}")" "A failed hardware refresh discarded the last valid inventory."
+
+PITCREW_TEST_INFO_FAIL=1 \
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_host_hardware \
+        "${unavailable_host_hardware}" \
+        1 \
+        "${cpuinfo_fixture}" \
+        "${kernel_fixture}" \
+        x86_64
+assert_equals "unavailable" "$(jq -r '.status' "${unavailable_host_hardware}")" "A failed initial hardware probe was not unavailable."
+assert_equals "null" "$(jq -r '.inventoryHash' "${unavailable_host_hardware}")" "Unavailable hardware published an inventory hash."
+
+tampered_host_hardware="${TEMP_DIRECTORY}/tampered-host-hardware.json"
+jq '.architecture = "arm64"' "${host_hardware}" > "${tampered_host_hardware}"
+assert_false "Tampered host hardware inventory was accepted." host_hardware_inventory_is_valid "${tampered_host_hardware}"
+invalid_timestamp_hardware="${TEMP_DIRECTORY}/invalid-timestamp-hardware.json"
+jq '.attemptedAt = "not-a-timestamp"' "${host_hardware}" > "${invalid_timestamp_hardware}"
+assert_false "Host hardware accepted a malformed attempt timestamp." host_hardware_inventory_is_valid "${invalid_timestamp_hardware}"
+fallback_host_hardware="${TEMP_DIRECTORY}/fallback-host-hardware.json"
+write_stale_or_unavailable_host_hardware \
+    "${host_hardware}" \
+    "${fallback_host_hardware}" \
+    2026-08-04T00:10:00Z
+assert_equals "stale" "$(jq -r '.status' "${fallback_host_hardware}")" "Hardware persistence fallback did not retain stale inventory."
+assert_equals "${initial_hardware_hash}" "$(jq -r '.inventoryHash' "${fallback_host_hardware}")" "Hardware persistence fallback changed inventory identity."
 
 HOSTNAME=manager123 \
 PATH="${fake_docker_directory}:${PATH}" \
@@ -768,7 +865,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "12" \
+    "13" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1264,5 +1361,57 @@ assert_true \
     "Additive contract-twelve evidence was rejected for an older active contract." \
     observed_state_is_valid "${legacy_contract_twelve_state}"
 
+PATH="${fake_docker_directory}:${PATH}" \
+    collect_host_hardware \
+        "${host_hardware}" \
+        1 \
+        "${cpuinfo_fixture}" \
+        "${kernel_fixture}" \
+        x86_64
+contract_thirteen_state_json="${TEMP_DIRECTORY}/contract-thirteen-state.json"
+write_manager_observed_state \
+    "${contract_thirteen_state_json}" \
+    default \
+    manager-instance \
+    13 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_eleven_telemetry_json}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}"
+assert_true "Contract-thirteen observed manager state was rejected." observed_state_is_valid "${contract_thirteen_state_json}"
+assert_equals "current" "$(jq -r '.host.hardware.status' "${contract_thirteen_state_json}")" "Observed state lost hardware freshness."
+assert_equals "Example Processor 9000" "$(jq -r '.host.hardware.processorModel' "${contract_thirteen_state_json}")" "Observed state lost processor identity."
+assert_equals "16" "$(jq -r '.host.hardware.logicalProcessorCount' "${contract_thirteen_state_json}")" "Observed state lost logical processor topology."
+assert_false "Contract-thirteen observed state exposed an access token field." \
+    contains_access_token_field "${contract_thirteen_state_json}"
+assert_false "Contract-thirteen observed state exposed runner names or derived tags." \
+    contains_runner_identity_field "${contract_thirteen_state_json}"
+
+invalid_contract_thirteen_state="${TEMP_DIRECTORY}/invalid-contract-thirteen-state.json"
+jq 'del(.host)' "${contract_thirteen_state_json}" > "${invalid_contract_thirteen_state}"
+assert_false "Manager contract thirteen accepted missing host hardware." observed_state_is_valid "${invalid_contract_thirteen_state}"
+jq '.host.hardware.status = "unavailable"' "${contract_thirteen_state_json}" > "${invalid_contract_thirteen_state}"
+assert_false "Unavailable hardware retained inventory values." observed_state_is_valid "${invalid_contract_thirteen_state}"
+jq '.host.hardware.processorModel = "line\u000abreak"' "${contract_thirteen_state_json}" > "${invalid_contract_thirteen_state}"
+assert_false "Host hardware accepted control characters." observed_state_is_valid "${invalid_contract_thirteen_state}"
+
+legacy_contract_thirteen_state="${TEMP_DIRECTORY}/legacy-contract-thirteen-state.json"
+jq '.managerContractVersion = 12' "${contract_thirteen_state_json}" > "${legacy_contract_thirteen_state}"
+assert_true \
+    "Additive host hardware was rejected for an older active contract." \
+    observed_state_is_valid "${legacy_contract_thirteen_state}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

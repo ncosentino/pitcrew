@@ -219,6 +219,9 @@ type fakeDockerClient struct {
 	resourceSet      bool
 	resourceCalls    int
 	resourceRequests [][]resourceContainer
+	hardwareResult   hostHardwareSample
+	hardwareSet      bool
+	hardwareCalls    int
 }
 
 type fakeWaitResult struct {
@@ -518,6 +521,19 @@ func (d *fakeDockerClient) sampleResources(
 		result.slots[key] = usage
 	}
 	return result
+}
+
+func (d *fakeDockerClient) sampleHardware(
+	_ context.Context,
+	_ time.Time,
+) hostHardwareSample {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.hardwareCalls++
+	if !d.hardwareSet {
+		return hostHardwareSample{}
+	}
+	return d.hardwareResult
 }
 
 func newTestScaler(

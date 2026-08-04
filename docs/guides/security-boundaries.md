@@ -45,6 +45,17 @@ that needs them.
 
 Never bake credentials into a runner image.
 
+## Bound hardware inventory
+
+Managers publish a sanitized hardware inventory for cross-node diagnostics.
+It includes processor and core topology when observable, Docker-visible memory,
+OS/kernel identity, and Docker storage/runtime versions.
+
+PitCrew never publishes usernames, absolute paths, serial numbers, machine
+identifiers, network addresses, MAC addresses, Docker root paths, credentials,
+registration material, or job output. Unsupported fields remain `null`; they
+are never inferred from processor names.
+
 ## Isolate pool-local services
 
 An optional profile service network gives workers stable Docker DNS access to

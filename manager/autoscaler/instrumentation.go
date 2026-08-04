@@ -160,6 +160,13 @@ func (d *instrumentedDockerClient) sampleResources(
 	return sample
 }
 
+func (d *instrumentedDockerClient) sampleHardware(
+	ctx context.Context,
+	attemptedAt time.Time,
+) hostHardwareSample {
+	return d.inner.sampleHardware(ctx, attemptedAt)
+}
+
 type instrumentedScaleSetServiceFactory struct {
 	inner       scaleSetServiceFactory
 	diagnostics *diagnosticsRecorder

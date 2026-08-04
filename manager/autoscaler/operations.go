@@ -438,6 +438,23 @@ func (d *boundedDockerClient) sampleResources(
 	return sample
 }
 
+func (d *boundedDockerClient) sampleHardware(
+	ctx context.Context,
+	attemptedAt time.Time,
+) hostHardwareSample {
+	values, err := runContextOperation(
+		ctx,
+		dockerOperationTimeout,
+		func(operationContext context.Context) (hostHardwareSample, error) {
+			return d.inner.sampleHardware(operationContext, attemptedAt), nil
+		},
+	)
+	if err != nil {
+		return hostHardwareSample{}
+	}
+	return values
+}
+
 var _ scaleSetServiceFactory = (*boundedScaleSetServiceFactory)(nil)
 var _ scaleSetService = (*boundedScaleSetService)(nil)
 var _ messageSession = (*boundedMessageSession)(nil)

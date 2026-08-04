@@ -58,6 +58,7 @@ type dockerClient interface {
 		runners []resourceContainer,
 		sampledAt time.Time,
 	) resourceSample
+	sampleHardware(ctx context.Context, attemptedAt time.Time) hostHardwareSample
 }
 
 type commandExecutor interface {

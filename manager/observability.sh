@@ -83,6 +83,89 @@ observed_state_is_valid() {
             type == "object"
             and (.logicalProcessorCount | nonnegative_integer and . > 0)
             and (.memoryBytes | nonnegative_integer and . > 0);
+        def valid_nullable_hardware_text($maximum):
+            . == null
+            or (
+                type == "string"
+                and length >= 1
+                and length <= $maximum
+                and (explode | all(. >= 32 and . != 127))
+            );
+        def valid_nullable_positive_integer:
+            . == null or (nonnegative_integer and . > 0);
+        def valid_host_hardware:
+            type == "object"
+            and (
+                .status == "current"
+                or .status == "stale"
+                or .status == "unavailable"
+            )
+            and (
+                .collectedAt == null
+                or (
+                    (.collectedAt | type == "string")
+                    and ((.collectedAt | fromdateiso8601?) | type == "number")
+                )
+            )
+            and (
+                (.attemptedAt | type == "string")
+                and ((.attemptedAt | fromdateiso8601?) | type == "number")
+            )
+            and (
+                .inventoryHash == null
+                or (.inventoryHash | type == "string" and test("^[0-9a-f]{64}$"))
+            )
+            and (.processorModel | valid_nullable_hardware_text(256))
+            and (.architecture | valid_nullable_hardware_text(64))
+            and (.physicalCoreCount | valid_nullable_positive_integer)
+            and (.logicalProcessorCount | valid_nullable_positive_integer)
+            and (.performanceCoreCount | valid_nullable_positive_integer)
+            and (.efficiencyCoreCount | valid_nullable_positive_integer)
+            and (.memoryBytes | valid_nullable_positive_integer)
+            and (.operatingSystem | valid_nullable_hardware_text(256))
+            and (.kernelVersion | valid_nullable_hardware_text(256))
+            and (.dockerServerVersion | valid_nullable_hardware_text(256))
+            and (.dockerStorageDriver | valid_nullable_hardware_text(256))
+            and (.dockerBackingFilesystem | valid_nullable_hardware_text(256))
+            and (
+                if .status == "unavailable" then
+                    .collectedAt == null
+                    and .inventoryHash == null
+                    and .processorModel == null
+                    and .architecture == null
+                    and .physicalCoreCount == null
+                    and .logicalProcessorCount == null
+                    and .performanceCoreCount == null
+                    and .efficiencyCoreCount == null
+                    and .memoryBytes == null
+                    and .operatingSystem == null
+                    and .kernelVersion == null
+                    and .dockerServerVersion == null
+                    and .dockerStorageDriver == null
+                    and .dockerBackingFilesystem == null
+                else
+                    .collectedAt != null
+                    and .inventoryHash != null
+                    and (
+                        [
+                            .processorModel,
+                            .architecture,
+                            .physicalCoreCount,
+                            .logicalProcessorCount,
+                            .performanceCoreCount,
+                            .efficiencyCoreCount,
+                            .memoryBytes,
+                            .operatingSystem,
+                            .kernelVersion,
+                            .dockerServerVersion,
+                            .dockerStorageDriver,
+                            .dockerBackingFilesystem
+                        ]
+                        | map(select(. != null))
+                        | length > 0
+                    )
+                end
+            );
         def valid_resource_telemetry:
             type == "object"
             and has("host")
@@ -469,6 +552,23 @@ observed_state_is_valid() {
                         .capacityEvidence.fixed == null
                     end
                 )
+                and (
+                    if .managerContractVersion >= 13 then
+                        has("host")
+                        and (.host | type == "object")
+                        and (.host | keys == ["hardware"])
+                        and (.host.hardware | valid_host_hardware)
+                    else
+                        (
+                            has("host") == false
+                            or (
+                                (.host | type == "object")
+                                and (.host | keys == ["hardware"])
+                                and (.host.hardware | valid_host_hardware)
+                            )
+                        )
+                    end
+                )
             else
                 true
             end
@@ -492,6 +592,369 @@ observed_state_is_valid() {
         )
     ' "$1" >/dev/null 2>&1
 }
+
+host_hardware_values_json() {
+    jq -c -S '{
+        processorModel,
+        architecture,
+        physicalCoreCount,
+        logicalProcessorCount,
+        performanceCoreCount,
+        efficiencyCoreCount,
+        memoryBytes,
+        operatingSystem,
+        kernelVersion,
+        dockerServerVersion,
+        dockerStorageDriver,
+        dockerBackingFilesystem
+    }'
+}
+
+host_hardware_inventory_is_valid() {
+    inventory_path="$1"
+    jq -e '
+        def positive_integer:
+            type == "number" and . > 0 and floor == .;
+        def nullable_text($maximum):
+            . == null
+            or (
+                type == "string"
+                and length >= 1
+                and length <= $maximum
+                and (explode | all(. >= 32 and . != 127))
+            );
+        type == "object"
+        and (
+            .status == "current"
+            or .status == "stale"
+            or .status == "unavailable"
+        )
+        and (
+            .collectedAt == null
+            or (
+                (.collectedAt | type == "string")
+                and ((.collectedAt | fromdateiso8601?) | type == "number")
+            )
+        )
+        and (
+            (.attemptedAt | type == "string")
+            and ((.attemptedAt | fromdateiso8601?) | type == "number")
+        )
+        and (
+            .inventoryHash == null
+            or (.inventoryHash | type == "string" and test("^[0-9a-f]{64}$"))
+        )
+        and (.processorModel | nullable_text(256))
+        and (.architecture | nullable_text(64))
+        and (.physicalCoreCount == null or (.physicalCoreCount | positive_integer))
+        and (.logicalProcessorCount == null or (.logicalProcessorCount | positive_integer))
+        and (.performanceCoreCount == null or (.performanceCoreCount | positive_integer))
+        and (.efficiencyCoreCount == null or (.efficiencyCoreCount | positive_integer))
+        and (.memoryBytes == null or (.memoryBytes | positive_integer))
+        and (.operatingSystem | nullable_text(256))
+        and (.kernelVersion | nullable_text(256))
+        and (.dockerServerVersion | nullable_text(256))
+        and (.dockerStorageDriver | nullable_text(256))
+        and (.dockerBackingFilesystem | nullable_text(256))
+        and (
+            if .status == "unavailable" then
+                .collectedAt == null
+                and .inventoryHash == null
+                and .processorModel == null
+                and .architecture == null
+                and .physicalCoreCount == null
+                and .logicalProcessorCount == null
+                and .performanceCoreCount == null
+                and .efficiencyCoreCount == null
+                and .memoryBytes == null
+                and .operatingSystem == null
+                and .kernelVersion == null
+                and .dockerServerVersion == null
+                and .dockerStorageDriver == null
+                and .dockerBackingFilesystem == null
+            else
+                .collectedAt != null
+                and .inventoryHash != null
+            end
+        )
+    ' "${inventory_path}" >/dev/null 2>&1 || return 1
+    status=$(jq -r '.status' "${inventory_path}")
+    [ "${status}" = "unavailable" ] && return 0
+    expected_hash=$(jq -cj '{
+        processorModel,
+        architecture,
+        physicalCoreCount,
+        logicalProcessorCount,
+        performanceCoreCount,
+        efficiencyCoreCount,
+        memoryBytes,
+        operatingSystem,
+        kernelVersion,
+        dockerServerVersion,
+        dockerStorageDriver,
+        dockerBackingFilesystem
+    }' "${inventory_path}" | sha256sum | cut -d ' ' -f1)
+    [ "${expected_hash}" = "$(jq -r '.inventoryHash' "${inventory_path}")" ]
+}
+
+write_unavailable_host_hardware() (
+    output_path="$1"
+    attempted_at="${2:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    temporary="${output_path%/*}/.host-hardware.$$.tmp"
+    jq -n \
+        --arg attemptedAt "${attempted_at}" \
+        '{
+            status: "unavailable",
+            collectedAt: null,
+            attemptedAt: $attemptedAt,
+            inventoryHash: null,
+            processorModel: null,
+            architecture: null,
+            physicalCoreCount: null,
+            logicalProcessorCount: null,
+            performanceCoreCount: null,
+            efficiencyCoreCount: null,
+            memoryBytes: null,
+            operatingSystem: null,
+            kernelVersion: null,
+            dockerServerVersion: null,
+            dockerStorageDriver: null,
+            dockerBackingFilesystem: null
+        }' > "${temporary}" || {
+            rm -f "${temporary}"
+            return 1
+        }
+    mv -f "${temporary}" "${output_path}"
+)
+
+write_stale_or_unavailable_host_hardware() (
+    source_path="$1"
+    output_path="$2"
+    attempted_at="${3:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}"
+    temporary="${output_path%/*}/.host-hardware-fallback.$$.tmp"
+    if [ -f "${source_path}" ] &&
+        host_hardware_inventory_is_valid "${source_path}" &&
+        [ "$(jq -r '.inventoryHash // ""' "${source_path}")" != "" ]; then
+        jq \
+            --arg attemptedAt "${attempted_at}" \
+            '.status = "stale" | .attemptedAt = $attemptedAt' \
+            "${source_path}" > "${temporary}" || {
+                rm -f "${temporary}"
+                return 1
+            }
+    else
+        write_unavailable_host_hardware "${temporary}" "${attempted_at}" || return 1
+    fi
+    mv -f "${temporary}" "${output_path}"
+)
+
+collect_host_hardware() (
+    output_path="$1"
+    command_timeout="$2"
+    cpuinfo_path="${3:-/proc/cpuinfo}"
+    kernel_path="${4:-/proc/sys/kernel/osrelease}"
+    architecture_value="${5:-$(uname -m 2>/dev/null || true)}"
+    case "${command_timeout}" in
+        ''|*[!0-9]*|0) exit 1 ;;
+    esac
+    attempted_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    working_directory="${output_path%/*}/.host-hardware.$$"
+    candidate_path="${working_directory}/candidate.json"
+    docker_info_path="${working_directory}/docker-info.json"
+    temporary="${output_path%/*}/.host-hardware.$$.tmp"
+    mkdir -p "${working_directory}" || exit 1
+    trap 'rm -rf "${working_directory}" "${temporary}"' EXIT
+    printf '{}\n' > "${docker_info_path}"
+
+    docker_info_available=0
+    if timeout "${command_timeout}" docker info \
+        --format '{"logicalProcessorCount":{{.NCPU}},"memoryBytes":{{.MemTotal}},"operatingSystem":{{json .OperatingSystem}},"dockerServerVersion":{{json .ServerVersion}},"dockerStorageDriver":{{json .Driver}}}' \
+        > "${docker_info_path}.candidate" 2>/dev/null &&
+        jq -e '
+            (.logicalProcessorCount | type == "number" and . > 0 and floor == .)
+            and (.memoryBytes | type == "number" and . > 0 and floor == .)
+            and (.operatingSystem | type == "string")
+            and (.dockerServerVersion | type == "string")
+            and (.dockerStorageDriver | type == "string")
+        ' "${docker_info_path}.candidate" >/dev/null 2>&1; then
+        mv -f "${docker_info_path}.candidate" "${docker_info_path}"
+        docker_info_available=1
+    else
+        rm -f "${docker_info_path}.candidate"
+    fi
+
+    docker_backing_filesystem=$(
+        timeout "${command_timeout}" docker info \
+            --format '{{range .DriverStatus}}{{if eq (index . 0) "Backing Filesystem"}}{{index . 1}}{{end}}{{end}}' \
+            2>/dev/null || true
+    )
+    processor_model=""
+    physical_core_count=""
+    if [ -f "${cpuinfo_path}" ]; then
+        processor_model=$(
+            awk -F: '
+                {
+                    key=$1
+                    gsub(/^[ \t]+|[ \t]+$/, "", key)
+                    if (key == "model name" || key == "Processor" || key == "Hardware") {
+                        value=$2
+                        gsub(/^[ \t]+|[ \t]+$/, "", value)
+                        if (value != "") {
+                            print value
+                            exit
+                        }
+                    }
+                }
+            ' "${cpuinfo_path}"
+        )
+        physical_core_count=$(
+            awk -F: '
+                function flush_record() {
+                    if (!has_processor) return
+                    processors++
+                    if (physical_id != "" && core_id != "") {
+                        complete++
+                        cores[physical_id ":" core_id]=1
+                    }
+                    has_processor=0
+                    physical_id=""
+                    core_id=""
+                }
+                /^[[:space:]]*$/ { flush_record(); next }
+                {
+                    key=$1
+                    value=$2
+                    gsub(/^[ \t]+|[ \t]+$/, "", key)
+                    gsub(/^[ \t]+|[ \t]+$/, "", value)
+                    if (key == "processor") has_processor=1
+                    if (key == "physical id") physical_id=value
+                    if (key == "core id") core_id=value
+                }
+                END {
+                    flush_record()
+                    if (processors > 0 && complete == processors) {
+                        count=0
+                        for (key in cores) count++
+                        if (count > 0) print count
+                    }
+                }
+            ' "${cpuinfo_path}"
+        )
+    fi
+    kernel_version=""
+    [ -f "${kernel_path}" ] && kernel_version=$(cat "${kernel_path}" 2>/dev/null || true)
+    case "${architecture_value}" in
+        x86_64|amd64) architecture_value="amd64" ;;
+        aarch64|arm64) architecture_value="arm64" ;;
+        armv7*|armv6*) architecture_value="arm" ;;
+        i386|i486|i586|i686) architecture_value="386" ;;
+    esac
+
+    jq -n \
+        --arg processorModel "${processor_model}" \
+        --arg architecture "${architecture_value}" \
+        --arg physicalCoreCount "${physical_core_count}" \
+        --arg kernelVersion "${kernel_version}" \
+        --arg dockerBackingFilesystem "${docker_backing_filesystem}" \
+        --slurpfile dockerInfo "${docker_info_path}" \
+        '
+            def bounded_text($maximum):
+                gsub("\\s+"; " ")
+                | gsub("^ +| +$"; "")
+                | if length >= 1 and length <= $maximum
+                  then .
+                  else null
+                  end;
+            {
+                processorModel: ($processorModel | bounded_text(256)),
+                architecture: ($architecture | bounded_text(64)),
+                physicalCoreCount: (
+                    $physicalCoreCount
+                    | tonumber?
+                    | if . != null and . > 0 and floor == . then . else null end
+                ),
+                logicalProcessorCount: (
+                    $dockerInfo[0].logicalProcessorCount
+                    | if type == "number" and . > 0 and floor == . then . else null end
+                ),
+                performanceCoreCount: null,
+                efficiencyCoreCount: null,
+                memoryBytes: (
+                    $dockerInfo[0].memoryBytes
+                    | if type == "number" and . > 0 and floor == . then . else null end
+                ),
+                operatingSystem: (
+                    ($dockerInfo[0].operatingSystem // "")
+                    | bounded_text(256)
+                ),
+                kernelVersion: ($kernelVersion | bounded_text(256)),
+                dockerServerVersion: (
+                    ($dockerInfo[0].dockerServerVersion // "")
+                    | bounded_text(256)
+                ),
+                dockerStorageDriver: (
+                    ($dockerInfo[0].dockerStorageDriver // "")
+                    | bounded_text(256)
+                ),
+                dockerBackingFilesystem: (
+                    $dockerBackingFilesystem | bounded_text(256)
+                )
+            }
+        ' > "${candidate_path}" || exit 1
+
+    candidate_available=$(jq '
+        [
+            .processorModel,
+            .architecture,
+            .physicalCoreCount,
+            .logicalProcessorCount,
+            .performanceCoreCount,
+            .efficiencyCoreCount,
+            .memoryBytes,
+            .operatingSystem,
+            .kernelVersion,
+            .dockerServerVersion,
+            .dockerStorageDriver,
+            .dockerBackingFilesystem
+        ]
+        | map(select(. != null))
+        | length > 0
+    ' "${candidate_path}")
+    if [ "${docker_info_available}" = "1" ] &&
+        [ "${candidate_available}" = "true" ]; then
+        candidate_hash=$(jq -cj . "${candidate_path}" | sha256sum | cut -d ' ' -f1)
+        collected_at="${attempted_at}"
+        if [ -f "${output_path}" ] &&
+            host_hardware_inventory_is_valid "${output_path}" &&
+            [ "$(jq -r '.inventoryHash // ""' "${output_path}")" = "${candidate_hash}" ]; then
+            collected_at=$(jq -r '.collectedAt' "${output_path}")
+        fi
+        jq -n \
+            --arg collectedAt "${collected_at}" \
+            --arg attemptedAt "${attempted_at}" \
+            --arg inventoryHash "${candidate_hash}" \
+            --slurpfile values "${candidate_path}" \
+            '$values[0] + {
+                status: "current",
+                collectedAt: $collectedAt,
+                attemptedAt: $attemptedAt,
+                inventoryHash: $inventoryHash
+            }' > "${temporary}" || exit 1
+    elif [ -f "${output_path}" ] &&
+        host_hardware_inventory_is_valid "${output_path}" &&
+        [ "$(jq -r '.inventoryHash // ""' "${output_path}")" != "" ]; then
+        jq \
+            --arg attemptedAt "${attempted_at}" \
+            '.status = "stale" | .attemptedAt = $attemptedAt' \
+            "${output_path}" > "${temporary}" || exit 1
+    else
+        unavailable_path="${working_directory}/unavailable.json"
+        write_unavailable_host_hardware "${unavailable_path}" "${attempted_at}" || exit 1
+        cp "${unavailable_path}" "${temporary}" || exit 1
+    fi
+    host_hardware_inventory_is_valid "${temporary}" || exit 1
+    mv -f "${temporary}" "${output_path}"
+)
 
 parse_size_bytes() (
     compact_value=$(printf '%s' "$1" | tr -d '[:space:]')
@@ -1104,6 +1567,7 @@ write_manager_observed_state() {
     capacity_evidence_path="${18:-}"
     target_image="${19:-}"
     target_image_id="${20:-}"
+    host_hardware_path="${21:-}"
 
     observed_optional_snapshots=""
     for optional_projection in operation_journal subsystem_health capacity_evidence; do
@@ -1131,6 +1595,13 @@ write_manager_observed_state() {
     else
         remove_resource_policy_snapshot=0
     fi
+    if [ -z "${host_hardware_path}" ] || [ ! -f "${host_hardware_path}" ]; then
+        host_hardware_path="${output_path%/*}/.host_hardware.$$.tmp"
+        write_unavailable_host_hardware "${host_hardware_path}" || return 1
+        remove_host_hardware_snapshot=1
+    else
+        remove_host_hardware_snapshot=0
+    fi
 
     observed_temporary="${output_path%/*}/.observed-state.$$.tmp"
     if ! jq -n \
@@ -1151,6 +1622,7 @@ write_manager_observed_state() {
         --slurpfile operationJournal "${operation_journal_path}" \
         --slurpfile subsystemHealth "${subsystem_health_path}" \
         --slurpfile capacityEvidence "${capacity_evidence_path}" \
+        --slurpfile hostHardware "${host_hardware_path}" \
         --arg workerRevision "${worker_revision}" \
         --arg targetImage "${target_image}" \
         --arg targetImageId "${target_image_id}" \
@@ -1176,6 +1648,9 @@ write_manager_observed_state() {
             ),
             drainingSlots: ($slots[0] | map(select(.state == "draining")) | length),
             slots: $slots[0],
+            host: {
+                hardware: $hostHardware[0]
+            },
             resourceTelemetry: ($resourceTelemetry[0] | del(.slots)),
             resourcePolicy: $resourcePolicy[0],
             operationJournal: $operationJournal[0],
@@ -1197,11 +1672,13 @@ write_manager_observed_state() {
         }' > "${observed_temporary}"; then
         remove_observed_policy_snapshot "${resource_policy_path}" "${remove_resource_policy_snapshot}"
         remove_observed_optional_snapshots "${observed_optional_snapshots}"
+        [ "${remove_host_hardware_snapshot}" = "1" ] && rm -f "${host_hardware_path}"
         rm -f "${observed_temporary}"
         return 1
     fi
     remove_observed_policy_snapshot "${resource_policy_path}" "${remove_resource_policy_snapshot}"
     remove_observed_optional_snapshots "${observed_optional_snapshots}"
+    [ "${remove_host_hardware_snapshot}" = "1" ] && rm -f "${host_hardware_path}"
     if ! observed_state_is_valid "${observed_temporary}"; then
         rm -f "${observed_temporary}"
         return 1

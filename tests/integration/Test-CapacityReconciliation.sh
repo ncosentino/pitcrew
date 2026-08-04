@@ -179,7 +179,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="12" \
+        PITCREW_MANAGER_CONTRACT_VERSION="13" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -379,8 +379,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 12 ] || {
-    echo "Observed state did not report manager contract version twelve." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 13 ] || {
+    echo "Observed state did not report manager contract version thirteen." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
@@ -403,6 +403,24 @@ MANAGER_ID=$(manager_id)
     echo "Observed state did not report manager memory usage." >&2
     exit 1
 }
+[ "$(jq -r '.host.hardware.status' "${OBSERVED_STATE}")" = "current" ] || {
+    echo "Observed state did not report current host hardware inventory." >&2
+    exit 1
+}
+[ "$(jq -r '.host.hardware.logicalProcessorCount' "${OBSERVED_STATE}")" -gt 0 ] || {
+    echo "Observed state did not report hardware logical processor topology." >&2
+    exit 1
+}
+[ -n "$(jq -r '.host.hardware.processorModel // empty' "${OBSERVED_STATE}")" ] || {
+    echo "Observed state did not report the processor model." >&2
+    exit 1
+}
+[ "$(jq -r '.host.hardware.inventoryHash' "${OBSERVED_STATE}")" != "null" ] || {
+    echo "Observed state did not report a hardware inventory hash." >&2
+    exit 1
+}
+hardware_hash_before_refresh=$(jq -r '.host.hardware.inventoryHash' "${OBSERVED_STATE}")
+hardware_collected_before_refresh=$(jq -r '.host.hardware.collectedAt' "${OBSERVED_STATE}")
 [ "$(jq '[.slots[].resources | select(. != null)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {
     echo "Observed state did not report resources for every live worker." >&2
     exit 1
@@ -667,6 +685,14 @@ docker network inspect "${SERVICE_NETWORK}" >/dev/null || {
     exit 1
 }
 MANAGER_ID="${manager_after_refresh}"
+[ "$(jq -r '.host.hardware.inventoryHash' "${OBSERVED_STATE}")" = "${hardware_hash_before_refresh}" ] || {
+    echo "Manager refresh changed stable hardware inventory identity." >&2
+    exit 1
+}
+[ "$(jq -r '.host.hardware.collectedAt' "${OBSERVED_STATE}")" = "${hardware_collected_before_refresh}" ] || {
+    echo "Manager refresh duplicated an unchanged hardware inventory revision." >&2
+    exit 1
+}
 
 mapfile -t workers_before_invalid_state < <(worker_ids)
 printf '{"schemaVersion":1,"generation":4' > "${DESIRED_STATE}"

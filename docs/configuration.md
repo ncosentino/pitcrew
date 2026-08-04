@@ -159,7 +159,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 12 managers. A profile that
+11 and remain supported by the active contract 13 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -440,12 +440,59 @@ which reports the `unknown` reason because the manager observed nothing to
 blame. `reason` is observed manager state, never a diagnosis inferred by a
 dashboard.
 
-Manager contract 12 is active in this release. Both manager modes implement
-the external service-network launch contract and continue publishing the
-contract-12 diagnostic projections. Setup fails closed before Docker, image,
-or generated state mutation if a contract ahead of both implementations is
-selected. Contract-11 resource, image, exit, and worker-revision semantics
-remain compatible.
+Manager contract 12 introduced the external service-network launch contract
+while retaining its diagnostic projections.
+
+### Contract-13 host hardware inventory
+
+Contract 13 adds a top-level `host.hardware` projection. It describes only
+sanitized capacity and runtime facts visible to the manager:
+
+```json
+{
+  "host": {
+    "hardware": {
+      "status": "current",
+      "collectedAt": "2026-08-03T12:00:00Z",
+      "attemptedAt": "2026-08-03T12:05:00Z",
+      "inventoryHash": "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+      "processorModel": "Example Processor",
+      "architecture": "amd64",
+      "physicalCoreCount": 10,
+      "logicalProcessorCount": 20,
+      "performanceCoreCount": null,
+      "efficiencyCoreCount": null,
+      "memoryBytes": 34359738368,
+      "operatingSystem": "Docker Desktop",
+      "kernelVersion": "6.12.34",
+      "dockerServerVersion": "28.3.3",
+      "dockerStorageDriver": "overlayfs",
+      "dockerBackingFilesystem": "extfs"
+    }
+  }
+}
+```
+
+Every potentially unsupported field is present and nullable. PitCrew does not
+infer performance- and efficiency-core counts from processor marketing names.
+`current` means the latest bounded Docker probe succeeded, `stale` retains the
+last valid inventory after a failed refresh, and `unavailable` contains no
+retained values.
+
+The inventory hash covers only the ordered hardware values, not timestamps or
+freshness. An unchanged inventory preserves `collectedAt` across periodic
+samples and manager handoff. A changed processor, topology, memory allocation,
+OS/kernel, Docker version, storage driver, or backing filesystem produces a new
+hash and collection timestamp.
+
+The projection excludes usernames, absolute paths, serial numbers, machine
+GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
+registration material, and job output.
+
+Manager contract 13 is active in this release. Both manager modes publish the
+same hardware contract while retaining contract-11 resource and contract-12
+diagnostic semantics. Setup fails closed before Docker, image, or generated
+state mutation if a contract ahead of both implementations is selected.
 
 The fixed shell manager keeps the journal, the Docker summary, and the GitHub
 summary under `diagnostics/` inside the profile state directory and

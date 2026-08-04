@@ -27,13 +27,14 @@ $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerf
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
 $managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
+$autoscalerHardwarePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'hardware.go'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
 $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 12
+$activeManagerContractVersion = 13
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -294,6 +295,7 @@ $requiredPaths = @(
     $managerPath,
     $managerEntrypointPath,
     $autoscalerModulePath,
+    $autoscalerHardwarePath,
     $managerDockerfilePath,
     $observabilityPath,
     $diagnosticsPath,
@@ -1332,6 +1334,138 @@ foreach ($malformedJournalMember in @('capacity', 'events')) {
     )) "The journal budget did not discard a journal without '$malformedJournalMember'."
 }
 
+$hostHardwareV13 = [PSCustomObject][ordered]@{
+    status = 'current'
+    collectedAt = '2026-01-01T00:00:00Z'
+    attemptedAt = '2026-01-01T00:05:00Z'
+    inventoryHash = ('a' * 64)
+    processorModel = 'Example Processor 9000'
+    architecture = 'amd64'
+    physicalCoreCount = 10
+    logicalProcessorCount = 20
+    performanceCoreCount = $null
+    efficiencyCoreCount = $null
+    memoryBytes = 34359738368
+    operatingSystem = 'Docker Desktop'
+    kernelVersion = '6.12.34-test'
+    dockerServerVersion = '28.3.3'
+    dockerStorageDriver = 'overlayfs'
+    dockerBackingFilesystem = 'extfs'
+}
+$fixedStateV13 = (
+    $fixedStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$fixedStateV13.managerContractVersion = 13
+$fixedStateV13 | Add-Member -NotePropertyName host -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        hardware = $hostHardwareV13 |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json -Depth 16
+    }
+)
+Add-Check (
+    ($fixedStateV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract thirteen rejects current sanitized hardware inventory.'
+
+$autoscaledStateV13 = (
+    $autoscaledStateV12 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$autoscaledStateV13.managerContractVersion = 13
+$autoscaledStateV13 | Add-Member -NotePropertyName host -NotePropertyValue (
+    [PSCustomObject][ordered]@{
+        hardware = $hostHardwareV13 |
+            ConvertTo-Json -Depth 16 |
+            ConvertFrom-Json -Depth 16
+    }
+)
+Add-Check (
+    ($autoscaledStateV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract thirteen rejects autoscaled hardware inventory.'
+
+$missingHardwareV13 = (
+    $fixedStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$missingHardwareV13.PSObject.Properties.Remove('host')
+Add-Check (-not (
+    ($missingHardwareV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract thirteen accepts observed state without host hardware.'
+
+$staleHardwareV13 = (
+    $fixedStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$staleHardwareV13.host.hardware.status = 'stale'
+$staleHardwareV13.host.hardware.attemptedAt = '2026-01-01T00:10:00Z'
+Add-Check (
+    ($staleHardwareV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract thirteen rejects retained stale hardware inventory.'
+
+$unavailableHardwareV13 = (
+    $fixedStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$unavailableHardwareV13.host.hardware = [PSCustomObject][ordered]@{
+    status = 'unavailable'
+    collectedAt = $null
+    attemptedAt = '2026-01-01T00:10:00Z'
+    inventoryHash = $null
+    processorModel = $null
+    architecture = $null
+    physicalCoreCount = $null
+    logicalProcessorCount = $null
+    performanceCoreCount = $null
+    efficiencyCoreCount = $null
+    memoryBytes = $null
+    operatingSystem = $null
+    kernelVersion = $null
+    dockerServerVersion = $null
+    dockerStorageDriver = $null
+    dockerBackingFilesystem = $null
+}
+Add-Check (
+    ($unavailableHardwareV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract thirteen rejects explicitly unavailable hardware inventory.'
+
+$unavailableWithModelV13 = (
+    $unavailableHardwareV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$unavailableWithModelV13.host.hardware.processorModel = 'Invented Processor'
+Add-Check (-not (
+    ($unavailableWithModelV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Unavailable hardware inventory published a processor model.'
+
+$oversizedHardwareV13 = (
+    $fixedStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$oversizedHardwareV13.host.hardware.processorModel = 'x' * 257
+Add-Check (-not (
+    ($oversizedHardwareV13 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Hardware inventory accepted an oversized processor model.'
+
+Add-Check (
+    ($fixedStateV12 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twelve stopped being accepted after hardware inventory was added.'
+
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
 
@@ -1524,11 +1658,11 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 12) 'The setup contract does not activate the service-network manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 13) 'The setup contract does not activate the hardware-inventory manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 12
-) 'The setup contract does not expose the defined diagnostics contract.'
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 13
+) 'The setup contract does not expose the defined hardware-inventory contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
     $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
@@ -1544,7 +1678,7 @@ Add-ThrowsCheck `
     -Action {
         Assert-RunnerManagerContractActivation -Profile $futureProfile
     } `
-    -ExpectedMessage 'Manager contract 13 cannot activate' `
+    -ExpectedMessage 'Manager contract 14 cannot activate' `
     -Failure 'A future manager contract activated before both manager modes implement it.'
 $missingManagerRoot = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $missingManagerRoot | Out-Null
@@ -1863,7 +1997,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -2684,7 +2818,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'Fixed setup did not activate manager contract 12.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'Fixed setup did not activate manager contract 13.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -2704,7 +2838,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'Autoscaled setup did not activate manager contract 12.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'Autoscaled setup did not activate manager contract 13.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -3628,6 +3762,7 @@ finally {
 $manager = Get-Content -LiteralPath $managerPath -Raw -Encoding UTF8
 $managerEntrypoint = Get-Content -LiteralPath $managerEntrypointPath -Raw -Encoding UTF8
 $autoscalerModule = Get-Content -LiteralPath $autoscalerModulePath -Raw -Encoding UTF8
+$autoscalerHardware = Get-Content -LiteralPath $autoscalerHardwarePath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
 $observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
 $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw -Encoding UTF8
@@ -3698,6 +3833,30 @@ Add-Check (
     $manager -match 'docker network inspect' -and
     $manager -match [regex]::Escape('set -- "$@" --network "${SERVICE_NETWORK}"')
 ) 'The fixed manager does not validate and attach the external service network.'
+Add-Check (
+    $manager -match [regex]::Escape('HOST_HARDWARE_PATH="${STATE_DIRECTORY}/host-hardware.json"') -and
+    $manager -match [regex]::Escape('collect_host_hardware') -and
+    $observability -match [regex]::Escape('host_hardware_inventory_is_valid') -and
+    $observability -match [regex]::Escape('inventoryHash')
+) 'The fixed manager does not retain bounded sanitized host hardware inventory.'
+$hardwareDefaultPathAssignment = 'observed_hardware_path="${HOST_HARDWARE_PATH}"'
+$hardwareFallbackPathAssignment = 'observed_hardware_path="${HOST_HARDWARE_FALLBACK_PATH}"'
+$hardwareObservedArgument = '"${observed_hardware_path}"'
+$hardwareDefaultIndex = $manager.IndexOf($hardwareDefaultPathAssignment)
+$hardwareFallbackIndex = $manager.IndexOf($hardwareFallbackPathAssignment)
+$hardwareObservedArgumentIndex = $manager.LastIndexOf($hardwareObservedArgument)
+Add-Check (
+    $hardwareDefaultIndex -ge 0 -and
+    $hardwareDefaultIndex -eq $manager.LastIndexOf($hardwareDefaultPathAssignment) -and
+    $hardwareDefaultIndex -lt $hardwareFallbackIndex -and
+    $hardwareFallbackIndex -lt $hardwareObservedArgumentIndex
+) 'The fixed manager resets a stale hardware fallback before observed-state publication.'
+Add-Check (
+    $autoscalerHardware -match [regex]::Escape('hostHardwareInventoryInterval') -and
+    $autoscalerHardware -match [regex]::Escape('reconcileHostHardwareInventory') -and
+    $autoscalerHardware -match [regex]::Escape('DockerBackingFilesystem') -and
+    $autoscalerHardware -notmatch 'DockerRootDir|Serial|MachineGuid|MACAddress'
+) 'The autoscaler does not publish the sanitized hardware contract safely.'
 Add-Check ($diagnostics -match [regex]::Escape('DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384')) 'The operation journal does not bound its serialized size.'
 Add-Check ($diagnostics -match [regex]::Escape('sanitize_diagnostic_evidence')) 'Operation evidence is not sanitized before publication.'
 Add-Check ($diagnostics -match [regex]::Escape('mv -f "${append_temporary}" "${append_path}"')) 'The operation journal is not persisted atomically.'
@@ -3716,9 +3875,9 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_W
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-12}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-13}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=12$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'
