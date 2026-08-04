@@ -43,6 +43,7 @@ Run the smallest relevant command:
 ```powershell
 pwsh tests/Test-RunnerProfiles.ps1
 pwsh tests/Test-CopilotPlugin.ps1
+pwsh tests/Test-PerformanceReport.ps1
 ```
 
 ```bash

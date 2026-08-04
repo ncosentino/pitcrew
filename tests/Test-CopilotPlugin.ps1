@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.9.0') 'The operations plugin version was not advanced for external service networks.'
+Add-Check ($plugin.version -eq '1.10.0') 'The operations plugin version was not advanced for performance reporting.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -54,6 +54,7 @@ $expectedSkills = @(
     'pitcrew-capacity',
     'pitcrew-dashboard-update',
     'pitcrew-host-diagnostics',
+    'pitcrew-performance-report',
     'pitcrew-pool-update',
     'pitcrew-profile-recover',
     'pitcrew-profile-rollout'
@@ -252,6 +253,68 @@ Add-Check (
     $hostDiagnosticsSkill -match 'Never run `docker system prune`' -and
     $hostDiagnosticsSkill -match 'Never enter a running worker with `docker exec`'
 ) 'The host diagnostics skill does not forbid destructive host operations.'
+
+$performanceReportSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+$performanceReportScript = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'scripts' 'New-PitCrewPerformanceReport.ps1') `
+    -Raw `
+    -Encoding UTF8
+$performanceReportCore = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'scripts' 'PerformanceReport.Core.ps1') `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $performanceReportSkill -match 'New-PitCrewPerformanceReport\.ps1' -and
+    $performanceReportSkill -match 'PITCREW_DIAGNOSTICS_CREDENTIAL'
+) 'The performance report skill does not invoke its supported credential-safe script.'
+Add-Check (
+    $performanceReportSkill -match 'Never request or display job logs' -and
+    $performanceReportSkill -match 'exact lowercase SHA-256 equality' -and
+    $performanceReportSkill -match 'Correlation is not causation'
+) 'The performance report skill weakens its metadata, exact-mapping, or interpretation boundary.'
+Add-Check (
+    $performanceReportSkill -match '\*\*Verified measurements\*\*' -and
+    $performanceReportSkill -match '\*\*Unavailable evidence\*\*' -and
+    $performanceReportSkill -match '\*\*Hypotheses\*\*'
+) 'The performance report skill does not require the three-part redacted handoff.'
+Add-Check (
+    $performanceReportScript -match '/api/diagnostics/v1/tenants/' -and
+    $performanceReportScript -match 'actions/runs/' -and
+    $performanceReportScript -match '/jobs' -and
+    $performanceReportScript -notmatch '/(logs|artifacts)(?:\?|"|''|\s)'
+) 'The performance report script uses an unsupported Dashboard or GitHub data surface.'
+Add-Check (
+    $performanceReportScript -notmatch 'DiagnosticCredential' -and
+    $performanceReportScript -match 'PITCREW_DIAGNOSTICS_CREDENTIAL'
+) 'The performance report script accepts a raw diagnostic credential argument.'
+Add-Check (
+    $performanceReportScript -match 'Get-PitCrewPartitionedWorkflowRuns' -and
+    $performanceReportScript -match 'incompletenessFloors = @\(\$floorMap\.Values\)' -and
+    $performanceReportScript -match 'requestedProfilesUnavailable' -and
+    $performanceReportScript -match 'profileIdsToQuery' -and
+    $performanceReportScript -match '\$githubJob' -and
+    $performanceReportScript -match '''run_attempt'''
+) 'The performance report script does not preserve GitHub pagination or profile-fallback retention evidence.'
+Add-Check (
+    $performanceReportCore -notmatch 'ToHexStringLower' -and
+    $performanceReportCore -match 'SHA256\]::Create' -and
+    $performanceReportScript -match 'PITCREW_DIAGNOSTICS_CREDENTIAL'
+) 'The performance report script does not preserve its declared PowerShell 7.0 compatibility.'
+Add-Check (
+    $performanceReportScript -match 'Sort-Object -Unique' -and
+    $performanceReportCore -match 'jobDefinitionKey' -and
+    $performanceReportCore -match 'seenAssignments' -and
+    $performanceReportCore -match 'seenJobs'
+) 'The performance report does not deduplicate inputs or preserve stable cohort identity.'
+Add-Check (
+    $performanceReportScript -match 'DashboardMinimumIntervalMilliseconds = 500' -and
+    $performanceReportScript -match 'StatusCode -ne 429' -and
+    $performanceReportScript -match 'Headers\.RetryAfter' -and
+    $performanceReportCore -match 'Test-PitCrewLiteralTextFilter'
+) 'The performance report does not honor Dashboard rate limits or literal filters.'
 
 $profileRolloutSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-profile-rollout' 'SKILL.md') `
