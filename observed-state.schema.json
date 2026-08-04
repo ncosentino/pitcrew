@@ -1547,6 +1547,10 @@
             "type": ["string", "null"],
             "format": "date-time"
           },
+          "runnerNameHash": {
+            "type": ["string", "null"],
+            "pattern": "^[0-9a-f]{64}$"
+          },
           "resources": {
             "oneOf": [
               {
@@ -1602,6 +1606,30 @@
         "required": [
           "host"
         ]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 14
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "properties": {
+          "slots": {
+            "items": {
+              "required": [
+                "runnerNameHash"
+              ]
+            }
+          }
+        },
+        "$comment": "Contract 14 publishes only a SHA-256 correlation key for the exact runner name. Raw runner and container identities remain private."
       }
     },
     {

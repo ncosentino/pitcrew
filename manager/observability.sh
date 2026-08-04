@@ -435,6 +435,13 @@ observed_state_is_valid() {
                 .imageId == null
                 or (.imageId | type == "string" and test("^sha256:[0-9a-f]{64}$"))
             )
+            and (
+                .runnerNameHash == null
+                or (
+                    .runnerNameHash
+                    | type == "string" and test("^[0-9a-f]{64}$")
+                )
+            )
             and (.lastExit == null or (.lastExit | valid_last_exit));
         def valid_registration_status:
             . == "connected"
@@ -520,6 +527,21 @@ observed_state_is_valid() {
                     has("imageId")
                     and has("lastExit")
                     and (.resources == null or (.resources | valid_io_counters)))
+            else
+                true
+            end
+        )
+        and (
+            if .managerContractVersion >= 14 then
+                all(.slots[];
+                    has("runnerNameHash")
+                    and (
+                        .runnerNameHash == null
+                        or (
+                            .runnerNameHash
+                            | type == "string" and test("^[0-9a-f]{64}$")
+                        )
+                    ))
             else
                 true
             end
@@ -1465,6 +1487,16 @@ render_observed_slots() {
                 fi
             fi
 
+            runner_name_hash=""
+            case "${process_running}:${runtime_state}:${runner_name}" in
+                true:starting:?*|true:online:?*)
+                    runner_name_hash=$(
+                        printf '%s' "${runner_name}" |
+                            sha256sum |
+                            cut -d ' ' -f1
+                    )
+                    ;;
+            esac
             desired=true
             if [ -f "${candidate_path}/drain" ]; then
                 desired=false
@@ -1483,6 +1515,7 @@ render_observed_slots() {
                 --argjson backoffSeconds "${backoff_seconds}" \
                 --arg updatedAt "${updated_at}" \
                 --arg runnerName "${runner_name}" \
+                --arg runnerNameHash "${runner_name_hash}" \
                 --arg registrationStatus "${registration_status}" \
                 --arg registrationActivity "${registration_activity}" \
                 --arg imageId "${image_id}" \
@@ -1497,6 +1530,12 @@ render_observed_slots() {
                     failureCount: $failureCount,
                     backoffSeconds: $backoffSeconds,
                     updatedAt: (if $updatedAt == "" then null else $updatedAt end),
+                    runnerNameHash: (
+                        if $runnerNameHash == ""
+                        then null
+                        else $runnerNameHash
+                        end
+                    ),
                     registrationStatus: $registrationStatus,
                     activity: (
                         if $registrationActivity == ""

@@ -45,6 +45,10 @@ type registrationCleanupDocument struct {
 	Records                []registrationCleanupRecord `json:"records"`
 }
 
+// The cleanup document format has not changed since contract 10. Pinning this
+// value keeps pending cleanup readable if a manager image handoff rolls back.
+const registrationCleanupDocumentContractVersion = 10
+
 type registrationCleanupStore interface {
 	load() ([]registrationCleanupRecord, error)
 	save(records []registrationCleanupRecord) error
@@ -132,7 +136,7 @@ func (s *fileRegistrationCleanupStore) save(records []registrationCleanupRecord)
 	})
 	return writeJSONAtomically(s.path, registrationCleanupDocument{
 		SchemaVersion:          1,
-		ManagerContractVersion: managerContractVersion,
+		ManagerContractVersion: registrationCleanupDocumentContractVersion,
 		TargetKey:              s.targetKey,
 		Records:                ordered,
 	})

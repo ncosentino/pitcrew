@@ -865,7 +865,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "13" \
+    "14" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1413,5 +1413,59 @@ jq '.managerContractVersion = 12' "${contract_thirteen_state_json}" > "${legacy_
 assert_true \
     "Additive host hardware was rejected for an older active contract." \
     observed_state_is_valid "${legacy_contract_thirteen_state}"
+
+contract_fourteen_state_json="${TEMP_DIRECTORY}/contract-fourteen-state.json"
+write_manager_observed_state \
+    "${contract_fourteen_state_json}" \
+    default \
+    manager-instance \
+    14 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_eleven_telemetry_json}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}"
+assert_true "Contract-fourteen observed manager state was rejected." \
+    observed_state_is_valid "${contract_fourteen_state_json}"
+assert_equals \
+    "0727c7f1ee3b997f55b1e49ce0c39dac6d146e2af8803d1983d2d6ed2ac744b6" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .runnerNameHash' "${contract_fourteen_state_json}")" \
+    "Fixed observed state did not hash the exact first runner name."
+assert_equals \
+    "null" \
+    "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .runnerNameHash' "${contract_fourteen_state_json}")" \
+    "A draining launch-backoff slot published a stale runner-name hash."
+assert_false "Contract-fourteen observed state exposed raw runner or container identity." \
+    contains_runner_identity_field "${contract_fourteen_state_json}"
+
+invalid_contract_fourteen_state="${TEMP_DIRECTORY}/invalid-contract-fourteen-state.json"
+jq 'del(.slots[0].runnerNameHash)' "${contract_fourteen_state_json}" > "${invalid_contract_fourteen_state}"
+assert_false "Manager contract fourteen accepted a missing runner-name hash." \
+    observed_state_is_valid "${invalid_contract_fourteen_state}"
+jq '.slots[0].runnerNameHash = null' "${contract_fourteen_state_json}" > "${invalid_contract_fourteen_state}"
+assert_true "Contract-fourteen rejected an explicitly unavailable runner-name hash." \
+    observed_state_is_valid "${invalid_contract_fourteen_state}"
+jq '.slots[0].runnerNameHash = "ABC"' "${contract_fourteen_state_json}" > "${invalid_contract_fourteen_state}"
+assert_false "Manager contract fourteen accepted a malformed runner-name hash." \
+    observed_state_is_valid "${invalid_contract_fourteen_state}"
+
+legacy_contract_fourteen_state="${TEMP_DIRECTORY}/legacy-contract-fourteen-state.json"
+jq '.managerContractVersion = 13 | del(.slots[].runnerNameHash)' \
+    "${contract_fourteen_state_json}" > "${legacy_contract_fourteen_state}"
+assert_true \
+    "Observed-state validation rejected a contract-thirteen slot without runner correlation." \
+    observed_state_is_valid "${legacy_contract_fourteen_state}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

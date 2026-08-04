@@ -942,6 +942,7 @@ func (m *autoscalerManager) publishObserved() error {
 				FailureCount:   0,
 				BackoffSeconds: 0,
 				UpdatedAt:      &updatedAt,
+				RunnerNameHash: hashRunnerName(container.runnerName),
 				Resources:      nil,
 				Activity:       "unknown",
 				Target:         container.targetKey,

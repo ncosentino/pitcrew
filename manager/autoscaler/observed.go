@@ -1,6 +1,8 @@
 package main
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"sort"
 	"time"
 )
@@ -21,6 +23,7 @@ type observedSlot struct {
 	FailureCount       int                 `json:"failureCount"`
 	BackoffSeconds     int                 `json:"backoffSeconds"`
 	UpdatedAt          *string             `json:"updatedAt"`
+	RunnerNameHash     *string             `json:"runnerNameHash"`
 	Resources          *resourceUsage      `json:"resources"`
 	Activity           string              `json:"activity,omitempty"`
 	Target             string              `json:"target,omitempty"`
@@ -423,6 +426,7 @@ func observedRunnerSlot(
 		FailureCount:       0,
 		BackoffSeconds:     0,
 		UpdatedAt:          &updatedAt,
+		RunnerNameHash:     hashRunnerName(runner.runnerName),
 		Resources:          nil,
 		Activity:           activity,
 		Target:             runner.targetKey,
@@ -430,6 +434,15 @@ func observedRunnerSlot(
 		ImageID:            slotImageID(imageID),
 		LastExit:           nil,
 	}
+}
+
+func hashRunnerName(runnerName string) *string {
+	if runnerName == "" {
+		return nil
+	}
+	sum := sha256.Sum256([]byte(runnerName))
+	value := hex.EncodeToString(sum[:])
+	return &value
 }
 
 // slotImageID reports the immutable local image identity a worker launched

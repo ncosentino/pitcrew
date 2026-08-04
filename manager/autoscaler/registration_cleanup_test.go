@@ -29,6 +29,15 @@ func TestRegistrationCleanupStoreRoundTripsAndClears(t *testing.T) {
 	if err := store.save([]registrationCleanupRecord{record}); err != nil {
 		t.Fatalf("save registration cleanup: %v", err)
 	}
+	data, err := os.ReadFile(registrationCleanupPath(directory, "repo-1234"))
+	if err != nil {
+		t.Fatalf("read registration cleanup: %v", err)
+	}
+	document, err := parseRegistrationCleanupDocument(data, "repo-1234")
+	if err != nil ||
+		document.ManagerContractVersion != registrationCleanupDocumentContractVersion {
+		t.Fatalf("registration cleanup used a rollback-incompatible format: %#v %v", document, err)
+	}
 	restored, err := store.load()
 	if err != nil {
 		t.Fatalf("load registration cleanup: %v", err)

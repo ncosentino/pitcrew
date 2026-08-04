@@ -7,6 +7,10 @@ import (
 	"sort"
 )
 
+// The retirement document format has not changed since contract 8. Pinning
+// this value keeps a failed manager handoff rollback-readable by the old image.
+const retirementDocumentContractVersion = 8
+
 type retirementRecord struct {
 	Key                string `json:"key"`
 	RegistrationURL    string `json:"registrationUrl"`
@@ -33,7 +37,7 @@ func newRetirementDocument(generation int, records map[string]retirementRecord) 
 	})
 	return retirementDocument{
 		SchemaVersion:          1,
-		ManagerContractVersion: managerContractVersion,
+		ManagerContractVersion: retirementDocumentContractVersion,
 		Generation:             generation,
 		Targets:                targets,
 	}
