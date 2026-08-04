@@ -69,10 +69,10 @@ services:
       PITCREW_AUTOSCALING_MIN_IDLE: ${PITCREW_AUTOSCALING_MIN_IDLE:-0}
       PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS: ${PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS:-120}
       PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS: ${PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS:-}
-      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-13}
+      PITCREW_MANAGER_CONTRACT_VERSION: ${PITCREW_MANAGER_CONTRACT_VERSION:-14}
     labels:
       ephemeral-runner-manager-profile: ${RUNNER_PROFILE_ID:-default}
-      pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-13}
+      pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-14}
     volumes:
       # The manager needs the host Docker daemon to launch sibling runner
       # containers. Only the manager mounts this - never the runners.

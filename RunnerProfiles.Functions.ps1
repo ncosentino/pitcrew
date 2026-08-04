@@ -3,9 +3,9 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 13
+$script:RunnerManagerContractVersion = 14
 $script:RunnerDefinedManagerContractVersion = 11
-$script:RunnerDefinedDiagnosticsContractVersion = 13
+$script:RunnerDefinedDiagnosticsContractVersion = 14
 $script:RunnerWorkerRuntimeContractVersion = 2
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384

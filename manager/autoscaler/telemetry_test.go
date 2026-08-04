@@ -410,6 +410,9 @@ func TestManagerPublishesAndCachesRunnerResourceTelemetry(t *testing.T) {
 		published.ResourceTelemetry.Host == nil ||
 		published.ResourceTelemetry.Manager == nil ||
 		len(published.Slots) != 1 ||
+		published.Slots[0].RunnerNameHash == nil ||
+		*published.Slots[0].RunnerNameHash !=
+			"e0054523055d4ebd049b2b33a1f3b55ba66e5f194b1bbbe5a69eca1ac6a5bf41" ||
 		published.Slots[0].Resources == nil {
 		t.Fatalf("observed state lost Docker resource telemetry: %#v", published)
 	}

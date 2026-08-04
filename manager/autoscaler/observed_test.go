@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"os"
@@ -118,6 +119,9 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		t.Fatalf("resource telemetry fabricated usage: %#v", state.ResourceTelemetry)
 	}
 	if state.Slots[0].Resources != nil ||
+		state.Slots[0].RunnerNameHash == nil ||
+		*state.Slots[0].RunnerNameHash !=
+			"e0054523055d4ebd049b2b33a1f3b55ba66e5f194b1bbbe5a69eca1ac6a5bf41" ||
 		state.Slots[0].Activity == "" ||
 		state.Slots[0].Target != "scope" ||
 		state.Slots[0].RegistrationStatus != "connected" ||
@@ -137,6 +141,12 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)
 	}
+	if bytes.Contains(data, []byte("runner-one")) ||
+		bytes.Contains(data, []byte(`"runnerName"`)) ||
+		bytes.Contains(data, []byte(`"containerId"`)) ||
+		bytes.Contains(data, []byte(`"containerName"`)) {
+		t.Fatalf("observed state exposed raw runner or container identity: %s", data)
+	}
 	for _, field := range []string{
 		"schemaVersion", "managerContractVersion", "profileId",
 		"managerInstanceId", "managerStatus", "observedAt", "scope",
@@ -155,6 +165,30 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	if _, exists := firstSlot["targetKey"]; exists {
 		t.Fatalf("slot projection emitted unsupported targetKey field: %#v", firstSlot)
+	}
+}
+
+func TestHashRunnerNameUsesExactLowercaseSHA256(t *testing.T) {
+	hash := hashRunnerName("runner-one")
+	if hash == nil ||
+		*hash != "e0054523055d4ebd049b2b33a1f3b55ba66e5f194b1bbbe5a69eca1ac6a5bf41" {
+		t.Fatalf("unexpected runner-name hash: %v", hash)
+	}
+	if hashRunnerName("") != nil {
+		t.Fatal("empty runner name produced a correlation hash")
+	}
+}
+
+func TestCleanupSlotOmitsRunnerNameHash(t *testing.T) {
+	slot := observedCleanupSlot(
+		registrationCleanupRecord{
+			SlotKey:    "scope-1",
+			RunnerName: "runner-one",
+		},
+		scalerSnapshot{target: targetSpec{key: "scope"}},
+	)
+	if slot.ProcessRunning || slot.RunnerNameHash != nil {
+		t.Fatalf("non-running cleanup slot retained live identity: %#v", slot)
 	}
 }
 

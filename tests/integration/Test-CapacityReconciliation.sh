@@ -179,7 +179,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="13" \
+        PITCREW_MANAGER_CONTRACT_VERSION="14" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -379,8 +379,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 13 ] || {
-    echo "Observed state did not report manager contract version thirteen." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 14 ] || {
+    echo "Observed state did not report manager contract version fourteen." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {

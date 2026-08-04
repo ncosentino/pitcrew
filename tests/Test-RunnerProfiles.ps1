@@ -34,7 +34,7 @@ $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 13
+$activeManagerContractVersion = 14
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -1466,6 +1466,73 @@ Add-Check (
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract twelve stopped being accepted after hardware inventory was added.'
 
+$fixedStateV14 = (
+    $fixedStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$fixedStateV14.managerContractVersion = 14
+foreach ($slot in $fixedStateV14.slots) {
+    $slot | Add-Member `
+        -NotePropertyName runnerNameHash `
+        -NotePropertyValue $(if ($slot.processRunning) { 'a' * 64 } else { $null })
+}
+Add-Check (
+    ($fixedStateV14 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fourteen rejects fixed runner correlation hashes.'
+
+$autoscaledStateV14 = (
+    $autoscaledStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$autoscaledStateV14.managerContractVersion = 14
+foreach ($slot in $autoscaledStateV14.slots) {
+    $slot | Add-Member `
+        -NotePropertyName runnerNameHash `
+        -NotePropertyValue $(if ($slot.processRunning) { 'b' * 64 } else { $null })
+}
+Add-Check (
+    ($autoscaledStateV14 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fourteen rejects autoscaled runner correlation hashes.'
+
+$missingRunnerHashV14 = (
+    $fixedStateV14 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$missingRunnerHashV14.slots[0].PSObject.Properties.Remove('runnerNameHash')
+Add-Check (-not (
+    ($missingRunnerHashV14 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract fourteen accepts a slot without runner correlation.'
+
+$liveWithoutRunnerHashV14 = (
+    $fixedStateV14 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$liveWithoutRunnerHashV14.slots[0].runnerNameHash = $null
+Add-Check (
+    ($liveWithoutRunnerHashV14 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fourteen rejects an explicitly unavailable runner correlation.'
+
+$contractThirteenWithoutRunnerHash = (
+    $fixedStateV13 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+foreach ($slot in $contractThirteenWithoutRunnerHash.slots) {
+    $slot.PSObject.Properties.Remove('runnerNameHash')
+}
+Add-Check (
+    ($contractThirteenWithoutRunnerHash | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract thirteen stopped accepting slots without runner correlation.'
+
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
 
@@ -1658,11 +1725,11 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 13) 'The setup contract does not activate the hardware-inventory manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 14) 'The setup contract does not activate the runner-correlation manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 13
-) 'The setup contract does not expose the defined hardware-inventory contract.'
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 14
+) 'The setup contract does not expose the defined runner-correlation contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
     $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
@@ -1678,7 +1745,7 @@ Add-ThrowsCheck `
     -Action {
         Assert-RunnerManagerContractActivation -Profile $futureProfile
     } `
-    -ExpectedMessage 'Manager contract 14 cannot activate' `
+    -ExpectedMessage "Manager contract $($futureProfile.ManagerContractVersion) cannot activate" `
     -Failure 'A future manager contract activated before both manager modes implement it.'
 $missingManagerRoot = Join-Path ([IO.Path]::GetTempPath()) ([Guid]::NewGuid().ToString('n'))
 New-Item -ItemType Directory -Path $missingManagerRoot | Out-Null
@@ -1997,7 +2064,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -2818,7 +2885,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'Fixed setup did not activate manager contract 13.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'Fixed setup did not activate manager contract 14.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -2838,7 +2905,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'Autoscaled setup did not activate manager contract 13.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'Autoscaled setup did not activate manager contract 14.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -3875,9 +3942,9 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_W
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-13}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-14}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=13$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

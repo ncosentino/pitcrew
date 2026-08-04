@@ -159,7 +159,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 13 managers. A profile that
+11 and remain supported by the active contract 14 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -489,10 +489,28 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 13 is active in this release. Both manager modes publish the
+Manager contract 14 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics. Setup fails closed before Docker, image, or generated
 state mutation if a contract ahead of both implementations is selected.
+
+### Contract-14 runner correlation
+
+Contract 14 adds `runnerNameHash` to every observed slot. For a live worker it
+is the lowercase SHA-256 digest of the exact UTF-8 runner name registered with
+GitHub. The field is `null` whenever the manager does not currently hold a
+usable exact runner identity, including non-running and launch-backoff slots.
+
+The hash is a correlation key, not an authentication value or a fuzzy host
+identifier. A diagnostic client can hash the exact `runner_name` already
+returned by GitHub job metadata and compare by equality. PitCrew never
+publishes the raw runner name, configured prefix, container name, container ID,
+registration payload, JIT configuration, token, or job output.
+
+The stable slot `key` remains unchanged and continues to own reconciliation.
+Dashboard retention of historical hash-to-node/profile assignments is a
+separate downstream responsibility; PitCrew observed state reports only the
+current bounded slot projection.
 
 The fixed shell manager keeps the journal, the Docker summary, and the GitHub
 summary under `diagnostics/` inside the profile state directory and

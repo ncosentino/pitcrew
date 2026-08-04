@@ -64,7 +64,9 @@ func TestDurableRetirementReloadsRemovedBusyTarget(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if document.Generation != 2 || len(document.Targets) != 1 {
+	if document.ManagerContractVersion != retirementDocumentContractVersion ||
+		document.Generation != 2 ||
+		len(document.Targets) != 1 {
 		t.Fatalf("retirement intent was not durably recorded: %#v", document)
 	}
 	if err := manager.publishAcknowledgement(); err == nil {
