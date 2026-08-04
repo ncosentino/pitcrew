@@ -187,6 +187,38 @@ and unverified hypotheses, and it never converts a single host/container pair
 into a root cause: CDN edge variability and load-sensitive host contention stay
 competing hypotheses until repeated measurements resolve them.
 
+## Performance report skill
+
+`pitcrew-performance-report` joins bounded GitHub Actions job metadata with
+scoped Dashboard node, profile, telemetry, hardware, and runner-assignment
+history.
+
+```text
+Use the pitcrew-performance-report skill to compare jobs from
+example/project across my PitCrew nodes for the last six hours.
+```
+
+The skill requires an expiring read-only Dashboard diagnostic credential in
+`PITCREW_DIAGNOSTICS_CREDENTIAL` and uses the caller's existing `gh`
+authentication. The credential is never placed in a command argument or
+report.
+
+Only run/job IDs and names, exact runner names, labels, timestamps, status, and
+conclusion are queried. Runner names are hashed locally and omitted from the
+output; mapping uses exact equality against Dashboard's retained contract-14
+assignment hashes. The skill never reads logs, artifacts, environments, step
+output, caches, or secrets and cannot mutate workflows, runners, capacity,
+managers, Docker, or hosts.
+
+Workflow-run searches cover GitHub's documented 35-day run lifetime and split
+time partitions before the API's 1,000-result filtered-search ceiling.
+
+The equivalent Markdown and JSON reports include per-node and per-profile
+count, median, p95, range, timeout/cancellation rate, cross-profile overlap,
+sanitized hardware context, explicit evidence gaps, and ranked hypotheses.
+They state that correlation is not causation and one paired sample is not a
+host benchmark.
+
 ## Profile recovery skill
 
 `pitcrew-profile-recover` recovers one explicitly selected degraded profile with
