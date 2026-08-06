@@ -148,6 +148,11 @@ run_setup() {
         "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${POWERSHELL_ROOT}\\Setup-Runner.ps1' -ProfilePath '${POWERSHELL_PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=${workers}'"
 }
 
+run_pause() {
+    pwsh -NoProfile -Command \
+        "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${POWERSHELL_ROOT}\\Setup-Runner.ps1' -ProfilePath '${POWERSHELL_PROFILE_PATH}' -Token 'integration-token' -Pause"
+}
+
 run_refresh() {
     pwsh -NoProfile -Command \
         "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${POWERSHELL_ROOT}\\Setup-Runner.ps1' -ProfilePath '${POWERSHELL_PROFILE_PATH}' -Token 'integration-token' -Refresh -Repos '${REPOSITORY_URL}=5'"
@@ -179,7 +184,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="16" \
+        PITCREW_MANAGER_CONTRACT_VERSION="17" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -379,7 +384,7 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 16 ] || {
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 17 ] || {
     echo "Observed state did not report manager contract version fourteen." >&2
     exit 1
 }
@@ -694,9 +699,49 @@ MANAGER_ID="${manager_after_refresh}"
     exit 1
 }
 
+manager_before_pause=$(manager_id)
+run_pause
+wait_for_acknowledgement 4
+wait_for_observed_generation 4 accepted
+[ "$(manager_id)" = "${manager_before_pause}" ] || {
+    echo "Pause replaced the manager container." >&2
+    exit 1
+}
+[ "$(jq -r '.desiredSlots' "${OBSERVED_STATE}")" -eq 0 ] &&
+    [ "$(jq -r '.configuredSlots' "${OBSERVED_STATE}")" -eq 0 ] || {
+    echo "Pause did not publish zero effective capacity." >&2
+    exit 1
+}
+[ "$(worker_count)" -eq 5 ] || {
+    echo "Pause interrupted a busy worker before its current run completed." >&2
+    exit 1
+}
+[ "$(jq -r '.drainingSlots' "${OBSERVED_STATE}")" -eq 5 ] || {
+    echo "Pause did not mark every existing worker for natural drain." >&2
+    exit 1
+}
+mapfile -t paused_workers < <(worker_ids)
+for container_id in "${paused_workers[@]}"; do
+    docker stop --time 5 "${container_id}" >/dev/null
+done
+wait_for_worker_count 0
+[ "$(manager_id)" = "${manager_before_pause}" ] || {
+    echo "Natural pause drain stopped the manager." >&2
+    exit 1
+}
+
+run_setup 5
+wait_for_acknowledgement 5
+wait_for_observed_generation 5 accepted
+wait_for_worker_count 5
+[ "$(manager_id)" = "${manager_before_pause}" ] || {
+    echo "Resume replaced the manager container." >&2
+    exit 1
+}
+
 mapfile -t workers_before_invalid_state < <(worker_ids)
-printf '{"schemaVersion":1,"generation":4' > "${DESIRED_STATE}"
-wait_for_observed_generation 3 invalid
+printf '{"schemaVersion":1,"generation":6' > "${DESIRED_STATE}"
+wait_for_observed_generation 5 invalid
 mapfile -t workers_after_invalid_state < <(worker_ids)
 [ "${workers_before_invalid_state[*]}" = "${workers_after_invalid_state[*]}" ] || {
     echo "Malformed desired state churned a healthy worker pool." >&2

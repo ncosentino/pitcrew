@@ -247,6 +247,50 @@ func TestDesiredStateAcceptsIntegralJSONNumbersAndRejectsConflicts(t *testing.T)
 	}
 }
 
+func TestDesiredStateAcceptsPausedTargetsAndRejectsNegativeCapacity(t *testing.T) {
+	repository, err := parseDesiredState([]byte(`{
+	  "schemaVersion":1,
+	  "generation":5,
+	  "scope":"repo",
+	  "repositories":[{"url":"https://github.com/example/repo","workers":0}],
+	  "replicas":null
+	}`), "repo")
+	if err != nil {
+		t.Fatal(err)
+	}
+	targets, err := buildTargetSpecs(repository.state, config{
+		profileID:  "default",
+		namePrefix: "runner",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(targets) != 1 || targets[0].maximum != 0 {
+		t.Fatalf("paused repository target was not retained: %#v", targets)
+	}
+
+	organization, err := parseDesiredState([]byte(`{
+	  "schemaVersion":1,
+	  "generation":6,
+	  "scope":"org",
+	  "repositories":[],
+	  "replicas":0
+	}`), "org")
+	if err != nil || organization.state.Replicas == nil ||
+		*organization.state.Replicas != 0 {
+		t.Fatalf("paused organization state was rejected: %#v, %v", organization, err)
+	}
+
+	for _, document := range []string{
+		`{"schemaVersion":1,"generation":7,"scope":"repo","repositories":[{"url":"https://github.com/example/repo","workers":-1}],"replicas":null}`,
+		`{"schemaVersion":1,"generation":7,"scope":"org","repositories":[],"replicas":-1}`,
+	} {
+		if _, err := parseDesiredState([]byte(document), ""); err == nil {
+			t.Fatalf("negative desired capacity was accepted: %s", document)
+		}
+	}
+}
+
 func TestRepositoryDesiredStateCanonicalizesRegistrationURLs(t *testing.T) {
 	variant := []byte(`{
 	  "schemaVersion":1,

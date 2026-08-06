@@ -67,8 +67,11 @@ EOF
 
 state_five="${TEMP_DIRECTORY}/five.json"
 state_six="${TEMP_DIRECTORY}/six.json"
+state_paused="${TEMP_DIRECTORY}/paused.json"
+state_paused_org="${TEMP_DIRECTORY}/paused-org.json"
 slots_five="${TEMP_DIRECTORY}/five.tsv"
 slots_six="${TEMP_DIRECTORY}/six.tsv"
+slots_paused="${TEMP_DIRECTORY}/paused.tsv"
 write_repo_state \
     "${state_five}" \
     4 \
@@ -77,13 +80,30 @@ write_repo_state \
     "${state_six}" \
     5 \
     '[{"url":"https://github.com/example/project","workers":6}]'
+write_repo_state \
+    "${state_paused}" \
+    6 \
+    '[{"url":"https://github.com/example/project","workers":0}]'
+cat > "${state_paused_org}" <<'EOF'
+{
+  "schemaVersion": 1,
+  "generation": 7,
+  "scope": "org",
+  "repositories": [],
+  "replicas": 0
+}
+EOF
 
 assert_true "Five-worker desired state was rejected." desired_state_is_valid "${state_five}"
 assert_true "Six-worker desired state was rejected." desired_state_is_valid "${state_six}"
+assert_true "Paused repository desired state was rejected." desired_state_is_valid "${state_paused}"
+assert_true "Paused organization desired state was rejected." desired_state_is_valid "${state_paused_org}"
 render_desired_slots "${state_five}" "${slots_five}"
 render_desired_slots "${state_six}" "${slots_six}"
+render_desired_slots "${state_paused}" "${slots_paused}"
 assert_equals "5" "$(wc -l < "${slots_five}" | tr -d ' ')" "Five workers did not render five stable keys."
 assert_equals "6" "$(wc -l < "${slots_six}" | tr -d ' ')" "Six workers did not render six stable keys."
+assert_equals "0" "$(wc -l < "${slots_paused}" | tr -d ' ')" "Paused desired capacity rendered worker slots."
 assert_equals "1" "$(comm -13 "${slots_five}" "${slots_six}" | wc -l | tr -d ' ')" "Scaling from five to six did not add exactly one slot."
 assert_equals "0" "$(comm -23 "${slots_five}" "${slots_six}" | wc -l | tr -d ' ')" "Scaling from five to six removed an existing slot."
 assert_true \
@@ -919,7 +939,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "16" \
+    "17" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
