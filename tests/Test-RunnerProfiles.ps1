@@ -34,7 +34,7 @@ $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 16
+$activeManagerContractVersion = 17
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -1987,11 +1987,11 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 16) 'The setup contract does not activate the host-pressure manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 17) 'The setup contract does not activate the zero-capacity manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 16
-) 'The setup contract does not expose the defined host-pressure diagnostics contract.'
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 17
+) 'The setup contract does not expose the defined zero-capacity manager contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
     $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
@@ -2051,6 +2051,23 @@ $sameFiveWorkers = New-RunnerDesiredCapacityState `
         }
     ) `
     -Replicas $null
+$pausedRepository = New-RunnerDesiredCapacityState `
+    -Generation 100 `
+    -Scope repo `
+    -Repositories @(
+        [PSCustomObject]@{
+            Url = 'https://github.com/example/project'
+            Workers = 0
+        }
+    ) `
+    -Replicas $null
+$pausedOrganization = New-RunnerDesiredCapacityState `
+    -Generation 101 `
+    -Scope org `
+    -Repositories @() `
+    -Replicas 0
+Add-Check ($pausedRepository.repositories[0].workers -eq 0) 'Repository desired capacity rejected an explicit pause.'
+Add-Check ($pausedOrganization.replicas -eq 0) 'Organization desired capacity rejected an explicit pause.'
 Add-Check (
     (Get-RunnerDesiredCapacitySignature -State $fiveWorkers) -eq
     (Get-RunnerDesiredCapacitySignature -State $sameFiveWorkers)
@@ -2326,7 +2343,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -3147,7 +3164,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'Fixed setup did not activate manager contract 16.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'Fixed setup did not activate manager contract 17.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -3167,7 +3184,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'Autoscaled setup did not activate manager contract 16.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'Autoscaled setup did not activate manager contract 17.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -4042,6 +4059,107 @@ try {
         Remove-Item Env:\PITCREW_TEST_POST_OBSERVED_SOURCE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_POST_OBSERVED_TARGET -ErrorAction SilentlyContinue
 
+        $beforePause = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Autoscale `
+                    -MinimumIdle 0 `
+                    -ScaleDownDelaySeconds 120 `
+                    -Pause `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'uses the existing desired-capacity targets' `
+            -Failure 'Pause accepted an explicit replacement capacity target.'
+        $pauseGeneration = [int]$beforePause.generation + 1
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $env:PITCREW_TEST_REJECT_TOKEN = 'test-registration-token'
+        $pauseAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation $pauseGeneration `
+            -DesiredSlots 0 `
+            -AddedSlots 0 `
+            -DrainingSlots 1 `
+            -UnchangedSlots 0 `
+            -WaitForAcknowledgementRemoval 0
+        $pauseFailure = $null
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Autoscale `
+                -MinimumIdle 0 `
+                -ScaleDownDelaySeconds 120 `
+                -Pause
+        }
+        catch {
+            $pauseFailure = $_
+        }
+        finally {
+            if ($pauseFailure) {
+                Stop-Job -Job $pauseAcknowledgement
+            } else {
+                Wait-Job -Job $pauseAcknowledgement -Timeout 65 | Out-Null
+                Receive-Job -Job $pauseAcknowledgement -ErrorAction Stop | Out-Null
+            }
+            Remove-Job -Job $pauseAcknowledgement -Force
+        }
+        if ($pauseFailure) {
+            throw $pauseFailure
+        }
+        Remove-Item Env:\PITCREW_TEST_REJECT_TOKEN -ErrorAction SilentlyContinue
+        $pauseCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        $pausedState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($pausedState.generation -eq $pauseGeneration) 'Pause did not advance desired-capacity generation.'
+        Add-Check ($pausedState.repositories.Count -eq 1) 'Pause removed the existing repository target.'
+        Add-Check ($pausedState.repositories[0].workers -eq 0) 'Pause did not set effective capacity to zero.'
+        Add-Check (-not ($pauseCommands -match 'compose.*down')) 'Pause restarted or tore down the manager.'
+        Add-Check (-not ($pauseCommands -match 'rm.*-f')) 'Pause force-removed a busy worker.'
+
+        $resumeGeneration = $pauseGeneration + 1
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $resumeAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation $resumeGeneration `
+            -DesiredSlots 1 `
+            -AddedSlots 1 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 0 `
+            -WaitForAcknowledgementRemoval 0
+        $resumeFailure = $null
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Autoscale `
+                -MinimumIdle 0 `
+                -ScaleDownDelaySeconds 120 `
+                -CapacityOnly `
+                -AddRepos 'https://github.com/example/project=1'
+        }
+        catch {
+            $resumeFailure = $_
+        }
+        finally {
+            if ($resumeFailure) {
+                Stop-Job -Job $resumeAcknowledgement
+            } else {
+                Wait-Job -Job $resumeAcknowledgement -Timeout 65 | Out-Null
+                Receive-Job -Job $resumeAcknowledgement -ErrorAction Stop | Out-Null
+            }
+            Remove-Job -Job $resumeAcknowledgement -Force
+        }
+        if ($resumeFailure) {
+            throw $resumeFailure
+        }
+        $resumedState = Get-Content -LiteralPath $defaultDesiredPath -Raw -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check ($resumedState.generation -eq $resumeGeneration) 'Resume did not advance desired-capacity generation.'
+        Add-Check ($resumedState.repositories[0].workers -eq 1) 'Resume did not restore positive capacity.'
+
         Remove-Item `
             -LiteralPath (Join-Path (Split-Path -Parent $defaultDesiredPath) 'observed-state.json') `
             -Force `
@@ -4204,12 +4322,12 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_W
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-16}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-17}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_HOST_PROC_PATH: /host/proc')) 'Manager containers do not use the fixed host-proc telemetry path.'
 Add-Check ($compose -match [regex]::Escape('/proc:/host/proc:ro')) 'Manager containers do not mount Docker-host proc read-only.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
 Add-Check ($compose -notmatch '/host/proc:.+runner') 'Compose appears to expose Docker-host proc to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

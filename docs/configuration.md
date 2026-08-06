@@ -37,6 +37,7 @@ profile without changing other profiles on the same host.
 | `-Down` | No | Stops only the selected profile and removes its managed workers. | Off |
 | `-Refresh` | No | Builds and hot-swaps only the selected manager while preserving compatible workers and active jobs. | Off |
 | `-CapacityOnly` | No | Requires an in-place capacity update and fails rather than replacing a manager when the current profile cannot reconcile capacity safely. | Off |
+| `-Pause` | No | Reuses the existing desired targets, sets their effective capacity to zero, and drains busy workers naturally without stopping the manager. | Off |
 
 ## Repository worker counts
 
@@ -159,7 +160,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 16 managers. A profile that
+11 and remain supported by the active contract 17 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -489,7 +490,7 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 16 is active in this release. Both manager modes publish the
+Manager contract 17 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics. Setup fails closed before Docker, image, or generated
 state mutation if a contract ahead of both implementations is selected.
@@ -578,6 +579,17 @@ count. Organization and enterprise scope record one shared replica count. The
 manager derives stable ordinal slot keys, so changing a repository from five
 workers to six starts only ordinal six. Changing it back to five drains only
 ordinal six.
+
+### Contract-17 zero-capacity pause
+
+An existing desired target may carry zero capacity. `-Pause` writes that state
+through the normal capacity-only generation and acknowledgement path while
+retaining repository routing, scale-set identity, manager state, and history.
+It is distinct from manifest `replicas`, which remains a positive default, and
+from `-Replicas 0`, which keeps its auto-size meaning. Resume by applying a
+positive capacity with `-CapacityOnly`. Pause reuses the already accepted
+targets and does not require a new GitHub runner-registration access probe;
+resume and every positive capacity change retain the normal token validation.
 
 For autoscaled profiles, the same values are configured maximums. GitHub's
 assigned-job statistics determine current activation between the minimum idle

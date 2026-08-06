@@ -4,6 +4,8 @@ desired_state_is_valid() {
     jq -e '
         def positive_integer:
             type == "number" and . >= 1 and floor == .;
+        def nonnegative_integer:
+            type == "number" and . >= 0 and floor == .;
         def valid_url:
             type == "string"
             and length > 0
@@ -19,12 +21,12 @@ desired_state_is_valid() {
         and (
             if .scope == "repo" then
                 (.repositories | length > 0)
-                and all(.repositories[]; (.url | valid_url) and (.workers | positive_integer))
+                and all(.repositories[]; (.url | valid_url) and (.workers | nonnegative_integer))
                 and (([.repositories[].url] | unique | length) == (.repositories | length))
                 and .replicas == null
             else
                 (.repositories | length == 0)
-                and (.replicas | positive_integer)
+                and (.replicas | nonnegative_integer)
             end
         )
     ' "$1" >/dev/null 2>&1
@@ -121,7 +123,7 @@ write_undesired_slot_keys() {
     active_keys_path="$2"
     output_path="$3"
     awk -F '\t' '
-        NR == FNR {
+        FILENAME == ARGV[1] {
             desired[$1] = 1
             next
         }

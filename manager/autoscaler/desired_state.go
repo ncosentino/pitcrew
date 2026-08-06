@@ -208,9 +208,9 @@ func validateDesiredState(state desiredState, expectedScope string) error {
 			if err != nil {
 				return err
 			}
-			if repository.Workers < 1 {
+			if repository.Workers < 0 {
 				return fmt.Errorf(
-					"repository %q must request at least one worker",
+					"repository %q cannot request a negative worker count",
 					repository.URL,
 				)
 			}
@@ -226,8 +226,8 @@ func validateDesiredState(state desiredState, expectedScope string) error {
 		if len(state.Repositories) != 0 {
 			return errors.New("organization and enterprise scope cannot define repository targets")
 		}
-		if state.Replicas == nil || *state.Replicas < 1 {
-			return errors.New("organization and enterprise scope requires positive replicas")
+		if state.Replicas == nil || *state.Replicas < 0 {
+			return errors.New("organization and enterprise scope requires nonnegative replicas")
 		}
 	default:
 		return fmt.Errorf("desired-capacity scope must be repo, org, or ent, got %q", state.Scope)

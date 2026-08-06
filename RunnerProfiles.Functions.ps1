@@ -3,9 +3,9 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
-$script:RunnerManagerContractVersion = 16
+$script:RunnerManagerContractVersion = 17
 $script:RunnerDefinedManagerContractVersion = 11
-$script:RunnerDefinedDiagnosticsContractVersion = 16
+$script:RunnerDefinedDiagnosticsContractVersion = 17
 $script:RunnerWorkerRuntimeContractVersion = 2
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384
@@ -1092,8 +1092,8 @@ function New-RunnerDesiredCapacityState {
             $canonicalBuilder.Query = ''
             $canonicalBuilder.Fragment = ''
             $url = $canonicalBuilder.Uri.AbsoluteUri.TrimEnd('/')
-            if ($workers -lt 1) {
-                throw "Repository '$url' must request at least one worker."
+            if ($workers -lt 0) {
+                throw "Repository '$url' cannot request a negative worker count."
             }
 
             [PSCustomObject][ordered]@{
@@ -1123,8 +1123,8 @@ function New-RunnerDesiredCapacityState {
         if ($normalizedRepositories.Count -ne 0) {
             throw 'Organization and enterprise desired capacity cannot define repository targets.'
         }
-        if ($null -eq $Replicas -or $Replicas -lt 1) {
-            throw 'Organization and enterprise desired capacity requires a positive replica count.'
+        if ($null -eq $Replicas -or $Replicas -lt 0) {
+            throw 'Organization and enterprise desired capacity requires a nonnegative replica count.'
         }
     }
 

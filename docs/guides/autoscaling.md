@@ -89,7 +89,7 @@ canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
 Resource policy and the aggregate ceiling were introduced in manager contract
-11 and remain supported by the active contract 16 autoscaler.
+11 and remain supported by the active contract 17 autoscaler.
 
 Autoscaled slots also publish bounded `currentJob` metadata from GitHub's
 scale-set lifecycle events. The projection is sufficient to identify and link
@@ -175,6 +175,23 @@ restarting the autoscaling manager:
     -CapacityOnly `
     -AddRepos https://github.com/you/agentic-project=40
 ```
+
+Pause an existing profile without cancelling its busy jobs:
+
+```powershell
+.\Setup-Runner.ps1 `
+    -Profile copilot-cli `
+    -Autoscale `
+    -MinimumIdle 0 `
+    -ScaleDownDelaySeconds 120 `
+    -Pause
+```
+
+The target and scale-set listener remain. Effective maximum and activation
+become zero, no replacement worker starts, and busy workers exit naturally
+after their current job. Resume with a positive `-AddRepos ...=N` or
+`-Replicas N` capacity-only update. `-Pause` is not `-Down`, profile removal,
+job cancellation, Docker cleanup, or a Docker restart.
 
 The acknowledgement confirms that the new maximum was accepted; it does not
 start forty workers without matching demand.

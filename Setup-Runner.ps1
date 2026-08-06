@@ -108,6 +108,11 @@
     replacing the selected profile when its manager or static configuration is
     not compatible with a capacity-only update.
 
+.PARAMETER Pause
+    Set the selected existing profile's effective capacity to zero through the
+    capacity-only reconciliation path. Busy workers drain naturally; the
+    manager, routing, scale sets, state, and history remain.
+
 .PARAMETER RecoverManager
     Restart only the selected profile's already running manager once so a
     degraded manager can rebuild its controllers and re-adopt its labelled
@@ -145,6 +150,9 @@
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -AddRepos https://github.com/me/repo-a=4 -CapacityOnly
+
+.EXAMPLE
+    .\Setup-Runner.ps1 -Profile copilot-cli -Pause
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -Autoscale -MinimumIdle 0 -Repos https://github.com/me/repo-a=30
@@ -195,6 +203,7 @@ param(
     [switch]$Down,
     [switch]$Refresh,
     [switch]$CapacityOnly,
+    [switch]$Pause,
     [switch]$RecoverManager,
     [AllowNull()]
     [AllowEmptyString()]
@@ -1297,8 +1306,8 @@ try {
     $profileLock = Enter-RunnerProfileLock -Path $profileConfig.LockPath -TimeoutSeconds 30
 
     if ($RecoverManager) {
-        if ($Down -or $Refresh -or $CapacityOnly) {
-            Write-Error '-RecoverManager cannot be combined with -Down, -Refresh, or -CapacityOnly.'
+        if ($Down -or $Refresh -or $CapacityOnly -or $Pause) {
+            Write-Error '-RecoverManager cannot be combined with -Down, -Refresh, -CapacityOnly, or -Pause.'
         }
         $mutatingParameterNames = @(
             'Token',
@@ -1321,6 +1330,7 @@ try {
             'WorkerMemorySwap',
             'WorkerCpus',
             'WorkerPids'
+            'Pause'
         )
         $suppliedMutations = @(
             $mutatingParameterNames | Where-Object { $PSBoundParameters.ContainsKey($_) }
@@ -1343,9 +1353,27 @@ try {
         return
     }
 
+    if ($Pause) {
+        if ($Down -or $Refresh) {
+            Write-Error '-Pause cannot be combined with -Down or -Refresh.'
+        }
+        $explicitCapacityParameters = @(
+            @(
+                'Replicas',
+                'Repos',
+                'AddRepos',
+                'RemoveRepos'
+            ) | Where-Object { $PSBoundParameters.ContainsKey($_) }
+        )
+        if ($explicitCapacityParameters.Count -gt 0) {
+            Write-Error "-Pause uses the existing desired-capacity targets and rejects: $($explicitCapacityParameters -join ', ')."
+        }
+        $CapacityOnly = $true
+    }
+
     if ($Down) {
-        if ($Refresh -or $CapacityOnly) {
-            Write-Error '-Down cannot be combined with -Refresh or -CapacityOnly.'
+        if ($Refresh -or $CapacityOnly -or $Pause) {
+            Write-Error '-Down cannot be combined with -Refresh, -CapacityOnly, or -Pause.'
         }
         Write-Host "[stop] Stopping profile '$($profileConfig.Name)'"
         Stop-RunnerProfile -ProfileConfig $profileConfig
@@ -1422,18 +1450,29 @@ try {
             $currentDesiredReadError = $_.Exception.Message
         }
     }
+    if ($Pause) {
+        if (-not $currentDesiredState) {
+            $detail = if ($currentDesiredReadError) {
+                " $currentDesiredReadError"
+            } else {
+                ''
+            }
+            Write-Error "-Pause requires readable existing desired capacity for profile '$($profileConfig.Name)'.$detail"
+        }
+        if ([string]$currentDesiredState.scope -ne $Scope) {
+            Write-Error "-Pause scope '$Scope' does not match the existing '$($currentDesiredState.scope)' profile."
+        }
+    }
 
     $repoList = @()
     if ($Scope -eq 'repo') {
         $repoList = @($Repos)
-        if (($AddRepos -or $RemoveRepos) -and -not $Repos) {
+        $useCurrentRepositories = $false
+        if (($Pause -or $AddRepos -or $RemoveRepos) -and -not $Repos) {
             if ($currentDesiredState -and $currentDesiredState.scope -eq 'repo') {
-                $repoList = @(
-                    $currentDesiredState.repositories |
-                        ForEach-Object { "$($_.url)=$($_.workers)" }
-                )
+                $useCurrentRepositories = $true
             } elseif ($currentDesiredReadError) {
-                Write-Error "Cannot apply -AddRepos or -RemoveRepos because existing desired capacity is unreadable. Pass the complete -Repos list. $currentDesiredReadError"
+                Write-Error "Cannot apply -Pause, -AddRepos, or -RemoveRepos because existing desired capacity is unreadable. Pass the complete -Repos list for a normal capacity update. $currentDesiredReadError"
             } else {
                 $legacyRepositories = Get-RunnerEnvironmentFileValue `
                     -Path $profileConfig.EnvironmentPath `
@@ -1474,6 +1513,13 @@ try {
                 }
         )
         $repoCounts = @{}
+        if ($useCurrentRepositories) {
+            foreach ($repository in $currentDesiredState.repositories) {
+                if ([string]$repository.url -notin $removeUrls) {
+                    $repoCounts[[string]$repository.url] = [int]$repository.workers
+                }
+            }
+        }
         foreach ($entry in @($repoList) + @($AddRepos)) {
             if ([string]::IsNullOrWhiteSpace($entry)) {
                 continue
@@ -1512,16 +1558,31 @@ try {
         if ($desiredRepositories.Count -eq 0) {
             Write-Error '-Repos is required for repo scope (for example, -Repos https://github.com/me/a=2).'
         }
+        if ($Pause) {
+            $desiredRepositories = @(
+                $desiredRepositories |
+                    ForEach-Object {
+                        [PSCustomObject]@{
+                            Url = $_.Url
+                            Workers = 0
+                        }
+                    }
+            )
+        }
     } else {
         $desiredRepositories = @()
     }
-    $total = if ($Scope -eq 'repo') {
+    $total = if ($Pause) {
+        0
+    } elseif ($Scope -eq 'repo') {
         [int]($desiredRepositories | Measure-Object -Property Workers -Sum).Sum
     } else {
         [int]$profileConfig.Replicas
     }
     $desiredReplicas = if ($Scope -eq 'repo') {
         $null
+    } elseif ($Pause) {
+        [Nullable[int]]0
     } else {
         [Nullable[int]][int]$profileConfig.Replicas
     }
@@ -1530,19 +1591,21 @@ try {
         -Scope $Scope `
         -Repositories $desiredRepositories `
         -Replicas $desiredReplicas
-    $registrationAccess = Get-RunnerRegistrationAccessValidation `
-        -Token $Token `
-        -Scope $Scope `
-        -Repositories @($desiredDraft.repositories) `
-        -OrgName $OrgName `
-        -EnterpriseName $EnterpriseName
-    if (-not $registrationAccess.IsValid) {
-        $sourceDescription = if ($tokenSource -eq 'stored') {
-            'The selected profile stored token'
-        } else {
-            'The supplied registration token'
+    if (-not $Pause) {
+        $registrationAccess = Get-RunnerRegistrationAccessValidation `
+            -Token $Token `
+            -Scope $Scope `
+            -Repositories @($desiredDraft.repositories) `
+            -OrgName $OrgName `
+            -EnterpriseName $EnterpriseName
+        if (-not $registrationAccess.IsValid) {
+            $sourceDescription = if ($tokenSource -eq 'stored') {
+                'The selected profile stored token'
+            } else {
+                'The supplied registration token'
+            }
+            throw "$sourceDescription does not have runner registration access for $($registrationAccess.Target). Pass a valid -Token or update GitHub CLI authentication. $($registrationAccess.Reason)"
         }
-        throw "$sourceDescription does not have runner registration access for $($registrationAccess.Target). Pass a valid -Token or update GitHub CLI authentication. $($registrationAccess.Reason)"
     }
 
     $desiredSignature = Get-RunnerDesiredCapacitySignature -State $desiredDraft

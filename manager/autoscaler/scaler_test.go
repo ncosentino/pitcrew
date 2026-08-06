@@ -366,6 +366,52 @@ func TestInvalidJobContextStillProtectsBusyRunner(t *testing.T) {
 	}
 }
 
+func TestZeroMaximumWithholdsAdmissionWithoutStoppingBusyRunner(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if err := scaler.HandleJobStarted(context.Background(), &scaleset.JobStarted{
+		RunnerID:   int(runner.runnerID),
+		RunnerName: runner.runnerName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := scaler.setMaximum(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := scaler.snapshot()
+	if snapshot.target.maximum != 0 ||
+		snapshot.targetSlots != 0 ||
+		snapshot.runners[0].state != runnerBusy {
+		t.Fatalf("zero maximum did not preserve the busy runner: %#v", snapshot)
+	}
+	if len(api.removeCalls) != 0 || len(docker.stopRemove) != 0 {
+		t.Fatal("zero maximum preempted a busy worker")
+	}
+}
+
+func TestRetiredTargetCanReactivateAtZeroMaximum(t *testing.T) {
+	scaler, _, _, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	if err := scaler.beginRetirement(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	target := scaler.snapshot().target
+	target.maximum = 0
+	if err := scaler.reactivate(context.Background(), target); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := scaler.snapshot()
+	if snapshot.retiring || snapshot.target.maximum != 0 ||
+		snapshot.targetSlots != 0 {
+		t.Fatalf("zero-capacity target did not reactivate safely: %#v", snapshot)
+	}
+}
+
 func TestRecoveredRunnerIsProtectedUntilLifecycleSignal(t *testing.T) {
 	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, 0)
 	defer cancel()

@@ -482,8 +482,8 @@ func (s *runnerScaler) beginRetirement(ctx context.Context) error {
 }
 
 func (s *runnerScaler) reactivate(ctx context.Context, target targetSpec) error {
-	if target.maximum < 1 {
-		return errors.New("reactivated target maximum must be positive")
+	if target.maximum < 0 {
+		return errors.New("reactivated target maximum cannot be negative")
 	}
 	if err := s.acquireOperation(ctx); err != nil {
 		return fmt.Errorf("wait to reactivate target: %w", err)
