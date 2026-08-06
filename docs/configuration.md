@@ -159,7 +159,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 15 managers. A profile that
+11 and remain supported by the active contract 16 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -489,7 +489,7 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 15 is active in this release. Both manager modes publish the
+Manager contract 16 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics. Setup fails closed before Docker, image, or generated
 state mutation if a contract ahead of both implementations is selected.
@@ -531,6 +531,29 @@ job message payload, logs, step output, environment values, commit text,
 registration material, or credentials. Invalid or oversized metadata degrades
 only `currentJob`; the worker remains busy and protected. Resource activity is
 never used to invent missing job identity.
+
+### Contract-16 Docker-host pressure
+
+Contract 16 adds `resourceTelemetry.hostPressure`. The manager reads aggregate
+CPU, load, memory, swap, and optional Linux Pressure Stall Information from a
+read-only `/proc` mount that belongs only to the manager container.
+
+The source is named `docker-host` because it describes the Docker engine's
+execution domain. On native Linux that is the Docker host kernel. On Docker
+Desktop or WSL it is the Linux VM that runs the containers, not a claim about
+the complete physical Windows or macOS machine.
+
+The first CPU sample is `partial` because utilization requires two monotonic
+counter observations. Load and memory remain available immediately. PSI
+`some` and `full` ten-second averages are optional; kernels that do not expose
+them report `null` without degrading otherwise complete core pressure.
+Counter reset, manager restart, malformed files, or unavailable host-proc
+access never become measured zero.
+
+Only aggregate files are read. PitCrew does not enumerate or publish process
+IDs, command lines, environment values, mount paths, or per-process data.
+Pressure remains diagnostic evidence; it never cancels a job, stops a worker,
+or changes admission automatically.
 
 The fixed shell manager keeps the journal, the Docker summary, and the GitHub
 summary under `diagnostics/` inside the profile state directory and

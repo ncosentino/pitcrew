@@ -139,6 +139,10 @@ func TestDockerResourceSamplingAvailable(t *testing.T) {
 		sample.telemetry.Manager == nil {
 		t.Fatalf("complete Docker data was not available: %#v", sample.telemetry)
 	}
+	if sample.telemetry.HostPressure.Status != "unavailable" ||
+		sample.telemetry.HostPressure.Source != "docker-host" {
+		t.Fatalf("missing host proc was not explicit: %#v", sample.telemetry.HostPressure)
+	}
 	if sample.telemetry.Manager.CPUCores != 0.0125 ||
 		sample.telemetry.Manager.MemoryWorkingSetBytes != 33554432 ||
 		sample.telemetry.Manager.PIDs != 7 {

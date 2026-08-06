@@ -513,6 +513,9 @@ func (d *fakeDockerClient) sampleResources(
 	}
 	result := d.resourceResult
 	result.telemetry = d.resourceResult.telemetry
+	if result.telemetry.HostPressure.Status == "" {
+		result.telemetry.HostPressure = unavailableHostPressure()
+	}
 	if result.telemetry.SampledAt == "" {
 		result.telemetry.SampledAt = sampledAt.UTC().Format(time.RFC3339)
 	}

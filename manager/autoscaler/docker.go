@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -116,6 +117,10 @@ type dockerCLI struct {
 	executor               commandExecutor
 	hostname               func() (string, error)
 	resourceCommandTimeout time.Duration
+	hostProcPath           string
+	readHostFile           func(string) ([]byte, error)
+	hostPressureMu         sync.Mutex
+	previousHostCPU        *hostCPUCounters
 }
 
 func newDockerCLI() *dockerCLI {
@@ -123,6 +128,8 @@ func newDockerCLI() *dockerCLI {
 		executor:               execCommandExecutor{},
 		hostname:               os.Hostname,
 		resourceCommandTimeout: resourceTelemetryCommandTimeout,
+		hostProcPath:           defaultHostProcPath,
+		readHostFile:           os.ReadFile,
 	}
 }
 

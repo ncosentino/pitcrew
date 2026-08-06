@@ -131,6 +131,8 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	if state.ResourceTelemetry.Status != "unavailable" ||
 		state.ResourceTelemetry.Host != nil ||
+		state.ResourceTelemetry.HostPressure.Status != "unavailable" ||
+		state.ResourceTelemetry.HostPressure.Source != "docker-host" ||
 		state.ResourceTelemetry.Manager != nil {
 		t.Fatalf("resource telemetry fabricated usage: %#v", state.ResourceTelemetry)
 	}

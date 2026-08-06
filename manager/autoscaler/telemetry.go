@@ -50,10 +50,11 @@ type resourceSample struct {
 func unavailableResourceSample(sampledAt time.Time) resourceSample {
 	return resourceSample{
 		telemetry: resourceTelemetry{
-			SampledAt: sampledAt.UTC().Format(time.RFC3339),
-			Status:    "unavailable",
-			Host:      nil,
-			Manager:   nil,
+			SampledAt:    sampledAt.UTC().Format(time.RFC3339),
+			Status:       "unavailable",
+			Host:         nil,
+			HostPressure: unavailableHostPressure(),
+			Manager:      nil,
 		},
 		slots: make(map[string]resourceUsage),
 	}
@@ -66,6 +67,7 @@ func (d *dockerCLI) sampleResources(
 	sampledAt time.Time,
 ) resourceSample {
 	sample := unavailableResourceSample(sampledAt)
+	sample.telemetry.HostPressure = d.sampleHostPressure()
 
 	hostOutput, hostErr := d.runTelemetryCommand(
 		ctx,

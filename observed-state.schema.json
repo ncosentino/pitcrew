@@ -534,6 +534,290 @@
         }
       }
     },
+    "hostPressureTelemetry": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source",
+        "cpuUtilizationPercent",
+        "load1",
+        "load5",
+        "load15",
+        "memoryTotalBytes",
+        "memoryAvailableBytes",
+        "swapUsedBytes",
+        "cpuPressureSomeAvg10",
+        "cpuPressureFullAvg10",
+        "memoryPressureSomeAvg10",
+        "memoryPressureFullAvg10",
+        "ioPressureSomeAvg10",
+        "ioPressureFullAvg10"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["available", "partial", "unavailable"]
+        },
+        "source": {
+          "const": "docker-host"
+        },
+        "cpuUtilizationPercent": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "load1": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "load5": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "load15": {
+          "type": ["number", "null"],
+          "minimum": 0
+        },
+        "memoryTotalBytes": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "memoryAvailableBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "swapUsedBytes": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "cpuPressureSomeAvg10": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "cpuPressureFullAvg10": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "memoryPressureSomeAvg10": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "memoryPressureFullAvg10": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "ioPressureSomeAvg10": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        },
+        "ioPressureFullAvg10": {
+          "type": ["number", "null"],
+          "minimum": 0,
+          "maximum": 100
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "available"
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "cpuUtilizationPercent": {
+                "type": "number"
+              },
+              "load1": {
+                "type": "number"
+              },
+              "load5": {
+                "type": "number"
+              },
+              "load15": {
+                "type": "number"
+              },
+              "memoryTotalBytes": {
+                "type": "integer"
+              },
+              "memoryAvailableBytes": {
+                "type": "integer"
+              },
+              "swapUsedBytes": {
+                "type": "integer"
+              }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "partial"
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "anyOf": [
+              {
+                "properties": {
+                  "cpuUtilizationPercent": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "load1": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "load5": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "load15": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "memoryTotalBytes": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "memoryAvailableBytes": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "swapUsedBytes": {
+                    "type": "integer"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cpuPressureSomeAvg10": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "cpuPressureFullAvg10": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "memoryPressureSomeAvg10": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "memoryPressureFullAvg10": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "ioPressureSomeAvg10": {
+                    "type": "number"
+                  }
+                }
+              },
+              {
+                "properties": {
+                  "ioPressureFullAvg10": {
+                    "type": "number"
+                  }
+                }
+              }
+            ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            },
+            "required": ["status"]
+          },
+          "then": {
+            "properties": {
+              "cpuUtilizationPercent": {
+                "type": "null"
+              },
+              "load1": {
+                "type": "null"
+              },
+              "load5": {
+                "type": "null"
+              },
+              "load15": {
+                "type": "null"
+              },
+              "memoryTotalBytes": {
+                "type": "null"
+              },
+              "memoryAvailableBytes": {
+                "type": "null"
+              },
+              "swapUsedBytes": {
+                "type": "null"
+              },
+              "cpuPressureSomeAvg10": {
+                "type": "null"
+              },
+              "cpuPressureFullAvg10": {
+                "type": "null"
+              },
+              "memoryPressureSomeAvg10": {
+                "type": "null"
+              },
+              "memoryPressureFullAvg10": {
+                "type": "null"
+              },
+              "ioPressureSomeAvg10": {
+                "type": "null"
+              },
+              "ioPressureFullAvg10": {
+                "type": "null"
+              }
+            }
+          }
+        }
+      ],
+      "$comment": "Pressure describes the Docker engine host or VM visible through the manager-only read-only host-proc mount. It is not necessarily the physical machine on Docker Desktop."
+    },
     "managerResourceTelemetry": {
       "type": "object",
       "additionalProperties": false,
@@ -560,6 +844,9 @@
               "type": "null"
             }
           ]
+        },
+        "hostPressure": {
+          "$ref": "#/$defs/hostPressureTelemetry"
         },
         "manager": {
           "oneOf": [
@@ -1800,6 +2087,28 @@
         }
       },
       "$comment": "Fixed-manager job identity is unavailable because fixed runners have no scale-set lifecycle event."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 16
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "properties": {
+          "resourceTelemetry": {
+            "required": [
+              "hostPressure"
+            ]
+          }
+        }
+      },
+      "$comment": "Contract 16 publishes Docker-host or VM pressure from the manager-only read-only host-proc mount."
     },
     {
       "if": {
