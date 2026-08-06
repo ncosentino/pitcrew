@@ -34,7 +34,7 @@ $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 15
+$activeManagerContractVersion = 16
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -1694,6 +1694,107 @@ Add-Check (
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract fourteen stopped accepting slots without job context.'
 
+$availableHostPressureV16 = [PSCustomObject][ordered]@{
+    status = 'available'
+    source = 'docker-host'
+    cpuUtilizationPercent = 97.5
+    load1 = 18.5
+    load5 = 12.25
+    load15 = 8.0
+    memoryTotalBytes = 34359738368
+    memoryAvailableBytes = 4294967296
+    swapUsedBytes = 1073741824
+    cpuPressureSomeAvg10 = 35.5
+    cpuPressureFullAvg10 = 5.0
+    memoryPressureSomeAvg10 = 12.5
+    memoryPressureFullAvg10 = 3.0
+    ioPressureSomeAvg10 = 42.0
+    ioPressureFullAvg10 = 18.0
+}
+$fixedStateV16 = (
+    $fixedStateV15 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$fixedStateV16.managerContractVersion = 16
+$fixedStateV16.resourceTelemetry |
+    Add-Member `
+        -NotePropertyName hostPressure `
+        -NotePropertyValue (
+            $availableHostPressureV16 |
+                ConvertTo-Json -Depth 20 |
+                ConvertFrom-Json -Depth 20
+        )
+Add-Check (
+    ($fixedStateV16 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract sixteen rejects available Docker-host pressure.'
+
+$autoscaledStateV16 = (
+    $autoscaledStateV15 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$autoscaledStateV16.managerContractVersion = 16
+$partialHostPressureV16 = (
+    $availableHostPressureV16 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$partialHostPressureV16.status = 'partial'
+$partialHostPressureV16.cpuUtilizationPercent = $null
+$autoscaledStateV16.resourceTelemetry |
+    Add-Member -NotePropertyName hostPressure -NotePropertyValue $partialHostPressureV16
+Add-Check (
+    ($autoscaledStateV16 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract sixteen rejects a first-sample partial pressure projection.'
+
+$missingHostPressureV16 = (
+    $fixedStateV16 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$missingHostPressureV16.resourceTelemetry.PSObject.Properties.Remove('hostPressure')
+Add-Check (-not (
+    ($missingHostPressureV16 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract sixteen accepts missing Docker-host pressure.'
+
+$unavailableWithPressureV16 = (
+    $fixedStateV16 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unavailableWithPressureV16.resourceTelemetry.hostPressure.status = 'unavailable'
+Add-Check (-not (
+    ($unavailableWithPressureV16 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Unavailable Docker-host pressure retained measured values.'
+
+$invalidPressurePercentageV16 = (
+    $fixedStateV16 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidPressurePercentageV16.resourceTelemetry.hostPressure.ioPressureSomeAvg10 = 101
+Add-Check (-not (
+    ($invalidPressurePercentageV16 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Docker-host pressure accepted an impossible percentage.'
+
+$contractFifteenWithoutHostPressure = (
+    $fixedStateV15 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$contractFifteenWithoutHostPressure.resourceTelemetry.PSObject.Properties.Remove(
+    'hostPressure')
+Add-Check (
+    ($contractFifteenWithoutHostPressure | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fifteen stopped accepting telemetry without host pressure.'
+
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
 
@@ -1886,11 +1987,11 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 15) 'The setup contract does not activate the active-job manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 16) 'The setup contract does not activate the host-pressure manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 15
-) 'The setup contract does not expose the defined active-job diagnostics contract.'
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 16
+) 'The setup contract does not expose the defined host-pressure diagnostics contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
     $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
@@ -2225,7 +2326,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -3046,7 +3147,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'Fixed setup did not activate manager contract 15.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'Fixed setup did not activate manager contract 16.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -3066,7 +3167,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'Autoscaled setup did not activate manager contract 15.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'Autoscaled setup did not activate manager contract 16.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -4103,9 +4204,12 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_W
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-15}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-16}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_HOST_PROC_PATH: /host/proc')) 'Manager containers do not use the fixed host-proc telemetry path.'
+Add-Check ($compose -match [regex]::Escape('/proc:/host/proc:ro')) 'Manager containers do not mount Docker-host proc read-only.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'The example environment does not pin the current manager contract.'
+Add-Check ($compose -notmatch '/host/proc:.+runner') 'Compose appears to expose Docker-host proc to a runner service.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=16$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

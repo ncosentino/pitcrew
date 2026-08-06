@@ -15,6 +15,12 @@ worker containers. Docker socket access is effectively host-level control.
 Run only the committed PitCrew manager on a dedicated host and restrict access
 to the machine.
 
+The manager also mounts the Docker host's `/proc` read-only at `/host/proc` to
+collect aggregate pressure. On Docker Desktop this is the Linux VM that runs
+containers. PitCrew reads only aggregate CPU, load, memory, swap, and PSI files;
+it does not publish process IDs, command lines, environment values, or mount
+paths. Workers receive neither the Docker socket nor the host-proc mount.
+
 ## Keep workers socketless
 
 Worker containers never receive the host Docker socket. Workflows therefore

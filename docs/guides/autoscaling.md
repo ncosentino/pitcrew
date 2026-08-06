@@ -89,7 +89,7 @@ canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
 Resource policy and the aggregate ceiling were introduced in manager contract
-11 and remain supported by the active contract 15 autoscaler.
+11 and remain supported by the active contract 16 autoscaler.
 
 Autoscaled slots also publish bounded `currentJob` metadata from GitHub's
 scale-set lifecycle events. The projection is sufficient to identify and link
@@ -97,6 +97,11 @@ the repository, workflow run, and job without exposing the raw runner name,
 workflow ref, labels, payload, logs, environment values, or credentials.
 Missing listener history remains explicitly unavailable rather than being
 inferred from resource use.
+
+Both manager modes publish Docker-host or VM pressure separately from
+per-container usage. CPU utilization/load, available memory/swap, and optional
+Linux PSI make CPU contention, memory pressure, and I/O stalls visible without
+changing the demand count or triggering automatic scale or cancellation.
 
 ## Operation evidence
 

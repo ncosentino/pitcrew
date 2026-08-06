@@ -484,7 +484,8 @@ host_hardware="${TEMP_DIRECTORY}/host-hardware.json"
 unavailable_host_hardware="${TEMP_DIRECTORY}/unavailable-host-hardware.json"
 cpuinfo_fixture="${TEMP_DIRECTORY}/cpuinfo"
 kernel_fixture="${TEMP_DIRECTORY}/kernel-version"
-mkdir -p "${fake_docker_directory}"
+host_proc_fixture="${TEMP_DIRECTORY}/host-proc"
+mkdir -p "${fake_docker_directory}" "${host_proc_fixture}/pressure"
 cat > "${cpuinfo_fixture}" <<'EOF'
 processor : 0
 physical id : 0
@@ -502,6 +503,26 @@ core id : 1
 model name : Example Processor 9000
 EOF
 printf '%s\n' '6.12.34-test' > "${kernel_fixture}"
+printf '%s\n' 'cpu 150 0 100 850 100 0 0 0 0 0' > "${host_proc_fixture}/stat"
+printf '%s\n' '12.50 8.25 4.00 3/100 123' > "${host_proc_fixture}/loadavg"
+cat > "${host_proc_fixture}/meminfo" <<'EOF'
+MemTotal:       33554432 kB
+MemAvailable:    8388608 kB
+SwapTotal:       2097152 kB
+SwapFree:        1048576 kB
+EOF
+cat > "${host_proc_fixture}/pressure/cpu" <<'EOF'
+some avg10=21.50 avg60=12.00 avg300=4.00 total=1
+full avg10=3.25 avg60=2.00 avg300=1.00 total=1
+EOF
+cat > "${host_proc_fixture}/pressure/memory" <<'EOF'
+some avg10=9.50 avg60=8.00 avg300=7.00 total=1
+full avg10=4.50 avg60=3.00 avg300=2.00 total=1
+EOF
+cat > "${host_proc_fixture}/pressure/io" <<'EOF'
+some avg10=30.25 avg60=20.00 avg300=10.00 total=1
+full avg10=15.00 avg60=10.00 avg300=5.00 total=1
+EOF
 cat > "${fake_docker_directory}/docker" <<'EOF'
 #!/bin/sh
 case "$1" in
@@ -608,6 +629,31 @@ write_stale_or_unavailable_host_hardware \
 assert_equals "stale" "$(jq -r '.status' "${fallback_host_hardware}")" "Hardware persistence fallback did not retain stale inventory."
 assert_equals "${initial_hardware_hash}" "$(jq -r '.inventoryHash' "${fallback_host_hardware}")" "Hardware persistence fallback changed inventory identity."
 
+host_proc_without_psi="${TEMP_DIRECTORY}/host-proc-without-psi"
+host_pressure_without_psi="${TEMP_DIRECTORY}/host-pressure-without-psi.json"
+mkdir -p "${host_proc_without_psi}"
+cp \
+    "${host_proc_fixture}/stat" \
+    "${host_proc_fixture}/loadavg" \
+    "${host_proc_fixture}/meminfo" \
+    "${host_proc_without_psi}/"
+printf '%s\n' '1000 850' > "${host_pressure_without_psi}.baseline"
+collect_host_pressure \
+    "${host_proc_without_psi}" \
+    "${host_pressure_without_psi}.baseline" \
+    "${host_pressure_without_psi}"
+assert_equals "available" "$(jq -r '.status' "${host_pressure_without_psi}")" "Missing optional PSI degraded complete core pressure."
+assert_equals "null" "$(jq -r '.ioPressureSomeAvg10' "${host_pressure_without_psi}")" "Missing PSI was reported as measured zero."
+
+unavailable_host_pressure="${TEMP_DIRECTORY}/unavailable-host-pressure.json"
+collect_host_pressure \
+    "${TEMP_DIRECTORY}/missing-host-proc" \
+    "${unavailable_host_pressure}.baseline" \
+    "${unavailable_host_pressure}"
+assert_equals "unavailable" "$(jq -r '.status' "${unavailable_host_pressure}")" "Missing host proc was not explicitly unavailable."
+
+printf '%s\n' '1000 850' > "${collected_resources}.host-cpu-baseline"
+PITCREW_HOST_PROC_PATH="${host_proc_fixture}" \
 HOSTNAME=manager123 \
 PATH="${fake_docker_directory}:${PATH}" \
     collect_resource_telemetry \
@@ -617,9 +663,14 @@ PATH="${fake_docker_directory}:${PATH}" \
         'ephemeral-managed-runner-slot' \
         1
 assert_equals "available" "$(jq -r '.status' "${collected_resources}")" "Complete Docker stats did not produce available resource telemetry."
+assert_equals "available" "$(jq -r '.hostPressure.status' "${collected_resources}")" "Complete host pressure did not report available."
+assert_equals "50.000000" "$(jq -r '.hostPressure.cpuUtilizationPercent' "${collected_resources}")" "Host CPU utilization was normalized incorrectly."
+assert_equals "8589934592" "$(jq -r '.hostPressure.memoryAvailableBytes' "${collected_resources}")" "Host available memory was normalized incorrectly."
+assert_equals "30.25" "$(jq -r '.hostPressure.ioPressureSomeAvg10' "${collected_resources}")" "Host I/O pressure was normalized incorrectly."
 assert_equals "0.0125" "$(jq -r '.manager.cpuCores' "${collected_resources}")" "Manager CPU telemetry was normalized incorrectly."
 assert_equals "134217728" "$(jq -r '.slots["slot-one"].usage.memoryWorkingSetBytes' "${collected_resources}")" "Worker memory telemetry was normalized incorrectly."
 
+PITCREW_HOST_PROC_PATH="${host_proc_fixture}" \
 PITCREW_TEST_STATS_FAIL=1 \
 HOSTNAME=manager123 \
 PATH="${fake_docker_directory}:${PATH}" \
@@ -630,8 +681,10 @@ PATH="${fake_docker_directory}:${PATH}" \
         'ephemeral-managed-runner-slot' \
         1
 assert_equals "partial" "$(jq -r '.status' "${partial_resources}")" "A Docker stats failure was not surfaced as partial telemetry."
+assert_equals "partial" "$(jq -r '.hostPressure.status' "${partial_resources}")" "A first host-pressure sample did not remain partial."
 assert_equals "null" "$(jq -r '.manager' "${partial_resources}")" "A failed stats sample emitted success-shaped manager usage."
 
+PITCREW_HOST_PROC_PATH="${host_proc_fixture}" \
 PITCREW_TEST_INFO_FAIL=1 \
 HOSTNAME=manager123 \
 PATH="${fake_docker_directory}:${PATH}" \
@@ -647,6 +700,7 @@ assert_equals "0.0125" "$(jq -r '.manager.cpuCores' "${host_partial_resources}")
 assert_equals "134217728" "$(jq -r '.slots["slot-one"].usage.memoryWorkingSetBytes' "${host_partial_resources}")" "Host-capacity failure discarded valid worker telemetry."
 
 timeout_started=$(date +%s)
+PITCREW_HOST_PROC_PATH="${host_proc_fixture}" \
 PITCREW_TEST_STATS_SLEEP=5 \
 HOSTNAME=manager123 \
 PATH="${fake_docker_directory}:${PATH}" \
@@ -865,7 +919,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "15" \
+    "16" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1536,5 +1590,58 @@ jq '.managerContractVersion = 14 | del(.slots[].currentJob)' \
 assert_true \
     "Observed-state validation rejected a contract-fourteen slot without job context." \
     observed_state_is_valid "${legacy_contract_fifteen_state}"
+
+contract_sixteen_state_json="${TEMP_DIRECTORY}/contract-sixteen-state.json"
+jq '
+    .managerContractVersion = 16
+    | .resourceTelemetry.hostPressure = {
+        status: "available",
+        source: "docker-host",
+        cpuUtilizationPercent: 97.5,
+        load1: 18.5,
+        load5: 12.25,
+        load15: 8,
+        memoryTotalBytes: 34359738368,
+        memoryAvailableBytes: 4294967296,
+        swapUsedBytes: 1073741824,
+        cpuPressureSomeAvg10: 35.5,
+        cpuPressureFullAvg10: 5,
+        memoryPressureSomeAvg10: 12.5,
+        memoryPressureFullAvg10: 3,
+        ioPressureSomeAvg10: 42,
+        ioPressureFullAvg10: 18
+    }
+' "${contract_fifteen_state_json}" > "${contract_sixteen_state_json}"
+assert_true "Contract-sixteen observed manager state was rejected." \
+    observed_state_is_valid "${contract_sixteen_state_json}"
+assert_equals \
+    "97.5" \
+    "$(jq -r '.resourceTelemetry.hostPressure.cpuUtilizationPercent' "${contract_sixteen_state_json}")" \
+    "Observed state lost Docker-host CPU pressure."
+
+invalid_contract_sixteen_state="${TEMP_DIRECTORY}/invalid-contract-sixteen-state.json"
+jq 'del(.resourceTelemetry.hostPressure)' \
+    "${contract_sixteen_state_json}" > "${invalid_contract_sixteen_state}"
+assert_false "Manager contract sixteen accepted missing Docker-host pressure." \
+    observed_state_is_valid "${invalid_contract_sixteen_state}"
+jq '.resourceTelemetry.hostPressure.status = "unavailable"' \
+    "${contract_sixteen_state_json}" > "${invalid_contract_sixteen_state}"
+assert_false "Unavailable Docker-host pressure retained measurements." \
+    observed_state_is_valid "${invalid_contract_sixteen_state}"
+jq '.resourceTelemetry.hostPressure.ioPressureSomeAvg10 = 101' \
+    "${contract_sixteen_state_json}" > "${invalid_contract_sixteen_state}"
+assert_false "Docker-host pressure accepted an impossible percentage." \
+    observed_state_is_valid "${invalid_contract_sixteen_state}"
+jq '.resourceTelemetry.hostPressure.memoryAvailableBytes = 34359738369' \
+    "${contract_sixteen_state_json}" > "${invalid_contract_sixteen_state}"
+assert_false "Docker-host pressure accepted available memory above total memory." \
+    observed_state_is_valid "${invalid_contract_sixteen_state}"
+
+legacy_contract_sixteen_state="${TEMP_DIRECTORY}/legacy-contract-sixteen-state.json"
+jq '.managerContractVersion = 15 | del(.resourceTelemetry.hostPressure)' \
+    "${contract_sixteen_state_json}" > "${legacy_contract_sixteen_state}"
+assert_true \
+    "Observed-state validation rejected contract-fifteen telemetry without host pressure." \
+    observed_state_is_valid "${legacy_contract_sixteen_state}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

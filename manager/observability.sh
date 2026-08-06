@@ -166,6 +166,92 @@ observed_state_is_valid() {
                     )
                 end
             );
+        def optional_nonnegative_number:
+            . == null or (type == "number" and . >= 0);
+        def optional_percentage:
+            . == null or (type == "number" and . >= 0 and . <= 100);
+        def valid_host_pressure:
+            type == "object"
+            and (
+                keys == [
+                    "cpuPressureFullAvg10",
+                    "cpuPressureSomeAvg10",
+                    "cpuUtilizationPercent",
+                    "ioPressureFullAvg10",
+                    "ioPressureSomeAvg10",
+                    "load1",
+                    "load15",
+                    "load5",
+                    "memoryAvailableBytes",
+                    "memoryPressureFullAvg10",
+                    "memoryPressureSomeAvg10",
+                    "memoryTotalBytes",
+                    "source",
+                    "status",
+                    "swapUsedBytes"
+                ]
+            )
+            and .source == "docker-host"
+            and (
+                .status == "available"
+                or .status == "partial"
+                or .status == "unavailable"
+            )
+            and (.cpuUtilizationPercent | optional_percentage)
+            and (.load1 | optional_nonnegative_number)
+            and (.load5 | optional_nonnegative_number)
+            and (.load15 | optional_nonnegative_number)
+            and (
+                .memoryTotalBytes == null
+                or (.memoryTotalBytes | nonnegative_integer and . > 0)
+            )
+            and (.memoryAvailableBytes | optional_counter)
+            and (.swapUsedBytes | optional_counter)
+            and (.cpuPressureSomeAvg10 | optional_percentage)
+            and (.cpuPressureFullAvg10 | optional_percentage)
+            and (.memoryPressureSomeAvg10 | optional_percentage)
+            and (.memoryPressureFullAvg10 | optional_percentage)
+            and (.ioPressureSomeAvg10 | optional_percentage)
+            and (.ioPressureFullAvg10 | optional_percentage)
+            and (
+                .memoryTotalBytes == null
+                or .memoryAvailableBytes == null
+                or .memoryAvailableBytes <= .memoryTotalBytes
+            )
+            and (
+                [
+                    .cpuUtilizationPercent,
+                    .load1,
+                    .load5,
+                    .load15,
+                    .memoryTotalBytes,
+                    .memoryAvailableBytes,
+                    .swapUsedBytes,
+                    .cpuPressureSomeAvg10,
+                    .cpuPressureFullAvg10,
+                    .memoryPressureSomeAvg10,
+                    .memoryPressureFullAvg10,
+                    .ioPressureSomeAvg10,
+                    .ioPressureFullAvg10
+                ] as $measurements
+                | (
+                    .cpuUtilizationPercent != null
+                    and .load1 != null
+                    and .load5 != null
+                    and .load15 != null
+                    and .memoryTotalBytes != null
+                    and .memoryAvailableBytes != null
+                    and .swapUsedBytes != null
+                ) as $coreAvailable
+                | if .status == "available" then
+                    $coreAvailable
+                  elif .status == "partial" then
+                    ($coreAvailable | not)
+                    and any($measurements[]; . != null)
+                  else
+                    all($measurements[]; . == null)
+                  end
+            );
         def valid_resource_telemetry:
             type == "object"
             and has("host")
@@ -177,6 +263,7 @@ observed_state_is_valid() {
                 or .status == "unavailable"
             )
             and (.host == null or (.host | valid_host_capacity))
+            and (.hostPressure == null or (.hostPressure | valid_host_pressure))
             and (.manager == null or (.manager | valid_resource_usage));
         def valid_autoscaling:
             type == "object"
@@ -626,6 +713,15 @@ observed_state_is_valid() {
                             .currentJob | valid_current_job
                         )
                     ))
+            else
+                true
+            end
+        )
+        and (
+            if .managerContractVersion >= 16 then
+                .resourceTelemetry != null
+                and (.resourceTelemetry | has("hostPressure"))
+                and (.resourceTelemetry.hostPressure | valid_host_pressure)
             else
                 true
             end
@@ -1237,6 +1333,23 @@ write_unavailable_resource_telemetry() {
             sampledAt: $sampledAt,
             status: "unavailable",
             host: null,
+            hostPressure: {
+                status: "unavailable",
+                source: "docker-host",
+                cpuUtilizationPercent: null,
+                load1: null,
+                load5: null,
+                load15: null,
+                memoryTotalBytes: null,
+                memoryAvailableBytes: null,
+                swapUsedBytes: null,
+                cpuPressureSomeAvg10: null,
+                cpuPressureFullAvg10: null,
+                memoryPressureSomeAvg10: null,
+                memoryPressureFullAvg10: null,
+                ioPressureSomeAvg10: null,
+                ioPressureFullAvg10: null
+            },
             manager: null,
             slots: {}
         }' > "${temporary_path}"; then
@@ -1248,6 +1361,239 @@ write_unavailable_resource_telemetry() {
         return 1
     fi
 }
+
+collect_host_pressure() (
+    proc_path="$1"
+    baseline_path="$2"
+    output_path="$3"
+    cpu_utilization="null"
+    load_1="null"
+    load_5="null"
+    load_15="null"
+    memory_total="null"
+    memory_available="null"
+    swap_used="null"
+    cpu_some="null"
+    cpu_full="null"
+    memory_some="null"
+    memory_full="null"
+    io_some="null"
+    io_full="null"
+
+    if counters=$(
+        awk '
+            $1 == "cpu" {
+                if (NF < 5) exit 1
+                limit = NF < 9 ? NF : 9
+                total = 0
+                for (i = 2; i <= limit; i++) {
+                    if ($i !~ /^[0-9]+$/) exit 1
+                    total += $i
+                }
+                idle = $5
+                if (NF >= 6) idle += $6
+                printf "%.0f %.0f\n", total, idle
+                found = 1
+                exit
+            }
+            END {
+                if (!found) exit 1
+            }
+        ' "${proc_path}/stat" 2>/dev/null
+    ); then
+        current_total=${counters%% *}
+        current_idle=${counters##* }
+        if [ -f "${baseline_path}" ]; then
+            previous_total=""
+            previous_idle=""
+            read -r previous_total previous_idle < "${baseline_path}" || true
+            case "${previous_total}:${previous_idle}" in
+                *[!0-9:]*|:|*:) ;;
+                *)
+                    if [ "${current_total}" -gt "${previous_total}" ] &&
+                        [ "${current_idle}" -ge "${previous_idle}" ]; then
+                        total_delta=$((current_total - previous_total))
+                        idle_delta=$((current_idle - previous_idle))
+                        if [ "${idle_delta}" -le "${total_delta}" ]; then
+                            cpu_utilization=$(
+                                awk \
+                                    -v total="${total_delta}" \
+                                    -v idle="${idle_delta}" \
+                                    'BEGIN { printf "%.6f", ((total - idle) / total) * 100 }'
+                            )
+                        fi
+                    fi
+                    ;;
+            esac
+        fi
+        baseline_temporary="${baseline_path}.$$.tmp"
+        if printf '%s %s\n' "${current_total}" "${current_idle}" > "${baseline_temporary}"; then
+            mv -f "${baseline_temporary}" "${baseline_path}" || rm -f "${baseline_temporary}"
+        else
+            rm -f "${baseline_temporary}"
+        fi
+    fi
+
+    if loads=$(
+        awk '
+            NR == 1 {
+                for (i = 1; i <= 3; i++) {
+                    if ($i !~ /^[0-9]+([.][0-9]+)?$/) exit 1
+                }
+                print $1, $2, $3
+                found = 1
+                exit
+            }
+            END {
+                if (!found) exit 1
+            }
+        ' "${proc_path}/loadavg" 2>/dev/null
+    ); then
+        load_1=$(printf '%s\n' "${loads}" | awk '{ print $1 }')
+        load_5=$(printf '%s\n' "${loads}" | awk '{ print $2 }')
+        load_15=$(printf '%s\n' "${loads}" | awk '{ print $3 }')
+    fi
+
+    if memory=$(
+        awk '
+            function bytes(value) {
+                return value * 1024
+            }
+            /^MemTotal:/ {
+                if ($2 !~ /^[0-9]+$/ || $3 != "kB") exit 1
+                total = bytes($2)
+                hasTotal = 1
+            }
+            /^MemAvailable:/ {
+                if ($2 !~ /^[0-9]+$/ || $3 != "kB") exit 1
+                available = bytes($2)
+                hasAvailable = 1
+            }
+            /^SwapTotal:/ {
+                if ($2 !~ /^[0-9]+$/ || $3 != "kB") exit 1
+                swapTotal = bytes($2)
+                hasSwapTotal = 1
+            }
+            /^SwapFree:/ {
+                if ($2 !~ /^[0-9]+$/ || $3 != "kB") exit 1
+                swapFree = bytes($2)
+                hasSwapFree = 1
+            }
+            END {
+                if (!hasTotal || !hasAvailable ||
+                    total <= 0 || available < 0 || available > total) exit 1
+                if (hasSwapTotal && hasSwapFree && swapFree <= swapTotal) {
+                    printf "%.0f %.0f %.0f\n", total, available, swapTotal - swapFree
+                } else {
+                    printf "%.0f %.0f null\n", total, available
+                }
+            }
+        ' "${proc_path}/meminfo" 2>/dev/null
+    ); then
+        memory_total=$(printf '%s\n' "${memory}" | awk '{ print $1 }')
+        memory_available=$(printf '%s\n' "${memory}" | awk '{ print $2 }')
+        swap_used=$(printf '%s\n' "${memory}" | awk '{ print $3 }')
+    fi
+
+    psi_avg10() {
+        kind="$1"
+        path="$2"
+        awk -v kind="${kind}" '
+            $1 == kind {
+                for (i = 2; i <= NF; i++) {
+                    split($i, pair, "=")
+                    if (pair[1] == "avg10" &&
+                        pair[2] ~ /^[0-9]+([.][0-9]+)?$/ &&
+                        pair[2] + 0 <= 100) {
+                        print pair[2]
+                        exit
+                    }
+                }
+            }
+        ' "${path}" 2>/dev/null
+    }
+
+    value=$(psi_avg10 some "${proc_path}/pressure/cpu" || true)
+    [ -n "${value}" ] && cpu_some="${value}"
+    value=$(psi_avg10 full "${proc_path}/pressure/cpu" || true)
+    [ -n "${value}" ] && cpu_full="${value}"
+    value=$(psi_avg10 some "${proc_path}/pressure/memory" || true)
+    [ -n "${value}" ] && memory_some="${value}"
+    value=$(psi_avg10 full "${proc_path}/pressure/memory" || true)
+    [ -n "${value}" ] && memory_full="${value}"
+    value=$(psi_avg10 some "${proc_path}/pressure/io" || true)
+    [ -n "${value}" ] && io_some="${value}"
+    value=$(psi_avg10 full "${proc_path}/pressure/io" || true)
+    [ -n "${value}" ] && io_full="${value}"
+
+    core_available=0
+    if [ "${cpu_utilization}" != "null" ] &&
+        [ "${load_1}" != "null" ] &&
+        [ "${load_5}" != "null" ] &&
+        [ "${load_15}" != "null" ] &&
+        [ "${memory_total}" != "null" ] &&
+        [ "${memory_available}" != "null" ] &&
+        [ "${swap_used}" != "null" ]; then
+        core_available=1
+    fi
+    measurement_count=0
+    for measurement in \
+        "${cpu_utilization}" \
+        "${load_1}" \
+        "${load_5}" \
+        "${load_15}" \
+        "${memory_total}" \
+        "${memory_available}" \
+        "${swap_used}" \
+        "${cpu_some}" \
+        "${cpu_full}" \
+        "${memory_some}" \
+        "${memory_full}" \
+        "${io_some}" \
+        "${io_full}"; do
+        [ "${measurement}" = "null" ] || measurement_count=$((measurement_count + 1))
+    done
+    if [ "${core_available}" -eq 1 ]; then
+        status="available"
+    elif [ "${measurement_count}" -gt 0 ]; then
+        status="partial"
+    else
+        status="unavailable"
+    fi
+
+    jq -n \
+        --arg status "${status}" \
+        --argjson cpuUtilizationPercent "${cpu_utilization}" \
+        --argjson load1 "${load_1}" \
+        --argjson load5 "${load_5}" \
+        --argjson load15 "${load_15}" \
+        --argjson memoryTotalBytes "${memory_total}" \
+        --argjson memoryAvailableBytes "${memory_available}" \
+        --argjson swapUsedBytes "${swap_used}" \
+        --argjson cpuPressureSomeAvg10 "${cpu_some}" \
+        --argjson cpuPressureFullAvg10 "${cpu_full}" \
+        --argjson memoryPressureSomeAvg10 "${memory_some}" \
+        --argjson memoryPressureFullAvg10 "${memory_full}" \
+        --argjson ioPressureSomeAvg10 "${io_some}" \
+        --argjson ioPressureFullAvg10 "${io_full}" \
+        '{
+            status: $status,
+            source: "docker-host",
+            cpuUtilizationPercent: $cpuUtilizationPercent,
+            load1: $load1,
+            load5: $load5,
+            load15: $load15,
+            memoryTotalBytes: $memoryTotalBytes,
+            memoryAvailableBytes: $memoryAvailableBytes,
+            swapUsedBytes: $swapUsedBytes,
+            cpuPressureSomeAvg10: $cpuPressureSomeAvg10,
+            cpuPressureFullAvg10: $cpuPressureFullAvg10,
+            memoryPressureSomeAvg10: $memoryPressureSomeAvg10,
+            memoryPressureFullAvg10: $memoryPressureFullAvg10,
+            ioPressureSomeAvg10: $ioPressureSomeAvg10,
+            ioPressureFullAvg10: $ioPressureFullAvg10
+        }' > "${output_path}"
+)
 
 collect_resource_telemetry() (
     output_path="$1"
@@ -1264,6 +1610,7 @@ collect_resource_telemetry() (
     raw_stats_path="${working_directory}/stats.jsonl"
     normalized_stats_path="${working_directory}/normalized.jsonl"
     host_path="${working_directory}/host.json"
+    host_pressure_path="${working_directory}/host-pressure.json"
     output_temporary="${output_path%/*}/.resource-telemetry.$$.tmp"
     sampled_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)
     mkdir -p "${working_directory}" || exit 1
@@ -1272,6 +1619,12 @@ collect_resource_telemetry() (
     : > "${raw_stats_path}"
     : > "${normalized_stats_path}"
     printf 'null\n' > "${host_path}"
+    if ! collect_host_pressure \
+        "${PITCREW_HOST_PROC_PATH:-/host/proc}" \
+        "${output_path}.host-cpu-baseline" \
+        "${host_pressure_path}"; then
+        exit 1
+    fi
 
     host_available=0
     if timeout "${command_timeout}" docker info \
@@ -1369,11 +1722,13 @@ collect_resource_telemetry() (
         --arg sampledAt "${sampled_at}" \
         --arg status "${telemetry_status}" \
         --slurpfile host "${host_path}" \
+        --slurpfile hostPressure "${host_pressure_path}" \
         --slurpfile records "${normalized_stats_path}" \
         '{
             sampledAt: $sampledAt,
             status: $status,
             host: $host[0],
+            hostPressure: $hostPressure[0],
             manager: (
                 [$records[] | select(.role == "manager") | .usage][0] // null
             ),

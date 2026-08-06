@@ -8,10 +8,11 @@ import (
 )
 
 type resourceTelemetry struct {
-	SampledAt string                `json:"sampledAt"`
-	Status    string                `json:"status"`
-	Host      *hostResourceCapacity `json:"host"`
-	Manager   *resourceUsage        `json:"manager"`
+	SampledAt    string                `json:"sampledAt"`
+	Status       string                `json:"status"`
+	Host         *hostResourceCapacity `json:"host"`
+	HostPressure hostPressureTelemetry `json:"hostPressure"`
+	Manager      *resourceUsage        `json:"manager"`
 }
 
 type observedSlot struct {
@@ -167,10 +168,11 @@ func buildObservedState(
 		ConfiguredSlots:        configuredSlots,
 		Slots:                  []observedSlot{},
 		ResourceTelemetry: resourceTelemetry{
-			SampledAt: now.Format(time.RFC3339),
-			Status:    "unavailable",
-			Host:      nil,
-			Manager:   nil,
+			SampledAt:    now.Format(time.RFC3339),
+			Status:       "unavailable",
+			Host:         nil,
+			HostPressure: unavailableHostPressure(),
+			Manager:      nil,
 		},
 		Host: observedHost{
 			Hardware: unavailableHostHardwareInventory(now),
