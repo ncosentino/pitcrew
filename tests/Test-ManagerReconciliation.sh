@@ -865,7 +865,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "14" \
+    "15" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1467,5 +1467,74 @@ jq '.managerContractVersion = 13 | del(.slots[].runnerNameHash)' \
 assert_true \
     "Observed-state validation rejected a contract-thirteen slot without runner correlation." \
     observed_state_is_valid "${legacy_contract_fourteen_state}"
+
+contract_fifteen_state_json="${TEMP_DIRECTORY}/contract-fifteen-state.json"
+write_manager_observed_state \
+    "${contract_fifteen_state_json}" \
+    default \
+    manager-instance \
+    15 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_eleven_telemetry_json}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}"
+assert_true "Contract-fifteen observed manager state was rejected." \
+    observed_state_is_valid "${contract_fifteen_state_json}"
+assert_equals \
+    "0" \
+    "$(jq '[.slots[] | select(.currentJob != null)] | length' "${contract_fifteen_state_json}")" \
+    "Fixed manager fabricated active job context."
+
+invalid_contract_fifteen_state="${TEMP_DIRECTORY}/invalid-contract-fifteen-state.json"
+jq 'del(.slots[0].currentJob)' \
+    "${contract_fifteen_state_json}" > "${invalid_contract_fifteen_state}"
+assert_false "Manager contract fifteen accepted missing job availability." \
+    observed_state_is_valid "${invalid_contract_fifteen_state}"
+jq '
+    .slots[0].activity = "busy"
+    | .slots[0].currentJob = {
+        repository: "https://github.com/example/project",
+        workflowRunId: 31068390178,
+        jobId: "92513140749",
+        displayName: "Android debug build",
+        eventName: "pull_request",
+        queuedAt: "2026-08-06T03:40:00Z",
+        scaleSetAssignedAt: "2026-08-06T03:41:00Z",
+        runnerAssignedAt: "2026-08-06T03:41:30Z",
+        startedAt: "2026-08-06T03:42:03Z",
+        finishedAt: null,
+        result: null
+    }
+' "${contract_fifteen_state_json}" > "${invalid_contract_fifteen_state}"
+assert_true "Manager contract fifteen rejected bounded job context." \
+    observed_state_is_valid "${invalid_contract_fifteen_state}"
+jq '.slots[0].currentJob.workflowRef = "private-ref"' \
+    "${invalid_contract_fifteen_state}" > "${invalid_contract_fifteen_state}.raw"
+assert_false "Manager contract fifteen accepted an unsupported workflow payload." \
+    observed_state_is_valid "${invalid_contract_fifteen_state}.raw"
+jq '.slots[0].currentJob.jobId = "not-a-job-id"' \
+    "${invalid_contract_fifteen_state}" > "${invalid_contract_fifteen_state}.bad-id"
+assert_false "Manager contract fifteen accepted a malformed job identifier." \
+    observed_state_is_valid "${invalid_contract_fifteen_state}.bad-id"
+
+legacy_contract_fifteen_state="${TEMP_DIRECTORY}/legacy-contract-fifteen-state.json"
+jq '.managerContractVersion = 14 | del(.slots[].currentJob)' \
+    "${contract_fifteen_state_json}" > "${legacy_contract_fifteen_state}"
+assert_true \
+    "Observed-state validation rejected a contract-fourteen slot without job context." \
+    observed_state_is_valid "${legacy_contract_fifteen_state}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

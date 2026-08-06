@@ -34,7 +34,7 @@ $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 14
+$activeManagerContractVersion = 15
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -1533,6 +1533,167 @@ Add-Check (
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract thirteen stopped accepting slots without runner correlation.'
 
+$fixedStateV15 = (
+    $fixedStateV14 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$fixedStateV15.managerContractVersion = 15
+foreach ($slot in $fixedStateV15.slots) {
+    $slot | Add-Member -NotePropertyName currentJob -NotePropertyValue $null
+}
+Add-Check (
+    ($fixedStateV15 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fifteen rejects explicitly unavailable fixed job context.'
+
+$autoscaledStateV15 = (
+    $autoscaledStateV14 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$autoscaledStateV15.managerContractVersion = 15
+$autoscaledStateV15.desiredSlots = 1
+$autoscaledStateV15.activeSlots = 1
+$autoscaledStateV15.eligibleSlots = 1
+$autoscaledStateV15.slots = @(
+    $fixedStateV15.slots[0] |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$autoscaledStateV15.autoscaling = [PSCustomObject][ordered]@{
+    mode = 'scale-set'
+    status = 'running'
+    minimumIdleSlots = 0
+    maximumSlots = 1
+    targetSlots = 1
+    assignedJobs = 1
+    runningJobs = 1
+    availableJobs = 0
+    idleRunners = 0
+    busyRunners = 1
+    scaleDownDelaySeconds = 120
+    scaleDownAt = $null
+    scaleSetCount = 1
+    lastError = $null
+    maximumActiveWorkers = 1
+    targets = @(
+        [PSCustomObject][ordered]@{
+            key = 'repo-example'
+            repository = 'https://github.com/example/project'
+            maximumSlots = 1
+            targetSlots = 1
+            localActiveWorkers = 1
+            localIdleWorkers = 0
+            localBusyWorkers = 1
+            localDrainingWorkers = 0
+            statistics = [PSCustomObject][ordered]@{
+                observedAt = '2026-08-06T03:42:03Z'
+                availableJobs = 0
+                acquiredJobs = 1
+                assignedJobs = 1
+                runningJobs = 1
+                registeredRunners = 1
+                busyRunners = 1
+                idleRunners = 0
+            }
+        }
+    )
+}
+$activeJobSlotV15 = $autoscaledStateV15.slots[0]
+if ($activeJobSlotV15.PSObject.Properties['activity']) {
+    $activeJobSlotV15.activity = 'busy'
+} else {
+    $activeJobSlotV15 | Add-Member -NotePropertyName activity -NotePropertyValue 'busy'
+}
+$activeJobSlotV15.currentJob = [PSCustomObject][ordered]@{
+    repository = 'https://github.com/example/project'
+    workflowRunId = 31068390178
+    jobId = '92513140749'
+    displayName = 'Android debug build'
+    eventName = 'pull_request'
+    queuedAt = '2026-08-06T03:40:00Z'
+    scaleSetAssignedAt = '2026-08-06T03:41:00Z'
+    runnerAssignedAt = '2026-08-06T03:41:30Z'
+    startedAt = '2026-08-06T03:42:03Z'
+    finishedAt = $null
+    result = $null
+}
+Add-Check (
+    ($autoscaledStateV15 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fifteen rejects bounded autoscaled job context.'
+
+$missingCurrentJobV15 = (
+    $fixedStateV15 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$missingCurrentJobV15.slots[0].PSObject.Properties.Remove('currentJob')
+Add-Check (-not (
+    ($missingCurrentJobV15 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract fifteen accepts a slot without explicit job availability.'
+
+$invalidCurrentJobV15 = (
+    $autoscaledStateV15 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$invalidCurrentJobSlotV15 = @(
+    $invalidCurrentJobV15.slots |
+        Where-Object { $null -ne $_.currentJob }
+)[0]
+$invalidCurrentJobSlotV15.currentJob.jobId = 'not-a-job-id'
+Add-Check (-not (
+    ($invalidCurrentJobV15 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract fifteen accepts an invalid job identifier.'
+
+$oversizedCurrentJobV15 = (
+    $autoscaledStateV15 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$oversizedCurrentJobSlotV15 = @(
+    $oversizedCurrentJobV15.slots |
+        Where-Object { $null -ne $_.currentJob }
+)[0]
+$oversizedCurrentJobSlotV15.currentJob.displayName = 'x' * 257
+Add-Check (-not (
+    ($oversizedCurrentJobV15 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract fifteen accepts an oversized job display name.'
+
+$rawCurrentJobPayloadV15 = (
+    $autoscaledStateV15 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+$rawCurrentJobPayloadSlotV15 = @(
+    $rawCurrentJobPayloadV15.slots |
+        Where-Object { $null -ne $_.currentJob }
+)[0]
+$rawCurrentJobPayloadSlotV15.currentJob |
+    Add-Member -NotePropertyName workflowRef -NotePropertyValue 'private-ref'
+Add-Check (-not (
+    ($rawCurrentJobPayloadV15 | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract fifteen accepts an unsupported workflow payload field.'
+
+$contractFourteenWithoutCurrentJob = (
+    $fixedStateV14 |
+        ConvertTo-Json -Depth 16 |
+        ConvertFrom-Json -Depth 16
+)
+foreach ($slot in $contractFourteenWithoutCurrentJob.slots) {
+    $slot.PSObject.Properties.Remove('currentJob')
+}
+Add-Check (
+    ($contractFourteenWithoutCurrentJob | ConvertTo-Json -Depth 16) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract fourteen stopped accepting slots without job context.'
+
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
 
@@ -1725,11 +1886,11 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 14) 'The setup contract does not activate the runner-correlation manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 15) 'The setup contract does not activate the active-job manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 14
-) 'The setup contract does not expose the defined runner-correlation contract.'
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 15
+) 'The setup contract does not expose the defined active-job diagnostics contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
     $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
@@ -2064,7 +2225,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -2885,7 +3046,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'Fixed setup did not activate manager contract 14.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'Fixed setup did not activate manager contract 15.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -2905,7 +3066,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'Autoscaled setup did not activate manager contract 14.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'Autoscaled setup did not activate manager contract 15.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -3942,9 +4103,9 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_W
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-14}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-15}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=14$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=15$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

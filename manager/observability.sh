@@ -404,6 +404,75 @@ observed_state_is_valid() {
             and has("fixed")
             and (.targets | type == "array")
             and (.fixed == null or (.fixed | valid_capacity_deficit));
+        def valid_bounded_text($maximum):
+            type == "string"
+            and length >= 1
+            and length <= $maximum
+            and (
+                explode
+                | map(select(. < 32 or . == 127))
+                | length == 0
+            );
+        def valid_current_job:
+            type == "object"
+            and (
+                keys == [
+                    "displayName",
+                    "eventName",
+                    "finishedAt",
+                    "jobId",
+                    "queuedAt",
+                    "repository",
+                    "result",
+                    "runnerAssignedAt",
+                    "scaleSetAssignedAt",
+                    "startedAt",
+                    "workflowRunId"
+                ]
+            )
+            and (
+                .repository
+                | type == "string"
+                and test("^https://github\\.com/[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$")
+            )
+            and (.workflowRunId | nonnegative_integer and . >= 1)
+            and (
+                .jobId
+                | type == "string"
+                and test("^[1-9][0-9]{0,31}$")
+            )
+            and (
+                .displayName == null
+                or (
+                    .displayName
+                    | valid_bounded_text(256)
+                )
+            )
+            and (
+                .eventName == null
+                or (
+                    .eventName
+                    | valid_bounded_text(64)
+                )
+            )
+            and (.queuedAt == null or (.queuedAt | type == "string" and length > 0))
+            and (
+                .scaleSetAssignedAt == null
+                or (.scaleSetAssignedAt | type == "string" and length > 0)
+            )
+            and (
+                .runnerAssignedAt == null
+                or (.runnerAssignedAt | type == "string" and length > 0)
+            )
+            and (.startedAt | type == "string" and length > 0)
+            and (.finishedAt == null or (.finishedAt | type == "string" and length > 0))
+            and (
+                .result == null
+                or (
+                    .result
+                    | valid_bounded_text(64)
+                )
+            );
         def valid_slot:
             type == "object"
             and (.key | type == "string" and length > 0)
@@ -442,6 +511,7 @@ observed_state_is_valid() {
                     | type == "string" and test("^[0-9a-f]{64}$")
                 )
             )
+            and (.currentJob == null or (.currentJob | valid_current_job))
             and (.lastExit == null or (.lastExit | valid_last_exit));
         def valid_registration_status:
             . == "connected"
@@ -540,6 +610,20 @@ observed_state_is_valid() {
                         or (
                             .runnerNameHash
                             | type == "string" and test("^[0-9a-f]{64}$")
+                        )
+                    ))
+            else
+                true
+            end
+        )
+        and (
+            if .managerContractVersion >= 15 then
+                all(.slots[];
+                    has("currentJob")
+                    and (
+                        .currentJob == null
+                        or (
+                            .currentJob | valid_current_job
                         )
                     ))
             else
@@ -1536,6 +1620,7 @@ render_observed_slots() {
                         else $runnerNameHash
                         end
                     ),
+                    currentJob: null,
                     registrationStatus: $registrationStatus,
                     activity: (
                         if $registrationActivity == ""
