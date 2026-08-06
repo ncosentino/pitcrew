@@ -124,6 +124,8 @@ write_undesired_slot_keys "${slots_five}" "${active_keys}" "${undesired_keys}"
 assert_equals "2" "$(wc -l < "${undesired_keys}" | tr -d ' ')" "Linear desired-key lookup returned the wrong drain set."
 assert_true "Linear desired-key lookup missed the removed ordinal." grep -Fqx "${removed_key}" "${undesired_keys}"
 assert_true "Linear desired-key lookup missed an orphaned slot." grep -Fqx 'orphan-slot' "${undesired_keys}"
+write_undesired_slot_keys "${slots_paused}" "${active_keys}" "${undesired_keys}"
+assert_equals "7" "$(wc -l < "${undesired_keys}" | tr -d ' ')" "Zero desired capacity did not drain every active slot."
 
 multi_initial="${TEMP_DIRECTORY}/multi-initial.json"
 multi_changed="${TEMP_DIRECTORY}/multi-changed.json"

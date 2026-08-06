@@ -123,7 +123,7 @@ write_undesired_slot_keys() {
     active_keys_path="$2"
     output_path="$3"
     awk -F '\t' '
-        NR == FNR {
+        FILENAME == ARGV[1] {
             desired[$1] = 1
             next
         }
