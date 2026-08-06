@@ -56,6 +56,19 @@ identifiers, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, or job output. Unsupported fields remain `null`; they
 are never inferred from processor names.
 
+## Bound active job context
+
+Autoscaled managers receive GitHub scale-set lifecycle messages so they can
+protect busy workers. PitCrew publishes only bounded repository, run/job
+identifier, display/event name, timestamp, and result fields needed for
+operator triage.
+
+The projection excludes raw runner identity, workflow refs, requested labels,
+message payloads, logs, step output, environment values, commit text, JIT
+configuration, tokens, and registration material. Fixed and recovered workers
+without usable lifecycle metadata remain unattributed; resource activity is
+never used to guess a job.
+
 ## Isolate pool-local services
 
 An optional profile service network gives workers stable Docker DNS access to

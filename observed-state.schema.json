@@ -177,6 +177,78 @@
       },
       "$comment": "Classification precedence is Docker-confirmed OOM, SIGKILL, other signal, clean zero, ordinary nonzero error, launch failure, then unknown. Exit code 137 alone never proves OOM."
     },
+    "currentJob": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "workflowRunId",
+        "jobId",
+        "displayName",
+        "eventName",
+        "queuedAt",
+        "scaleSetAssignedAt",
+        "runnerAssignedAt",
+        "startedAt",
+        "finishedAt",
+        "result"
+      ],
+      "properties": {
+        "repository": {
+          "type": "string",
+          "maxLength": 160,
+          "pattern": "^https://github\\.com/[A-Za-z0-9._-]{1,39}/[A-Za-z0-9._-]{1,100}$"
+        },
+        "workflowRunId": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9223372036854775807
+        },
+        "jobId": {
+          "type": "string",
+          "pattern": "^[1-9][0-9]{0,31}$"
+        },
+        "displayName": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 256,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        },
+        "eventName": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        },
+        "queuedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "scaleSetAssignedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "runnerAssignedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "result": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64,
+          "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
+        }
+      },
+      "$comment": "Autoscaled job context is bounded lifecycle metadata from GitHub's scale-set listener. It excludes runner identity, workflow refs, labels, payloads, logs, environment values, and credentials."
+    },
     "scaleSetStatistics": {
       "type": "object",
       "additionalProperties": false,
@@ -1551,6 +1623,16 @@
             "type": ["string", "null"],
             "pattern": "^[0-9a-f]{64}$"
           },
+          "currentJob": {
+            "oneOf": [
+              {
+                "$ref": "#/$defs/currentJob"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
           "resources": {
             "oneOf": [
               {
@@ -1586,7 +1668,40 @@
               }
             ]
           }
-        }
+        },
+        "allOf": [
+          {
+            "if": {
+              "properties": {
+                "currentJob": {
+                  "type": "object"
+                }
+              },
+              "required": [
+                "currentJob"
+              ]
+            },
+            "then": {
+              "properties": {
+                "processRunning": {
+                  "const": true
+                },
+                "runnerNameHash": {
+                  "type": "string",
+                  "pattern": "^[0-9a-f]{64}$"
+                },
+                "activity": {
+                  "enum": ["busy", "draining"]
+                }
+              },
+              "required": [
+                "processRunning",
+                "runnerNameHash",
+                "activity"
+              ]
+            }
+          }
+        ]
       }
     }
   },
@@ -1631,6 +1746,60 @@
         },
         "$comment": "Contract 14 publishes only a SHA-256 correlation key for the exact runner name. Raw runner and container identities remain private."
       }
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 15
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "properties": {
+          "slots": {
+            "items": {
+              "required": [
+                "currentJob"
+              ]
+            }
+          }
+        }
+      },
+      "$comment": "Contract 15 publishes bounded active GitHub Actions job context for autoscaled workers. Fixed, idle, and unattributed workers publish currentJob as null."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 15
+          },
+          "autoscaling": {
+            "type": "null"
+          }
+        },
+        "required": [
+          "managerContractVersion",
+          "autoscaling"
+        ]
+      },
+      "then": {
+        "properties": {
+          "slots": {
+            "items": {
+              "properties": {
+                "currentJob": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      },
+      "$comment": "Fixed-manager job identity is unavailable because fixed runners have no scale-set lifecycle event."
     },
     {
       "if": {

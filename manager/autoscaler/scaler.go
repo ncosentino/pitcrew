@@ -53,6 +53,7 @@ type runnerRecord struct {
 	idleSince           *time.Time
 	jobStartedAt        *time.Time
 	completedAt         *time.Time
+	currentJob          *observedJobContext
 	revision            string
 	stale               bool
 	fenceRetryAt        *time.Time
@@ -320,7 +321,13 @@ func (s *runnerScaler) HandleJobStarted(
 	runner.state = runnerBusy
 	runner.protected = false
 	runner.idleSince = nil
-	runner.jobStartedAt = timePointer(now)
+	if runner.jobStartedAt == nil {
+		runner.jobStartedAt = timePointer(now)
+	}
+	runner.currentJob = mergeStartedJobContext(
+		runner.currentJob,
+		jobContextFromStarted(jobInfo, now),
+	)
 	runner.updatedAt = now
 	s.mu.Unlock()
 	s.onChange()
@@ -362,6 +369,11 @@ func (s *runnerScaler) HandleJobCompleted(
 	runner.protected = false
 	runner.idleSince = nil
 	runner.completedAt = timePointer(now)
+	runner.currentJob = jobContextFromCompleted(
+		jobInfo,
+		now,
+		runner.currentJob,
+	)
 	runner.updatedAt = now
 	s.mu.Unlock()
 	s.onChange()

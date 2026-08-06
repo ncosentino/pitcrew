@@ -159,7 +159,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 14 managers. A profile that
+11 and remain supported by the active contract 15 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -489,7 +489,7 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 14 is active in this release. Both manager modes publish the
+Manager contract 15 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics. Setup fails closed before Docker, image, or generated
 state mutation if a contract ahead of both implementations is selected.
@@ -511,6 +511,26 @@ The stable slot `key` remains unchanged and continues to own reconciliation.
 Dashboard retention of historical hash-to-node/profile assignments is a
 separate downstream responsibility; PitCrew observed state reports only the
 current bounded slot projection.
+
+### Contract-15 active job context
+
+Contract 15 adds `currentJob` to every observed slot. Fixed workers, idle
+workers, recovered workers whose start event cannot be reconstructed, and
+other unattributed workers report `null`. An autoscaled worker reports a
+bounded object while the scale-set listener owns usable lifecycle metadata for
+its current job.
+
+The object contains only the canonical GitHub repository URL, workflow-run and
+job identifiers, bounded display and event names, queue/assignment/start
+timestamps, and a bounded finish result while the draining worker still
+exists. Dashboard can derive an exact GitHub job link and retain the interval
+after the ephemeral worker exits.
+
+PitCrew does not publish the workflow ref, requested labels, runner ID or name,
+job message payload, logs, step output, environment values, commit text,
+registration material, or credentials. Invalid or oversized metadata degrades
+only `currentJob`; the worker remains busy and protected. Resource activity is
+never used to invent missing job identity.
 
 The fixed shell manager keeps the journal, the Docker summary, and the GitHub
 summary under `diagnostics/` inside the profile state directory and

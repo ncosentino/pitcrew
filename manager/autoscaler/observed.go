@@ -24,6 +24,7 @@ type observedSlot struct {
 	BackoffSeconds     int                 `json:"backoffSeconds"`
 	UpdatedAt          *string             `json:"updatedAt"`
 	RunnerNameHash     *string             `json:"runnerNameHash"`
+	CurrentJob         *observedJobContext `json:"currentJob"`
 	Resources          *resourceUsage      `json:"resources"`
 	Activity           string              `json:"activity,omitempty"`
 	Target             string              `json:"target,omitempty"`
@@ -427,6 +428,7 @@ func observedRunnerSlot(
 		BackoffSeconds:     0,
 		UpdatedAt:          &updatedAt,
 		RunnerNameHash:     hashRunnerName(runner.runnerName),
+		CurrentJob:         cloneJobContext(runner.currentJob),
 		Resources:          nil,
 		Activity:           activity,
 		Target:             runner.targetKey,

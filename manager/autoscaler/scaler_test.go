@@ -293,25 +293,76 @@ func TestJobLifecycleChangesStateWithoutChangingDemand(t *testing.T) {
 	}
 	markAllRunnersIdle(scaler)
 	runner := findRunner(t, scaler)
+	startedAt := time.Date(2026, 8, 6, 3, 42, 3, 0, time.UTC)
 	if err := scaler.HandleJobStarted(context.Background(), &scaleset.JobStarted{
 		RunnerID:   int(runner.runnerID),
 		RunnerName: runner.runnerName,
+		JobMessageBase: scaleset.JobMessageBase{
+			RepositoryName: "genesis",
+			OwnerName:      "ncosentino",
+			JobID:          "92513140749",
+			JobDisplayName: "Android debug build",
+			WorkflowRunID:  31068390178,
+			EventName:      "push",
+			QueueTime:      startedAt.Add(-time.Minute),
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot := scaler.snapshot()
-	if snapshot.runners[0].state != runnerBusy || snapshot.statistics.assignedJobs != 1 {
+	if snapshot.runners[0].state != runnerBusy ||
+		snapshot.statistics.assignedJobs != 1 ||
+		snapshot.runners[0].currentJob == nil ||
+		snapshot.runners[0].currentJob.JobID != "92513140749" {
 		t.Fatalf("job start changed the wrong state: %#v", snapshot)
 	}
 	if err := scaler.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{
+		Result:     "Cancelled",
 		RunnerID:   int(runner.runnerID),
 		RunnerName: runner.runnerName,
+		JobMessageBase: scaleset.JobMessageBase{
+			RepositoryName: "genesis",
+			OwnerName:      "ncosentino",
+			JobID:          "92513140749",
+			WorkflowRunID:  31068390178,
+		},
 	}); err != nil {
 		t.Fatal(err)
 	}
 	snapshot = scaler.snapshot()
-	if snapshot.runners[0].state != runnerDraining || snapshot.statistics.assignedJobs != 1 {
+	if snapshot.runners[0].state != runnerDraining ||
+		snapshot.statistics.assignedJobs != 1 ||
+		snapshot.runners[0].currentJob == nil ||
+		snapshot.runners[0].currentJob.FinishedAt == nil ||
+		snapshot.runners[0].currentJob.Result == nil ||
+		*snapshot.runners[0].currentJob.Result != "Cancelled" {
 		t.Fatalf("job completion changed demand or failed to drain: %#v", snapshot)
+	}
+}
+
+func TestInvalidJobContextStillProtectsBusyRunner(t *testing.T) {
+	scaler, _, _, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if err := scaler.HandleJobStarted(context.Background(), &scaleset.JobStarted{
+		RunnerID:   int(runner.runnerID),
+		RunnerName: runner.runnerName,
+		JobMessageBase: scaleset.JobMessageBase{
+			RepositoryName: "genesis",
+			OwnerName:      "ncosentino",
+			JobID:          "not-a-job-id",
+			WorkflowRunID:  31068390178,
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	snapshot := scaler.snapshot()
+	if snapshot.runners[0].state != runnerBusy ||
+		snapshot.runners[0].currentJob != nil {
+		t.Fatalf("invalid metadata changed busy-worker safety: %#v", snapshot.runners[0])
 	}
 }
 
@@ -520,7 +571,7 @@ func TestProtectedRecoveredRetirementProbesAndPreservesBusyRunner(t *testing.T) 
 		t.Fatalf("busy registration probe error was not preserved: %v", err)
 	}
 	runner := findRunner(t, scaler)
-	if runner.state != runnerBusy || runner.protected {
+	if runner.state != runnerBusy || runner.protected || runner.currentJob != nil {
 		t.Fatalf("busy recovered runner was not preserved safely: %#v", runner)
 	}
 	if !reflect.DeepEqual(api.removeCalls, []int64{77}) {

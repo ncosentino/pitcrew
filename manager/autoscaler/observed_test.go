@@ -8,6 +8,8 @@ import (
 	"path/filepath"
 	"testing"
 	"time"
+
+	"github.com/actions/scaleset"
 )
 
 func TestObservedStateAutoscalingContract(t *testing.T) {
@@ -24,6 +26,19 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
 	idleSince := now.Add(-time.Minute)
+	currentJob := jobContextFromStarted(&scaleset.JobStarted{
+		RunnerID:   2,
+		RunnerName: "runner-two",
+		JobMessageBase: scaleset.JobMessageBase{
+			RepositoryName: "genesis",
+			OwnerName:      "ncosentino",
+			JobID:          "92513140749",
+			JobWorkflowRef: "private-workflow-ref",
+			JobDisplayName: "Android debug build",
+			WorkflowRunID:  31068390178,
+			RequestLabels:  []string{"private-request-label"},
+		},
+	}, now.Add(-30*time.Second))
 	snapshot := scalerSnapshot{
 		target:      targetSpec{key: "scope", maximum: replicas},
 		targetSlots: 3,
@@ -55,6 +70,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 				state:       runnerBusy,
 				startedAt:   now.Add(-time.Minute),
 				updatedAt:   now,
+				currentJob:  currentJob,
 			},
 			{
 				key:         "scope-3",
@@ -128,6 +144,12 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		state.Slots[2].RegistrationStatus != "disconnected" {
 		t.Fatalf("slot projection omitted autoscaling lifecycle data: %#v", state.Slots[0])
 	}
+	if state.Slots[0].CurrentJob != nil ||
+		state.Slots[1].CurrentJob == nil ||
+		state.Slots[1].CurrentJob.JobID != "92513140749" ||
+		state.Slots[2].CurrentJob != nil {
+		t.Fatalf("slot projection omitted or fabricated job context: %#v", state.Slots)
+	}
 
 	path := filepath.Join(projectTestDirectory(t), "observed-state.json")
 	if err := writeJSONAtomically(path, state); err != nil {
@@ -142,9 +164,15 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		t.Fatal(err)
 	}
 	if bytes.Contains(data, []byte("runner-one")) ||
+		bytes.Contains(data, []byte("runner-two")) ||
+		bytes.Contains(data, []byte("runner-three")) ||
 		bytes.Contains(data, []byte(`"runnerName"`)) ||
 		bytes.Contains(data, []byte(`"containerId"`)) ||
-		bytes.Contains(data, []byte(`"containerName"`)) {
+		bytes.Contains(data, []byte(`"containerName"`)) ||
+		bytes.Contains(data, []byte("private-workflow-ref")) ||
+		bytes.Contains(data, []byte("private-request-label")) ||
+		bytes.Contains(data, []byte(`"jobWorkflowRef"`)) ||
+		bytes.Contains(data, []byte(`"requestLabels"`)) {
 		t.Fatalf("observed state exposed raw runner or container identity: %s", data)
 	}
 	for _, field := range []string{
@@ -165,6 +193,9 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	if _, exists := firstSlot["targetKey"]; exists {
 		t.Fatalf("slot projection emitted unsupported targetKey field: %#v", firstSlot)
+	}
+	if _, exists := firstSlot["currentJob"]; !exists {
+		t.Fatalf("slot projection omitted explicit job availability: %#v", firstSlot)
 	}
 }
 
