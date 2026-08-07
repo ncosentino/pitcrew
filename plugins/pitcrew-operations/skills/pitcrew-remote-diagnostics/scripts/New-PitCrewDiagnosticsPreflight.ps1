@@ -243,7 +243,8 @@ $preflight = [PSCustomObject][ordered]@{
         } else {
             $DashboardNodeStatus
         }
-        lastSeenAt = if ($DashboardNodeLastSeenAt -eq [DateTimeOffset]::MinValue) {
+        lastSeenAt = if ($null -eq $DashboardNodeLastSeenAt -or
+            $DashboardNodeLastSeenAt -eq [DateTimeOffset]::MinValue) {
             $null
         } else {
             $DashboardNodeLastSeenAt.ToUniversalTime()
