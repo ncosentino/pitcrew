@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.10.0') 'The operations plugin version was not advanced for performance reporting.'
+Add-Check ($plugin.version -eq '1.11.0') 'The operations plugin version was not advanced for remote diagnostics.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -57,7 +57,8 @@ $expectedSkills = @(
     'pitcrew-performance-report',
     'pitcrew-pool-update',
     'pitcrew-profile-recover',
-    'pitcrew-profile-rollout'
+    'pitcrew-profile-rollout',
+    'pitcrew-remote-diagnostics'
 )
 $skillDirectories = @(
     Get-ChildItem -LiteralPath $skillsRoot -Directory |
@@ -253,6 +254,149 @@ Add-Check (
     $hostDiagnosticsSkill -match 'Never run `docker system prune`' -and
     $hostDiagnosticsSkill -match 'Never enter a running worker with `docker exec`'
 ) 'The host diagnostics skill does not forbid destructive host operations.'
+
+$remoteDiagnosticsRoot = Join-Path $skillsRoot 'pitcrew-remote-diagnostics'
+$remoteDiagnosticsSkill = Get-Content `
+    -LiteralPath (Join-Path $remoteDiagnosticsRoot 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+$remoteDiagnosticsScripts = Join-Path $remoteDiagnosticsRoot 'scripts'
+$remoteCollectorPath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'Collect-PitCrewDiagnostics.ps1'
+$remotePackagePath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'New-PitCrewDiagnosticsPackage.ps1'
+$remoteImportPath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'Import-PitCrewDiagnostics.ps1'
+$remoteInvokePath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'Invoke-PitCrewRemoteDiagnostics.ps1'
+$remotePreflightPath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'New-PitCrewDiagnosticsPreflight.ps1'
+$remoteCorePath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'RemoteDiagnostics.Core.ps1'
+$remoteTransportPath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'RemoteDiagnostics.Transport.ps1'
+$remoteReleaseAssetPath = Join-Path `
+    $root `
+    'scripts' `
+    'release' `
+    'New-PitCrewReleaseAssets.ps1'
+foreach ($path in @(
+        $remoteCollectorPath,
+        $remotePackagePath,
+        $remoteImportPath,
+        $remoteInvokePath,
+        $remotePreflightPath,
+        $remoteCorePath,
+        $remoteTransportPath,
+        $remoteReleaseAssetPath)) {
+    Add-Check (
+        Test-Path -LiteralPath $path -PathType Leaf
+    ) "The remote diagnostics skill is missing supported script '$path'."
+}
+$remoteCollector = Get-Content `
+    -LiteralPath $remoteCollectorPath `
+    -Raw `
+    -Encoding UTF8
+$remotePackage = Get-Content `
+    -LiteralPath $remotePackagePath `
+    -Raw `
+    -Encoding UTF8
+$remoteImport = Get-Content `
+    -LiteralPath $remoteImportPath `
+    -Raw `
+    -Encoding UTF8
+$remoteInvoke = Get-Content `
+    -LiteralPath $remoteInvokePath `
+    -Raw `
+    -Encoding UTF8
+$remoteTransport = Get-Content `
+    -LiteralPath $remoteTransportPath `
+    -Raw `
+    -Encoding UTF8
+$remoteReleaseAsset = Get-Content `
+    -LiteralPath $remoteReleaseAssetPath `
+    -Raw `
+    -Encoding UTF8
+$remotePreflight = Get-Content `
+    -LiteralPath $remotePreflightPath `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $remoteDiagnosticsSkill -match '(?m)^## Phase 1: remote-first preflight' -and
+    $remoteDiagnosticsSkill -match 'ConnectorOffline' -and
+    $remoteDiagnosticsSkill -match 'CapacityMismatch' -and
+    $remoteDiagnosticsSkill -match 'JobNotAssigned' -and
+    $remoteDiagnosticsSkill -match 'HostPressure' -and
+    $remoteDiagnosticsSkill -match 'Full'
+) 'The remote diagnostics skill does not narrow incidents after remote-first triage.'
+Add-Check (
+    $remoteDiagnosticsSkill -match '(?m)^### Direct' -and
+    $remoteDiagnosticsSkill -match '(?m)^### Explicit SSH' -and
+    $remoteDiagnosticsSkill -match '(?m)^### Explicit WinRM' -and
+    $remoteDiagnosticsSkill -match '(?m)^### Agent handoff'
+) 'The remote diagnostics skill does not expose all approved execution paths.'
+Add-Check (
+    $remoteDiagnosticsSkill -match 'Never read `\.env`' -and
+    $remoteDiagnosticsSkill -match 'Never add a generic inbound command channel' -and
+    $remoteDiagnosticsSkill -match 'never serialize it' -and
+    $remoteDiagnosticsSkill -match '\*\*Verified measurements\*\*' -and
+    $remoteDiagnosticsSkill -match '\*\*Unavailable evidence\*\*' -and
+    $remoteDiagnosticsSkill -match '\*\*Hypotheses\*\*'
+) 'The remote diagnostics skill weakens credential, command-channel, or evidence-separation boundaries.'
+Add-Check (
+    $remoteCollector -match 'connector-health\.json' -and
+    $remoteCollector -match 'connector-events\.jsonl' -and
+    $remoteCollector -match 'label=ephemeral-runner-manager-profile=' -and
+    $remoteCollector -match 'label=ephemeral-managed-runner-profile=' -and
+    $remoteCollector -match 'docker stats --no-stream' -and
+    $remoteCollector -match 'pitcrew-diagnostics-session=' -and
+    $remoteCollector -match '--pull=never' -and
+    $remoteCollector -match '''--entrypoint''' -and
+    $remoteCollector -match '''--disable''' -and
+    $remoteCollector -match '''--max-redirs''' -and
+    $remoteCollector -notmatch '''--location'''
+) 'The portable collector omits journal, exact-label, bounded stats, or exact cleanup evidence.'
+Add-Check (
+    $remoteCollector -notmatch 'Get-Content[^\r\n]+\.env' -and
+    $remoteCollector -notmatch 'Get-Content[^\r\n]+identity\.json' -and
+    $remoteCollector -notmatch 'docker\s+(exec|stop|kill|restart|prune)' -and
+    $remoteCollector -match 'ApprovedUrl values must be literal HTTP or HTTPS URLs'
+) 'The portable collector reads a forbidden surface, invokes a destructive Docker command, or weakens URL validation.'
+Add-Check (
+    $remotePackage -match 'New-PitCrewDeterministicZip' -and
+    $remotePackage -match 'collector\.sha256' -and
+    $remotePackage -match 'AGENT-PROMPT\.md' -and
+    $remotePackage -match 'Invoke-Collection\.ps1'
+) 'The handoff package is not deterministic or omits its checksum, invocation, or prompt.'
+Add-Check (
+    $remoteInvoke -match "'Direct', 'Ssh', 'WinRM', 'Package'" -and
+    $remoteTransport -match 'Invoke-Command' -and
+    $remoteTransport -match 'reportJson' -and
+    $remoteInvoke -match 'PlanOnly' -and
+    $remoteInvoke -notmatch '\[string\]\$Command\b'
+) 'The orchestrator omits an approved path, dry transport plan, or exposes a generic command.'
+Add-Check (
+    $remoteImport -match 'checksum verification failed' -and
+    $remoteImport -match 'ExpectedPackageId' -and
+    $remoteImport -match 'ExpectedCollectorSha256' -and
+    $remoteImport -match 'Test-PitCrewRemoteDiagnosticsForbiddenProperty'
+) 'The importer does not verify package, collector, checksums, and forbidden report properties.'
+Add-Check (
+    $remotePreflight -match 'AllowAutoRedirect = \$false' -and
+    $remotePreflight -match 'origin-only URL'
+) 'The remote-first public endpoint probe can follow an unapproved redirect or accept a path URL.'
+Add-Check (
+    $remoteReleaseAsset -match 'Collect-PitCrewDiagnostics\.ps1' -and
+    $remoteReleaseAsset -match '\$checksumAsset = "\$collectorAsset\.sha256"' -and
+    $remoteReleaseAsset -match 'Get-FileHash'
+) 'The release asset staging script does not publish the portable collector with its SHA-256 sidecar.'
 
 $performanceReportSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'SKILL.md') `
