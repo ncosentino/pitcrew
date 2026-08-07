@@ -187,6 +187,61 @@ and unverified hypotheses, and it never converts a single host/container pair
 into a root cause: CDN edge variability and load-sensitive host contention stay
 competing hypotheses until repeated measurements resolve them.
 
+## Remote diagnostics skill
+
+`pitcrew-remote-diagnostics` starts with Dashboard, GitHub Actions, public
+endpoint, and release evidence before it requests anything from a runner node.
+It narrows the incident to connector offline, capacity mismatch, job not
+assigned, host pressure, or full collection.
+
+The public Dashboard probe accepts an origin-only HTTPS URL (or explicit
+loopback HTTP for local testing) and does not follow redirects.
+
+```text
+Use the pitcrew-remote-diagnostics skill to investigate why Zephyr is offline
+without changing the node. I do not have a remote transport, so create the
+operator handoff bundle.
+```
+
+When the current session is already on the node, the skill runs the portable
+collector directly. When the caller explicitly supplies a PowerShell-remoting
+SSH or WinRM endpoint, it transmits the fixed collector in memory and returns
+the structured result without installing an agent or storing credentials. When
+no transport exists, it creates a deterministic ZIP containing the collector,
+manifest, checksum, exact invocation, and exact node-agent prompt.
+
+The portable `Collect-PitCrewDiagnostics.ps1` script reads only fixed generated
+profile state, the standard bounded connector health journal, exact-label
+Docker inventory, and optional caller-approved query-free URLs. It does not
+read environment files, connector identity, JIT material, registration
+payloads, job output, or arbitrary paths. Docker resource queries use exact
+labels or IDs; the only cleanup permitted is the collector's own run-scoped
+diagnostic container after its exact ID and label are verified.
+
+URL collection accepts at most four approved destinations with a maximum
+900-second timeout per probe. Redirects are not followed. The container sample
+uses the recorded immutable local worker image ID with `--pull=never` and an
+explicit `curl` entrypoint, so diagnostics cannot pull a mutable image or start
+the worker registration entrypoint. Curl configuration files are disabled so
+an ambient redirect or header rule cannot expand the approved URL boundary.
+
+Returned artifacts are checksum-verified before import. The importer rejects
+extra ZIP entries, path traversal, unsupported schemas, package or collector
+mismatches, oversized files, unredacted roots, and secret-bearing property
+names. It correlates preflight, connector outage, observed-state, and collection
+timestamps and emits equivalent JSON and Markdown diagnoses with verified,
+unavailable, and hypothesis sections.
+
+Published PitCrew releases include `Collect-PitCrewDiagnostics.ps1` and
+`Collect-PitCrewDiagnostics.ps1.sha256` so an operator can verify the same
+versioned collector independently of the installed plugin. Maintainers stage
+those exact assets from the reviewed plugin source before publishing:
+
+```powershell
+pwsh scripts/release/New-PitCrewReleaseAssets.ps1 `
+    -OutputDirectory <release-assets>
+```
+
 ## Performance report skill
 
 `pitcrew-performance-report` joins bounded GitHub Actions job metadata with
