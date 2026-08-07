@@ -868,7 +868,7 @@ if ($CommandArguments[0] -eq '-Pi') {
 
     $invalidOutageDirectory = Join-Path $tempRoot 'invalid-outage-result'
     Copy-Item `
-        -LiteralPath (Join-Path $expandedPackage 'results') `
+        -LiteralPath $windowsOutput `
         -Destination $invalidOutageDirectory `
         -Recurse
     $invalidOutageReportPath = Join-Path `
@@ -904,7 +904,7 @@ if ($CommandArguments[0] -eq '-Pi') {
         -Action {
             & $importScript `
                 -InputPath $invalidOutageDirectory `
-                -ExpectedPackageId $firstPackage.packageId
+                -ExpectedPackageId $windowsPackageId
         } `
         -ExpectedMessage 'not a GUID' `
         -Failure 'The importer persisted an unvalidated connector outage identifier.'
