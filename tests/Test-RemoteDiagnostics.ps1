@@ -451,7 +451,7 @@ if ($CommandArguments[0] -eq '-Pi') {
         -GitHubRunUrl https://github.com/example/project/actions/runs/123/job/456 `
         -DashboardNodeId '33333333-3333-3333-3333-333333333333' `
         -DashboardNodeStatus offline `
-        -DashboardNodeLastSeenAt '2026-08-07T08:58:00Z' `
+        -DashboardNodeLastSeenAt '2026-08-07T01:58:00-07:00' `
         -DashboardIncident connector-offline `
         -OutputPath $preflightPath
     $preflightJson = Get-Content `
@@ -474,6 +474,48 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         $preflightJson.dashboard.publicEndpoint.reachable -eq $false
     ) 'The preflight reported a refused loopback endpoint as reachable.'
+    Add-Check (
+        ([DateTimeOffset]$preflightJson.dashboard.lastSeenAt) -eq
+            [DateTimeOffset]'2026-08-07T08:58:00Z'
+    ) 'The preflight did not preserve an explicit Dashboard timestamp in UTC.'
+
+    Write-Host 'Remote diagnostics test: minimal preflight'
+    $minimalPreflightPath = Join-Path $tempRoot 'preflight-minimal.json'
+    $null = & $preflightScript `
+        -DiagnosticMode HostPressure `
+        -OutputPath $minimalPreflightPath
+    $minimalPreflightJson = Get-Content `
+        -LiteralPath $minimalPreflightPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 50
+    Add-Check (
+        $null -eq $minimalPreflightJson.dashboard.lastSeenAt
+    ) 'The preflight did not preserve an omitted Dashboard timestamp as null.'
+    Add-Check (
+        @($minimalPreflightJson.unavailableEvidence |
+                Where-Object category -eq 'public-dashboard-endpoint').Count -eq 1 -and
+        @($minimalPreflightJson.unavailableEvidence |
+                Where-Object category -eq 'github-actions').Count -eq 1
+    ) 'The minimal preflight did not record omitted remote evidence as unavailable.'
+    $minimalPlanOutput = Join-Path `
+        $outputRoot `
+        'minimal-plan-should-not-exist'
+    $minimalPlan = & $orchestrator `
+        -ExecutionMode Package `
+        -PitCrewRoot 'C:\PitCrew' `
+        -Profile default `
+        -DiagnosticMode HostPressure `
+        -PreflightPath $minimalPreflightPath `
+        -OutputDirectory $minimalPlanOutput `
+        -PlanOnly
+    Add-Check (
+        $minimalPlan.transport.type -eq 'agent-handoff' -and
+        $minimalPlan.diagnosticMode -eq 'HostPressure'
+    ) 'The minimal preflight could not be consumed by package plan mode.'
+    Add-Check (
+        -not (Test-Path -LiteralPath $minimalPlanOutput)
+    ) 'Minimal package plan mode wrote output instead of remaining dry.'
 
     $beforeHashes = Get-FixtureHashes -Path $fixtureRoot
     Write-Host 'Remote diagnostics test: Windows collector'
