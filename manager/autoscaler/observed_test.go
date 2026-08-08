@@ -30,13 +30,13 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		RunnerID:   2,
 		RunnerName: "runner-two",
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
-			JobID:          "92513140749",
-			JobWorkflowRef: "private-workflow-ref",
-			JobDisplayName: "Android debug build",
-			WorkflowRunID:  31068390178,
-			RequestLabels:  []string{"private-request-label"},
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
+			JobID:          "123456789",
+			JobWorkflowRef: "workflow-ref-not-published",
+			JobDisplayName: "Large integration build",
+			WorkflowRunID:  987654321,
+			RequestLabels:  []string{"request-label-not-published"},
 		},
 	}, now.Add(-30*time.Second))
 	snapshot := scalerSnapshot{
@@ -148,7 +148,7 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 	}
 	if state.Slots[0].CurrentJob != nil ||
 		state.Slots[1].CurrentJob == nil ||
-		state.Slots[1].CurrentJob.JobID != "92513140749" ||
+		state.Slots[1].CurrentJob.JobID != "123456789" ||
 		state.Slots[2].CurrentJob != nil {
 		t.Fatalf("slot projection omitted or fabricated job context: %#v", state.Slots)
 	}
@@ -171,8 +171,8 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		bytes.Contains(data, []byte(`"runnerName"`)) ||
 		bytes.Contains(data, []byte(`"containerId"`)) ||
 		bytes.Contains(data, []byte(`"containerName"`)) ||
-		bytes.Contains(data, []byte("private-workflow-ref")) ||
-		bytes.Contains(data, []byte("private-request-label")) ||
+		bytes.Contains(data, []byte("workflow-ref-not-published")) ||
+		bytes.Contains(data, []byte("request-label-not-published")) ||
 		bytes.Contains(data, []byte(`"jobWorkflowRef"`)) ||
 		bytes.Contains(data, []byte(`"requestLabels"`)) {
 		t.Fatalf("observed state exposed raw runner or container identity: %s", data)

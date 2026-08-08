@@ -47,6 +47,7 @@ nav:
       - Architecture Decisions:
           - Overview: adr/README.md
           - "ADR-0001: Docs-first Agent Guidance": adr/adr-0001-docs-first-agent-guidance.md
+          - "ADR-0002: Workload-Agnostic Service Classes": adr/adr-0002-workload-agnostic-service-classes.md
   - Guides:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md

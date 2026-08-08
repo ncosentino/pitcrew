@@ -21,8 +21,8 @@ PowerShell, Docker Compose, and a POSIX shell manager.
   boundary.
 - Preserve active jobs during compatible capacity, image, and manager changes.
   Use exact profile labels or container IDs; never broaden cleanup by name.
-- Never commit credentials, registration material, private host details, or
-  developer-specific paths. Sanitize every public artifact.
+- Never commit credentials, registration material, non-public repository or host
+  details, or developer-specific paths. Sanitize every public artifact.
 
 ## Delivery
 

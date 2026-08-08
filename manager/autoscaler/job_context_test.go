@@ -15,12 +15,12 @@ func TestJobContextPublishesOnlyBoundedTriageMetadata(t *testing.T) {
 		RunnerID:   17,
 		RunnerName: "raw-runner-name",
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName:     "genesis",
-			OwnerName:          "ncosentino",
-			JobID:              "92513140749",
-			JobWorkflowRef:     "ncosentino/genesis/.github/workflows/ci.yml@refs/heads/private",
-			JobDisplayName:     "Android\n debug\tbuild",
-			WorkflowRunID:      31068390178,
+			RepositoryName:     "project-b",
+			OwnerName:          "example-org",
+			JobID:              "123456789",
+			JobWorkflowRef:     "example-org/project-b/.github/workflows/ci.yml@refs/heads/internal-topic",
+			JobDisplayName:     "Large\n integration\tbuild",
+			WorkflowRunID:      987654321,
 			EventName:          "pull_request",
 			RequestLabels:      []string{"secret-label"},
 			QueueTime:          observedAt.Add(-2 * time.Minute),
@@ -31,11 +31,11 @@ func TestJobContextPublishesOnlyBoundedTriageMetadata(t *testing.T) {
 	if context == nil {
 		t.Fatal("valid job metadata was discarded")
 	}
-	if context.Repository != "https://github.com/ncosentino/genesis" ||
-		context.WorkflowRunID != 31068390178 ||
-		context.JobID != "92513140749" ||
+	if context.Repository != "https://github.com/example-org/project-b" ||
+		context.WorkflowRunID != 987654321 ||
+		context.JobID != "123456789" ||
 		context.DisplayName == nil ||
-		*context.DisplayName != "Android debug build" ||
+		*context.DisplayName != "Large integration build" ||
 		context.EventName == nil ||
 		*context.EventName != "pull_request" ||
 		context.StartedAt != "2026-08-06T03:42:03Z" {
@@ -49,7 +49,7 @@ func TestJobContextPublishesOnlyBoundedTriageMetadata(t *testing.T) {
 	for _, excluded := range []string{
 		"raw-runner-name",
 		"JobWorkflowRef",
-		"private",
+		"internal-topic",
 		"secret-label",
 		"RunnerID",
 		"RunnerName",
@@ -66,19 +66,19 @@ func TestJobCompletionPreservesIdentityAndAddsBoundedOutcome(t *testing.T) {
 	finishedAt := time.Date(2026, 8, 6, 4, 25, 29, 0, time.UTC)
 	started := jobContextFromStarted(&scaleset.JobStarted{
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
-			JobID:          "92513140749",
-			WorkflowRunID:  31068390178,
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
+			JobID:          "123456789",
+			WorkflowRunID:  987654321,
 		},
 	}, startedAt)
 	completed := jobContextFromCompleted(&scaleset.JobCompleted{
 		Result: "Cancelled\nby operator",
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
-			JobID:          "92513140749",
-			WorkflowRunID:  31068390178,
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
+			JobID:          "123456789",
+			WorkflowRunID:  987654321,
 			FinishTime:     finishedAt,
 		},
 	}, finishedAt.Add(time.Second), started)
@@ -95,10 +95,10 @@ func TestJobCompletionPreservesIdentityAndAddsBoundedOutcome(t *testing.T) {
 func TestRepeatedJobStartPreservesOriginalObservedStart(t *testing.T) {
 	firstObservedAt := time.Date(2026, 8, 6, 3, 42, 3, 0, time.UTC)
 	message := scaleset.JobMessageBase{
-		RepositoryName: "genesis",
-		OwnerName:      "ncosentino",
-		JobID:          "92513140749",
-		WorkflowRunID:  31068390178,
+		RepositoryName: "project-b",
+		OwnerName:      "example-org",
+		JobID:          "123456789",
+		WorkflowRunID:  987654321,
 	}
 	first := jobContextFromMessage(message, firstObservedAt)
 	repeated := jobContextFromMessage(
@@ -168,18 +168,18 @@ func TestJobCompletionDoesNotInventMissingStartContext(t *testing.T) {
 func TestMismatchedJobCompletionDoesNotChangeTrackedJob(t *testing.T) {
 	startedAt := time.Date(2026, 8, 6, 3, 42, 3, 0, time.UTC)
 	existing := jobContextFromMessage(scaleset.JobMessageBase{
-		RepositoryName: "genesis",
-		OwnerName:      "ncosentino",
-		JobID:          "92513140749",
-		WorkflowRunID:  31068390178,
+		RepositoryName: "project-b",
+		OwnerName:      "example-org",
+		JobID:          "123456789",
+		WorkflowRunID:  987654321,
 	}, startedAt)
 	completed := jobContextFromCompleted(&scaleset.JobCompleted{
 		Result: "Failed",
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
-			JobID:          "92510065242",
-			WorkflowRunID:  31067679511,
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
+			JobID:          "123456788",
+			WorkflowRunID:  987654320,
 			FinishTime:     startedAt.Add(time.Hour),
 		},
 	}, startedAt.Add(time.Hour), existing)

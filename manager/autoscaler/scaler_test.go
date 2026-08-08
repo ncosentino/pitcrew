@@ -298,11 +298,11 @@ func TestJobLifecycleChangesStateWithoutChangingDemand(t *testing.T) {
 		RunnerID:   int(runner.runnerID),
 		RunnerName: runner.runnerName,
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
-			JobID:          "92513140749",
-			JobDisplayName: "Android debug build",
-			WorkflowRunID:  31068390178,
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
+			JobID:          "123456789",
+			JobDisplayName: "Large integration build",
+			WorkflowRunID:  987654321,
 			EventName:      "push",
 			QueueTime:      startedAt.Add(-time.Minute),
 		},
@@ -313,7 +313,7 @@ func TestJobLifecycleChangesStateWithoutChangingDemand(t *testing.T) {
 	if snapshot.runners[0].state != runnerBusy ||
 		snapshot.statistics.assignedJobs != 1 ||
 		snapshot.runners[0].currentJob == nil ||
-		snapshot.runners[0].currentJob.JobID != "92513140749" {
+		snapshot.runners[0].currentJob.JobID != "123456789" {
 		t.Fatalf("job start changed the wrong state: %#v", snapshot)
 	}
 	if err := scaler.HandleJobCompleted(context.Background(), &scaleset.JobCompleted{
@@ -321,10 +321,10 @@ func TestJobLifecycleChangesStateWithoutChangingDemand(t *testing.T) {
 		RunnerID:   int(runner.runnerID),
 		RunnerName: runner.runnerName,
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
-			JobID:          "92513140749",
-			WorkflowRunID:  31068390178,
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
+			JobID:          "123456789",
+			WorkflowRunID:  987654321,
 		},
 	}); err != nil {
 		t.Fatal(err)
@@ -351,10 +351,10 @@ func TestInvalidJobContextStillProtectsBusyRunner(t *testing.T) {
 		RunnerID:   int(runner.runnerID),
 		RunnerName: runner.runnerName,
 		JobMessageBase: scaleset.JobMessageBase{
-			RepositoryName: "genesis",
-			OwnerName:      "ncosentino",
+			RepositoryName: "project-b",
+			OwnerName:      "example-org",
 			JobID:          "not-a-job-id",
-			WorkflowRunID:  31068390178,
+			WorkflowRunID:  987654321,
 		},
 	}); err != nil {
 		t.Fatal(err)

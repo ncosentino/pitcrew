@@ -590,8 +590,8 @@ $autoscaledStateV11.autoscaling |
             }
         },
         [PSCustomObject][ordered]@{
-            key = 'repo-genesis'
-            repository = 'https://github.com/ncosentino/genesis'
+            key = 'repo-project-b'
+            repository = 'https://github.com/example/project-b'
             maximumSlots = 4
             targetSlots = 2
             localActiveWorkers = 2
@@ -1005,8 +1005,8 @@ $autoscaledStateV12 | Add-Member -NotePropertyName capacityEvidence -NotePropert
                 evidence = $null
             },
             [PSCustomObject][ordered]@{
-                key = 'repo-genesis'
-                repository = 'https://github.com/ncosentino/genesis'
+                key = 'repo-project-b'
+                repository = 'https://github.com/example/project-b'
                 observedAt = '2026-01-01T00:00:00Z'
                 freshness = 'stale'
                 targetSlots = 2
@@ -1608,9 +1608,9 @@ if ($activeJobSlotV15.PSObject.Properties['activity']) {
 }
 $activeJobSlotV15.currentJob = [PSCustomObject][ordered]@{
     repository = 'https://github.com/example/project'
-    workflowRunId = 31068390178
-    jobId = '92513140749'
-    displayName = 'Android debug build'
+    workflowRunId = 987654321
+    jobId = '123456789'
+    displayName = 'Large integration build'
     eventName = 'pull_request'
     queuedAt = '2026-08-06T03:40:00Z'
     scaleSetAssignedAt = '2026-08-06T03:41:00Z'

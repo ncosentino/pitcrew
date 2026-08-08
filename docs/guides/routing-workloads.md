@@ -50,6 +50,13 @@ jobs:
 Do not add `self-hosted` to an isolated profile. That would make broad legacy
 jobs eligible for the specialized capacity.
 
+### Queue isolation is not host isolation
+
+Separate labels isolate GitHub queue eligibility, not aggregate Docker-host
+resources. Fixed and autoscaled profiles on one host can still compete for CPU,
+memory, process, network, and storage capacity until opt-in host-local admission is
+implemented and enabled.
+
 Autoscaled profiles publish the same effective label set through their GitHub
 runner scale sets. Enabling autoscaling therefore does not require changing a
 correctly labeled `runs-on` declaration.

@@ -1583,9 +1583,9 @@ jq '
     .slots[0].activity = "busy"
     | .slots[0].currentJob = {
         repository: "https://github.com/example/project",
-        workflowRunId: 31068390178,
-        jobId: "92513140749",
-        displayName: "Android debug build",
+        workflowRunId: 987654321,
+        jobId: "123456789",
+        displayName: "Large integration build",
         eventName: "pull_request",
         queuedAt: "2026-08-06T03:40:00Z",
         scaleSetAssignedAt: "2026-08-06T03:41:00Z",
@@ -1597,7 +1597,7 @@ jq '
 ' "${contract_fifteen_state_json}" > "${invalid_contract_fifteen_state}"
 assert_true "Manager contract fifteen rejected bounded job context." \
     observed_state_is_valid "${invalid_contract_fifteen_state}"
-jq '.slots[0].currentJob.workflowRef = "private-ref"' \
+jq '.slots[0].currentJob.workflowRef = "workflow-ref-not-published"' \
     "${invalid_contract_fifteen_state}" > "${invalid_contract_fifteen_state}.raw"
 assert_false "Manager contract fifteen accepted an unsupported workflow payload." \
     observed_state_is_valid "${invalid_contract_fifteen_state}.raw"

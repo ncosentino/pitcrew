@@ -10,8 +10,9 @@ applyTo: "README.md,docs/**,mkdocs.yml,requirements-docs.txt,.github/workflows/d
   git history and issue tracking rather than maintained guides.
 - Keep complete explanations with one canonical owner. Other pages provide local
   context and link to that owner instead of copying substantial sections.
-- Use placeholders in examples. Do not publish credentials, private infrastructure,
-  internal hostnames, tenant identifiers, or developer-specific absolute paths.
+- Use placeholders in examples. Do not publish credentials, non-public repository
+  identities or workflow details, private infrastructure, internal hostnames, tenant
+  identifiers, or developer-specific absolute paths.
 - Keep public URLs canonical under `https://www.devleader.ca/projects/pitcrew`
   without trailing slashes.
 - Preserve `docs/_headers` noindex rules for production and preview Pages origins.
