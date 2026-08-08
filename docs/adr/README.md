@@ -1,5 +1,5 @@
 ---
-description: Index of accepted PitCrew architecture decision records.
+description: Index of PitCrew architecture decision records.
 ---
 
 # Architecture Decision Records
@@ -11,3 +11,4 @@ them with a new record.
 | Record | Status | Decision |
 | --- | --- | --- |
 | [ADR-0001](adr-0001-docs-first-agent-guidance.md) | Accepted | Use layered, docs-first agent guidance with project-owned scoped instructions and executable structural validation. |
+| [ADR-0002](adr-0002-workload-agnostic-service-classes.md) | Accepted | Keep scheduling external and express queue and host isolation through workload-agnostic profile service classes. |

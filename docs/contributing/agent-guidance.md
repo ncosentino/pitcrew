@@ -30,18 +30,16 @@ PitCrew's instructions are project-owned unless they live under the reserved
 `.github/instructions/genesis/` subtree. Project-owned specialization belongs outside
 that subtree.
 
-Genesis-managed instructions are currently not installed. They may be adopted later
-through their owning synchronization tool after the selected instruction composition
-is proven compatible. A future sync may replace only the managed subtree; it must not
+Managed instructions are currently not installed. They may be adopted later through
+their owning synchronization tool after the selected instruction composition is
+proven compatible. A future sync may replace only the managed subtree; it must not
 overwrite PitCrew instructions, root files, docs, or review tooling.
 
 ### Current divergence
 
-Common Genesis instructions currently include assumptions about shell options, Go
-command testing, and lint tooling that do not match this repository's declared
-contracts. Adoption is deferred by
-[Genesis issue #408](https://github.com/ncosentino/genesis/issues/408). PitCrew keeps
-its local guidance project-owned until that reusable layer is safe to consume.
+Selected reusable rules currently conflict with this repository's declared
+toolchain, testing scope, and portable shell contracts. PitCrew keeps its local
+guidance project-owned until that managed layer is safe to consume.
 
 ## Context budgets
 

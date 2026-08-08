@@ -23,11 +23,10 @@ tests, schemas, and the Genesis delivery contract. The repository had no scoped
 contributor instructions, local review skill, guidance resolver, or structural
 guidance gate.
 
-PitCrew also intends to consume reusable Genesis-managed instructions. The current
-common set is not yet safe for this repository because it prescribes undeclared Go
-tooling, applies command-specific testing rules broadly, and treats one shell-option
-combination as the only valid failure model. Genesis issue
-[#408](https://github.com/ncosentino/genesis/issues/408) tracks that reusable work.
+PitCrew also intends to consume reusable managed instructions. The currently
+available composition is not yet safe for this repository because selected rules
+conflict with PitCrew's declared toolchain, testing scope, and portable shell
+contracts. Compatibility work remains owned outside this public repository.
 
 ## Decision drivers
 
@@ -36,7 +35,7 @@ combination as the only valid failure model. Genesis issue
 - Preserve PitCrew's lifecycle, trust-boundary, privacy, and delivery policy.
 - Keep operator-facing skills separate from contributor review procedure.
 - Derive validation from executable repository sources.
-- Permit later Genesis-managed adoption without overwriting local guidance.
+- Permit later managed adoption without overwriting local guidance.
 - Enforce the structure mechanically.
 
 ## Decision
@@ -59,7 +58,7 @@ coherent file populations. Architecture, alternatives, and long examples stay in
 docs. Dynamic inventories are derived by scripts rather than copied into prose.
 
 The `.github/instructions/genesis/` namespace is reserved for future managed
-instructions. Only the Genesis synchronization workflow may replace it. PitCrew
+instructions. Only its owning synchronization process may replace it. PitCrew
 specialization remains outside that subtree.
 
 ### Documentation and decisions
@@ -100,9 +99,9 @@ commands, and delivery policy permanently loaded and leaves no structural drift 
 
 **Use only project-owned instructions.** This is accurate today but would duplicate
 reusable guidance indefinitely. Project-owned instructions are the immediate layer,
-while the managed namespace remains available after Genesis issue #408.
+while the managed namespace remains available after compatibility is established.
 
-**Sync all common Genesis instructions immediately.** This provides managed updates
+**Sync all common managed instructions immediately.** This provides managed updates
 but introduces verified conflicts with PitCrew's declared toolchain and portable shell
 behavior. Managed adoption is deferred rather than locally forking those generic
 rules.
@@ -119,7 +118,7 @@ would remain fragmented.
 - Exact lifecycle and trust-boundary rules arrive with relevant edits.
 - Existing public docs and executable contracts remain authoritative.
 - Review derives validation rather than maintaining another command table.
-- Future Genesis-managed adoption has a protected namespace and precedence model.
+- Future managed adoption has a protected namespace and precedence model.
 - Structural drift is detected before delivery.
 
 ### Negative
@@ -127,7 +126,7 @@ would remain fragmented.
 - Guidance now spans several deliberately different surfaces.
 - Contributors must classify new content by owner.
 - The structural gate and documentation map require maintenance.
-- Genesis-managed adoption remains a separate follow-up until upstream guidance is
+- Managed adoption remains a separate follow-up until upstream guidance is
   compatible.
 
 ## Confirmation
