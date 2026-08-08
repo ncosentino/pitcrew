@@ -87,6 +87,10 @@ jobs:
             exit 1
           }
 
+      - name: Validate guidance contract
+        shell: pwsh
+        run: ./tests/Test-Guidance.ps1
+
       - name: Run runner-profile contracts
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1

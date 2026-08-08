@@ -12,12 +12,41 @@ Dockerfiles, JSON, and MkDocs content.
 Install PowerShell 7, Go 1.25 or later, Docker with Compose, Python 3, and
 `pip`.
 
-## Validate runner contracts
+## Discover validation
+
+The CI workflows and executable repository surfaces own the complete command set.
+Inventory them before selecting a local check:
+
+```powershell
+pwsh scripts/guidance/Get-ValidationInventory.ps1
+```
+
+Run the smallest command that covers the changed behavior. Complete Docker
+integration remains owned by pull-request CI.
+
+## Validate guidance
+
+```powershell
+pwsh tests/Test-Guidance.ps1
+```
+
+This checks root budgets, documentation and ADR reachability, scoped instructions,
+review wiring, and matched-context limits.
+
+## Validate PowerShell contracts
 
 Run the hermetic profile and lifecycle contract suite:
 
 ```powershell
 pwsh tests/Test-RunnerProfiles.ps1
+```
+
+Use the focused plugin and diagnostic suites when those surfaces change:
+
+```powershell
+pwsh tests/Test-CopilotPlugin.ps1
+pwsh tests/Test-RemoteDiagnostics.ps1
+pwsh tests/Test-PerformanceReport.ps1
 ```
 
 The suite records Docker commands instead of contacting a daemon or GitHub.
@@ -30,6 +59,12 @@ Check the manager script and Compose model:
 sh -n manager/manage-runners.sh
 sh -n manager/entrypoint.sh
 docker compose --file docker-compose.yml config --quiet
+```
+
+Run the hermetic manager reconciliation contracts with:
+
+```bash
+sh tests/Test-ManagerReconciliation.sh
 ```
 
 ## Validate the autoscaler
@@ -58,3 +93,7 @@ python -m mkdocs build --strict
 ```
 
 The generated site is written to `site/`.
+
+The exact required pull-request checks and draft/full validation behavior are
+declared in `.github/genesis-delivery.json` and the workflows under
+`.github/workflows/`.

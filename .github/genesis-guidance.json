@@ -1,0 +1,63 @@
+{
+  "$schema": "./genesis-guidance.schema.json",
+  "schemaVersion": 1,
+  "docs": {
+    "mapPath": "docs/index.md",
+    "adrIndexPath": "docs/adr/README.md"
+  },
+  "agents": {
+    "path": "AGENTS.md",
+    "maxLines": 60,
+    "maxBytes": 3072,
+    "redirects": {
+      "claude": "CLAUDE.md",
+      "copilot": ".github/copilot-instructions.md"
+    }
+  },
+  "instructions": {
+    "root": ".github/instructions",
+    "managedRoot": ".github/instructions/genesis",
+    "managedInstalled": false,
+    "individualReviewThreshold": {
+      "lines": 100,
+      "bytes": 8192
+    },
+    "matchedContext": {
+      "targetLines": 300,
+      "targetBytes": 16384,
+      "maxLines": 600,
+      "maxBytes": 32768
+    },
+    "representativePaths": [
+      ".github/workflows/ci.yml",
+      "AGENTS.md",
+      "docker-compose.yml",
+      "Dockerfile",
+      "docs/index.md",
+      "manager/autoscaler/main.go",
+      "manager/autoscaler/bootstrap_test.go",
+      "manager/manage-runners.sh",
+      "manager/reconciliation.sh",
+      "observed-state.schema.json",
+      "plugins/pitcrew-operations/plugin.json",
+      "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/SKILL.md",
+      "profiles/copilot-cli/Dockerfile",
+      "README.md",
+      "runner-profile.schema.json",
+      "RunnerProfiles.Functions.ps1",
+      "scripts/release/New-PitCrewReleaseAssets.ps1",
+      "Setup-Runner.ps1",
+      "tests/Test-CopilotPlugin.ps1",
+      "tests/Test-RunnerProfiles.ps1"
+    ]
+  },
+  "review": {
+    "skillPath": ".github/skills/review-changes/SKILL.md",
+    "instructionResolver": "scripts/guidance/Get-ApplicableInstructions.ps1",
+    "validationInventory": "scripts/guidance/Get-ValidationInventory.ps1",
+    "contractValidator": "scripts/guidance/Test-GuidanceContract.ps1",
+    "contractTest": "tests/Test-Guidance.ps1"
+  },
+  "generatedMirrors": [],
+  "contextExceptions": []
+}

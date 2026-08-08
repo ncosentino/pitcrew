@@ -41,6 +41,12 @@ nav:
   - Troubleshooting: troubleshooting.md
   - Building from Source: building.md
   - Deployment: deployment.md
+  - Contributing:
+      - Architecture: contributing/architecture.md
+      - Agent Guidance: contributing/agent-guidance.md
+      - Architecture Decisions:
+          - Overview: adr/README.md
+          - "ADR-0001: Docs-first Agent Guidance": adr/adr-0001-docs-first-agent-guidance.md
   - Guides:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md

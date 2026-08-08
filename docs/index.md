@@ -56,6 +56,25 @@ the specialized pool.
 Optional demand-driven profiles retain only a configured idle floor and use
 GitHub runner scale-set demand to return toward their operator-defined maximum.
 
+## Documentation map
+
+- [Getting Started](getting-started.md) installs the first profile and routes a
+  workflow.
+- [Configuration](configuration.md) defines setup parameters, profile manifests,
+  generated state, and manager contracts.
+- [Troubleshooting](troubleshooting.md) diagnoses registration, routing, capacity,
+  image, and Docker failures.
+- [Building from Source](building.md) identifies local validation entry points.
+- [Documentation Deployment](deployment.md) defines the canonical site and Pages
+  indexing boundary.
+- [Guides](guides/index.md) cover profiles, routing, autoscaling, updates, security,
+  services, external data, and Copilot operations.
+- [Contributor Architecture](contributing/architecture.md) maps implementation
+  boundaries and executable contracts.
+- [Agent Guidance](contributing/agent-guidance.md) explains guidance ownership,
+  review, and context budgets.
+- [Architecture Decision Records](adr/README.md) preserve significant decisions.
+
 ## About
 
 PitCrew is built by [Nick Cosentino](https://www.devleader.ca). Follow
