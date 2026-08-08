@@ -179,10 +179,13 @@ available at [www.devleader.ca/projects/pitcrew](https://www.devleader.ca/projec
 ## Contributing
 
 1. Open an issue describing the change or problem.
-2. Keep changes focused and include contract coverage for behavior changes.
-3. Run `pwsh tests/Test-RunnerProfiles.ps1` and
+2. Read the [contributor architecture](docs/contributing/architecture.md) and
+   [agent-guidance model](docs/contributing/agent-guidance.md).
+3. Keep changes focused and include contract coverage for behavior changes.
+4. Run `pwsh tests/Test-RunnerProfiles.ps1` and
    `pwsh tests/Test-CopilotPlugin.ps1`. Changes to the portable diagnostics
-   workflow also run `pwsh tests/Test-RemoteDiagnostics.ps1`.
+   workflow also run `pwsh tests/Test-RemoteDiagnostics.ps1`. Guidance changes
+   run `pwsh tests/Test-Guidance.ps1`.
 
 ## About
 
