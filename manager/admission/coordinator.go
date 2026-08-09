@@ -35,6 +35,13 @@ const DefaultProvisionalLeaseTTL = 30 * time.Second
 // arbitrarily large text.
 const maxEvidenceBytes = 512
 
+// rotationSeedModulus bounds the durable decision sequence before it is
+// cast to the in-memory rotation cursor's int type. Its value is an
+// arbitrary large prime with no functional significance beyond keeping the
+// cast well-behaved across platforms: rotation is always subsequently used
+// modulo the much smaller live contender count.
+const rotationSeedModulus = 1_000_000_007
+
 // Coordinator is the single, mutex-serialized owner of atomic allocation,
 // per-profile reservations, borrowing, fairness, the durable decision
 // sequence, and durable epochs for one Docker daemon's admission namespace.
@@ -95,11 +102,17 @@ func Open(backing store, clock Clock, provisionalTTL time.Duration) (*Coordinato
 		state = pruned
 	}
 	return &Coordinator{
-		store:                backing,
-		clock:                clock,
-		provisionalTTL:       provisionalTTL,
-		state:                state,
-		demand:               make(map[string]int),
+		store:          backing,
+		clock:          clock,
+		provisionalTTL: provisionalTTL,
+		state:          state,
+		demand:         make(map[string]int),
+		// Seeding rotation from the durable decision sequence, rather than
+		// always starting at zero, prevents a restart from always
+		// re-favoring the first sorted profile in a fairness tie: the
+		// exact modulus has no measured significance since rotation is
+		// always used modulo the much smaller live contender count.
+		rotation:             int(state.DecisionSequence % rotationSeedModulus),
 		provisionalDeadlines: make(map[string]time.Time),
 	}, nil
 }
@@ -182,13 +195,30 @@ func (c *Coordinator) ApplyPolicy(policy HostPolicy) error {
 // SetDemand publishes one profile's current pending demand so the fair
 // shared pool can be partitioned without waiting for that profile's own
 // Acquire call to arrive. It does not itself grant or consume any unit.
-func (c *Coordinator) SetDemand(profileID string, pending int) {
+//
+// profileID must match the public profile identity syntax and must be
+// known to the currently applied policy; pending must not be negative. A
+// pending value of zero deletes the profile's demand entry rather than
+// storing a zero, so an arbitrary stream of stale or one-off profile
+// identities can never grow this map without bound.
+func (c *Coordinator) SetDemand(profileID string, pending int) error {
+	if err := validateProfileID(profileID); err != nil {
+		return err
+	}
+	if pending < 0 {
+		return fmt.Errorf("admission: pending demand cannot be negative, got %d", pending)
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if pending < 0 {
-		pending = 0
+	if _, known := c.state.Policy.profile(profileID); !known {
+		return ErrUnknownProfile
+	}
+	if pending == 0 {
+		delete(c.demand, profileID)
+		return nil
 	}
 	c.demand[profileID] = pending
+	return nil
 }
 
 // Acquire requests one provisional lease of exactly the requesting profile's
@@ -201,6 +231,9 @@ func (c *Coordinator) SetDemand(profileID string, pending int) {
 // returns that lease unchanged alongside ErrDuplicateLease, so a safe retry
 // after an ambiguous response never double-counts budget.
 func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lease, error) {
+	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+		return Lease{}, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
@@ -234,15 +267,18 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 
 	ownRemaining := max(profilePolicy.ReservedUnits-held[profileID], 0)
 	fromReservation := ownRemaining >= unitCost
+	sharedPoolContenders := 0
 	if !fromReservation {
 		protected := c.protectedNonBorrowableLocked(profileID, held)
 		available := free - protected
 		if available < unitCost {
 			return Lease{}, ErrBudgetExceeded
 		}
-		if !c.fairTurnLocked(profileID, held, available, unitCost) {
+		granted, contenders := c.fairTurnLocked(profileID, held, available, unitCost)
+		if !granted {
 			return Lease{}, ErrBudgetExceeded
 		}
+		sharedPoolContenders = contenders
 	}
 
 	sequence := c.state.DecisionSequence + 1
@@ -267,6 +303,12 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 	}
 	c.state = next
 	c.provisionalDeadlines[key.String()] = deadline
+	// The rotation cursor advances only once this grant is durably saved:
+	// a save failure must never move fairness priority for a request that
+	// was not actually admitted.
+	if sharedPoolContenders > 0 {
+		c.advanceRotationLocked(sharedPoolContenders)
+	}
 	return lease, nil
 }
 
@@ -275,6 +317,9 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 // lease already elapsed, and ErrLeaseNotProvisional if the lease was already
 // activated; only a provisional lease has an expiry to extend.
 func (c *Coordinator) Renew(profileID, slotKey string) (Lease, error) {
+	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+		return Lease{}, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
@@ -311,6 +356,9 @@ func (c *Coordinator) Renew(profileID, slotKey string) (Lease, error) {
 // manager can safely retry after an ambiguous acknowledgement. A worker
 // process must never be started before Activate succeeds.
 func (c *Coordinator) Activate(profileID, slotKey string) (Lease, error) {
+	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+		return Lease{}, err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
@@ -349,6 +397,9 @@ func (c *Coordinator) Activate(profileID, slotKey string) (Lease, error) {
 // already-tombstoned slot is a safe idempotent no-op. Releasing a slot that
 // never existed and was never tombstoned returns ErrLeaseNotFound.
 func (c *Coordinator) Release(profileID, slotKey string) error {
+	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+		return err
+	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
@@ -394,6 +445,9 @@ func sanitizeEvidence(evidence string) (string, error) {
 // registration are absent may release a stranded active lease. Empty
 // evidence is rejected outright; time alone never releases an active lease.
 func (c *Coordinator) Reconcile(profileID, slotKey, evidence string) error {
+	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+		return err
+	}
 	sanitized, err := sanitizeEvidence(evidence)
 	if err != nil {
 		return err
@@ -552,19 +606,25 @@ func (c *Coordinator) protectedNonBorrowableLocked(requester string, held map[st
 // demand; a profile whose shared-pool holdings plus this exact request
 // still fit within its guarantee is admitted immediately, and a profile that
 // would exceed its guarantee is admitted only if capacity remains after
-// every other demanding profile's own guarantee is protected. The rotation
-// cursor advances on every shared-pool grant so repeated contention cannot
-// always favor the same profile.
+// every other demanding profile's own guarantee is protected.
+//
+// fairTurnLocked itself never advances the rotation cursor: it only decides
+// whether this request wins the round. The returned contenderCount is the
+// value the caller must pass to advanceRotationLocked, and the caller must
+// do so only after the resulting grant has been durably saved, so a save
+// failure can never move fairness priority for a request that was not
+// actually admitted. A contenderCount of zero means no contenders were
+// registered and there is no rotation cursor to advance.
 func (c *Coordinator) fairTurnLocked(
 	profileID string,
 	held map[string]int,
 	available int,
 	unitCost int,
-) bool {
+) (granted bool, contenderCount int) {
 	contenders := c.contendersLocked()
 	count := len(contenders)
 	if count == 0 {
-		return available >= unitCost
+		return available >= unitCost, 0
 	}
 	index := sort.SearchStrings(contenders, profileID)
 	isContender := index < count && contenders[index] == profileID
@@ -573,8 +633,7 @@ func (c *Coordinator) fairTurnLocked(
 		guarantee := c.guaranteedShareLocked(contenders, index, available)
 		sharedHeld := max(held[profileID]-c.reservedUnitsLocked(profileID), 0)
 		if sharedHeld+unitCost <= guarantee {
-			c.advanceRotationLocked(count)
-			return true
+			return true, count
 		}
 	}
 
@@ -590,10 +649,9 @@ func (c *Coordinator) fairTurnLocked(
 		}
 	}
 	if available-protected >= unitCost {
-		c.advanceRotationLocked(count)
-		return true
+		return true, count
 	}
-	return false
+	return false, count
 }
 
 // contendersLocked returns every policy-known profile with registered

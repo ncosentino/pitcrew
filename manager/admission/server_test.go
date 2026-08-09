@@ -94,6 +94,25 @@ func TestServerClientAcquireActivateReleaseOverSocket(t *testing.T) {
 	}
 }
 
+// TestClientSetDemandPropagatesCoordinatorErrorsOverSocket confirms
+// SetDemand's error path is not swallowed by the server: a client request
+// naming an unknown profile must reach the client as a non-nil error
+// carrying the coordinator's sentinel, not silently succeed.
+func TestClientSetDemandPropagatesCoordinatorErrorsOverSocket(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 1, 0, false))
+	_, socketPath := startTestServer(t, coordinator)
+
+	client := NewClient(socketPath)
+	if err := client.SetDemand("never-registered", 1); !errors.Is(err, ErrUnknownProfile) {
+		t.Fatalf("expected ErrUnknownProfile over the wire, got %v", err)
+	}
+	if err := client.SetDemand("alpha", 3); err != nil {
+		t.Fatalf("expected a known profile's demand to be accepted over the wire: %v", err)
+	}
+}
+
 func TestServerRejectsClientWithNoOverlappingProtocolVersion(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)

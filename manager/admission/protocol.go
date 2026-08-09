@@ -103,6 +103,7 @@ const (
 	ErrorCodeEvidenceRequired    ErrorCode = "evidence-required"
 	ErrorCodeEvidenceInvalid     ErrorCode = "evidence-invalid"
 	ErrorCodeInvalidPolicy       ErrorCode = "invalid-policy"
+	ErrorCodeInvalidIdentity     ErrorCode = "invalid-identity"
 	ErrorCodeStalePolicy         ErrorCode = "stale-policy"
 	ErrorCodeCorruptState        ErrorCode = "corrupt-state"
 	ErrorCodeRequestTooLarge     ErrorCode = "request-too-large"
@@ -135,6 +136,8 @@ func errorCodeForErr(err error) ErrorCode {
 		return ErrorCodeEvidenceRequired
 	case errors.Is(err, ErrStalePolicy):
 		return ErrorCodeStalePolicy
+	case errors.Is(err, ErrInvalidIdentity):
+		return ErrorCodeInvalidIdentity
 	case errors.Is(err, ErrInvalidPolicy):
 		return ErrorCodeInvalidPolicy
 	case errors.Is(err, ErrCorruptState):
@@ -169,6 +172,8 @@ func errForErrorCode(code ErrorCode) error {
 		return ErrEvidenceRequired
 	case ErrorCodeStalePolicy:
 		return ErrStalePolicy
+	case ErrorCodeInvalidIdentity:
+		return ErrInvalidIdentity
 	case ErrorCodeInvalidPolicy:
 		return ErrInvalidPolicy
 	case ErrorCodeCorruptState:

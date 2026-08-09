@@ -235,7 +235,9 @@ func (s *Server) dispatch(request Request) Response {
 			return errorResponse(version, err)
 		}
 	case CommandSetDemand:
-		s.coordinator.SetDemand(request.ProfileID, request.PendingDemand)
+		if err := s.coordinator.SetDemand(request.ProfileID, request.PendingDemand); err != nil {
+			return errorResponse(version, err)
+		}
 	case CommandAcquire:
 		lease, err := s.coordinator.Acquire(request.ProfileID, request.SlotKey, request.PendingDemand)
 		if err != nil && !errors.Is(err, ErrDuplicateLease) {

@@ -324,7 +324,7 @@ func TestFairTurnLockedAccountsForRequestedUnitCostNotJustHeldUnits(t *testing.T
 	// already holds 1 shared unit and requests 3 more, which must be
 	// rejected because 1+3=4 > 2, even though 1 < 2 would have incorrectly
 	// fast-tracked it under the old, cost-blind comparison.
-	got := coordinator.fairTurnLocked("alpha", held, 4, 3)
+	got, _ := coordinator.fairTurnLocked("alpha", held, 4, 3)
 	coordinator.mu.Unlock()
 
 	if got {
@@ -1126,5 +1126,206 @@ func TestPolicyValidationAllowsPartialReservationsAcrossProfiles(t *testing.T) {
 		if _, err := coordinator.Acquire("alpha", "alpha-"+slotName(i), 1); err != nil {
 			t.Fatalf("expected alpha to still claim its own reservation: %v", err)
 		}
+	}
+}
+
+// --- Identity validation -------------------------------------------------
+
+// TestProfileIDValidationRejectsSyntaxViolations exercises the public
+// profile identity contract at policy-application time: empty, oversized
+// (>32 characters), uppercase, a leading digit or hyphen, and an embedded
+// separator must all be rejected before a policy can be applied.
+func TestProfileIDValidationRejectsSyntaxViolations(t *testing.T) {
+	invalidProfileIDs := []string{
+		"",
+		strings.Repeat("a", 33),
+		"Alpha",
+		"1alpha",
+		"-alpha",
+		"al/pha",
+		"al pha",
+	}
+	for _, profileID := range invalidProfileIDs {
+		clock := newManualClock()
+		coordinator := OpenMemory(clock, time.Minute)
+		err := coordinator.ApplyPolicy(singleProfilePolicy(profileID, 1, 1, 0, false))
+		if !errors.Is(err, ErrInvalidIdentity) {
+			t.Fatalf("profile id %q: expected ErrInvalidIdentity, got %v", profileID, err)
+		}
+	}
+}
+
+// TestSlotKeyValidationRejectsSyntaxViolations exercises the bounded opaque
+// slot key contract at every slot operation: empty, oversized (>128
+// characters), an embedded separator, and control characters must all be
+// rejected before the identity ever reaches map-key formation.
+func TestSlotKeyValidationRejectsSyntaxViolations(t *testing.T) {
+	invalidSlotKeys := []string{
+		"",
+		strings.Repeat("a", 129),
+		"slot/a",
+		"slot\ta",
+		"slot\na",
+		" slot-a",
+	}
+	for _, slotKey := range invalidSlotKeys {
+		clock := newManualClock()
+		coordinator := OpenMemory(clock, time.Minute)
+		mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+		if _, err := coordinator.Acquire("alpha", slotKey, 1); !errors.Is(err, ErrInvalidIdentity) {
+			t.Fatalf("slot key %q: expected ErrInvalidIdentity from Acquire, got %v", slotKey, err)
+		}
+		if _, err := coordinator.Renew("alpha", slotKey); !errors.Is(err, ErrInvalidIdentity) {
+			t.Fatalf("slot key %q: expected ErrInvalidIdentity from Renew, got %v", slotKey, err)
+		}
+		if _, err := coordinator.Activate("alpha", slotKey); !errors.Is(err, ErrInvalidIdentity) {
+			t.Fatalf("slot key %q: expected ErrInvalidIdentity from Activate, got %v", slotKey, err)
+		}
+		if err := coordinator.Release("alpha", slotKey); !errors.Is(err, ErrInvalidIdentity) {
+			t.Fatalf("slot key %q: expected ErrInvalidIdentity from Release, got %v", slotKey, err)
+		}
+		if err := coordinator.Reconcile("alpha", slotKey, "evidence"); !errors.Is(err, ErrInvalidIdentity) {
+			t.Fatalf("slot key %q: expected ErrInvalidIdentity from Reconcile, got %v", slotKey, err)
+		}
+	}
+}
+
+// TestIdentityValidationPreventsLeaseKeyCollisions proves the exclusion of
+// "/" from both patterns makes the profile/slot join used to form a durable
+// lease key unambiguous: two different (profileID, slotKey) pairs whose
+// naive string concatenation would collide (e.g. "a" + "/" + "b/c" versus
+// "a/b" + "/" + "c") can never both be valid, so at most one of the two
+// candidate leases can ever be acquired at a time and there is no path by
+// which a legitimate pair is misattributed to another pair's key.
+func TestIdentityValidationPreventsLeaseKeyCollisions(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+
+	// Neither half of a collision-prone pair can pass identity validation,
+	// since "/" is excluded from both the ProfileID and SlotKey patterns.
+	if _, err := coordinator.Acquire("a/b", "c", 1); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("expected a profile id containing \"/\" to be rejected, got %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "b/c", 1); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("expected a slot key containing \"/\" to be rejected, got %v", err)
+	}
+}
+
+// --- SetDemand validation --------------------------------------------------
+
+// TestSetDemandRejectsUnknownAndInvalidProfiles confirms SetDemand rejects
+// a syntactically invalid profile identity and a profile not present in the
+// currently applied policy, in both cases without mutating the demand map.
+func TestSetDemandRejectsUnknownAndInvalidProfiles(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+
+	if err := coordinator.SetDemand("Not-Valid", 1); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("expected ErrInvalidIdentity for a syntactically invalid profile id, got %v", err)
+	}
+	if err := coordinator.SetDemand("never-registered", 1); !errors.Is(err, ErrUnknownProfile) {
+		t.Fatalf("expected ErrUnknownProfile for a profile absent from policy, got %v", err)
+	}
+}
+
+// TestSetDemandRejectsNegativeDemand confirms SetDemand returns an error
+// for negative pending demand rather than silently clamping it to zero.
+func TestSetDemandRejectsNegativeDemand(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+
+	if err := coordinator.SetDemand("alpha", -1); err == nil {
+		t.Fatal("expected negative pending demand to be rejected")
+	}
+}
+
+// TestSetDemandDeletesEntryOnZeroDemand confirms a zero pending demand
+// deletes the profile's map entry rather than storing an explicit zero, so
+// an arbitrary stream of one-off profile identities cannot grow the demand
+// map without bound.
+func TestSetDemandDeletesEntryOnZeroDemand(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 4,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+		},
+	})
+
+	if err := coordinator.SetDemand("alpha", 3); err != nil {
+		t.Fatalf("set demand: %v", err)
+	}
+	coordinator.mu.Lock()
+	_, present := coordinator.demand["alpha"]
+	coordinator.mu.Unlock()
+	if !present {
+		t.Fatal("expected a positive pending demand to be recorded")
+	}
+
+	if err := coordinator.SetDemand("alpha", 0); err != nil {
+		t.Fatalf("set demand to zero: %v", err)
+	}
+	coordinator.mu.Lock()
+	_, present = coordinator.demand["alpha"]
+	coordinator.mu.Unlock()
+	if present {
+		t.Fatal("expected a zero pending demand to delete the map entry rather than store a zero")
+	}
+}
+
+// --- Fairness rotation seeding across restart ------------------------------
+
+// TestFairnessRotationIsSeededFromDurableDecisionSequenceAcrossRestart
+// proves a restart does not always reset fairness priority to the first
+// sorted profile. A fresh coordinator with no prior history breaks a tie
+// between two equally-costed contenders in favor of the alphabetically
+// first profile (rotation defaults to zero); this test seeds a durable
+// document with a nonzero DecisionSequence before Open and confirms the
+// restarted coordinator's rotation cursor instead favors the second
+// profile for the single contested unit, matching the seeded value's
+// effect on the guarantee-remainder distribution.
+func TestFairnessRotationIsSeededFromDurableDecisionSequenceAcrossRestart(t *testing.T) {
+	directory := t.TempDir()
+	seed := newDurableState()
+	seed.DecisionSequence = 1
+	seed.Policy = HostPolicy{
+		Generation: 1,
+		TotalUnits: 1,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	}
+	if err := newFileStore(directory).Save(seed); err != nil {
+		t.Fatalf("seed durable state: %v", err)
+	}
+
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open seeded state: %v", err)
+	}
+
+	if err := coordinator.SetDemand("alpha", 1); err != nil {
+		t.Fatalf("set demand alpha: %v", err)
+	}
+	if err := coordinator.SetDemand("beta", 1); err != nil {
+		t.Fatalf("set demand beta: %v", err)
+	}
+
+	// With rotation seeded from DecisionSequence=1 and both profiles
+	// contending for the single available unit, beta (sorted index 1)
+	// wins the tie rather than alpha (sorted index 0): a fresh, unseeded
+	// coordinator would always favor alpha instead.
+	if _, err := coordinator.Acquire("beta", "beta-slot", 1); err != nil {
+		t.Fatalf("expected beta to win the seeded rotation's tie, got %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "alpha-slot", 1); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected alpha to lose the seeded rotation's tie, got %v", err)
 	}
 }

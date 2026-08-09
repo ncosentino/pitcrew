@@ -47,6 +47,13 @@ var ErrEvidenceRequired = errors.New("admission: reconciliation evidence require
 // trail, not free-form text.
 var ErrEvidenceInvalid = errors.New("admission: reconciliation evidence is invalid")
 
+// ErrInvalidIdentity reports a ProfileID or SlotKey that does not match this
+// package's identity syntax. Both are validated before they are ever joined
+// into a leaseKey, so a syntactically invalid identity can never be
+// confused with, or collide against, a different valid identity (see
+// identity.go).
+var ErrInvalidIdentity = errors.New("admission: invalid profile or slot identity")
+
 // LeaseStatus is the lifecycle state of one granted lease.
 type LeaseStatus string
 

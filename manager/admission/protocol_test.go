@@ -23,6 +23,7 @@ func TestErrorCodeRoundTripsForKnownSentinels(t *testing.T) {
 		ErrEvidenceRequired,
 		ErrStalePolicy,
 		ErrInvalidPolicy,
+		ErrInvalidIdentity,
 		ErrCorruptState,
 	}
 	for _, sentinel := range sentinels {

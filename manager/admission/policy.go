@@ -47,8 +47,8 @@ type ProfilePolicy struct {
 }
 
 func (p ProfilePolicy) validate() error {
-	if p.ProfileID == "" {
-		return fmt.Errorf("%w: profile identity cannot be empty", ErrInvalidPolicy)
+	if err := validateProfileID(p.ProfileID); err != nil {
+		return fmt.Errorf("%w: %w", ErrInvalidPolicy, err)
 	}
 	if p.UnitCost < 1 {
 		return fmt.Errorf(
