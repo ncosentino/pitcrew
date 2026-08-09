@@ -10,6 +10,22 @@ RUN CGO_ENABLED=0 go build \
     -o /out/pitcrew-autoscaler \
     .
 
+# pitcrew-admission is the versioned server/CLI-client binary for the
+# host-local admission coordinator (ADR-0003). Only the binary is built and
+# copied here; runtime entrypoint and Compose wiring are added by later
+# stacked issues once the coordinator has a socket and durable state path.
+FROM golang:1.25.3-alpine AS admission-build
+
+WORKDIR /src
+COPY admission/go.mod ./
+RUN go mod download
+COPY admission/ ./
+RUN CGO_ENABLED=0 go build \
+    -trimpath \
+    -ldflags="-s -w" \
+    -o /out/pitcrew-admission \
+    ./cmd/pitcrew-admission
+
 # The manager needs only the Docker client binary, not the CLI image's Compose
 # and Buildx plugins. Keep the runtime layer to Alpine plus Docker, jq, the
 # autoscaler binary, and manager scripts.
@@ -20,6 +36,7 @@ FROM alpine:3.22
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=autoscaler-build /out/pitcrew-autoscaler /usr/local/bin/pitcrew-autoscaler
+COPY --from=admission-build /out/pitcrew-admission /usr/local/bin/pitcrew-admission
 
 ARG JQ_VERSION=1.8.2
 ARG TARGETARCH
@@ -70,6 +87,7 @@ RUN chmod +x \
     /usr/local/bin/registration.sh \
     /usr/local/bin/diagnostics.sh \
     /usr/local/bin/reconciliation.sh \
-    /usr/local/bin/pitcrew-autoscaler
+    /usr/local/bin/pitcrew-autoscaler \
+    /usr/local/bin/pitcrew-admission
 
 ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]
