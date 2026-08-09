@@ -132,6 +132,7 @@ jobs:
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/integration/fake-runner/fake-runner.sh
           bash -n tests/integration/Test-CapacityReconciliation.sh
+          bash -n tests/integration/Test-HostAdmissionContention.sh
 
       - name: Run manager reconciliation contracts
         run: sh ./tests/Test-ManagerReconciliation.sh
@@ -155,6 +156,9 @@ jobs:
 
       - name: Run real Docker reconciliation
         run: bash ./tests/integration/Test-CapacityReconciliation.sh
+
+      - name: Run host admission contention
+        run: bash ./tests/integration/Test-HostAdmissionContention.sh
 
   ci:
     name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
