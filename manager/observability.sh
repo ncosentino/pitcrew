@@ -182,11 +182,19 @@ observed_state_is_valid() {
             and (.provisionalUnits | nonnegative_integer)
             and (.heldUnits | nonnegative_integer)
             and (.borrowedUnits | nonnegative_integer)
-            and (.pendingUnits | nonnegative_integer)
-            and (.withheldUnits | nonnegative_integer)
+            and (
+                (
+                    .pendingUnits == null
+                    and .withheldUnits == null
+                )
+                or (
+                    (.pendingUnits | nonnegative_integer)
+                    and (.withheldUnits | nonnegative_integer)
+                    and .withheldUnits == .pendingUnits
+                )
+            )
             and (.heldUnits == (.activeUnits + .provisionalUnits))
-            and (.borrowedUnits == ([.heldUnits - .reservedUnits, 0] | max))
-            and (.withheldUnits == ([.pendingUnits - .heldUnits, 0] | max));
+            and (.borrowedUnits == ([.heldUnits - .reservedUnits, 0] | max));
         def valid_host_admission_decision:
             type == "object"
             and (.sequence | nonnegative_integer)
@@ -200,9 +208,15 @@ observed_state_is_valid() {
             and (.granted | type == "boolean")
             and (
                 .failureCategory == null
-                or (.failureCategory | type == "string" and length > 0 and length <= 64)
+                or (
+                    .failureCategory
+                    | type == "string"
+                    and length > 0
+                    and length <= 64
+                    and test("^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+                )
             )
-            and (.decidedAtUnixNano | type == "number" and . >= 0);
+            and (.decidedAtUnixNano | nonnegative_integer);
         # valid_host_admission enforces the closed hostAdmission.status
         # vocabulary from ADR-0003: "disabled" and "unavailable" never carry
         # a measured value (null, never a fabricated zero), while
@@ -263,6 +277,19 @@ observed_state_is_valid() {
                     and .hostPolicyFingerprint == null
                     and .accounting == null
                     and .lastDecision == null
+                elif .status == "available" then
+                    .namespace != null
+                    and .epoch != null
+                    and .decisionSequence != null
+                    and .capacityUnits != null
+                    and .safetyMarginUnits != null
+                    and .effectiveTotalUnits != null
+                    and .availableUnits != null
+                    and .hostPolicyFingerprint != null
+                    and .accounting != null
+                    and .accounting.profilePolicyFingerprint != null
+                    and .accounting.pendingUnits != null
+                    and .accounting.withheldUnits != null
                 else
                     .namespace != null
                     and .epoch != null
@@ -569,7 +596,9 @@ observed_state_is_valid() {
             and (
                 .reason as $reason
                 | [
-                    "none", "admission-ceiling", "launch-pending", "docker-unavailable",
+                    "none", "admission-ceiling", "host-admission-withheld",
+                    "host-admission-degraded",
+                    "host-admission-unavailable", "launch-pending", "docker-unavailable",
                     "docker-failed", "jit-pending", "jit-failed", "listener-unavailable",
                     "session-unavailable", "registration-cleanup-pending", "worker-draining",
                     "invalid-desired-state", "retry-backoff", "unknown"

@@ -93,7 +93,7 @@ func (c *Client) ApplyPolicy(policy HostPolicy) error {
 	return responseErr(response)
 }
 
-// SetDemand publishes one profile's current pending demand.
+// SetDemand publishes one profile's current pending worker count.
 func (c *Client) SetDemand(profileID string, pending int) error {
 	response, err := c.call(Request{
 		Command:       CommandSetDemand,

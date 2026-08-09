@@ -1866,7 +1866,7 @@ $availableHostAdmissionAccountingV18 = [PSCustomObject][ordered]@{
     heldUnits = 4
     borrowedUnits = 2
     pendingUnits = 5
-    withheldUnits = 1
+    withheldUnits = 5
 }
 $availableHostAdmissionDecisionV18 = [PSCustomObject][ordered]@{
     sequence = 42
@@ -1982,6 +1982,40 @@ Add-Check (
     ) | Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract eighteen rejected a fully populated degraded hostAdmission.'
 
+$degradedUnknownDemandV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$degradedUnknownDemandV18.status = 'degraded'
+$degradedUnknownDemandV18.accounting.pendingUnits = $null
+$degradedUnknownDemandV18.accounting.withheldUnits = $null
+Add-Check (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $degradedUnknownDemandV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eighteen rejected degraded host admission with unknown demand.'
+
+$availableUnknownDemandV18 = (
+    $degradedUnknownDemandV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$availableUnknownDemandV18.status = 'available'
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $availableUnknownDemandV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Available host admission accepted unknown pending demand.'
+
 $disabledWithNamespaceV18 = (
     $disabledHostAdmissionV18 |
         ConvertTo-Json -Depth 20 |
@@ -2061,6 +2095,38 @@ Add-Check (-not (
         ) | ConvertTo-Json -Depth 20
     ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
 )) 'A hostAdmission lastDecision accepted an unsupported command.'
+
+$unsafeDecisionFailureV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unsafeDecisionFailureV18.lastDecision.failureCategory = '/var/lib/private'
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $unsafeDecisionFailureV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A hostAdmission lastDecision accepted path-like failure evidence.'
+
+$availableWithoutCapacityV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$availableWithoutCapacityV18.capacityUnits = $null
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $availableWithoutCapacityV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Available host admission accepted missing host capacity.'
 
 $fabricatedZeroCapacityV18 = (
     $disabledHostAdmissionV18 |

@@ -144,6 +144,16 @@ func (s durableState) validate() error {
 				decision.Command,
 			)
 		}
+		if err := validateProfileID(decision.ProfileID); err != nil {
+			return fmt.Errorf("%w: last decision profile identity is invalid", ErrCorruptState)
+		}
+		if !decision.FailureCategory.valid() {
+			return fmt.Errorf(
+				"%w: last decision failure category %q is invalid",
+				ErrCorruptState,
+				decision.FailureCategory,
+			)
+		}
 	}
 	return nil
 }

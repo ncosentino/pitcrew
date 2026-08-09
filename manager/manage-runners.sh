@@ -450,6 +450,7 @@ publish_observed_state() {
     observed_health_path="/tmp/pitcrew-observed-subsystem-health.json"
     observed_capacity_path="/tmp/pitcrew-observed-capacity-evidence.json"
     observed_host_admission_path="/tmp/pitcrew-observed-host-admission.json"
+    observed_host_admission_wait_state=$(host_admission_wait_state "${SLOT_DIRECTORY}")
     render_operation_journal "${DIAGNOSTICS_DIRECTORY}" "${observed_journal_path}" || true
     if render_subsystem_health "${DIAGNOSTICS_DIRECTORY}" "${observed_health_path}"; then
         render_fixed_capacity_evidence \
@@ -457,7 +458,8 @@ publish_observed_state() {
             "${observed_desired_count}" \
             "${observed_desired_status}" \
             "${observed_health_path}" \
-            "${observed_capacity_path}" || true
+            "${observed_capacity_path}" \
+            "${observed_host_admission_wait_state}" || true
     else
         write_unavailable_capacity_evidence "${observed_capacity_path}" || true
     fi
@@ -938,6 +940,8 @@ run_slot() {
             if [ "${admission_status}" -ne 0 ]; then
                 if [ "${admission_status}" -eq 2 ]; then
                     echo "[slot ${slot_key}] host admission withheld worker launch"
+                elif [ "${admission_status}" -eq 3 ]; then
+                    echo "[slot ${slot_key}] host admission policy is degraded; preserving current pool" >&2
                 else
                     echo "[slot ${slot_key}] host admission unavailable; preserving current pool" >&2
                 fi

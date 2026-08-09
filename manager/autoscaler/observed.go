@@ -114,8 +114,8 @@ type observedHostAdmissionAccounting struct {
 	ProvisionalUnits         int     `json:"provisionalUnits"`
 	HeldUnits                int     `json:"heldUnits"`
 	BorrowedUnits            int     `json:"borrowedUnits"`
-	PendingUnits             int     `json:"pendingUnits"`
-	WithheldUnits            int     `json:"withheldUnits"`
+	PendingUnits             *int    `json:"pendingUnits"`
+	WithheldUnits            *int    `json:"withheldUnits"`
 }
 
 // observedHostAdmissionDecision is a bounded, sanitized last-decision record

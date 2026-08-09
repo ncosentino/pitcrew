@@ -35,26 +35,39 @@ host_admission_cli() {
         --socket "${HOST_ADMISSION_SOCKET}"
 }
 
-host_admission_publish_demand() {
+host_admission_pending_count() {
     slot_directory="$1"
-    host_admission_enabled || return 0
     pending=0
     for slot_state_path in "${slot_directory}"/*; do
         [ -d "${slot_state_path}" ] || continue
         [ -f "${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}" ] || continue
         pending=$((pending + 1))
     done
+    printf '%s\n' "${pending}"
+}
+
+host_admission_publish_demand() {
+    slot_directory="$1"
+    host_admission_enabled || return 0
+    pending=$(host_admission_pending_count "${slot_directory}") || return 1
     host_admission_cli \
         set-demand \
         --profile "${PROFILE_ID}" \
         --demand "${pending}" >/dev/null 2>&1
 }
 
+host_admission_mark_wait_reason() {
+    slot_state_path="$1"
+    wait_reason="$2"
+    printf '%s\n' "${wait_reason}" \
+        > "${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}"
+}
+
 host_admission_begin_wait() {
     slot_state_path="$1"
     slot_directory="$2"
     host_admission_enabled || return 0
-    : > "${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}"
+    host_admission_mark_wait_reason "${slot_state_path}" "pending" || return 1
     host_admission_publish_demand "${slot_directory}" || true
 }
 
@@ -67,7 +80,8 @@ host_admission_end_wait() {
 }
 
 # Returns 0 when a lease was acquired, 2 when host budget withheld the
-# request, and 1 when coordinator availability or protocol failed.
+# request, 3 for incompatible policy or lease state, and 1 when coordinator
+# availability or transport failed.
 host_admission_acquire() {
     slot_state_path="$1"
     slot_key="$2"
@@ -75,16 +89,23 @@ host_admission_acquire() {
     host_admission_enabled || return 0
 
     host_admission_begin_wait "${slot_state_path}" "${slot_directory}"
+    pending=$(host_admission_pending_count "${slot_directory}") || pending=1
     lease_temporary="${slot_state_path}/.${HOST_ADMISSION_LEASE_FILE}.$$"
     host_admission_cli \
         acquire \
         --profile "${PROFILE_ID}" \
         --slot "${slot_key}" \
-        --demand 1 > "${lease_temporary}" 2>"${lease_temporary}.error"
+        --demand "${pending}" > "${lease_temporary}" 2>"${lease_temporary}.error"
     acquire_status=$?
     if [ "${acquire_status}" -eq 3 ]; then
         rm -f "${lease_temporary}" "${lease_temporary}.error"
+        host_admission_mark_wait_reason "${slot_state_path}" "withheld" || true
         return 2
+    fi
+    if [ "${acquire_status}" -eq 4 ] || [ "${acquire_status}" -eq 5 ]; then
+        rm -f "${lease_temporary}" "${lease_temporary}.error"
+        host_admission_mark_wait_reason "${slot_state_path}" "degraded" || true
+        return 3
     fi
     if [ "${acquire_status}" -ne 0 ] ||
         ! jq -e \
@@ -98,6 +119,7 @@ host_admission_acquire() {
                 and (.leaseId | (type == "string" and length > 0))
             ' "${lease_temporary}" >/dev/null 2>&1; then
         rm -f "${lease_temporary}" "${lease_temporary}.error"
+        host_admission_mark_wait_reason "${slot_state_path}" "unavailable" || true
         return 1
     fi
     mv -f "${lease_temporary}" "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
@@ -106,17 +128,55 @@ host_admission_acquire() {
     return 0
 }
 
+host_admission_wait_state() {
+    slot_directory="$1"
+    state="none"
+    for slot_state_path in "${slot_directory}"/*; do
+        [ -d "${slot_state_path}" ] || continue
+        marker_path="${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}"
+        [ -f "${marker_path}" ] || continue
+        marker_state=""
+        IFS= read -r marker_state < "${marker_path}" || true
+        case "${marker_state}" in
+            unavailable)
+                printf '%s\n' "unavailable"
+                return 0
+                ;;
+            degraded)
+                state="degraded"
+                ;;
+            withheld)
+                [ "${state}" != "degraded" ] && state="withheld"
+                ;;
+            *)
+                [ "${state}" = "none" ] && state="pending"
+                ;;
+        esac
+    done
+    printf '%s\n' "${state}"
+}
+
 host_admission_activate() {
     slot_state_path="$1"
     slot_key="$2"
     host_admission_enabled || return 0
 
     lease_temporary="${slot_state_path}/.${HOST_ADMISSION_LEASE_FILE}.$$"
-    if ! host_admission_cli \
+    host_admission_cli \
         activate \
         --profile "${PROFILE_ID}" \
-        --slot "${slot_key}" > "${lease_temporary}" 2>/dev/null ||
-        ! jq -e \
+        --slot "${slot_key}" > "${lease_temporary}" 2>/dev/null
+    activation_status=$?
+    if [ "${activation_status}" -ne 0 ]; then
+        rm -f "${lease_temporary}"
+        if [ "${activation_status}" -eq 4 ] || [ "${activation_status}" -eq 5 ]; then
+            host_admission_mark_wait_reason "${slot_state_path}" "degraded" || true
+        else
+            host_admission_mark_wait_reason "${slot_state_path}" "unavailable" || true
+        fi
+        return 1
+    fi
+    if ! jq -e \
             --arg profile "${PROFILE_ID}" \
             --arg slot "${slot_key}" \
             '
@@ -125,6 +185,7 @@ host_admission_activate() {
                 and .status == "active"
             ' "${lease_temporary}" >/dev/null 2>&1; then
         rm -f "${lease_temporary}"
+        host_admission_mark_wait_reason "${slot_state_path}" "unavailable" || true
         return 1
     fi
     mv -f "${lease_temporary}" "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
@@ -274,16 +335,20 @@ host_admission_status() {
             | ($own != null) as $known
             | (
                 (
+                    (.namespace // "") != $namespace
+                )
+                or (
                     $hostFingerprint != ""
-                    and (.hostPolicyFingerprint // "") != ""
-                    and .hostPolicyFingerprint != $hostFingerprint
+                    and (.hostPolicyFingerprint // "") != $hostFingerprint
                 )
                 or (
                     $known
                     and $profileFingerprint != ""
-                    and ($own.profilePolicyFingerprint // "") != ""
-                    and $own.profilePolicyFingerprint != $profileFingerprint
+                    and ($own.profilePolicyFingerprint // "") != $profileFingerprint
                 )
+                or ((.capacityUnits // 0) <= 0)
+                or (.safetyMarginUnits == null)
+                or ($known and ($own.pendingUnits == null or $own.withheldUnits == null))
                 or ($known | not)
             ) as $degraded
             | (.lastDecision // null) as $decision
@@ -309,7 +374,7 @@ host_admission_status() {
                     if (.capacityUnits // 0) > 0 then .capacityUnits else null end
                 ),
                 safetyMarginUnits: (
-                    if (.capacityUnits // 0) > 0 then (.safetyMarginUnits // 0) else null end
+                    if (.capacityUnits // 0) > 0 then (.safetyMarginUnits // null) else null end
                 ),
                 effectiveTotalUnits: .effectiveTotalUnits,
                 availableUnits: .availableUnits,

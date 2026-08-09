@@ -60,6 +60,23 @@ func mustApplyPolicy(t *testing.T, coordinator *Coordinator, policy HostPolicy) 
 	}
 }
 
+func mustStatus(t *testing.T, coordinator *Coordinator) Snapshot {
+	t.Helper()
+	snapshot, err := coordinator.Status()
+	if err != nil {
+		t.Fatalf("read coordinator status: %v", err)
+	}
+	return snapshot
+}
+
+func mustInt(t *testing.T, value *int, name string) int {
+	t.Helper()
+	if value == nil {
+		t.Fatalf("%s was unavailable", name)
+	}
+	return *value
+}
+
 // --- Budget and concurrency -------------------------------------------------
 
 func TestAcquireNeverExceedsBudget(t *testing.T) {
@@ -96,7 +113,7 @@ func TestAcquireNeverExceedsBudget(t *testing.T) {
 	if granted != 5 {
 		t.Fatalf("expected exactly 5 grants against a budget of 5, got %d", granted)
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Leases) != 5 {
 		t.Fatalf("expected 5 durable leases, got %d", len(snapshot.Leases))
 	}
@@ -123,7 +140,7 @@ func TestConcurrentAcquireReleaseNeverOverAdmits(t *testing.T) {
 		for i := 0; i < rounds; i++ {
 			slot := slotName(start + i)
 			if _, err := coordinator.Acquire(profileID, slot, 1); err == nil {
-				snapshot := coordinator.Status()
+				snapshot := mustStatus(t, coordinator)
 				mu.Lock()
 				if len(snapshot.Leases) > maxObservedHeld {
 					maxObservedHeld = len(snapshot.Leases)
@@ -427,7 +444,7 @@ func TestActivationRejectedAfterExpiry(t *testing.T) {
 
 	// A worker process must never start against an expired lease; the
 	// coordinator must not have silently produced an active lease.
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	for _, lease := range snapshot.Leases {
 		if lease.SlotKey == "slot-a" && lease.Status == LeaseActive {
 			t.Fatalf("expired lease must never become active")
@@ -482,7 +499,7 @@ func TestActiveLeasePersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen after restart: %v", err)
 	}
-	snapshot := restarted.Status()
+	snapshot := mustStatus(t, restarted)
 	if snapshot.Policy.Generation != 1 || len(snapshot.Leases) != 1 {
 		t.Fatalf("expected restored policy and lease, got %+v", snapshot)
 	}
@@ -532,7 +549,7 @@ func TestRestartDiscardsProvisionalLeasesButPreservesActiveLeases(t *testing.T) 
 	if err != nil {
 		t.Fatalf("reopen after restart: %v", err)
 	}
-	snapshot := restarted.Status()
+	snapshot := mustStatus(t, restarted)
 	if len(snapshot.Leases) != 1 || snapshot.Leases[0].SlotKey != "active-slot" {
 		t.Fatalf("expected only the active lease to survive restart, got %+v", snapshot.Leases)
 	}
@@ -582,7 +599,7 @@ func TestRestartDiscardsProvisionalLeasesButPreservesActiveLeases(t *testing.T) 
 	if err != nil {
 		t.Fatalf("reopen an already-pruned document: %v", err)
 	}
-	secondSnapshot := restartedAgain.Status()
+	secondSnapshot := mustStatus(t, restartedAgain)
 	if secondSnapshot.DecisionSequence != sequenceAfterFirstRestart {
 		t.Fatalf(
 			"expected no-op restart to leave decision sequence unchanged, before=%d after=%d",
@@ -605,7 +622,7 @@ func TestRestartDiscardDoesNotTouchAnEmptyOrLeaselessDocument(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	snapshot := restarted.Status()
+	snapshot := mustStatus(t, restarted)
 	if len(snapshot.Leases) != 0 || len(snapshot.Tombstones) != 0 {
 		t.Fatalf("expected a leaseless document to be untouched by restart discard, got %+v", snapshot)
 	}
@@ -627,7 +644,7 @@ func TestExactReleaseProducesDurableTombstone(t *testing.T) {
 	if err := coordinator.Release("alpha", "slot-a"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Leases) != 0 {
 		t.Fatalf("expected no remaining leases after release, got %+v", snapshot.Leases)
 	}
@@ -670,7 +687,7 @@ func TestReconcileRequiresEvidenceAndProducesTombstone(t *testing.T) {
 	if err := coordinator.Reconcile("alpha", "slot-a", "container absent; registration fenced"); err != nil {
 		t.Fatalf("reconcile with evidence: %v", err)
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Leases) != 0 {
 		t.Fatalf("expected lease to be released by reconciliation, got %+v", snapshot.Leases)
 	}
@@ -750,7 +767,7 @@ func TestReconcileEvidenceSanitization(t *testing.T) {
 		if err := coordinator.Reconcile("alpha", "slot-a", "  container absent  "); err != nil {
 			t.Fatalf("expected valid evidence with surrounding whitespace to be accepted: %v", err)
 		}
-		snapshot := coordinator.Status()
+		snapshot := mustStatus(t, coordinator)
 		found := false
 		for _, tombstone := range snapshot.Tombstones {
 			if tombstone.SlotKey == "slot-a" && tombstone.Reason == TombstoneReconciledAbsent {
@@ -779,7 +796,7 @@ func TestTombstoneIsSupersededByAFreshLeaseForTheSameSlot(t *testing.T) {
 	if err := coordinator.Release("alpha", "slot-a"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Tombstones) != 1 {
 		t.Fatalf("expected exactly one tombstone after release, got %d", len(snapshot.Tombstones))
 	}
@@ -787,7 +804,7 @@ func TestTombstoneIsSupersededByAFreshLeaseForTheSameSlot(t *testing.T) {
 	if _, err := coordinator.Acquire("alpha", "slot-a", 1); err != nil {
 		t.Fatalf("expected reacquisition of a tombstoned slot to succeed: %v", err)
 	}
-	snapshot = coordinator.Status()
+	snapshot = mustStatus(t, coordinator)
 	if len(snapshot.Tombstones) != 0 {
 		t.Fatalf("expected the prior tombstone to be superseded by the fresh lease, got %+v", snapshot.Tombstones)
 	}
@@ -811,7 +828,7 @@ func TestTombstoneCompactionKeepsNewestBySequence(t *testing.T) {
 			t.Fatalf("release %s: %v", slot, err)
 		}
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Tombstones) != maxTombstones {
 		t.Fatalf("expected tombstones to be bounded at %d, got %d", maxTombstones, len(snapshot.Tombstones))
 	}
@@ -906,7 +923,7 @@ func TestDuplicateAcquireIsSafeAndDoesNotDoubleCountBudget(t *testing.T) {
 	if second.LeaseID != first.LeaseID {
 		t.Fatalf("expected duplicate acquire to return the existing lease unchanged")
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Leases) != 1 {
 		t.Fatalf("expected exactly one durable lease despite the duplicate call, got %d", len(snapshot.Leases))
 	}
@@ -974,7 +991,7 @@ func TestReducedBudgetDrainsNaturallyWithoutRevokingActiveLeases(t *testing.T) {
 	// Reduce the budget below the number of already-active leases.
 	mustApplyPolicy(t, coordinator, singleProfilePolicyGeneration(2, "alpha", 1, 1, 0, false))
 
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if len(snapshot.Leases) != 3 {
 		t.Fatalf("expected reduced budget to leave existing active leases untouched, got %+v", snapshot.Leases)
 	}
@@ -1336,9 +1353,8 @@ func TestFairnessRotationIsSeededFromDurableDecisionSequenceAcrossRestart(t *tes
 // exercises the exact accounting definitions documented on Snapshot:
 // activeUnits, provisionalUnits, heldUnits, reservedUnits,
 // borrowedUnits=max(heldUnits-reservedUnits,0), pendingUnits, and
-// withheldUnits=max(pendingUnits-heldUnits,0), for two profiles in one
-// policy, including a profile that borrows shared-pool capacity beyond its
-// own reservation.
+// withheldUnits, for two profiles in one policy, including a profile that
+// borrows shared-pool capacity beyond its own reservation.
 func TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
@@ -1373,7 +1389,7 @@ func TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld
 		t.Fatalf("set demand alpha: %v", err)
 	}
 
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	accounting := make(map[string]ProfileAccounting, len(snapshot.Accounting))
 	for _, entry := range snapshot.Accounting {
 		accounting[entry.ProfileID] = entry
@@ -1389,8 +1405,11 @@ func TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld
 	if alpha.ReservedUnits != 2 || alpha.BorrowedUnits != 0 {
 		t.Fatalf("expected alpha fully within its own reservation (borrowed=0), got %#v", alpha)
 	}
-	if alpha.PendingUnits != 5 || alpha.WithheldUnits != 3 {
-		t.Fatalf("expected alpha pending=5 withheld=max(5-2,0)=3, got %#v", alpha)
+	if pending := mustInt(t, alpha.PendingUnits, "alpha pending units"); pending != 5 {
+		t.Fatalf("expected alpha pending=5, got %#v", alpha)
+	}
+	if withheld := mustInt(t, alpha.WithheldUnits, "alpha withheld units"); withheld != 5 {
+		t.Fatalf("expected alpha withheld=5, got %#v", alpha)
 	}
 
 	beta, ok := accounting["beta"]
@@ -1403,8 +1422,11 @@ func TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld
 	if beta.ReservedUnits != 1 || beta.BorrowedUnits != 1 {
 		t.Fatalf("expected beta reserved=1 borrowed=max(2-1,0)=1, got %#v", beta)
 	}
-	if beta.PendingUnits != 4 || beta.WithheldUnits != 2 {
-		t.Fatalf("expected beta pending=4 withheld=max(4-2,0)=2, got %#v", beta)
+	if pending := mustInt(t, beta.PendingUnits, "beta pending units"); pending != 3 {
+		t.Fatalf("expected beta pending=3 after one successful grant, got %#v", beta)
+	}
+	if withheld := mustInt(t, beta.WithheldUnits, "beta withheld units"); withheld != 3 {
+		t.Fatalf("expected beta withheld=3, got %#v", beta)
 	}
 
 	if snapshot.EffectiveTotalUnits != 6 {
@@ -1412,6 +1434,69 @@ func TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld
 	}
 	if snapshot.AvailableUnits != 2 {
 		t.Fatalf("expected available units 6-4=2, got %d", snapshot.AvailableUnits)
+	}
+}
+
+func TestStatusConvertsPendingWorkersToPolicyUnits(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 12, 3, 0, false))
+	if err := coordinator.SetDemand("alpha", 2); err != nil {
+		t.Fatalf("set demand: %v", err)
+	}
+
+	accounting := mustStatus(t, coordinator).Accounting[0]
+	if pending := mustInt(t, accounting.PendingUnits, "pending units"); pending != 6 {
+		t.Fatalf("expected two workers at three units each to report six pending units, got %d", pending)
+	}
+	if withheld := mustInt(t, accounting.WithheldUnits, "withheld units"); withheld != 6 {
+		t.Fatalf("expected all outstanding demand to remain withheld, got %d", withheld)
+	}
+}
+
+func TestStatusReportsDemandUnknownAfterRestart(t *testing.T) {
+	backing := newMemoryStore()
+	clock := newManualClock()
+	coordinator, err := Open(backing, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open coordinator: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 2, 0, false))
+	if err := coordinator.SetDemand("alpha", 0); err != nil {
+		t.Fatalf("publish known zero demand: %v", err)
+	}
+	if pending := mustInt(t, mustStatus(t, coordinator).Accounting[0].PendingUnits, "pending units"); pending != 0 {
+		t.Fatalf("expected known zero demand before restart, got %d", pending)
+	}
+
+	restarted, err := Open(backing, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("restart coordinator: %v", err)
+	}
+	accounting := mustStatus(t, restarted).Accounting[0]
+	if accounting.PendingUnits != nil || accounting.WithheldUnits != nil {
+		t.Fatalf("restart fabricated current demand from an empty in-memory ledger: %#v", accounting)
+	}
+}
+
+func TestStatusSweepsExpiredProvisionals(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 2, 0, false))
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
+		t.Fatalf("acquire provisional lease: %v", err)
+	}
+	clock.advance(2 * time.Minute)
+
+	snapshot := mustStatus(t, coordinator)
+	if len(snapshot.Leases) != 0 {
+		t.Fatalf("status retained an expired provisional lease: %#v", snapshot.Leases)
+	}
+	if snapshot.AvailableUnits != 2 {
+		t.Fatalf("expired provisional lease still consumed budget: %d", snapshot.AvailableUnits)
+	}
+	if snapshot.Accounting[0].PendingUnits != nil ||
+		snapshot.Accounting[0].WithheldUnits != nil {
+		t.Fatalf("expired provisional lease retained stale demand: %#v", snapshot.Accounting[0])
 	}
 }
 
@@ -1439,7 +1524,7 @@ func TestStatusReportsNamespaceCapacitySafetyMarginAndFingerprints(t *testing.T)
 		},
 	})
 
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	if snapshot.Namespace != "ns-a" {
 		t.Fatalf("expected namespace ns-a, got %q", snapshot.Namespace)
 	}
@@ -1545,7 +1630,7 @@ func TestLastDecisionRecordsGrantedAcquire(t *testing.T) {
 	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	decision := snapshot.LastDecision
 	if decision == nil {
 		t.Fatal("expected a last decision to be recorded")
@@ -1553,8 +1638,8 @@ func TestLastDecisionRecordsGrantedAcquire(t *testing.T) {
 	if decision.Command != CommandAcquire || !decision.Granted {
 		t.Fatalf("expected a granted acquire decision, got %#v", decision)
 	}
-	if decision.ProfileID != "alpha" || decision.SlotKey != "slot-1" {
-		t.Fatalf("expected the decision to carry the exact lease identity, got %#v", decision)
+	if decision.ProfileID != "alpha" {
+		t.Fatalf("expected the decision to carry only the profile identity, got %#v", decision)
 	}
 	if decision.FailureCategory != "" {
 		t.Fatalf("expected no failure category on a granted decision, got %q", decision.FailureCategory)
@@ -1573,13 +1658,13 @@ func TestLastDecisionRecordsDeniedAcquireWithBoundedFailureCategory(t *testing.T
 	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
 		t.Fatalf("first acquire: %v", err)
 	}
-	sequenceBeforeDenial := coordinator.Status().DecisionSequence
+	sequenceBeforeDenial := mustStatus(t, coordinator).DecisionSequence
 
 	if _, err := coordinator.Acquire("alpha", "slot-2", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected the second acquire to be denied by budget, got %v", err)
 	}
 
-	snapshot := coordinator.Status()
+	snapshot := mustStatus(t, coordinator)
 	decision := snapshot.LastDecision
 	if decision == nil {
 		t.Fatal("expected a last decision to be recorded for the denial")
@@ -1589,9 +1674,6 @@ func TestLastDecisionRecordsDeniedAcquireWithBoundedFailureCategory(t *testing.T
 	}
 	if decision.FailureCategory != ErrorCodeBudgetExceeded {
 		t.Fatalf("expected failure category %q, got %q", ErrorCodeBudgetExceeded, decision.FailureCategory)
-	}
-	if decision.SlotKey != "slot-2" {
-		t.Fatalf("expected the denial to carry the denied slot's identity, got %#v", decision)
 	}
 	if decision.Sequence != sequenceBeforeDenial {
 		t.Fatalf("expected a denial to leave the decision sequence unchanged, got %d want %d",
@@ -1611,7 +1693,7 @@ func TestLastDecisionTreatsDuplicateAcquireAsGranted(t *testing.T) {
 		t.Fatalf("expected a duplicate acquire, got %v", err)
 	}
 
-	decision := coordinator.Status().LastDecision
+	decision := mustStatus(t, coordinator).LastDecision
 	if decision == nil || !decision.Granted {
 		t.Fatalf("expected a duplicate acquire to be recorded as granted, got %#v", decision)
 	}
@@ -1632,7 +1714,7 @@ func TestLastDecisionRecordsRelease(t *testing.T) {
 		t.Fatalf("release: %v", err)
 	}
 
-	decision := coordinator.Status().LastDecision
+	decision := mustStatus(t, coordinator).LastDecision
 	if decision == nil || decision.Command != CommandRelease || !decision.Granted {
 		t.Fatalf("expected a granted release decision, got %#v", decision)
 	}
@@ -1648,9 +1730,9 @@ func TestLastDecisionNeverRecordedForNonLeaseCommands(t *testing.T) {
 	if err := coordinator.SetDemand("alpha", 2); err != nil {
 		t.Fatalf("set demand: %v", err)
 	}
-	_ = coordinator.Status()
+	_ = mustStatus(t, coordinator)
 
-	if decision := coordinator.Status().LastDecision; decision != nil {
+	if decision := mustStatus(t, coordinator).LastDecision; decision != nil {
 		t.Fatalf("expected no last decision from policy/demand/status calls alone, got %#v", decision)
 	}
 }
@@ -1689,7 +1771,7 @@ func TestLastDecisionPersistsAcrossRestart(t *testing.T) {
 	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
 		t.Fatalf("acquire: %v", err)
 	}
-	before := coordinator.Status().LastDecision
+	before := mustStatus(t, coordinator).LastDecision
 	if before == nil {
 		t.Fatal("expected a last decision before restart")
 	}
@@ -1698,13 +1780,12 @@ func TestLastDecisionPersistsAcrossRestart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
-	after := restarted.Status().LastDecision
+	after := mustStatus(t, restarted).LastDecision
 	if after == nil {
 		t.Fatal("expected the last decision to survive a restart")
 	}
 	if after.Sequence != before.Sequence || after.Command != before.Command ||
-		after.ProfileID != before.ProfileID || after.SlotKey != before.SlotKey ||
-		after.Granted != before.Granted {
+		after.ProfileID != before.ProfileID || after.Granted != before.Granted {
 		t.Fatalf("expected the last decision to be unchanged across restart, before=%#v after=%#v", before, after)
 	}
 }
@@ -1760,7 +1841,7 @@ func TestAbsentLastDecisionRemainsValidForOlderDocuments(t *testing.T) {
 	if err != nil {
 		t.Fatalf("expected an absent lastDecision field to remain valid, got %v", err)
 	}
-	if decision := coordinator.Status().LastDecision; decision != nil {
+	if decision := mustStatus(t, coordinator).LastDecision; decision != nil {
 		t.Fatalf("expected a nil last decision for a document that predates it, got %#v", decision)
 	}
 }

@@ -866,15 +866,35 @@
           "minimum": 0
         },
         "pendingUnits": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 0
         },
         "withheldUnits": {
-          "type": "integer",
+          "type": ["integer", "null"],
           "minimum": 0
         }
       },
-      "$comment": "heldUnits equals activeUnits plus provisionalUnits. borrowedUnits equals max(heldUnits - reservedUnits, 0): shared capacity held beyond this profile's own reservation. withheldUnits equals max(pendingUnits - heldUnits, 0): demand this profile has not yet been granted."
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "pendingUnits": { "type": "null" }
+            },
+            "required": ["pendingUnits"]
+          },
+          "then": {
+            "properties": {
+              "withheldUnits": { "type": "null" }
+            }
+          },
+          "else": {
+            "properties": {
+              "withheldUnits": { "type": "integer" }
+            }
+          }
+        }
+      ],
+      "$comment": "heldUnits equals activeUnits plus provisionalUnits. borrowedUnits equals max(heldUnits - reservedUnits, 0): shared capacity held beyond this profile's own reservation. pendingUnits and withheldUnits are equal outstanding demand in policy units; both are null until demand has been republished after coordinator restart or policy replacement."
     },
     "hostAdmissionDecision": {
       "type": "object",
@@ -900,14 +920,15 @@
         "failureCategory": {
           "type": ["string", "null"],
           "minLength": 1,
-          "maxLength": 64
+          "maxLength": 64,
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
         },
         "decidedAtUnixNano": {
-          "type": "number",
+          "type": "integer",
           "minimum": 0
         }
       },
-      "$comment": "failureCategory is a bounded classification (for example coordinator-outage, budget-denied, profile-policy-mismatch). It never carries raw errors, host names, runner names, container IDs, paths, URLs, job output, or credentials."
+      "$comment": "failureCategory is a bounded lower-kebab-case coordinator error code (for example budget-exceeded or lease-expired). It never carries raw errors, host names, runner names, container IDs, paths, URLs, job output, or credentials."
     },
     "hostAdmissionState": {
       "type": "object",
@@ -1052,6 +1073,36 @@
               "effectiveTotalUnits",
               "availableUnits"
             ]
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "available"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "capacityUnits": { "type": "integer" },
+              "safetyMarginUnits": { "type": "integer" },
+              "hostPolicyFingerprint": { "type": "string" },
+              "accounting": {
+                "allOf": [
+                  {
+                    "$ref": "#/$defs/hostAdmissionAccounting"
+                  },
+                  {
+                    "properties": {
+                      "profilePolicyFingerprint": { "type": "string" },
+                      "pendingUnits": { "type": "integer" },
+                      "withheldUnits": { "type": "integer" }
+                    }
+                  }
+                ]
+              }
+            }
           }
         }
       ],
@@ -1688,6 +1739,9 @@
       "enum": [
         "none",
         "admission-ceiling",
+        "host-admission-withheld",
+        "host-admission-degraded",
+        "host-admission-unavailable",
         "launch-pending",
         "docker-unavailable",
         "docker-failed",

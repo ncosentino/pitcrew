@@ -124,6 +124,30 @@ const (
 	ErrorCodeProtocolMismatch    ErrorCode = "protocol-mismatch"
 )
 
+func (c ErrorCode) valid() bool {
+	switch c {
+	case "",
+		ErrorCodeUnknownProfile,
+		ErrorCodeDuplicateLease,
+		ErrorCodeLeaseNotFound,
+		ErrorCodeLeaseExpired,
+		ErrorCodeLeaseNotProvisional,
+		ErrorCodeBudgetExceeded,
+		ErrorCodeEvidenceRequired,
+		ErrorCodeEvidenceInvalid,
+		ErrorCodeInvalidPolicy,
+		ErrorCodeInvalidIdentity,
+		ErrorCodeStalePolicy,
+		ErrorCodeCorruptState,
+		ErrorCodeRequestTooLarge,
+		ErrorCodeMalformedRequest,
+		ErrorCodeProtocolMismatch:
+		return true
+	default:
+		return false
+	}
+}
+
 // errorCodeForErr maps a coordinator sentinel error to its stable wire
 // code. It uses errors.Is so an error wrapped with additional detail (for
 // example "%w: profile %q ...") still maps to the correct code. An error

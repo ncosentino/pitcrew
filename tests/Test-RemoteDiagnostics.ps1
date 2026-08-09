@@ -265,6 +265,15 @@ try {
             hostAdmission = @{
                 status = 'degraded'
                 namespace = 'primary'
+                epoch = 3
+                decisionSequence = 9
+                capacityUnits = 10
+                safetyMarginUnits = 1
+                effectiveTotalUnits = 9
+                availableUnits = 5
+                hostPolicyFingerprint = $null
+                accounting = $null
+                lastDecision = $null
             }
         } | ConvertTo-Json -Depth 30)
 

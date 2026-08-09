@@ -1343,6 +1343,42 @@ assert_equals "retry-backoff" "$(jq -r '.fixed.reason' "${diagnostics_capacity_p
 assert_equals "1" "$(jq -r '.fixed.cleanupPendingWorkers' "${diagnostics_capacity_projection}")" "Capacity evidence lost cleanup-pending workers."
 assert_equals "0" "$(jq -r '.fixed.targets | length' "${diagnostics_capacity_projection}")" "A fixed profile published autoscaling target evidence."
 
+render_fixed_capacity_evidence \
+    "${capacity_slots_json}" \
+    2 \
+    accepted \
+    "${diagnostics_health_projection}" \
+    "${diagnostics_capacity_projection}" \
+    withheld
+assert_equals \
+    "host-admission-withheld" \
+    "$(jq -r '.fixed.reason' "${diagnostics_capacity_projection}")" \
+    "A host budget denial was not attributed to host admission."
+
+render_fixed_capacity_evidence \
+    "${capacity_slots_json}" \
+    2 \
+    accepted \
+    "${diagnostics_health_projection}" \
+    "${diagnostics_capacity_projection}" \
+    unavailable
+assert_equals \
+    "host-admission-unavailable" \
+    "$(jq -r '.fixed.reason' "${diagnostics_capacity_projection}")" \
+    "A coordinator outage was not attributed to host admission."
+
+render_fixed_capacity_evidence \
+    "${capacity_slots_json}" \
+    2 \
+    accepted \
+    "${diagnostics_health_projection}" \
+    "${diagnostics_capacity_projection}" \
+    degraded
+assert_equals \
+    "host-admission-degraded" \
+    "$(jq -r '.fixed.reason' "${diagnostics_capacity_projection}")" \
+    "A policy mismatch was not attributed to host admission."
+
 unknown_github_health="${TEMP_DIRECTORY}/unknown-github-health.json"
 jq '.github = {state:"unknown", observedAt:"2026-07-27T00:00:00Z", consecutiveFailures:0, retryAt:null, lastSuccess:null, lastFailure:null}' \
     "${diagnostics_health_projection}" > "${unknown_github_health}"
@@ -1738,7 +1774,7 @@ jq '
             heldUnits: 3,
             borrowedUnits: 1,
             pendingUnits: 4,
-            withheldUnits: 1
+            withheldUnits: 4
         },
         lastDecision: {
             sequence: 42,
@@ -1815,6 +1851,16 @@ jq '.hostAdmission.lastDecision.command = "status"' \
     "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
 assert_false \
     "Host admission accepted a non-lease last-decision command." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.lastDecision.failureCategory = "/var/lib/private"' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Host admission accepted path-like failure evidence." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.accounting.pendingUnits = null | .hostAdmission.accounting.withheldUnits = null' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Available host admission accepted unknown demand accounting." \
     observed_state_is_valid "${invalid_contract_eighteen_accounting}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

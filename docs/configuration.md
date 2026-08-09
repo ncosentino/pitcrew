@@ -137,8 +137,8 @@ state. Its `status` is one of:
 | Status | Meaning |
 |--------|---------|
 | `disabled` | This profile has no `hostAdmission` policy. Every other field is `null`. |
-| `available` | The coordinator responded and this profile's own host and profile policy fingerprints match the coordinator's applied policy. |
-| `degraded` | The coordinator responded, but the host or profile policy fingerprint does not match, or this profile is unknown to the coordinator. |
+| `available` | The coordinator responded with the expected namespace, complete policy identities, and current demand accounting for this profile. |
+| `degraded` | The coordinator responded, but its namespace or policy identity does not match, this profile is unknown, or demand has not yet been republished after coordinator restart or policy replacement. |
 | `unavailable` | The coordinator could not be reached or returned an unreadable response. Reading status is diagnostics-only and never affects worker lifecycle. |
 
 `unavailable` values are always `null`, never a fabricated zero, so a reader can
@@ -147,21 +147,28 @@ never mistake "could not measure" for "measured as empty."
 Accounting is scoped to this profile only; the coordinator's full multi-profile
 ledger is never published. The published fields use these precise semantics:
 
-- `activeUnits` — units held by workers that have completed admission and are
-  running.
+- `activeUnits` — units held by active leases. Ambiguous recovery may retain an
+  active lease until exact worker absence and release are proven.
 - `provisionalUnits` — units tentatively held for a worker still starting.
 - `heldUnits` — `activeUnits + provisionalUnits`.
 - `borrowedUnits` — `max(heldUnits - reservedUnits, 0)`: shared capacity this
   profile is using beyond its own configured reservation.
-- `pendingUnits` — units of demand this profile has asked for but not yet been
-  granted.
-- `withheldUnits` — `max(pendingUnits - heldUnits, 0)`: demand the host has not
-  been able to satisfy.
+- `pendingUnits` — outstanding worker demand multiplied by this profile's unit
+  cost.
+- `withheldUnits` — the same outstanding units while host admission has not
+  granted them. Both values are `null` until demand is republished after
+  coordinator restart or policy replacement.
+
+Per-target capacity evidence keeps this host result separate from the existing
+profile ceiling. `host-admission-withheld` identifies a target currently denied
+by host budget or fairness; `host-admission-degraded` identifies incompatible
+policy or lease state; and `host-admission-unavailable` identifies a target whose
+new launch is blocked because the coordinator cannot be reached.
 
 `lastDecision` is a single bounded record of this profile's most recent
 admission decision (`sequence`, `command`, `granted`, `failureCategory`,
-`decidedAtUnixNano`) — never a raw error message, host name, runner name,
-container ID, path, URL, or job output.
+`decidedAtUnixNano`) — never an exact slot identity, raw error message, host
+name, runner name, container ID, path, URL, or job output.
 
 ### Read-only external volumes
 

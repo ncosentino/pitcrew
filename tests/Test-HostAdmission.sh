@@ -59,6 +59,7 @@ printf '%s|%s|%s|%s\n' "${command}" "${profile}" "${slot}" "${demand}" \
     >> "${PITCREW_TEST_ADMISSION_CALLS}"
 case "${command}:${PITCREW_TEST_ADMISSION_MODE:-success}" in
     acquire:withheld) exit 3 ;;
+    acquire:degraded|activate:degraded) exit 5 ;;
     acquire:error|release:error|reconcile:error) exit 1 ;;
     release:not-found|reconcile:not-found) exit 4 ;;
 esac
@@ -122,7 +123,7 @@ assert_true \
     "Recovered draining slots do not clear pending host demand before return." \
     grep -Fq 'host_admission_end_wait \' "${manager_source}"
 assert_true \
-    "Fixed admission implementation activated the manager contract before autoscaler parity." \
+    "Fixed admission implementation did not activate manager contract eighteen." \
     grep -Fq 'MANAGER_CONTRACT_VERSION=18' "${manager_source}"
 
 disabled_calls="${TEMP_DIRECTORY}/disabled-calls.log"
@@ -193,6 +194,10 @@ assert_equals \
 assert_true \
     "Withheld fixed slot lost its pending-demand marker." \
     test -f "${admission_slot}/${HOST_ADMISSION_WAIT_MARKER}"
+assert_equals \
+    "withheld" \
+    "$(host_admission_wait_state "${admission_slots}")" \
+    "Host budget denial did not retain a bounded withheld reason."
 
 PITCREW_TEST_ADMISSION_MODE="error"
 export PITCREW_TEST_ADMISSION_MODE
@@ -204,6 +209,25 @@ assert_equals \
     "1" \
     "${unavailable_status}" \
     "Coordinator failure did not return the fixed-manager unavailable status."
+assert_equals \
+    "unavailable" \
+    "$(host_admission_wait_state "${admission_slots}")" \
+    "Coordinator failure did not retain a bounded unavailable reason."
+
+PITCREW_TEST_ADMISSION_MODE="degraded"
+export PITCREW_TEST_ADMISSION_MODE
+set +e
+host_admission_acquire "${admission_slot}" "control-1" "${admission_slots}"
+degraded_status=$?
+set -e
+assert_equals \
+    "3" \
+    "${degraded_status}" \
+    "Policy mismatch did not return the fixed-manager degraded status."
+assert_equals \
+    "degraded" \
+    "$(host_admission_wait_state "${admission_slots}")" \
+    "Policy mismatch did not retain a bounded degraded reason."
 
 PITCREW_TEST_ADMISSION_MODE="not-found"
 export PITCREW_TEST_ADMISSION_MODE
@@ -239,6 +263,7 @@ status_snapshot="${TEMP_DIRECTORY}/status-snapshot.json"
 status_output="${TEMP_DIRECTORY}/status-output.json"
 cat > "${status_snapshot}" <<'EOF'
 {
+    "namespace": "primary",
     "epoch": 3,
     "decisionSequence": 9,
     "capacityUnits": 10,
@@ -304,6 +329,19 @@ assert_true \
 )
 assert_true \
     "A mismatched host policy fingerprint did not report a degraded status." \
+    jq -e '.status == "degraded"' "${status_output}" >/dev/null
+
+missing_identity_snapshot="${TEMP_DIRECTORY}/status-missing-identity.json"
+jq 'del(.hostPolicyFingerprint)' "${status_snapshot}" > "${missing_identity_snapshot}"
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${missing_identity_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-a"
+    export PITCREW_TEST_STATUS_SNAPSHOT PITCREW_HOST_ADMISSION_HOST_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Missing coordinator identity was reported as available." \
     jq -e '.status == "degraded"' "${status_output}" >/dev/null
 
 (
