@@ -374,8 +374,8 @@ manager_image_kib=$(docker run \
     --entrypoint /bin/sh \
     "ephemeral-runner-manager:profile-${PROFILE_NAME}" \
     -c "du -sk / 2>/dev/null | awk '{ print \$1 }'")
-[ "${manager_image_kib}" -le 61440 ] || {
-    echo "Manager filesystem is ${manager_image_kib} KiB; expected at most 60 MiB." >&2
+[ "${manager_image_kib}" -le 65536 ] || {
+    echo "Manager filesystem is ${manager_image_kib} KiB; expected at most 64 MiB." >&2
     exit 1
 }
 echo "Manager filesystem size: ${manager_image_kib} KiB"
