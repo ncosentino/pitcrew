@@ -417,6 +417,7 @@ func TestManagerHandoffClosesSessionWithoutDestroyingPool(t *testing.T) {
 		docker,
 		&fakeClock{current: time.Now()},
 		newAdmissionController(0),
+		newHostAdmissionCoordinator(hostAdmissionConfig{}, cfg.profileID),
 		newDiagnosticsRecorder("", "instance", nil),
 		cfg.sessionOwner,
 		[]recoveredContainer{{
@@ -474,9 +475,10 @@ func TestListenerFailureCanRestartWithoutDestroyingPool(t *testing.T) {
 	docker := newFakeDockerClient(nil)
 	failures := make(chan error, 1)
 	ctx, cancel := context.WithCancel(context.Background())
+	cfg := managerTestConfig(projectTestDirectory(t))
 	controller, err := startTargetController(
 		ctx,
-		managerTestConfig(projectTestDirectory(t)),
+		cfg,
 		targetSpec{
 			key:             "repo-one",
 			registrationURL: "https://github.com/example/one",
@@ -489,6 +491,7 @@ func TestListenerFailureCanRestartWithoutDestroyingPool(t *testing.T) {
 		docker,
 		&fakeClock{current: time.Now()},
 		newAdmissionController(0),
+		newHostAdmissionCoordinator(hostAdmissionConfig{}, cfg.profileID),
 		newDiagnosticsRecorder("", "instance", nil),
 		"instance",
 		nil,
@@ -1219,6 +1222,7 @@ func newCoherenceTestController(
 		newFakeDockerClient(nil),
 		&fakeClock{current: time.Now()},
 		newAdmissionController(0),
+		newHostAdmissionCoordinator(hostAdmissionConfig{}, cfg.profileID),
 		newDiagnosticsRecorder("", "manager-instance", nil),
 		testLogger(),
 		nil,

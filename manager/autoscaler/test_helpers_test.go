@@ -208,6 +208,10 @@ type fakeDockerClient struct {
 	followLines      map[string][]string
 	followObserved   chan fakeFollowRequest
 	runErrors        []error
+	createErrors     []error
+	startErrors      []error
+	created          map[string]bool
+	starts           []string
 	stopRemoveErrors map[string][]error
 	waitResults      map[string][]fakeWaitResult
 	waitObserved     chan string
@@ -321,6 +325,7 @@ func newFakeDockerClient(events *eventRecorder) *fakeDockerClient {
 		stopRemoveErrors: make(map[string][]error),
 		waitResults:      make(map[string][]fakeWaitResult),
 		running:          make(map[string]bool),
+		created:          make(map[string]bool),
 		exitStates:       make(map[string]containerExitState),
 		runningErrors:    make(map[string][]error),
 	}
@@ -344,6 +349,45 @@ func (d *fakeDockerClient) run(
 	containerID := fmt.Sprintf("container-%d", d.nextID)
 	d.running[containerID] = true
 	return containerID, nil
+}
+
+func (d *fakeDockerClient) create(
+	_ context.Context,
+	launch containerLaunch,
+) (string, error) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.createErrors) > 0 {
+		err := d.createErrors[0]
+		d.createErrors = d.createErrors[1:]
+		if err != nil {
+			return "", err
+		}
+	}
+	d.nextID++
+	d.launches = append(d.launches, launch)
+	containerID := fmt.Sprintf("container-%d", d.nextID)
+	d.created[containerID] = true
+	return containerID, nil
+}
+
+func (d *fakeDockerClient) start(
+	_ context.Context,
+	containerID string,
+) error {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	d.starts = append(d.starts, containerID)
+	if len(d.startErrors) > 0 {
+		err := d.startErrors[0]
+		d.startErrors = d.startErrors[1:]
+		if err != nil {
+			return err
+		}
+	}
+	delete(d.created, containerID)
+	d.running[containerID] = true
+	return nil
 }
 
 func (d *fakeDockerClient) wait(ctx context.Context, containerID string) (int, error) {
@@ -590,6 +634,7 @@ func newTestScalerInDirectory(
 		docker,
 		clock,
 		newAdmissionController(0),
+		newHostAdmissionCoordinator(hostAdmissionConfig{}, cfg.profileID),
 		newDiagnosticsRecorder(stateDirectory, "manager-instance", clock),
 		testLogger(),
 		nil,

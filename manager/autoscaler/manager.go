@@ -16,15 +16,16 @@ import (
 const managerShutdownTimeout = 50 * time.Second
 
 type autoscalerManager struct {
-	cfg         config
-	paths       statePaths
-	factory     scaleSetServiceFactory
-	docker      dockerClient
-	clock       clock
-	logger      *slog.Logger
-	instanceID  string
-	admission   *admissionController
-	diagnostics *diagnosticsRecorder
+	cfg           config
+	paths         statePaths
+	factory       scaleSetServiceFactory
+	docker        dockerClient
+	clock         clock
+	logger        *slog.Logger
+	instanceID    string
+	admission     *admissionController
+	hostAdmission *hostAdmissionCoordinator
+	diagnostics   *diagnosticsRecorder
 
 	controllers          map[string]*targetController
 	retiring             map[string]*targetController
@@ -98,6 +99,7 @@ func newAutoscalerManager(
 		logger:                logger,
 		instanceID:            instanceID,
 		admission:             newAdmissionController(cfg.maximumActiveWorkers),
+		hostAdmission:         newHostAdmissionCoordinator(cfg.hostAdmission, cfg.profileID),
 		diagnostics:           diagnostics,
 		controllers:           make(map[string]*targetController),
 		retiring:              make(map[string]*targetController),
@@ -616,6 +618,7 @@ func (m *autoscalerManager) startDesiredController(
 		m.docker,
 		m.clock,
 		m.admission,
+		m.hostAdmission,
 		m.diagnostics,
 		m.cfg.sessionOwner,
 		m.recovered[target.key],
@@ -770,6 +773,7 @@ func (m *autoscalerManager) startRetiringController(
 		m.docker,
 		m.clock,
 		m.admission,
+		m.hostAdmission,
 		m.diagnostics,
 		m.cfg.sessionOwner,
 		m.recovered[target.key],

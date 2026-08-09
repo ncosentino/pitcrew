@@ -1,7 +1,14 @@
+# The Go autoscaler imports the admission wire client directly from the
+# sibling manager/admission module (see ADR-0003) through a local go.mod
+# replace directive, so admission/ is copied into this build context under
+# the same relative layout as the repository (manager/admission next to
+# manager/autoscaler) before autoscaler's go.mod is resolved.
 FROM golang:1.25.3-alpine AS autoscaler-build
 
-WORKDIR /src
-COPY autoscaler/go.mod autoscaler/go.sum ./
+WORKDIR /src/manager
+COPY admission/ ./admission/
+COPY autoscaler/go.mod autoscaler/go.sum ./autoscaler/
+WORKDIR /src/manager/autoscaler
 RUN go mod download
 COPY autoscaler/ ./
 RUN CGO_ENABLED=0 go build \
