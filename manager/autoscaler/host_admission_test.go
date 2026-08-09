@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"os"
+	"reflect"
 	"sync"
 	"testing"
 	"time"
@@ -229,6 +231,75 @@ func newHostAdmissionTestScaler(
 		newAdmissionController(0),
 		hostAdmission,
 		newDiagnosticsRecorder("", "manager-instance", clock),
+		testLogger(),
+		nil,
+		func(err error) {
+			if err != nil && !errors.Is(err, context.Canceled) {
+				t.Logf("scaler background error: %v", err)
+			}
+		},
+	)
+	suffix := 0
+	scaler.nameSuffix = func() (string, error) {
+		suffix++
+		return fmt.Sprintf("suffix%02d", suffix), nil
+	}
+	return scaler, api, docker, clock, hostAdmission, cancel
+}
+
+// newHostAdmissionTestScalerInDirectory is the persistent-state counterpart
+// of newHostAdmissionTestScaler: it backs both the registration cleanup and
+// host lease cleanup ledgers with real files under stateDirectory, so tests
+// can exercise durability across a simulated manager restart by building a
+// second scaler instance pointed at the same directory.
+func newHostAdmissionTestScalerInDirectory(
+	t *testing.T,
+	maximum int,
+	client hostAdmissionLeaseClient,
+	stateDirectory string,
+) (
+	*runnerScaler,
+	*fakeScaleSetService,
+	*fakeDockerClient,
+	*fakeClock,
+	*hostAdmissionCoordinator,
+	context.CancelFunc,
+) {
+	t.Helper()
+	ctx, cancel := context.WithCancel(context.Background())
+	clock := &fakeClock{current: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
+	events := &eventRecorder{}
+	api := newFakeScaleSetService(events)
+	docker := newFakeDockerClient(events)
+	cfg := config{
+		profileID:         "profile-a",
+		runnerImage:       "example/runner:latest",
+		workerRevision:    testWorkerRevision,
+		sessionOwner:      "pitcrew-profile-a",
+		assumeUnversioned: true,
+		namePrefix:        "pitcrew-runner",
+		scaleDownDelay:    10 * time.Minute,
+		stateDirectory:    stateDirectory,
+	}
+	target := targetSpec{
+		key:             "repo-1234",
+		registrationURL: "https://github.com/example/repository",
+		repository:      "https://github.com/example/repository",
+		maximum:         maximum,
+		scaleSetName:    "pitcrew-profile-a-deadbeef",
+	}
+	hostAdmission := newHostAdmissionCoordinatorWithClient(client, cfg.profileID)
+	scaler := newRunnerScaler(
+		ctx,
+		cfg,
+		target,
+		42,
+		api,
+		docker,
+		clock,
+		newAdmissionController(0),
+		hostAdmission,
+		newDiagnosticsRecorder(stateDirectory, "manager-instance", clock),
 		testLogger(),
 		nil,
 		func(err error) {
@@ -484,14 +555,17 @@ func TestHostAdmissionCreatedContainerRecoveryStartsWithActiveLease(t *testing.T
 }
 
 // TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease proves a
-// created-but-unstarted container whose lease cannot be confirmed (missing,
-// expired, or rejected) is removed exactly instead of being started.
+// created-but-unstarted container whose lease cannot be reacquired (budget
+// exhausted, so a restart-discarded provisional lease cannot be granted
+// again) is removed exactly instead of being started, and its exact GitHub
+// registration is removed alongside the container so no JIT registration is
+// left orphaned.
 func TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease(t *testing.T) {
-	client := newFakeHostAdmissionClient(1)
-	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	client := newFakeHostAdmissionClient(0)
+	scaler, api, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
-	// No lease pre-granted: activation of "slot-missing" will fail with
-	// admission.ErrLeaseNotFound.
+	// No lease pre-granted and zero budget: reacquisition of "slot-missing"
+	// will fail with admission.ErrBudgetExceeded.
 
 	container := recoveredContainer{
 		containerID: "container-orphaned",
@@ -514,9 +588,62 @@ func TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease(t *testing.T)
 	if len(docker.stopRemove) != 1 || docker.stopRemove[0] != "container-orphaned" {
 		t.Fatalf("orphaned created container was not removed exactly: %+v", docker.stopRemove)
 	}
+	if len(api.removeCalls) != 1 || api.removeCalls[0] != 100 {
+		t.Fatalf("orphaned created container's registration was not removed exactly: %+v", api.removeCalls)
+	}
 	snapshot := scaler.snapshot()
 	if len(snapshot.runners) != 0 {
 		t.Fatal("a container with a rejected lease was recorded as a runner")
+	}
+}
+
+// TestHostAdmissionCreatedContainerRecoveryReacquiresDiscardedProvisional
+// proves a created-but-unstarted container whose provisional lease was
+// discarded by the host coordinator's own restart (e.g. the coordinator
+// restarted independently of the manager) is successfully reacquired under
+// the exact same slot key when budget is available, and the container is
+// started rather than discarded.
+func TestHostAdmissionCreatedContainerRecoveryReacquiresDiscardedProvisional(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	// No lease pre-granted: the coordinator has no memory of this slot, as
+	// if its own restart discarded the provisional lease. Budget is
+	// available, so reacquisition under the same slot key must succeed.
+
+	container := recoveredContainer{
+		containerID: "container-reacquired",
+		name:        "runner-reacquired",
+		runnerName:  "runner-reacquired",
+		runnerID:    104,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-104",
+		revision:    testWorkerRevision,
+		createdAt:   time.Now().Add(-time.Minute),
+		unstarted:   true,
+		hostSlotKey: "slot-discarded",
+	}
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("recovery should reacquire a discarded provisional lease: %v", err)
+	}
+	if len(docker.starts) != 1 || docker.starts[0] != "container-reacquired" {
+		t.Fatalf("reacquired created container was not started: %+v", docker.starts)
+	}
+	if len(docker.stopRemove) != 0 {
+		t.Fatal("a container with a successfully reacquired lease was removed instead of started")
+	}
+	found := false
+	for _, key := range client.acquireCalls {
+		if key == "profile-a/slot-discarded" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("recovery did not attempt to reacquire the discarded provisional lease")
+	}
+	snapshot := scaler.snapshot()
+	if len(snapshot.runners) != 1 || snapshot.runners[0].hostSlotKey != "slot-discarded" {
+		t.Fatalf("reacquired runner lost its lease identity: %+v", snapshot.runners)
 	}
 }
 
@@ -590,9 +717,10 @@ func TestHostAdmissionActiveLeaseRestartAdoption(t *testing.T) {
 
 // TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy proves that
 // when a running container's lease cannot be re-confirmed across a restart,
-// the worker is still adopted (busy-worker survival) but with its lease
-// identity cleared, so this manager instance never attempts an unproven
-// release for it later.
+// the worker is still adopted (busy-worker survival) and its lease identity
+// is preserved rather than cleared, so a coordinator outage cannot erase the
+// identity a later exit, scale-down, or shutdown needs to retry the release
+// durably.
 func TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy(t *testing.T) {
 	client := newFakeHostAdmissionClient(1)
 	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
@@ -620,8 +748,8 @@ func TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy(t *testing
 	if len(snapshot.runners) != 1 {
 		t.Fatalf("expected the worker to survive, got %d runners", len(snapshot.runners))
 	}
-	if snapshot.runners[0].hostSlotKey != "" {
-		t.Fatalf("unconfirmed lease identity was not cleared: %+v", snapshot.runners[0])
+	if snapshot.runners[0].hostSlotKey != "slot-unconfirmed" {
+		t.Fatalf("unconfirmed lease identity was incorrectly cleared: %+v", snapshot.runners[0])
 	}
 }
 
@@ -897,5 +1025,396 @@ func TestHostAdmissionNoLeakedLeaseAfterRepeatedFailures(t *testing.T) {
 	}
 	if client.remainingBudget() != 1 {
 		t.Fatalf("synthetic budget was not fully restored after failures: %d", client.remainingBudget())
+	}
+}
+
+// TestHostAdmissionReleaseFailureOnNaturalExitIsRetried proves a transient
+// coordinator failure releasing a lease after a natural container exit
+// durably enqueues a pending release record rather than stranding the
+// lease, and that the next reconcile cycle's retry resolves it exactly.
+func TestHostAdmissionReleaseFailureOnNaturalExitIsRetried(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, _, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	client.releaseErrs[leaseSlotKey("profile-a", runner.hostSlotKey)] = errors.New("coordinator unavailable")
+
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
+
+	if scaler.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatalf("expected a durable pending release record after a transient failure, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 1 {
+		t.Fatalf("lease was released despite a failed release call: %d outstanding", client.leaseCount())
+	}
+
+	clock.advance(hostLeaseReleaseRetryDelay)
+	if _, err := scaler.reconcileLocked(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("pending release record was not resolved by the retry, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 0 {
+		t.Fatalf("lease was not eventually released, %d outstanding", client.leaseCount())
+	}
+}
+
+// TestHostAdmissionReleaseFailureOnScaleDownIsRetried proves a transient
+// coordinator failure releasing a lease during scale-down durably enqueues
+// a pending release record and that a later reconcile resolves it exactly.
+func TestHostAdmissionReleaseFailureOnScaleDownIsRetried(t *testing.T) {
+	client := newFakeHostAdmissionClient(2)
+	scaler, _, _, clock, _, cancel := newHostAdmissionTestScaler(t, 2, client)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 2); err != nil {
+		t.Fatal(err)
+	}
+	markAllRunnersIdle(scaler)
+	snapshot := scaler.snapshot()
+	if len(snapshot.runners) != 2 {
+		t.Fatalf("expected two runners, got %d", len(snapshot.runners))
+	}
+	client.releaseErrs[leaseSlotKey("profile-a", snapshot.runners[0].hostSlotKey)] = errors.New("coordinator unavailable")
+	client.releaseErrs[leaseSlotKey("profile-a", snapshot.runners[1].hostSlotKey)] = errors.New("coordinator unavailable")
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(11 * time.Minute)
+	if _, err := scaler.reconcileLocked(context.Background()); err == nil {
+		t.Fatal("expected the scale-down reconcile to surface the transient release failure")
+	}
+
+	if scaler.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatalf("expected exactly one durable pending release record, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	after := scaler.snapshot()
+	if len(after.runners) != 1 {
+		t.Fatalf("expected exactly one surviving runner after scale-down, got %d", len(after.runners))
+	}
+
+	clock.advance(hostLeaseReleaseRetryDelay)
+	if _, err := scaler.reconcileLocked(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("pending release record was not resolved by the retry, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+}
+
+// TestHostAdmissionReleaseFailureOnDelayedCleanupIsRetried proves a
+// transient coordinator failure releasing a lease during delayed container
+// cleanup (docker.stopAndRemove initially failing during scale-down, then
+// succeeding on retry) durably enqueues a pending release record and that a
+// later reconcile resolves it exactly.
+func TestHostAdmissionReleaseFailureOnDelayedCleanupIsRetried(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, docker, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	markAllRunnersIdle(scaler)
+
+	docker.stopRemoveErrors[runner.containerID] = []error{errors.New("stop failed")}
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	clock.advance(11 * time.Minute)
+	if _, err := scaler.reconcileLocked(context.Background()); err == nil {
+		t.Fatal("expected the scale-down reconcile to surface the transient stop failure")
+	}
+
+	snapshot := scaler.snapshot()
+	if len(snapshot.runners) != 1 || snapshot.runners[0].state != runnerCleanupPending {
+		t.Fatalf("expected the runner to be pending delayed cleanup, got %+v", snapshot.runners)
+	}
+
+	client.releaseErrs[leaseSlotKey("profile-a", runner.hostSlotKey)] = errors.New("coordinator unavailable")
+	if err := scaler.retryCleanupPending(context.Background()); err == nil {
+		t.Fatal("expected delayed cleanup to surface the transient release failure")
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatalf("expected a durable pending release record after a transient failure, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 1 {
+		t.Fatalf("lease was released despite a failed release call: %d outstanding", client.leaseCount())
+	}
+
+	clock.advance(hostLeaseReleaseRetryDelay)
+	if _, err := scaler.reconcileLocked(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("pending release record was not resolved by the retry, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 0 {
+		t.Fatalf("lease was not eventually released, %d outstanding", client.leaseCount())
+	}
+}
+
+// TestHostAdmissionReleaseFailureOnShutdownIsRetried proves a transient
+// coordinator failure releasing an idle worker's lease during shutdown
+// durably enqueues a pending release record, and that retrying releases
+// (independent of shutdown) resolves it exactly without needing to remove
+// or stop any additional worker.
+func TestHostAdmissionReleaseFailureOnShutdownIsRetried(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, _, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	markAllRunnersIdle(scaler)
+	client.releaseErrs[leaseSlotKey("profile-a", runner.hostSlotKey)] = errors.New("coordinator unavailable")
+
+	if err := scaler.shutdown(context.Background()); err == nil {
+		t.Fatal("expected shutdown to surface the transient release failure")
+	}
+
+	if scaler.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatalf("expected a durable pending release record after a transient failure, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 1 {
+		t.Fatalf("lease was released despite a failed release call: %d outstanding", client.leaseCount())
+	}
+
+	clock.advance(hostLeaseReleaseRetryDelay)
+	if err := scaler.retryPendingHostLeaseReleases(); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("pending release record was not resolved by the retry, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 0 {
+		t.Fatalf("lease was not eventually released, %d outstanding", client.leaseCount())
+	}
+}
+
+// TestHostAdmissionReleaseFailureOnAbandonLaunchIsRetried proves a transient
+// coordinator failure releasing a lease while abandoning a launch after
+// container create failure durably enqueues a pending release record
+// instead of leaking the lease, and that a later retry resolves it exactly.
+func TestHostAdmissionReleaseFailureOnAbandonLaunchIsRetried(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, docker, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+
+	docker.createErrors = []error{errors.New("create failed")}
+	client.releaseErrs[leaseSlotKey("profile-a", "pitcrew-runner-repo-1234-suffix01")] = errors.New("coordinator unavailable")
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("expected create failure")
+	}
+
+	if scaler.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatalf("expected a durable pending release record after an abandoned launch, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 1 {
+		t.Fatalf("lease was released despite a failed release call: %d outstanding", client.leaseCount())
+	}
+
+	clock.advance(hostLeaseReleaseRetryDelay)
+	if err := scaler.retryPendingHostLeaseReleases(); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("pending release record was not resolved by the retry, got %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 0 {
+		t.Fatalf("lease was not eventually released, %d outstanding", client.leaseCount())
+	}
+}
+
+// TestHostAdmissionPendingReleaseRetrySurvivesManagerRestart proves a
+// pending host lease release record persists across a simulated manager
+// restart (a fresh scaler instance backed by the same state directory) and
+// that it is eventually resolved without ever touching Docker or GitHub
+// demand.
+func TestHostAdmissionPendingReleaseRetrySurvivesManagerRestart(t *testing.T) {
+	directory := projectTestDirectory(t)
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, _, _, _, cancel := newHostAdmissionTestScalerInDirectory(t, 1, client, directory)
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	client.releaseErrs[leaseSlotKey("profile-a", runner.hostSlotKey)] = errors.New("coordinator unavailable")
+
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
+	if scaler.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatal("failed lease release was not retained as pending before restart")
+	}
+	cancel()
+
+	path := hostLeaseCleanupPath(directory, runner.targetKey)
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read persisted host lease cleanup: %v", err)
+	}
+	document, err := parseHostLeaseCleanupDocument(data, runner.targetKey)
+	if err != nil {
+		t.Fatalf("persisted host lease cleanup is invalid: %v", err)
+	}
+	if len(document.Records) != 1 ||
+		document.Records[0].HostSlotKey != runner.hostSlotKey ||
+		document.Records[0].RunnerKey != runner.key {
+		t.Fatalf("persisted host lease cleanup lost the lease identity: %#v", document.Records)
+	}
+
+	restarted, _, restartedDocker, restartedClock, _, restartedCancel := newHostAdmissionTestScalerInDirectory(
+		t, 1, client, directory,
+	)
+	defer restartedCancel()
+	if restarted.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatal("restarted scaler lost the pending host lease release")
+	}
+
+	restartedClock.advance(hostLeaseReleaseRetryDelay)
+	if err := restarted.retryPendingHostLeaseReleases(); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("restarted retry did not resolve the pending release, got %d", restarted.pendingHostLeaseReleaseCount())
+	}
+	if client.leaseCount() != 0 {
+		t.Fatalf("lease was not eventually released after restart, %d outstanding", client.leaseCount())
+	}
+	if len(restartedDocker.stops) != 0 || len(restartedDocker.stopRemove) != 0 {
+		t.Fatal("pending release retry touched Docker, which it must never do")
+	}
+	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("resolved pending host lease cleanup state was not cleared")
+	}
+}
+
+// TestHostAdmissionRunningRecoveryOutagePreservesKeyForLaterRelease proves
+// that when recoverRunning cannot re-confirm a lease across a restart
+// (coordinator outage), the worker's exact lease identity is preserved
+// rather than cleared, so a later natural exit can still durably release
+// (or enqueue) it.
+func TestHostAdmissionRunningRecoveryOutagePreservesKeyForLaterRelease(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	// No lease pre-granted: activation of "slot-outage" fails, simulating a
+	// coordinator outage across a manager restart.
+
+	container := recoveredContainer{
+		containerID: "container-outage",
+		name:        "runner-outage",
+		runnerName:  "runner-outage",
+		runnerID:    200,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-200",
+		revision:    testWorkerRevision,
+		createdAt:   time.Now().Add(-time.Minute),
+		hostSlotKey: "slot-outage",
+	}
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("running container recovery must survive a coordinator outage: %v", err)
+	}
+	runner := findRunner(t, scaler)
+	if runner.hostSlotKey != "slot-outage" {
+		t.Fatalf("recovered running worker lost its lease identity: %+v", runner)
+	}
+
+	// Now grant the lease so a later exit's release attempt can succeed
+	// exactly, proving the preserved identity is usable.
+	client.preGrant("profile-a", "slot-outage", true)
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
+
+	if len(client.releaseCalls) != 1 || client.releaseCalls[0] != "profile-a/slot-outage" {
+		t.Fatalf("preserved lease identity was not used for exact release on exit: %#v", client.releaseCalls)
+	}
+	if client.leaseCount() != 0 {
+		t.Fatalf("lease was not released using the preserved identity: %d outstanding", client.leaseCount())
+	}
+	_ = docker
+}
+
+// TestHostAdmissionCreatedRecoveryDiscardRemovesRegistration proves a
+// created-but-unstarted container discarded during recovery (lease cannot
+// be reacquired) also has its exact GitHub registration removed, so no JIT
+// registration is left orphaned.
+func TestHostAdmissionCreatedRecoveryDiscardRemovesRegistration(t *testing.T) {
+	client := newFakeHostAdmissionClient(0)
+	scaler, api, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+
+	container := recoveredContainer{
+		containerID: "container-discard",
+		name:        "runner-discard",
+		runnerName:  "runner-discard",
+		runnerID:    201,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-201",
+		revision:    testWorkerRevision,
+		createdAt:   time.Now().Add(-time.Minute),
+		unstarted:   true,
+		hostSlotKey: "slot-discard",
+	}
+	if err := scaler.recover(container); err == nil {
+		t.Fatal("expected recovery to fail when the lease cannot be reacquired")
+	}
+	if len(docker.stopRemove) != 1 || docker.stopRemove[0] != "container-discard" {
+		t.Fatalf("discarded container was not removed exactly: %+v", docker.stopRemove)
+	}
+	if len(api.removeCalls) != 1 || api.removeCalls[0] != 201 {
+		t.Fatalf("discarded container's registration was not removed exactly: %#v", api.removeCalls)
+	}
+}
+
+// TestHostAdmissionCreatedRecoveryDiscardRegistrationFailureIsRetried
+// proves a registration removal failure while discarding an unstartable
+// recovered container is retried durably through the same pending
+// registration cleanup ledger used for exited workers, never left orphaned.
+func TestHostAdmissionCreatedRecoveryDiscardRegistrationFailureIsRetried(t *testing.T) {
+	client := newFakeHostAdmissionClient(0)
+	scaler, api, _, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	api.removeErrors[202] = errors.New("registration removal failed")
+
+	container := recoveredContainer{
+		containerID: "container-discard-retry",
+		name:        "runner-discard-retry",
+		runnerName:  "runner-discard-retry",
+		runnerID:    202,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-202",
+		revision:    testWorkerRevision,
+		createdAt:   time.Now().Add(-time.Minute),
+		unstarted:   true,
+		hostSlotKey: "slot-discard-retry",
+	}
+	if err := scaler.recover(container); err == nil {
+		t.Fatal("expected recovery to fail when the lease cannot be reacquired")
+	}
+	if scaler.pendingRegistrationCount() != 1 {
+		t.Fatalf("expected the failed registration removal to be retained as pending, got %d", scaler.pendingRegistrationCount())
+	}
+
+	clock.advance(registrationCleanupRetryDelay)
+	delete(api.removeErrors, 202)
+	if err := scaler.retryPendingRegistrations(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingRegistrationCount() != 0 {
+		t.Fatalf("pending registration removal was not resolved by the retry, got %d", scaler.pendingRegistrationCount())
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{202, 202}) {
+		t.Fatalf("expected exactly two registration removal attempts, got %#v", api.removeCalls)
 	}
 }

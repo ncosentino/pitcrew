@@ -140,12 +140,14 @@ type runnerScaler struct {
 	nameSuffix        func() (string, error)
 	logger            *slog.Logger
 
-	cleanupStore         registrationCleanupStore
-	pendingRegistrations map[string]registrationCleanupRecord
-	admission            *admissionController
-	hostAdmission        *hostAdmissionCoordinator
-	diagnostics          *diagnosticsRecorder
-	blocking             capacityBlock
+	cleanupStore             registrationCleanupStore
+	pendingRegistrations     map[string]registrationCleanupRecord
+	hostLeaseCleanupStore    hostLeaseCleanupStore
+	pendingHostLeaseReleases map[string]hostLeaseCleanupRecord
+	admission                *admissionController
+	hostAdmission            *hostAdmissionCoordinator
+	diagnostics              *diagnosticsRecorder
+	blocking                 capacityBlock
 }
 
 func newRunnerScaler(
@@ -205,11 +207,17 @@ func newRunnerScaler(
 			target.key,
 		),
 		pendingRegistrations: make(map[string]registrationCleanupRecord),
-		admission:            admission,
-		hostAdmission:        hostAdmission,
-		diagnostics:          diagnostics,
+		hostLeaseCleanupStore: newHostLeaseCleanupStore(
+			cfg.stateDirectory,
+			target.key,
+		),
+		pendingHostLeaseReleases: make(map[string]hostLeaseCleanupRecord),
+		admission:                admission,
+		hostAdmission:            hostAdmission,
+		diagnostics:              diagnostics,
 	}
 	scaler.restorePendingRegistrations()
+	scaler.restorePendingHostLeaseReleases()
 	scaler.admission.join(target.key, scaler.runnerCount)
 	scaler.operationGate <- struct{}{}
 	return scaler
@@ -235,6 +243,30 @@ func (s *runnerScaler) restorePendingRegistrations() {
 		s.logger.Warn(
 			"Restored pending runner registration cleanup",
 			"pendingRegistrations", len(records),
+		)
+	}
+}
+
+// restorePendingHostLeaseReleases reloads host admission lease releases a
+// previous manager instance could not confirm, so a restart cannot turn a
+// known active lease into an untracked, permanently stranded reservation.
+func (s *runnerScaler) restorePendingHostLeaseReleases() {
+	records, err := s.hostLeaseCleanupStore.load()
+	if err != nil {
+		s.onError(fmt.Errorf(
+			"restore pending host lease release for %s: %w",
+			s.target.key,
+			err,
+		))
+		return
+	}
+	for _, record := range records {
+		s.pendingHostLeaseReleases[record.HostSlotKey] = record
+	}
+	if len(records) > 0 {
+		s.logger.Warn(
+			"Restored pending host admission lease releases",
+			"pendingHostLeaseReleases", len(records),
 		)
 	}
 }
@@ -527,6 +559,9 @@ func (s *runnerScaler) tick(ctx context.Context) error {
 
 func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	var operationErrors []error
+	if err := s.retryPendingHostLeaseReleases(); err != nil {
+		operationErrors = append(operationErrors, err)
+	}
 	if err := s.retryPendingRegistrations(ctx); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
@@ -697,14 +732,23 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		currentRunner := s.runners[runnerKey]
 		var hostSlotKey string
 		released := false
+		var pendingRecord hostLeaseCleanupRecord
+		var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
 		if currentRunner != nil {
 			hostSlotKey = currentRunner.hostSlotKey
 			released = s.markHostLeaseReleaseLocked(currentRunner)
+			if released {
+				pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
+					runnerKey, hostSlotKey, s.clock.now().UTC(),
+				)
+			}
 		}
 		delete(s.runners, runnerKey)
 		s.mu.Unlock()
 		if released {
-			if err := s.hostAdmission.release(hostSlotKey); err != nil {
+			s.reportEvictedHostLeaseReleases(evictedLeases)
+			s.persistPendingHostLeaseReleases(pendingLeaseRecords)
+			if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
 				operationErrors = append(operationErrors, fmt.Errorf(
 					"release host admission lease %s after scale-down: %w",
 					hostSlotKey,
@@ -756,15 +800,24 @@ func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {
 		s.mu.Lock()
 		var hostSlotKey string
 		released := false
+		var pendingRecord hostLeaseCleanupRecord
+		var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
 		if current := s.runners[runner.key]; current != nil &&
 			current.state == runnerCleanupPending {
 			hostSlotKey = current.hostSlotKey
 			released = s.markHostLeaseReleaseLocked(current)
+			if released {
+				pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
+					runner.key, hostSlotKey, s.clock.now().UTC(),
+				)
+			}
 			delete(s.runners, runner.key)
 		}
 		s.mu.Unlock()
 		if released {
-			if err := s.hostAdmission.release(hostSlotKey); err != nil {
+			s.reportEvictedHostLeaseReleases(evictedLeases)
+			s.persistPendingHostLeaseReleases(pendingLeaseRecords)
+			if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf(
 					"release host admission lease %s after delayed cleanup: %w",
 					hostSlotKey,
@@ -947,6 +1000,244 @@ func (s *runnerScaler) pendingRegistrationCount() int {
 	return len(s.pendingRegistrations)
 }
 
+// beginPendingHostLeaseRelease durably records the exact host admission
+// lease identity before its release is attempted, so a crash between
+// deciding to release a lease and confirming that release cannot strand an
+// active lease without a retry record. Calling this before every release
+// attempt (rather than only after a failure) closes that window exactly:
+// the durable record always exists before the in-memory runner identity is
+// the only place the lease's existence is known.
+func (s *runnerScaler) beginPendingHostLeaseRelease(
+	runnerKey string,
+	hostSlotKey string,
+	now time.Time,
+) hostLeaseCleanupRecord {
+	s.mu.Lock()
+	record, evicted, records := s.beginPendingHostLeaseReleaseLocked(runnerKey, hostSlotKey, now)
+	s.mu.Unlock()
+	s.reportEvictedHostLeaseReleases(evicted)
+	s.persistPendingHostLeaseReleases(records)
+	return record
+}
+
+// beginPendingHostLeaseReleaseLocked is the lock-already-held counterpart of
+// beginPendingHostLeaseRelease. Callers that mark a runner for deletion and
+// remove it from s.runners in the same locked section must call this first,
+// so the durable record's in-memory bookkeeping exists before that runner's
+// only remaining identity (the s.runners entry) disappears. The caller is
+// responsible for persisting the returned records and reporting any
+// eviction once it has released the lock.
+func (s *runnerScaler) beginPendingHostLeaseReleaseLocked(
+	runnerKey string,
+	hostSlotKey string,
+	now time.Time,
+) (hostLeaseCleanupRecord, []hostLeaseCleanupRecord, []hostLeaseCleanupRecord) {
+	record, exists := s.pendingHostLeaseReleases[hostSlotKey]
+	if !exists {
+		record = hostLeaseCleanupRecord{
+			TargetKey:     s.target.key,
+			RunnerKey:     runnerKey,
+			HostSlotKey:   hostSlotKey,
+			FirstFailedAt: now.Format(time.RFC3339),
+		}
+	}
+	s.pendingHostLeaseReleases[record.HostSlotKey] = record
+	evicted := s.boundPendingHostLeaseReleasesLocked()
+	records := s.pendingHostLeaseReleasesLocked()
+	return record, evicted, records
+}
+
+// markPendingHostLeaseReleaseAttempt keeps a failed lease release pending
+// with bounded retry metadata.
+func (s *runnerScaler) markPendingHostLeaseReleaseAttempt(
+	record hostLeaseCleanupRecord,
+	now time.Time,
+	cause error,
+) {
+	s.mu.Lock()
+	current, exists := s.pendingHostLeaseReleases[record.HostSlotKey]
+	if !exists {
+		current = record
+	}
+	if current.FirstFailedAt == "" {
+		current.FirstFailedAt = now.Format(time.RFC3339)
+	}
+	current.Attempts++
+	current.LastAttemptAt = now.Format(time.RFC3339)
+	current.NextAttemptAt = now.Add(hostLeaseReleaseRetryDelay).Format(time.RFC3339)
+	s.pendingHostLeaseReleases[current.HostSlotKey] = current
+	evicted := s.boundPendingHostLeaseReleasesLocked()
+	records := s.pendingHostLeaseReleasesLocked()
+	s.mu.Unlock()
+	s.reportEvictedHostLeaseReleases(evicted)
+	s.persistPendingHostLeaseReleases(records)
+	retryAt := now.Add(hostLeaseReleaseRetryDelay)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemAdmission,
+		operation: operationAdmissionSettle,
+		target:    current.HostSlotKey,
+		outcome:   outcomeRetry,
+		reason:    reasonUnknown,
+		evidence:  "exact host admission lease release is still pending",
+		attempt:   current.Attempts,
+		retryAt:   &retryAt,
+	})
+	s.logger.Warn(
+		"Host admission lease release is pending",
+		"hostSlotKey", current.HostSlotKey,
+		"runnerKey", current.RunnerKey,
+		"attempts", current.Attempts,
+	)
+	s.onError(fmt.Errorf(
+		"release host admission lease %s: %w",
+		current.HostSlotKey,
+		cause,
+	))
+}
+
+// resolvePendingHostLeaseRelease clears a durable release record once the
+// lease is confirmed gone, whether by an exact release success or by the
+// coordinator reporting the lease no longer exists.
+func (s *runnerScaler) resolvePendingHostLeaseRelease(hostSlotKey string, reason string) {
+	s.mu.Lock()
+	_, exists := s.pendingHostLeaseReleases[hostSlotKey]
+	delete(s.pendingHostLeaseReleases, hostSlotKey)
+	records := s.pendingHostLeaseReleasesLocked()
+	s.mu.Unlock()
+	if !exists {
+		return
+	}
+	s.persistPendingHostLeaseReleases(records)
+	s.logger.Info(
+		"Host admission lease release completed",
+		"hostSlotKey", hostSlotKey,
+		"reason", reason,
+	)
+}
+
+func (s *runnerScaler) persistPendingHostLeaseReleases(
+	records []hostLeaseCleanupRecord,
+) {
+	if err := s.hostLeaseCleanupStore.save(records); err != nil {
+		s.onError(fmt.Errorf(
+			"persist pending host lease release for %s: %w",
+			s.target.key,
+			err,
+		))
+	}
+}
+
+func (s *runnerScaler) reportEvictedHostLeaseReleases(
+	evicted []hostLeaseCleanupRecord,
+) {
+	for _, record := range evicted {
+		s.onError(fmt.Errorf(
+			"pending host lease release for slot %s was dropped at the %d record bound",
+			record.HostSlotKey,
+			maxPendingHostLeaseReleases,
+		))
+	}
+}
+
+func (s *runnerScaler) boundPendingHostLeaseReleasesLocked() []hostLeaseCleanupRecord {
+	evicted := make([]hostLeaseCleanupRecord, 0)
+	for len(s.pendingHostLeaseReleases) > maxPendingHostLeaseReleases {
+		var oldest *hostLeaseCleanupRecord
+		for _, record := range s.pendingHostLeaseReleases {
+			if oldest == nil ||
+				record.FirstFailedAt < oldest.FirstFailedAt ||
+				(record.FirstFailedAt == oldest.FirstFailedAt &&
+					record.HostSlotKey < oldest.HostSlotKey) {
+				value := record
+				oldest = &value
+			}
+		}
+		if oldest == nil {
+			break
+		}
+		delete(s.pendingHostLeaseReleases, oldest.HostSlotKey)
+		evicted = append(evicted, *oldest)
+	}
+	return evicted
+}
+
+func (s *runnerScaler) pendingHostLeaseReleasesLocked() []hostLeaseCleanupRecord {
+	records := make([]hostLeaseCleanupRecord, 0, len(s.pendingHostLeaseReleases))
+	for _, record := range s.pendingHostLeaseReleases {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].HostSlotKey < records[j].HostSlotKey
+	})
+	return records
+}
+
+func (s *runnerScaler) pendingHostLeaseReleaseCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pendingHostLeaseReleases)
+}
+
+// releaseHostLeaseOrEnqueue is the single path every lifecycle site must use
+// once it has decided a lease should no longer be held. It durably records
+// the exact lease identity before attempting release, so a transient
+// coordinator failure here can never strand an active lease without a
+// retry record: the pending record already exists on disk before this call
+// returns, regardless of outcome. Call sites that mark a runner for
+// deletion and remove it from s.runners while holding s.mu should instead
+// call beginPendingHostLeaseReleaseLocked before the delete, persist the
+// result once unlocked, and finish with attemptPendingHostLeaseRelease.
+func (s *runnerScaler) releaseHostLeaseOrEnqueue(runnerKey, hostSlotKey string) error {
+	if hostSlotKey == "" {
+		return nil
+	}
+	now := s.clock.now().UTC()
+	record := s.beginPendingHostLeaseRelease(runnerKey, hostSlotKey, now)
+	return s.attemptPendingHostLeaseRelease(record)
+}
+
+// attemptPendingHostLeaseRelease performs the exact release for an already
+// durably enqueued pending record, resolving it on success.
+// hostAdmissionCoordinator.release already folds admission.ErrLeaseNotFound
+// into a nil error, so a nil return here resolves the pending record for
+// both an exact release success and a lease the coordinator already
+// considers gone.
+func (s *runnerScaler) attemptPendingHostLeaseRelease(record hostLeaseCleanupRecord) error {
+	if err := s.hostAdmission.release(record.HostSlotKey); err != nil {
+		s.markPendingHostLeaseReleaseAttempt(record, s.clock.now().UTC(), err)
+		return err
+	}
+	s.resolvePendingHostLeaseRelease(record.HostSlotKey, "released")
+	return nil
+}
+
+// retryPendingHostLeaseReleases retries host admission lease releases that
+// previously failed, including work restored after a manager restart. It
+// only ever calls hostAdmission.release: it never touches Docker containers
+// or GitHub registrations, and never alters demand, so a stuck release
+// backlog can never remove or stop a worker.
+func (s *runnerScaler) retryPendingHostLeaseReleases() error {
+	s.mu.Lock()
+	pending := s.pendingHostLeaseReleasesLocked()
+	s.mu.Unlock()
+
+	var releaseErrors []error
+	for _, record := range pending {
+		now := s.clock.now().UTC()
+		if !hostLeaseReleaseDue(record, now) {
+			continue
+		}
+		if err := s.attemptPendingHostLeaseRelease(record); err != nil {
+			releaseErrors = append(releaseErrors, fmt.Errorf(
+				"retry host admission lease release for slot %s: %w",
+				record.HostSlotKey,
+				err,
+			))
+		}
+	}
+	return errors.Join(releaseErrors...)
+}
+
 // removeExitedRegistration removes the exact JIT registration of a worker that
 // has exited, retaining a durable cleanup-pending record when GitHub cannot
 // confirm the removal.
@@ -1059,7 +1350,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	jit, err := s.api.generateJIT(ctx, s.scaleSetID, requestedName)
 	if err != nil {
 		if hostAdmissionEnabled {
-			_ = s.hostAdmission.release(hostSlotKey)
+			_ = s.releaseHostLeaseOrEnqueue(requestedName, hostSlotKey)
 		}
 		s.setBlocking(
 			deficitJITFailed,
@@ -1083,7 +1374,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		)
 		cleanupCancel()
 		if hostAdmissionEnabled {
-			cleanupErr = errors.Join(cleanupErr, s.hostAdmission.release(hostSlotKey))
+			cleanupErr = errors.Join(cleanupErr, s.releaseHostLeaseOrEnqueue(slotKey, hostSlotKey))
 		}
 		return nil, errors.Join(
 			errors.New("JIT runner name cannot form a Docker container name"),
@@ -1141,7 +1432,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 			}
 		}
 		if hostAdmissionEnabled {
-			if err := s.hostAdmission.release(hostSlotKey); err != nil {
+			if err := s.releaseHostLeaseOrEnqueue(slotKey, hostSlotKey); err != nil {
 				cleanupErrors = append(cleanupErrors, fmt.Errorf(
 					"release host admission lease %s: %w",
 					hostSlotKey,
@@ -1285,7 +1576,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		)
 		var releaseErr error
 		if hostAdmissionEnabled {
-			releaseErr = s.hostAdmission.release(hostSlotKey)
+			releaseErr = s.releaseHostLeaseOrEnqueue(runner.key, hostSlotKey)
 		}
 		return nil, errors.Join(
 			errors.New("autoscaler began shutdown while starting a runner"),
@@ -1366,9 +1657,14 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 // recoverCreated handles a container a prior manager process created but
 // never started (a crash between docker create and docker start). It must
 // never call logs/wait on the container: those Docker calls are undefined
-// for a container that has never run. When host admission is enabled, the
-// container's recorded lease is re-activated before starting; a missing or
-// rejected lease exactly removes the container instead of starting it.
+// for a container that has never run. When host admission is enabled, this
+// first re-acquires the container's recorded lease (idempotent: a lease
+// already active or provisional under this exact slot key is a safe
+// duplicate, and a provisional lease the coordinator's own restart recovery
+// discarded may simply be reacquired, since the container has not started
+// consuming host resources) and then activates it. A denied reacquisition
+// or a failed activation exactly removes the container instead of starting
+// it.
 func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 	hostAdmissionEnabled := s.hostAdmission.enabled()
 	if hostAdmissionEnabled {
@@ -1377,6 +1673,14 @@ func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 				container,
 				"",
 				errors.New("created container has no host admission lease"),
+			)
+		}
+		pendingDemand := s.hostAdmission.currentDemand()
+		if _, _, err := s.hostAdmission.acquire(container.hostSlotKey, pendingDemand); err != nil {
+			return s.discardUnstartedContainer(
+				container,
+				container.hostSlotKey,
+				fmt.Errorf("reacquire recovered host admission lease: %w", err),
 			)
 		}
 		if _, err := s.hostAdmission.activate(container.hostSlotKey); err != nil {
@@ -1400,9 +1704,10 @@ func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 // recoverRunning handles a container already running when this manager
 // process started. When host admission is enabled it re-confirms the
 // recorded lease is still active for this manager instance; a failure here
-// never destroys the worker (busy-worker survival), it only means this
-// process will not later attempt to release a lease it cannot prove is
-// still its own.
+// never destroys the worker (busy-worker survival) and never clears the
+// lease identity: a coordinator outage must not erase which exact lease
+// this running worker holds, since that identity is exactly what a later
+// exit, scale-down, or shutdown needs to retry the release durably.
 func (s *runnerScaler) recoverRunning(container recoveredContainer) error {
 	if s.hostAdmission.enabled() && container.hostSlotKey != "" {
 		if _, err := s.hostAdmission.activate(container.hostSlotKey); err != nil {
@@ -1411,15 +1716,21 @@ func (s *runnerScaler) recoverRunning(container recoveredContainer) error {
 				container.containerID,
 				err,
 			))
-			container.hostSlotKey = ""
 		}
 	}
 	return s.insertRecoveredRunner(container, true)
 }
 
 // discardUnstartedContainer removes a created-but-unstarted container that
-// cannot be safely started, releasing any lease it held. Release is
-// best-effort: an already-released or unknown lease is a no-op.
+// cannot be safely started, along with its exact GitHub registration (the
+// container was only ever created after a successful JIT registration, so
+// discarding it without also removing that registration would leave a JIT
+// registration orphan) and its host admission lease, if any. Registration
+// removal durably retries through the same pending-registration-cleanup
+// ledger used for exited workers, so a transient GitHub failure here cannot
+// leave an orphaned registration either. Lease release is enqueued durably
+// through releaseHostLeaseOrEnqueue: an already-released or unknown lease is
+// a safe no-op.
 func (s *runnerScaler) discardUnstartedContainer(
 	container recoveredContainer,
 	hostSlotKey string,
@@ -1427,12 +1738,36 @@ func (s *runnerScaler) discardUnstartedContainer(
 ) error {
 	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
 	defer cleanupCancel()
+
+	now := s.clock.now().UTC()
+	registrationRecord := s.beginPendingRegistrationCleanup(runnerRecord{
+		key:         container.slotKey,
+		targetKey:   container.targetKey,
+		runnerName:  container.runnerName,
+		runnerID:    container.runnerID,
+		containerID: container.containerID,
+		container:   container.name,
+	}, nil, now)
+	var registrationErr error
+	if err := registrationRemovalError(
+		s.api.removeRunner(cleanupContext, container.runnerID),
+	); err != nil {
+		s.markPendingRegistrationAttempt(registrationRecord, s.clock.now().UTC(), err)
+		registrationErr = fmt.Errorf(
+			"remove registration for discarded created container %s: %w",
+			container.containerID,
+			err,
+		)
+	} else {
+		s.resolvePendingRegistration(registrationRecord.SlotKey, "removed")
+	}
+
 	removeErr := s.docker.stopAndRemove(cleanupContext, container.containerID)
 	var releaseErr error
 	if hostSlotKey != "" {
-		releaseErr = s.hostAdmission.release(hostSlotKey)
+		releaseErr = s.releaseHostLeaseOrEnqueue(container.slotKey, hostSlotKey)
 	}
-	return errors.Join(cause, removeErr, releaseErr)
+	return errors.Join(cause, registrationErr, removeErr, releaseErr)
 }
 
 // insertRecoveredRunner records the recovered container as a runner and
@@ -1762,6 +2097,13 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	unexpected := runner.state != runnerDraining && !shuttingDown
 	hostSlotKey := runner.hostSlotKey
 	releaseLease := s.markHostLeaseReleaseLocked(runner)
+	var pendingRecord hostLeaseCleanupRecord
+	var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
+	if releaseLease {
+		pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
+			exited.key, hostSlotKey, s.clock.now().UTC(),
+		)
+	}
 	delete(s.runners, runner.key)
 	needsReconcile := !s.shuttingDown && s.capacityCountLocked() < s.targetSlots
 	if s.capacityCountLocked() <= s.targetSlots {
@@ -1770,7 +2112,9 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	s.mu.Unlock()
 	s.onChange()
 	if releaseLease {
-		if err := s.hostAdmission.release(hostSlotKey); err != nil {
+		s.reportEvictedHostLeaseReleases(evictedLeases)
+		s.persistPendingHostLeaseReleases(pendingLeaseRecords)
+		if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
 			s.onError(fmt.Errorf(
 				"release host admission lease %s after container exit: %w",
 				hostSlotKey,
@@ -1859,14 +2203,23 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 			s.mu.Lock()
 			var hostSlotKey string
 			released := false
+			var pendingRecord hostLeaseCleanupRecord
+			var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
 			if current := s.runners[runner.key]; current != nil {
 				hostSlotKey = current.hostSlotKey
 				released = s.markHostLeaseReleaseLocked(current)
+				if released {
+					pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
+						runner.key, hostSlotKey, s.clock.now().UTC(),
+					)
+				}
 			}
 			delete(s.runners, runner.key)
 			s.mu.Unlock()
 			if released {
-				if err := s.hostAdmission.release(hostSlotKey); err != nil {
+				s.reportEvictedHostLeaseReleases(evictedLeases)
+				s.persistPendingHostLeaseReleases(pendingLeaseRecords)
+				if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
 					return fmt.Errorf(
 						"release host admission lease %s during shutdown: %w",
 						hostSlotKey,
