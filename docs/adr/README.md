@@ -12,3 +12,4 @@ them with a new record.
 | --- | --- | --- |
 | [ADR-0001](adr-0001-docs-first-agent-guidance.md) | Accepted | Use layered, docs-first agent guidance with project-owned scoped instructions and executable structural validation. |
 | [ADR-0002](adr-0002-workload-agnostic-service-classes.md) | Accepted | Keep scheduling external and express queue and host isolation through workload-agnostic profile service classes. |
+| [ADR-0003](adr-0003-dedicated-host-admission-service.md) | Accepted | Coordinate atomic host-local admission through one socket-local service without Docker access. |
