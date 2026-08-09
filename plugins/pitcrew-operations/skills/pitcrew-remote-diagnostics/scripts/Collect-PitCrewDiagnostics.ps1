@@ -109,6 +109,19 @@ function Get-PitCrewSha256 {
     return [BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant()
 }
 
+function Get-PitCrewTextSha256 {
+    param([Parameter(Mandatory)][string]$Value)
+
+    $bytes = [Text.UTF8Encoding]::new($false).GetBytes($Value)
+    $sha256 = [Security.Cryptography.SHA256]::Create()
+    try {
+        $hash = $sha256.ComputeHash($bytes)
+    } finally {
+        $sha256.Dispose()
+    }
+    return [BitConverter]::ToString($hash).Replace('-', '').ToLowerInvariant()
+}
+
 function Add-PitCrewUnavailable {
     param(
         [Parameter(Mandatory)]
@@ -600,6 +613,58 @@ function ConvertTo-PitCrewStateSummary {
     $configuration = Get-PitCrewProperty $Static 'configuration'
     $update = Get-PitCrewProperty $Observed 'update'
     $resourceTelemetry = Get-PitCrewProperty $Observed 'resourceTelemetry'
+    $capacityEvidence = Get-PitCrewProperty $Observed 'capacityEvidence'
+    $sanitizedCapacityEvidence = if ($null -eq $capacityEvidence) {
+        $null
+    } else {
+        $capacityTargets = @(
+            Get-PitCrewProperty $capacityEvidence 'targets' @() |
+                Where-Object { $null -ne $_ })
+        if ($capacityTargets.Count -gt 64) {
+            throw 'Capacity evidence exceeds its bounded target count.'
+        }
+        [PSCustomObject][ordered]@{
+            fixed = Get-PitCrewProperty $capacityEvidence 'fixed'
+            targets = @(
+                foreach ($target in $capacityTargets) {
+                    $targetKey = [string](
+                        Get-PitCrewProperty $target 'key')
+                    if ([string]::IsNullOrWhiteSpace($targetKey) -or
+                        $targetKey.Length -gt 128) {
+                        throw 'Capacity-deficit target key is invalid.'
+                    }
+                    [PSCustomObject][ordered]@{
+                        keyHash = Get-PitCrewTextSha256 -Value $targetKey
+                        observedAt =
+                            Get-PitCrewProperty $target 'observedAt'
+                        freshness =
+                            Get-PitCrewProperty $target 'freshness'
+                        targetSlots =
+                            Get-PitCrewProperty $target 'targetSlots'
+                        activeWorkers =
+                            Get-PitCrewProperty $target 'activeWorkers'
+                        startingWorkers =
+                            Get-PitCrewProperty $target 'startingWorkers'
+                        drainingWorkers =
+                            Get-PitCrewProperty $target 'drainingWorkers'
+                        cleanupPendingWorkers =
+                            Get-PitCrewProperty `
+                                $target `
+                                'cleanupPendingWorkers'
+                        eligibleWorkers =
+                            Get-PitCrewProperty $target 'eligibleWorkers'
+                        localDeficit =
+                            Get-PitCrewProperty $target 'localDeficit'
+                        eligibilityDeficit =
+                            Get-PitCrewProperty `
+                                $target `
+                                'eligibilityDeficit'
+                        reason = Get-PitCrewProperty $target 'reason'
+                        evidence = Get-PitCrewProperty $target 'evidence'
+                    }
+                })
+        }
+    }
     return [PSCustomObject][ordered]@{
         desired = [PSCustomObject][ordered]@{
             generation = Get-PitCrewProperty $Desired 'generation'
@@ -682,6 +747,7 @@ function ConvertTo-PitCrewStateSummary {
             }
             hostPressure = Get-PitCrewProperty $resourceTelemetry 'hostPressure'
             hostAdmission = Get-PitCrewProperty $Observed 'hostAdmission'
+            capacityEvidence = $sanitizedCapacityEvidence
         }
     }
 }
@@ -1693,6 +1759,13 @@ function New-PitCrewMarkdownReport {
     $null = $builder.AppendLine("- Manager status: ``$(ConvertTo-PitCrewMarkdownText $observed.managerStatus)``")
     $null = $builder.AppendLine("- Desired / acknowledged / observed generation: ``$($Report.verifiedMeasurements.state.desired.generation)`` / ``$($Report.verifiedMeasurements.state.acknowledged.generation)`` / ``$($observed.generation)``")
     $null = $builder.AppendLine("- Observed-state freshness: ``$($observed.freshnessSeconds)`` seconds")
+    if ($null -ne $observed.hostAdmission) {
+        $admission = $observed.hostAdmission
+        $null = $builder.AppendLine("- Host admission: ``$($admission.status)``; namespace ``$($admission.namespace)``; epoch ``$($admission.epoch)``; decision sequence ``$($admission.decisionSequence)``")
+        if ($null -ne $admission.accounting) {
+            $null = $builder.AppendLine("- Host-admission units: held ``$($admission.accounting.heldUnits)``; borrowed ``$($admission.accounting.borrowedUnits)``; pending ``$($admission.accounting.pendingUnits)``; withheld ``$($admission.accounting.withheldUnits)``")
+        }
+    }
     $connectorSnapshot = Get-PitCrewProperty $Report.verifiedMeasurements.connectorHealth 'snapshot'
     if ($null -ne $connectorSnapshot) {
         $null = $builder.AppendLine("- Connector state: ``$($connectorSnapshot.state)``; last failure: ``$($connectorSnapshot.lastFailureCategory)``")
@@ -1707,6 +1780,20 @@ function New-PitCrewMarkdownReport {
             "| $(ConvertTo-PitCrewMarkdownText $item.target) | $($item.desiredWorkers) | $($item.liveWorkers) | $($item.observedSlots) | $($item.registeredWorkers) | $($item.mismatch) |")
     }
     $null = $builder.AppendLine()
+    $capacityEvidence = $observed.capacityEvidence
+    if ($null -ne $capacityEvidence) {
+        $null = $builder.AppendLine('### Capacity-deficit evidence')
+        $null = $builder.AppendLine()
+        if ($null -ne $capacityEvidence.fixed) {
+            $null = $builder.AppendLine(
+                "- Fixed target: ``$($capacityEvidence.fixed.reason)``; freshness ``$($capacityEvidence.fixed.freshness)``; local deficit ``$($capacityEvidence.fixed.localDeficit)``")
+        }
+        foreach ($target in @($capacityEvidence.targets)) {
+            $null = $builder.AppendLine(
+                "- Target ``$($target.keyHash)``: ``$($target.reason)``; freshness ``$($target.freshness)``; local deficit ``$($target.localDeficit)``")
+        }
+        $null = $builder.AppendLine()
+    }
     if (@($Report.verifiedMeasurements.urlProbes).Count -gt 0) {
         $null = $builder.AppendLine('### URL probes')
         $null = $builder.AppendLine()

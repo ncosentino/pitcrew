@@ -54,8 +54,15 @@ jobs eligible for the specialized capacity.
 
 Separate labels isolate GitHub queue eligibility, not aggregate Docker-host
 resources. Fixed and autoscaled profiles on one host can still compete for CPU,
-memory, process, network, and storage capacity until opt-in host-local admission is
-implemented and enabled.
+memory, process, network, and storage capacity unless every relevant profile
+participates in a validated host-local admission namespace.
+
+Host-local admission controls new worker starts after GitHub routing has
+identified demand. It does not reorder the queue, force GitHub to choose this
+host, preempt a running job, or constrain an uncoordinated profile or process.
+See [Host-Local Admission Operations](host-admission.md). Do not claim protected
+headroom until coordinated admission is enabled and reports `available` for
+every participating profile.
 
 Autoscaled profiles publish the same effective label set through their GitHub
 runner scale sets. Enabling autoscaling therefore does not require changing a

@@ -62,8 +62,11 @@ For a manifest, add:
   replaced immediately, while assigned stale runners finish their one job.
 - Every JIT worker still executes one job and is destroyed.
 
-The configured maximum remains the operator's host resource ceiling. PitCrew
-does not infer a new maximum from transient CPU or memory readings.
+The configured maximum is a per-target routing ceiling, not a host-wide
+resource guarantee. PitCrew does not infer a new maximum from transient CPU or
+memory readings. Use a separately calibrated and validated
+[host-local admission policy](host-admission.md) when multiple profiles must
+coordinate new worker starts on one host.
 
 ## Profile-wide worker ceiling
 
@@ -97,6 +100,11 @@ profile-wide limit, while `host-admission-withheld` and
 `host-admission-degraded` identify host-budget contention and incompatible
 policy or lease state respectively. `host-admission-unavailable` identifies
 coordinator outage.
+
+GitHub's assigned-job count remains the only autoscaling demand count.
+Host-local admission is a later start gate: it can withhold a worker requested
+by that demand, but it cannot make an ineligible job eligible, reorder GitHub's
+queue, or turn a configured maximum into guaranteed physical capacity.
 
 Autoscaled slots also publish bounded `currentJob` metadata from GitHub's
 scale-set lifecycle events. The projection is sufficient to identify and link

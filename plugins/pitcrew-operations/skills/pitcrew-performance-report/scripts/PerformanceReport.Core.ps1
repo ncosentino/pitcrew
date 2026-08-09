@@ -435,6 +435,23 @@ function ConvertTo-PitCrewTelemetrySample {
         'managerPids',
         'hostLogicalProcessorCount',
         'hostMemoryBytes',
+        'hostAdmissionStatus',
+        'hostAdmissionNamespace',
+        'hostAdmissionEpoch',
+        'hostAdmissionDecisionSequence',
+        'hostAdmissionCapacityUnits',
+        'hostAdmissionSafetyMarginUnits',
+        'hostAdmissionEffectiveTotalUnits',
+        'hostAdmissionAvailableUnits',
+        'hostAdmissionUnitCost',
+        'hostAdmissionReservedUnits',
+        'hostAdmissionBorrowable',
+        'hostAdmissionActiveUnits',
+        'hostAdmissionProvisionalUnits',
+        'hostAdmissionHeldUnits',
+        'hostAdmissionBorrowedUnits',
+        'hostAdmissionPendingUnits',
+        'hostAdmissionWithheldUnits',
         'workerCpuCores',
         'workerMemoryBytes',
         'workerPids',
@@ -454,6 +471,257 @@ function ConvertTo-PitCrewTelemetrySample {
         $projection[$field] = Get-PitCrewProperty $Sample $field
     }
     return [PSCustomObject]$projection
+}
+
+function Get-PitCrewMaximumNullable {
+    param(
+        [Parameter(Mandatory)]
+        [AllowNull()]
+        [AllowEmptyCollection()]
+        [object[]]$Values
+    )
+
+    $reported = @(
+        $Values |
+            Where-Object { $null -ne $_ } |
+            ForEach-Object { [long]$_ })
+    if ($reported.Count -eq 0) {
+        return $null
+    }
+    return [long](
+        $reported |
+            Measure-Object -Maximum |
+            Select-Object -ExpandProperty Maximum)
+}
+
+function New-PitCrewHostAdmissionSummary {
+    param(
+        [Parameter(Mandatory)][string]$NodeKey,
+        [Parameter(Mandatory)][string]$ProfileId,
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Samples,
+        [AllowEmptyCollection()]
+        [object[]]$CapacityDeficits = @(),
+        [bool]$CapacityDeficitsTruncated = $false
+    )
+
+    $reported = @(
+        $Samples |
+            Where-Object {
+                (Get-PitCrewProperty $_ 'hostAdmissionStatus') -in
+                    @('disabled', 'available', 'degraded', 'unavailable')
+            })
+    $latestSample = @(
+        $Samples |
+            Sort-Object {
+                ConvertTo-PitCrewUtc $_.observedAt
+            } |
+            Select-Object -Last 1)
+    $latest = if ($latestSample.Count -eq 0) {
+        $null
+    } else {
+        $sample = $latestSample[0]
+        $sampleStatus = Get-PitCrewProperty $sample 'hostAdmissionStatus'
+        $isReported = $sampleStatus -in
+            @('disabled', 'available', 'degraded', 'unavailable')
+        [PSCustomObject][ordered]@{
+            observedAt = Get-PitCrewProperty $sample 'observedAt'
+            status = if ($isReported) {
+                $sampleStatus
+            } else {
+                'unreported'
+            }
+            namespace = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionNamespace'
+            } else {
+                $null
+            }
+            epoch = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionEpoch'
+            } else {
+                $null
+            }
+            decisionSequence = if ($isReported) {
+                Get-PitCrewProperty `
+                    $sample `
+                    'hostAdmissionDecisionSequence'
+            } else {
+                $null
+            }
+            capacityUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionCapacityUnits'
+            } else {
+                $null
+            }
+            safetyMarginUnits = if ($isReported) {
+                Get-PitCrewProperty `
+                    $sample `
+                    'hostAdmissionSafetyMarginUnits'
+            } else {
+                $null
+            }
+            effectiveTotalUnits = if ($isReported) {
+                Get-PitCrewProperty `
+                    $sample `
+                    'hostAdmissionEffectiveTotalUnits'
+            } else {
+                $null
+            }
+            availableUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionAvailableUnits'
+            } else {
+                $null
+            }
+            unitCost = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionUnitCost'
+            } else {
+                $null
+            }
+            reservedUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionReservedUnits'
+            } else {
+                $null
+            }
+            borrowable = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionBorrowable'
+            } else {
+                $null
+            }
+            activeUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionActiveUnits'
+            } else {
+                $null
+            }
+            provisionalUnits = if ($isReported) {
+                Get-PitCrewProperty `
+                    $sample `
+                    'hostAdmissionProvisionalUnits'
+            } else {
+                $null
+            }
+            heldUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionHeldUnits'
+            } else {
+                $null
+            }
+            borrowedUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionBorrowedUnits'
+            } else {
+                $null
+            }
+            pendingUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionPendingUnits'
+            } else {
+                $null
+            }
+            withheldUnits = if ($isReported) {
+                Get-PitCrewProperty $sample 'hostAdmissionWithheldUnits'
+            } else {
+                $null
+            }
+        }
+    }
+    $sampleReasonEvidence = @(
+        $Samples |
+            ForEach-Object {
+                [PSCustomObject]@{
+                    reason = Get-PitCrewProperty `
+                        $_ `
+                        'capacityDeficitReason'
+                }
+            })
+    $reasonEvidence = if ($CapacityDeficits.Count -gt 0) {
+        @($CapacityDeficits)
+    } else {
+        @($sampleReasonEvidence)
+    }
+    $reportedReasonEvidence = @(
+        $reasonEvidence |
+            Where-Object {
+                $null -ne (Get-PitCrewProperty $_ 'reason')
+            })
+    $admissionReasons = @(
+        $reportedReasonEvidence |
+            ForEach-Object {
+                Get-PitCrewProperty $_ 'reason'
+            } |
+            Where-Object {
+                $_ -in @(
+                    'host-admission-withheld',
+                    'host-admission-degraded',
+                    'host-admission-unavailable')
+            } |
+            Group-Object |
+            Sort-Object Name |
+            ForEach-Object {
+                [PSCustomObject][ordered]@{
+                    reason = $_.Name
+                    samples = $_.Count
+                }
+            })
+    return [PSCustomObject][ordered]@{
+        nodeKey = $NodeKey
+        profileId = $ProfileId
+        sampleCount = $Samples.Count
+        reportedSampleCount = $reported.Count
+        unreportedSampleCount = $Samples.Count - $reported.Count
+        statusCounts = [PSCustomObject][ordered]@{
+            disabled = @(
+                $reported |
+                    Where-Object hostAdmissionStatus -eq 'disabled').Count
+            available = @(
+                $reported |
+                    Where-Object hostAdmissionStatus -eq 'available').Count
+            degraded = @(
+                $reported |
+                    Where-Object hostAdmissionStatus -eq 'degraded').Count
+            unavailable = @(
+                $reported |
+                    Where-Object hostAdmissionStatus -eq 'unavailable').Count
+        }
+        latest = $latest
+        maximumHeldUnits = Get-PitCrewMaximumNullable -Values @(
+            $reported |
+                ForEach-Object {
+                    Get-PitCrewProperty $_ 'hostAdmissionHeldUnits'
+                })
+        maximumBorrowedUnits = Get-PitCrewMaximumNullable -Values @(
+            $reported |
+                ForEach-Object {
+                    Get-PitCrewProperty $_ 'hostAdmissionBorrowedUnits'
+                })
+        maximumPendingUnits = Get-PitCrewMaximumNullable -Values @(
+            $reported |
+                ForEach-Object {
+                    Get-PitCrewProperty $_ 'hostAdmissionPendingUnits'
+                })
+        maximumWithheldUnits = Get-PitCrewMaximumNullable -Values @(
+            $reported |
+                ForEach-Object {
+                    Get-PitCrewProperty $_ 'hostAdmissionWithheldUnits'
+                })
+        withheldSampleCount = @(
+            $reported |
+                Where-Object {
+                    $withheldUnits = Get-PitCrewProperty `
+                        $_ `
+                        'hostAdmissionWithheldUnits'
+                    $null -ne $withheldUnits -and
+                    [long]$withheldUnits -gt 0
+                }).Count
+        noAdmissionDeficitObservationCount = @(
+            $reportedReasonEvidence |
+                Where-Object {
+                    (Get-PitCrewProperty $_ 'reason') -eq 'none'
+                }).Count
+        reportedDeficitReasonObservationCount =
+            $reportedReasonEvidence.Count
+        unreportedDeficitReasonObservationCount =
+            $reasonEvidence.Count - $reportedReasonEvidence.Count
+        capacityDeficitsTruncated = $CapacityDeficitsTruncated
+        deficitReasons = $admissionReasons
+    }
 }
 
 function ConvertTo-PitCrewHardware {
@@ -488,6 +756,30 @@ function ConvertTo-PitCrewHardware {
         $projection[$field] = Get-PitCrewProperty $Hardware $field
     }
     return [PSCustomObject]$projection
+}
+
+function ConvertTo-PitCrewAdmissionDeficitReasonText {
+    param([Parameter(Mandatory)][object]$Summary)
+
+    $text = if (@($Summary.deficitReasons).Count -gt 0) {
+        ConvertTo-PitCrewMarkdownText (
+            @(
+                $Summary.deficitReasons |
+                    ForEach-Object {
+                        "$($_.reason) ($($_.samples))"
+                    }) -join ', ')
+    } elseif ($Summary.noAdmissionDeficitObservationCount -gt 0 -and
+        $Summary.unreportedDeficitReasonObservationCount -eq 0) {
+        'none'
+    } elseif ($Summary.reportedDeficitReasonObservationCount -eq 0) {
+        'unreported'
+    } else {
+        'unavailable'
+    }
+    if ($Summary.capacityDeficitsTruncated) {
+        return "$text; history truncated"
+    }
+    return $text
 }
 
 function ConvertTo-PitCrewHardwareRevision {
@@ -579,6 +871,7 @@ function New-PitCrewPerformanceReportModel {
     $nodeMeasurements = [Collections.Generic.List[object]]::new()
     $nodeMeasurementsByKey = @{}
     $unavailable = [Collections.Generic.List[object]]::new()
+    $admissionSummaries = [Collections.Generic.List[object]]::new()
     $mappingIncompleteNodes = [Collections.Generic.HashSet[string]]::new(
         [StringComparer]::OrdinalIgnoreCase)
     $mappingIncompleteProfiles = [Collections.Generic.HashSet[string]]::new(
@@ -716,6 +1009,94 @@ function New-PitCrewPerformanceReportModel {
                         ForEach-Object {
                             ConvertTo-PitCrewTelemetrySample $_
                         })
+                $capacityDeficits = @(
+                    Get-PitCrewProperty `
+                        $profile `
+                        'capacityDeficits' `
+                        @())
+                $capacityDeficitsTruncated = [bool](
+                    Get-PitCrewProperty `
+                        $profile `
+                        'capacityDeficitsTruncated' `
+                        $false)
+                $admissionSummary = New-PitCrewHostAdmissionSummary `
+                    -NodeKey $nodeKey `
+                    -ProfileId $profileId `
+                    -Samples $projectedSamples `
+                    -CapacityDeficits $capacityDeficits `
+                    -CapacityDeficitsTruncated $capacityDeficitsTruncated
+                $admissionSummaries.Add($admissionSummary)
+                if ($admissionSummary.capacityDeficitsTruncated) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'host-admission-deficits-truncated'
+                        nodeKey = $nodeKey
+                        profileId = $profileId
+                        reason = 'Dashboard truncated retained per-target capacity-deficit observations.'
+                    })
+                }
+                if ($admissionSummary.unreportedSampleCount -gt 0) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'host-admission-unreported'
+                        nodeKey = $nodeKey
+                        profileId = $profileId
+                        reason = 'One or more samples did not report host admission; disabled cannot be inferred from null.'
+                    })
+                }
+                if ($admissionSummary.statusCounts.unavailable -gt 0) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'host-admission-unavailable'
+                        nodeKey = $nodeKey
+                        profileId = $profileId
+                        reason = 'Coordinator measurements were unavailable in one or more samples.'
+                    })
+                }
+                if ($admissionSummary.statusCounts.degraded -gt 0) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'host-admission-degraded'
+                        nodeKey = $nodeKey
+                        profileId = $profileId
+                        reason = 'Compatible current host-admission evidence was unavailable in one or more degraded samples.'
+                    })
+                }
+                $availableAdmissionFields = @(
+                    'hostAdmissionNamespace',
+                    'hostAdmissionEpoch',
+                    'hostAdmissionDecisionSequence',
+                    'hostAdmissionCapacityUnits',
+                    'hostAdmissionSafetyMarginUnits',
+                    'hostAdmissionEffectiveTotalUnits',
+                    'hostAdmissionAvailableUnits',
+                    'hostAdmissionUnitCost',
+                    'hostAdmissionReservedUnits',
+                    'hostAdmissionBorrowable',
+                    'hostAdmissionActiveUnits',
+                    'hostAdmissionProvisionalUnits',
+                    'hostAdmissionHeldUnits',
+                    'hostAdmissionBorrowedUnits',
+                    'hostAdmissionPendingUnits',
+                    'hostAdmissionWithheldUnits')
+                $incompleteAvailableSamples = @(
+                    $projectedSamples |
+                        Where-Object {
+                            if ($_.hostAdmissionStatus -ne 'available') {
+                                return $false
+                            }
+                            foreach ($field in $availableAdmissionFields) {
+                                if ($null -eq (
+                                        Get-PitCrewProperty $_ $field)) {
+                                    return $true
+                                }
+                            }
+                            return $false
+                        })
+                if ($incompleteAvailableSamples.Count -gt 0) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'host-admission-accounting'
+                        nodeKey = $nodeKey
+                        profileId = $profileId
+                        reason = 'An available host-admission sample omitted required policy or accounting fields.'
+                    })
+                }
                 foreach ($sample in $samples) {
                 if ((Get-PitCrewProperty $sample 'telemetryStatus') -in
                     @('partial', 'unavailable', 'unreported')) {
@@ -1245,6 +1626,7 @@ function New-PitCrewPerformanceReportModel {
             jobNodeSummaries = $jobNodeSummaries
             profileSummaries = $profileSummaries
             overlapComparisons = $overlapComparisons
+            admissionSummaries = @($admissionSummaries)
             nodes = @($nodeMeasurements)
         }
         unavailableEvidence = @($unavailable)
@@ -1252,7 +1634,9 @@ function New-PitCrewPerformanceReportModel {
         limitations = @(
             'Correlation is not causation.',
             'One paired sample is not a host benchmark.',
-            'A missing assignment or telemetry sample remains unavailable rather than being inferred.'
+            'A missing assignment or telemetry sample remains unavailable rather than being inferred.',
+            'Host-admission units are abstract policy accounting, not CPU, memory, worker counts, or universal workload weights.',
+            'Withheld units show that a worker start was gated; they do not prove GitHub queue delay or a running-job performance cause.'
         )
     }
 }
@@ -1339,6 +1723,40 @@ function ConvertTo-PitCrewPerformanceMarkdown {
         $nodeKey = ConvertTo-PitCrewMarkdownText $comparison.nodeKey
         $lines.Add(
             "| $repository | $workflowName | $jobName | $nodeKey | $($comparison.withoutCrossProfileOverlap.medianSeconds) | $($comparison.withCrossProfileOverlap.medianSeconds) | $($comparison.medianDeltaPercent)% |")
+    }
+    $lines.Add('')
+    $lines.Add('### Host-admission observations')
+    $lines.Add('')
+    $lines.Add(
+        '> Admission units are abstract policy accounting. Withheld units do not prove GitHub queue delay or a running-job performance cause.')
+    $lines.Add('')
+    $lines.Add('| Node | Profile | Samples | Available | Degraded | Unavailable | Disabled | Unreported | Latest status | Epoch | Decision sequence | Max held | Max borrowed | Max pending | Max withheld | Admission deficit reasons |')
+    $lines.Add('| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- |')
+    foreach ($summary in @(
+            $Report.verifiedMeasurements.admissionSummaries)) {
+        $latestStatus = if ($null -eq $summary.latest) {
+            'unreported'
+        } else {
+            ConvertTo-PitCrewMarkdownText $summary.latest.status
+        }
+        $epoch = if ($null -eq $summary.latest -or
+            $null -eq $summary.latest.epoch) {
+            'unavailable'
+        } else {
+            [string]$summary.latest.epoch
+        }
+        $sequence = if ($null -eq $summary.latest -or
+            $null -eq $summary.latest.decisionSequence) {
+            'unavailable'
+        } else {
+            [string]$summary.latest.decisionSequence
+        }
+        $deficitReasons =
+            ConvertTo-PitCrewAdmissionDeficitReasonText -Summary $summary
+        $nodeKey = ConvertTo-PitCrewMarkdownText $summary.nodeKey
+        $profileId = ConvertTo-PitCrewMarkdownText $summary.profileId
+        $lines.Add(
+            "| $nodeKey | $profileId | $($summary.sampleCount) | $($summary.statusCounts.available) | $($summary.statusCounts.degraded) | $($summary.statusCounts.unavailable) | $($summary.statusCounts.disabled) | $($summary.unreportedSampleCount) | $latestStatus | $epoch | $sequence | $($summary.maximumHeldUnits) | $($summary.maximumBorrowedUnits) | $($summary.maximumPendingUnits) | $($summary.maximumWithheldUnits) | $deficitReasons |")
     }
     $lines.Add('')
     $lines.Add('### Complete sanitized measurement payload')

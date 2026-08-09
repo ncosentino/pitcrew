@@ -1,4 +1,5 @@
 {
+  "fixtureDescription": "Fully synthetic contract data; no names or measurements were collected from a real installation.",
   "from": "2026-08-01T09:00:00Z",
   "to": "2026-08-01T13:00:00Z",
   "repositories": [
@@ -7,7 +8,7 @@
   "nodes": [
     {
       "nodeId": "11111111-1111-1111-1111-111111111111",
-      "displayName": "private-host-a",
+      "displayName": "fixture-node-a",
       "hardware": {
         "status": "current",
         "collectedAt": "2026-08-01T11:30:00Z",
@@ -18,7 +19,7 @@
     },
     {
       "nodeId": "22222222-2222-2222-2222-222222222222",
-      "displayName": "private-host-b",
+      "displayName": "fixture-node-b",
       "hardware": {
         "status": "current",
         "collectedAt": "2026-08-01T08:00:00Z",
@@ -56,7 +57,7 @@
           "inventoryHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
           "firstObservedAt": "2026-08-01T11:30:00Z",
           "lastObservedAt": "2026-08-01T13:00:00Z",
-          "sourceProfileId": "unselected-private-profile",
+          "sourceProfileId": "fixture-unselected-profile",
           "hardware": {
             "status": "current",
             "inventoryHash": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
@@ -70,21 +71,76 @@
             {
               "observedAt": "2026-08-01T10:05:00Z",
               "telemetryStatus": "available",
-              "managerInstanceId": "private-manager-instance",
+              "managerInstanceId": "fixture-manager-instance",
               "activeSlots": 1,
+              "hostAdmissionStatus": "available",
+              "hostAdmissionNamespace": "shared-ci",
+              "hostAdmissionEpoch": 2,
+              "hostAdmissionDecisionSequence": 10,
+              "hostAdmissionCapacityUnits": 20,
+              "hostAdmissionSafetyMarginUnits": 4,
+              "hostAdmissionEffectiveTotalUnits": 16,
+              "hostAdmissionAvailableUnits": 12,
+              "hostAdmissionUnitCost": 4,
+              "hostAdmissionReservedUnits": 8,
+              "hostAdmissionBorrowable": false,
+              "hostAdmissionActiveUnits": 4,
+              "hostAdmissionProvisionalUnits": 0,
+              "hostAdmissionHeldUnits": 4,
+              "hostAdmissionBorrowedUnits": 0,
+              "hostAdmissionPendingUnits": 0,
+              "hostAdmissionWithheldUnits": 0,
+              "capacityDeficitReason": "none",
               "workerCpuCores": 2.0,
               "workerMemoryBytes": 2147483648,
-              "workerTargetImage": "private.registry/runner:secret",
-              "workerUpdateError": "private update detail"
+              "workerTargetImage": "registry.example.invalid/fixture-worker:1",
+              "workerUpdateError": "fixture update detail"
             },
             {
               "observedAt": "2026-08-01T12:10:00Z",
               "telemetryStatus": "available",
               "activeSlots": 1,
+              "hostAdmissionStatus": "available",
+              "hostAdmissionNamespace": "shared-ci",
+              "hostAdmissionEpoch": 2,
+              "hostAdmissionDecisionSequence": 14,
+              "hostAdmissionCapacityUnits": 20,
+              "hostAdmissionSafetyMarginUnits": 4,
+              "hostAdmissionEffectiveTotalUnits": 16,
+              "hostAdmissionAvailableUnits": 0,
+              "hostAdmissionUnitCost": 4,
+              "hostAdmissionReservedUnits": 8,
+              "hostAdmissionBorrowable": false,
+              "hostAdmissionActiveUnits": 8,
+              "hostAdmissionProvisionalUnits": 0,
+              "hostAdmissionHeldUnits": 8,
+              "hostAdmissionBorrowedUnits": 0,
+              "hostAdmissionPendingUnits": 4,
+              "hostAdmissionWithheldUnits": 4,
+              "capacityDeficitReason": "none",
               "workerCpuCores": 6.0,
               "workerMemoryBytes": 4294967296
             }
           ],
+          "capacityDeficits": [
+            {
+              "targetKey": "repo:example/project",
+              "observedAt": "2026-08-01T12:10:00Z",
+              "repository": "example/project",
+              "freshness": "current",
+              "targetSlots": 2,
+              "activeWorkers": 1,
+              "startingWorkers": 0,
+              "drainingWorkers": 0,
+              "cleanupPendingWorkers": 0,
+              "eligibleWorkers": 1,
+              "localDeficit": 1,
+              "eligibilityDeficit": 1,
+              "reason": "host-admission-withheld",
+              "evidence": "Host admission withheld one unit request"
+            }
+          ],
+          "capacityDeficitsTruncated": true,
           "retention": {
             "droppedRunnerAssignments": 0
           }
@@ -96,6 +152,24 @@
               "observedAt": "2026-08-01T12:10:00Z",
               "telemetryStatus": "partial",
               "activeSlots": 1,
+              "hostAdmissionStatus": "degraded",
+              "hostAdmissionNamespace": "shared-ci",
+              "hostAdmissionEpoch": 2,
+              "hostAdmissionDecisionSequence": 14,
+              "hostAdmissionCapacityUnits": 20,
+              "hostAdmissionSafetyMarginUnits": 4,
+              "hostAdmissionEffectiveTotalUnits": 16,
+              "hostAdmissionAvailableUnits": 0,
+              "hostAdmissionUnitCost": 2,
+              "hostAdmissionReservedUnits": 4,
+              "hostAdmissionBorrowable": true,
+              "hostAdmissionActiveUnits": 2,
+              "hostAdmissionProvisionalUnits": 0,
+              "hostAdmissionHeldUnits": 2,
+              "hostAdmissionBorrowedUnits": 0,
+              "hostAdmissionPendingUnits": null,
+              "hostAdmissionWithheldUnits": null,
+              "capacityDeficitReason": "host-admission-degraded",
               "workerCpuCores": 5.0,
               "workerMemoryBytes": 3221225472
             }
@@ -128,6 +202,24 @@
               "observedAt": "2026-08-01T10:04:00Z",
               "telemetryStatus": "available",
               "activeSlots": 1,
+              "hostAdmissionStatus": "unavailable",
+              "hostAdmissionNamespace": "shared-ci",
+              "hostAdmissionEpoch": null,
+              "hostAdmissionDecisionSequence": null,
+              "hostAdmissionCapacityUnits": null,
+              "hostAdmissionSafetyMarginUnits": null,
+              "hostAdmissionEffectiveTotalUnits": null,
+              "hostAdmissionAvailableUnits": null,
+              "hostAdmissionUnitCost": null,
+              "hostAdmissionReservedUnits": null,
+              "hostAdmissionBorrowable": null,
+              "hostAdmissionActiveUnits": null,
+              "hostAdmissionProvisionalUnits": null,
+              "hostAdmissionHeldUnits": null,
+              "hostAdmissionBorrowedUnits": null,
+              "hostAdmissionPendingUnits": null,
+              "hostAdmissionWithheldUnits": null,
+              "capacityDeficitReason": "host-admission-unavailable",
               "workerCpuCores": 1.5,
               "workerMemoryBytes": 1610612736
             }

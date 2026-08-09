@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.11.2') 'The operations plugin patch version was not advanced for host-admission diagnostics.'
+Add-Check ($plugin.version -eq '1.11.3') 'The operations plugin patch version was not advanced for host-admission operations.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -234,6 +234,16 @@ Add-Check (
     $hostDiagnosticsSkill -match 'Never make a credentialed GitHub API query'
 ) 'The host diagnostics skill does not compare live worker counts with registered capacity.'
 Add-Check (
+    $hostDiagnosticsSkill -match '(?m)^## Host-admission evidence' -and
+    $hostDiagnosticsSkill -match '`decisionSequence`' -and
+    $hostDiagnosticsSkill -match '`provisionalUnits`' -and
+    $hostDiagnosticsSkill -match '`withheldUnits`' -and
+    $hostDiagnosticsSkill -match '`host-admission-withheld`' -and
+    $hostDiagnosticsSkill -match '`host-admission-degraded`' -and
+    $hostDiagnosticsSkill -match '`host-admission-unavailable`' -and
+    $hostDiagnosticsSkill -match 'Never call them\s+CPU, memory, workers, queue priority, or universal workload weights'
+) 'The host diagnostics skill does not preserve the contract-18 admission interpretation boundary.'
+Add-Check (
     $hostDiagnosticsSkill -match 'A single host-versus-container pair never establishes a root cause\.' -and
     $hostDiagnosticsSkill -match 'CDN edge and route variability' -and
     $hostDiagnosticsSkill -match 'load-sensitive host contention' -and
@@ -328,6 +338,10 @@ $remotePreflight = Get-Content `
     -LiteralPath $remotePreflightPath `
     -Raw `
     -Encoding UTF8
+$remoteCore = Get-Content `
+    -LiteralPath $remoteCorePath `
+    -Raw `
+    -Encoding UTF8
 Add-Check (
     $remoteDiagnosticsSkill -match '(?m)^## Phase 1: remote-first preflight' -and
     $remoteDiagnosticsSkill -match 'ConnectorOffline' -and
@@ -350,6 +364,19 @@ Add-Check (
     $remoteDiagnosticsSkill -match '\*\*Unavailable evidence\*\*' -and
     $remoteDiagnosticsSkill -match '\*\*Hypotheses\*\*'
 ) 'The remote diagnostics skill weakens credential, command-channel, or evidence-separation boundaries.'
+Add-Check (
+    $remoteDiagnosticsSkill -match 'manager contract 18' -and
+    $remoteDiagnosticsSkill -match 'pending/withheld units' -and
+    $remoteDiagnosticsSkill -match 'Disabled cannot be inferred\s+from null' -and
+    $remoteDiagnosticsSkill -match 'abstract policy accounting'
+) 'The remote diagnostics skill does not classify admission evidence conservatively.'
+Add-Check (
+    $remoteCore -match 'ConvertTo-PitCrewRemoteDiagnosticsHostAdmission' -and
+    $remoteCore -match 'ConvertTo-PitCrewRemoteDiagnosticsCapacityEvidence' -and
+    $remoteCore -match 'host-admission-withheld' -and
+    $remoteCore -match 'host-admission-degraded' -and
+    $remoteCore -match 'host-admission-unavailable'
+) 'The remote diagnostics importer does not validate the contract-18 admission surface.'
 Add-Check (
     $remoteCollector -match 'connector-health\.json' -and
     $remoteCollector -match 'connector-events\.jsonl' -and
@@ -425,6 +452,12 @@ Add-Check (
     $performanceReportSkill -match '\*\*Hypotheses\*\*'
 ) 'The performance report skill does not require the three-part redacted handoff.'
 Add-Check (
+    $performanceReportSkill -match 'host-admission fields' -and
+    $performanceReportSkill -match 'Positive withheld units show that new worker demand was gated' -and
+    $performanceReportSkill -match 'universal workload weights' -and
+    $performanceReportSkill -match 'GitHub queue eligibility and host admission are separate'
+) 'The performance report skill overstates admission accounting.'
+Add-Check (
     $performanceReportScript -match '/api/diagnostics/v1/tenants/' -and
     $performanceReportScript -match 'actions/runs/' -and
     $performanceReportScript -match '/jobs' -and
@@ -459,6 +492,12 @@ Add-Check (
     $performanceReportScript -match 'Headers\.RetryAfter' -and
     $performanceReportCore -match 'Test-PitCrewLiteralTextFilter'
 ) 'The performance report does not honor Dashboard rate limits or literal filters.'
+Add-Check (
+    $performanceReportCore -match '''hostAdmissionDecisionSequence''' -and
+    $performanceReportCore -match '''hostAdmissionWithheldUnits''' -and
+    $performanceReportCore -match 'admissionSummaries' -and
+    $performanceReportCore -match 'Host-admission units are abstract policy accounting'
+) 'The performance report core omits contract-18 admission history or its limits.'
 
 $profileRolloutSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-profile-rollout' 'SKILL.md') `

@@ -120,6 +120,7 @@ foreach ($path in @(
         Test-Path -LiteralPath $path -PathType Leaf
     ) "Remote diagnostics surface is missing: $path"
 }
+. $coreScript
 
 $tempRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
@@ -166,7 +167,7 @@ try {
             repositories = @(
                 @{
                     url = 'https://github.com/example/project'
-                    workers = 1
+                    workers = 2
                 })
             replicas = $null
         } | ConvertTo-Json -Depth 20)
@@ -179,8 +180,8 @@ try {
             managerContractVersion = 18
             desiredStateHash = ('a' * 64)
             observedAt = '2026-08-07T08:59:55Z'
-            desiredSlots = 1
-            addedSlots = 0
+            desiredSlots = 2
+            addedSlots = 1
             drainingSlots = 0
             unchangedSlots = 1
         } | ConvertTo-Json -Depth 20)
@@ -219,8 +220,8 @@ try {
             scope = 'repo'
             generation = 4
             desiredStateStatus = 'accepted'
-            desiredSlots = 1
-            configuredSlots = 1
+            desiredSlots = 2
+            configuredSlots = 2
             activeSlots = 1
             eligibleSlots = 1
             drainingSlots = 0
@@ -253,7 +254,7 @@ try {
                 targetRevision = ('c' * 64)
                 currentWorkers = 1
                 staleWorkers = 0
-                lastError = 'C:\Users\Nick\REMOTE_DIAGNOSTICS_MANAGER_ERROR_SENTINEL'
+                lastError = 'C:\synthetic\REMOTE_DIAGNOSTICS_MANAGER_ERROR_SENTINEL'
             }
             resourceTelemetry = @{
                 hostPressure = @{
@@ -263,17 +264,55 @@ try {
                 }
             }
             hostAdmission = @{
-                status = 'degraded'
-                namespace = 'primary'
+                status = 'available'
+                namespace = 'shared-ci'
                 epoch = 3
                 decisionSequence = 9
                 capacityUnits = 10
-                safetyMarginUnits = 1
-                effectiveTotalUnits = 9
-                availableUnits = 5
-                hostPolicyFingerprint = $null
-                accounting = $null
-                lastDecision = $null
+                safetyMarginUnits = 2
+                effectiveTotalUnits = 8
+                availableUnits = 0
+                hostPolicyFingerprint = ('e' * 64)
+                accounting = @{
+                    unitCost = 2
+                    reservedUnits = 2
+                    borrowable = $false
+                    profilePolicyFingerprint = ('f' * 64)
+                    activeUnits = 2
+                    provisionalUnits = 0
+                    heldUnits = 2
+                    borrowedUnits = 0
+                    pendingUnits = 2
+                    withheldUnits = 2
+                }
+                lastDecision = @{
+                    sequence = 9
+                    command = 'acquire'
+                    granted = $false
+                    failureCategory = 'budget-exceeded'
+                    decidedAtUnixNano = 1786093200000000000
+                }
+            }
+            capacityEvidence = @{
+                fixed = $null
+                targets = @(
+                    @{
+                        key = 'repo:acme/private-repository'
+                        repository =
+                            'https://github.com/acme/private-repository'
+                        observedAt = '2026-08-07T09:00:00Z'
+                        freshness = 'current'
+                        targetSlots = 2
+                        activeWorkers = 1
+                        startingWorkers = 0
+                        drainingWorkers = 0
+                        cleanupPendingWorkers = 0
+                        eligibleWorkers = 1
+                        localDeficit = 1
+                        eligibilityDeficit = 1
+                        reason = 'host-admission-withheld'
+                        evidence = 'Host admission withheld one worker'
+                    })
             }
         } | ConvertTo-Json -Depth 30)
 
@@ -599,6 +638,27 @@ if ($CommandArguments[0] -eq '-Pi') {
         $linuxReport.verifiedMeasurements.capacity[0].mismatch -eq $false
     ) 'The Linux collector reported a false live-versus-registered mismatch.'
     Add-Check (
+        $linuxReport.verifiedMeasurements.state.observed.hostAdmission.status -eq
+            'available' -and
+        $linuxReport.verifiedMeasurements.state.observed.hostAdmission.accounting.withheldUnits -eq
+            2
+    ) 'The collector omitted contract-18 host-admission accounting.'
+    Add-Check (
+        $linuxReport.verifiedMeasurements.state.observed.capacityEvidence.targets[0].reason -eq
+            'host-admission-withheld'
+    ) 'The collector omitted admission-specific capacity-deficit evidence.'
+    $privateTarget = 'repo:acme/private-repository'
+    $privateRepositoryUrl =
+        'https://github.com/acme/private-repository'
+    Add-Check (
+        $linuxReport.verifiedMeasurements.state.observed.capacityEvidence.targets[0].keyHash -eq
+            (Get-PitCrewRemoteDiagnosticsTextSha256 -Value $privateTarget) -and
+        $null -eq
+            $linuxReport.verifiedMeasurements.state.observed.capacityEvidence.targets[0].PSObject.Properties['repository'] -and
+        ($linuxReport | ConvertTo-Json -Depth 100) -notmatch
+            [regex]::Escape($privateRepositoryUrl)
+    ) 'The collector retained a private capacity target identity.'
+    Add-Check (
         @($linuxReport.verifiedMeasurements.urlProbes).Count -eq 2
     ) 'The Linux collector did not produce one host and one container URL sample.'
     Add-Check (
@@ -680,7 +740,7 @@ if ($CommandArguments[0] -eq '-Pi') {
         -ExecutionMode WinRM `
         -CollectorSource $collectorSource `
         -ArgumentsJson $transportArgumentsJson `
-        -WinRMComputerName alienware.example `
+        -WinRMComputerName fixture-node.example `
         -TransportInvoker $transportInvoker
     Add-Check (
         $winRMEnvelope.report.packageId -eq
@@ -792,8 +852,134 @@ if ($CommandArguments[0] -eq '-Pi') {
     ) 'The importer did not correlate the preflight timestamp.'
     Add-Check (
         $diagnosisJson.verifiedMeasurements.host.state.hostAdmissionStatus -ceq
-            'degraded'
+            'available'
     ) 'The imported diagnosis did not surface the bounded host admission status.'
+    $diagnosedAdmission =
+        $diagnosisJson.verifiedMeasurements.host.state.hostAdmission
+    Add-Check (
+        $diagnosedAdmission.namespace -eq 'shared-ci' -and
+        $diagnosedAdmission.epoch -eq 3 -and
+        $diagnosedAdmission.decisionSequence -eq 9 -and
+        $diagnosedAdmission.accounting.unitCost -eq 2 -and
+        $diagnosedAdmission.accounting.reservedUnits -eq 2 -and
+        $diagnosedAdmission.accounting.heldUnits -eq 2 -and
+        $diagnosedAdmission.accounting.withheldUnits -eq 2 -and
+        $diagnosedAdmission.lastDecision.failureCategory -eq 'budget-exceeded'
+    ) 'The imported diagnosis omitted the complete bounded admission contract.'
+    Add-Check (
+        $diagnosisJson.verifiedMeasurements.host.state.capacityEvidence.targets[0].reason -eq
+            'host-admission-withheld'
+    ) 'The imported diagnosis did not preserve capacity-deficit reasons.'
+
+    $unavailableReport = $linuxReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $unavailableReport.verifiedMeasurements.state.observed.hostAdmission =
+        [PSCustomObject][ordered]@{
+            status = 'unavailable'
+            namespace = 'shared-ci'
+            epoch = $null
+            decisionSequence = $null
+            capacityUnits = $null
+            safetyMarginUnits = $null
+            effectiveTotalUnits = $null
+            availableUnits = $null
+            hostPolicyFingerprint = $null
+            accounting = $null
+            lastDecision = $null
+        }
+    $unavailableReport.verifiedMeasurements.state.observed.capacityEvidence =
+        [PSCustomObject][ordered]@{
+            fixed = $null
+            targets = @(
+                [PSCustomObject][ordered]@{
+                    key = 'fixture-target'
+                    repository = 'https://github.com/acme/private-repository'
+                    observedAt = '2026-08-07T09:00:00Z'
+                    freshness = 'current'
+                    targetSlots = 2
+                    activeWorkers = 1
+                    startingWorkers = 0
+                    drainingWorkers = 0
+                    cleanupPendingWorkers = 0
+                    eligibleWorkers = 1
+                    localDeficit = 1
+                    eligibilityDeficit = 1
+                    reason = 'host-admission-unavailable'
+                    evidence = 'Host admission evidence unavailable'
+                })
+        }
+    $unavailableDiagnosis = New-PitCrewRemoteDiagnosticsDiagnosis `
+        -Report $unavailableReport `
+        -Preflight $null
+    Add-Check (
+        @($unavailableDiagnosis.unavailableEvidence |
+            Where-Object category -eq 'host-admission').Count -eq 1 -and
+        $unavailableDiagnosis.verifiedMeasurements.host.state.hostAdmission.status -eq
+            'unavailable' -and
+        $null -eq
+            $unavailableDiagnosis.verifiedMeasurements.host.state.hostAdmission.availableUnits -and
+        $unavailableDiagnosis.verifiedMeasurements.host.state.capacityEvidence.targets[0].reason -eq
+            'host-admission-unavailable'
+    ) 'Unavailable coordinator evidence was not preserved as unavailable.'
+    Add-Check (
+        $unavailableDiagnosis.verifiedMeasurements.host.state.capacityEvidence.targets[0].keyHash -eq
+            (Get-PitCrewRemoteDiagnosticsTextSha256 -Value 'fixture-target') -and
+        ($unavailableDiagnosis | ConvertTo-Json -Depth 100) -notmatch
+            [regex]::Escape('https://github.com/acme/private-repository')
+    ) 'The importer retained a private capacity target identity.'
+
+    $structuredNamespace = $linuxReport.verifiedMeasurements.state.observed.hostAdmission |
+        ConvertTo-Json -Depth 30 |
+        ConvertFrom-Json -Depth 30
+    $structuredNamespace.namespace = 'secret-ci'
+    Add-Check (
+        (
+            ConvertTo-PitCrewRemoteDiagnosticsHostAdmission `
+                -Admission $structuredNamespace
+        ).namespace -eq 'secret-ci'
+    ) 'A contract-valid structured namespace was rejected by generic secret-text filtering.'
+    $newlineNamespace = $structuredNamespace |
+        ConvertTo-Json -Depth 30 |
+        ConvertFrom-Json -Depth 30
+    $newlineNamespace.namespace = "shared-ci`n"
+    Add-ThrowsCheck `
+        -Action {
+            ConvertTo-PitCrewRemoteDiagnosticsHostAdmission `
+                -Admission $newlineNamespace |
+                Out-Null
+        } `
+        -ExpectedMessage 'Host admission namespace is invalid.' `
+        -Failure 'A namespace with trailing control data was accepted.'
+
+    $degradedReport = $linuxReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $degradedReport.verifiedMeasurements.state.observed.hostAdmission.status =
+        'degraded'
+    $degradedReport.verifiedMeasurements.state.observed.hostAdmission.hostPolicyFingerprint =
+        $null
+    $degradedDiagnosis = New-PitCrewRemoteDiagnosticsDiagnosis `
+        -Report $degradedReport `
+        -Preflight $null
+    Add-Check (
+        @($degradedDiagnosis.unavailableEvidence |
+            Where-Object category -eq 'host-admission-policy').Count -eq 1
+    ) 'Degraded policy-identity evidence was not classified explicitly.'
+    $missingAccountingReport = $degradedReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $missingAccountingReport.verifiedMeasurements.state.observed.hostAdmission.accounting =
+        $null
+    $missingAccountingDiagnosis = New-PitCrewRemoteDiagnosticsDiagnosis `
+        -Report $missingAccountingReport `
+        -Preflight $null
+    Add-Check (
+        @($missingAccountingDiagnosis.unavailableEvidence |
+            Where-Object category -eq 'host-admission-policy').Count -eq 1 -and
+        @($missingAccountingDiagnosis.unavailableEvidence |
+            Where-Object category -eq 'host-admission-demand').Count -eq 0
+    ) 'Missing profile accounting was misclassified as a demand-only gap.'
 
     Write-Host 'Remote diagnostics test: direct orchestrator'
     $directOutput = Join-Path $outputRoot 'direct'
@@ -832,7 +1018,7 @@ if ($CommandArguments[0] -eq '-Pi') {
         -PitCrewRoot 'C:\PitCrew' `
         -Profile default `
         -DiagnosticMode CapacityMismatch `
-        -WinRMComputerName alienware.example `
+        -WinRMComputerName fixture-node.example `
         -PreflightPath $preflightPath `
         -OutputDirectory (Join-Path $outputRoot 'winrm-plan-should-not-exist') `
         -PlanOnly

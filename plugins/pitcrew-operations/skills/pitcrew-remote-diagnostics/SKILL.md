@@ -199,6 +199,28 @@ checksum mismatches, package mismatches, unsupported schemas, unredacted root
 paths, and forbidden secret-bearing property names. It correlates preflight,
 connector outage, observed-state, and collection timestamps.
 
+For manager contract 18, the imported diagnosis must contain the validated,
+bounded host-admission projection: status, namespace, epoch, decision sequence,
+host policy values and fingerprint, profile cost/reservation/borrowing and
+accounting, pending/withheld units, and the last decision. It must also preserve
+fixed or per-target capacity-deficit freshness and reasons.
+
+Classify evidence honestly:
+
+- `disabled` is observed policy state.
+- `degraded` means policy identity or current demand accounting is incomplete.
+- `unavailable` means coordinator measurements were not obtained; null values
+  stay unavailable rather than becoming zero.
+- An absent host-admission object on an older manager contract is unsupported
+  evidence, not proof that admission was disabled. Disabled cannot be inferred
+  from null.
+
+Keep `host-admission-withheld`, `host-admission-degraded`, and
+`host-admission-unavailable` distinct from profile `admission-ceiling`, GitHub
+demand, Docker, JIT, listener, cleanup, and unknown evidence. Admission units
+are abstract policy accounting, not CPU, memory, worker counts, queue weights,
+or a performance diagnosis.
+
 ## Handoff
 
 Return the absolute paths to:

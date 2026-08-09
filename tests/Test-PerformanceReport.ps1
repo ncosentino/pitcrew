@@ -135,6 +135,111 @@ Add-Check (
     @($report.hypotheses |
         Where-Object hypothesis -match 'hardware').Count -eq 1
 ) 'Different hardware inventories did not remain a competing hypothesis.'
+$buildAdmission = $report.verifiedMeasurements.admissionSummaries |
+    Where-Object {
+        $_.nodeKey -eq 'node-1' -and
+        $_.profileId -eq 'build'
+    }
+Add-Check (
+    $buildAdmission.statusCounts.available -eq 2 -and
+    $buildAdmission.latest.epoch -eq 2 -and
+    $buildAdmission.latest.decisionSequence -eq 14
+) 'Contract-18 admission status and decision progress were not summarized.'
+Add-Check (
+    $buildAdmission.maximumHeldUnits -eq 8 -and
+    $buildAdmission.maximumWithheldUnits -eq 4 -and
+    $buildAdmission.withheldSampleCount -eq 1
+) 'Admission held and withheld unit summaries were calculated incorrectly.'
+Add-Check (
+    @($buildAdmission.deficitReasons |
+        Where-Object reason -eq 'host-admission-withheld').Count -eq 1
+) 'The report omitted the admission-specific capacity-deficit reason.'
+$admissionGapSummary = New-PitCrewHostAdmissionSummary `
+    -NodeKey node-gap `
+    -ProfileId gap-profile `
+    -Samples @(
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:00:00Z'
+            hostAdmissionStatus = 'available'
+            hostAdmissionEpoch = 1
+            hostAdmissionDecisionSequence = 2
+        },
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:01:00Z'
+        })
+Add-Check (
+    $admissionGapSummary.latest.status -eq 'unreported' -and
+    $null -eq $admissionGapSummary.latest.epoch -and
+    $admissionGapSummary.unreportedSampleCount -eq 1
+) 'A newer unreported sample was hidden behind older available admission evidence.'
+$legacyAdmissionSummary = New-PitCrewHostAdmissionSummary `
+    -NodeKey node-legacy `
+    -ProfileId legacy-profile `
+    -Samples @(
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:00:00Z'
+        })
+$mixedReasonSummary = New-PitCrewHostAdmissionSummary `
+    -NodeKey node-mixed `
+    -ProfileId mixed-profile `
+    -Samples @(
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:00:00Z'
+            capacityDeficitReason = 'none'
+        },
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:01:00Z'
+        })
+Add-Check (
+    (ConvertTo-PitCrewAdmissionDeficitReasonText `
+        -Summary $legacyAdmissionSummary) -eq 'unreported' -and
+    (ConvertTo-PitCrewAdmissionDeficitReasonText `
+        -Summary $mixedReasonSummary) -eq 'unavailable'
+) 'Legacy missing admission evidence was rendered as a measured no-deficit state.'
+$deduplicatedReasonSummary = New-PitCrewHostAdmissionSummary `
+    -NodeKey node-deduplicated `
+    -ProfileId deduplicated-profile `
+    -Samples @(
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:00:00Z'
+            capacityDeficitReason = 'host-admission-withheld'
+        }) `
+    -CapacityDeficits @(
+        [PSCustomObject]@{
+            observedAt = '2026-08-01T00:00:00Z'
+            reason = 'host-admission-withheld'
+        })
+Add-Check (
+    $deduplicatedReasonSummary.deficitReasons.Count -eq 1 -and
+    $deduplicatedReasonSummary.deficitReasons[0].samples -eq 1
+) 'Sample and per-target admission reasons were counted twice.'
+$admissionDeficitReasons = @(
+    $report.verifiedMeasurements.admissionSummaries |
+        ForEach-Object { @($_.deficitReasons) } |
+        ForEach-Object { $_.reason } |
+        Sort-Object -Unique)
+Add-Check (
+    @(
+        @(
+            'host-admission-degraded',
+            'host-admission-unavailable',
+            'host-admission-withheld') |
+            Where-Object { $_ -notin $admissionDeficitReasons }
+    ).Count -eq 0
+) 'The report did not keep all admission deficit reasons distinct.'
+Add-Check (
+    @($report.unavailableEvidence |
+        Where-Object kind -eq 'host-admission-unavailable').Count -eq 1
+) 'Unavailable coordinator evidence was not classified honestly.'
+Add-Check (
+    @($report.unavailableEvidence |
+        Where-Object kind -eq 'host-admission-degraded').Count -eq 1
+) 'Degraded admission evidence was not reported explicitly.'
+Add-Check (
+    $buildAdmission.capacityDeficitsTruncated -and
+    @($report.unavailableEvidence |
+        Where-Object kind -eq 'host-admission-deficits-truncated').Count -eq 1
+) 'Truncated per-target admission history was not reported as unavailable evidence.'
 Add-Check (
     (ConvertTo-PitCrewRepositoryIdentity `
         'https://github.com/example/project.git/') -eq 'example/project'
@@ -152,15 +257,18 @@ Add-Check (-not (
 
 $json = $report | ConvertTo-Json -Depth 30
 Add-Check ($json -notmatch 'runner-a-build') 'The JSON report exposed a raw runner name.'
-Add-Check ($json -notmatch 'private-host') 'The JSON report exposed a node display name.'
-Add-Check ($json -notmatch 'private-manager-instance') 'The JSON report exposed a manager instance identity.'
-Add-Check ($json -notmatch 'private.registry') 'The JSON report exposed a worker image reference.'
-Add-Check ($json -notmatch 'private update detail') 'The JSON report exposed a free-form update error.'
+Add-Check ($json -notmatch 'fixture-node-a') 'The JSON report exposed a node display name.'
+Add-Check ($json -notmatch 'fixture-manager-instance') 'The JSON report exposed a manager instance identity.'
+Add-Check ($json -notmatch 'registry.example.invalid') 'The JSON report exposed a worker image reference.'
+Add-Check ($json -notmatch 'fixture update detail') 'The JSON report exposed a free-form update error.'
 Add-Check ($json -notmatch '\.github/workflows') 'The JSON report exposed a workflow file path.'
-Add-Check ($json -notmatch 'unselected-private-profile') 'The JSON report exposed a hardware source profile.'
+Add-Check ($json -notmatch 'fixture-unselected-profile') 'The JSON report exposed a hardware source profile.'
 Add-Check (
     $json -match '31b0f683149e60f42ad58db94b6a509e5f2d7b5c7deac939d9f4573b05260b38'
 ) 'The JSON report omitted the exact runner correlation hash.'
+Add-Check (
+    $json -match '"hostAdmissionWithheldUnits": 4'
+) 'The JSON report omitted the retained host-admission fields.'
 
 $duplicateFixture = $fixture |
     ConvertTo-Json -Depth 30 |
@@ -240,6 +348,21 @@ Add-Check (
 Add-Check (
     $markdown -match 'Complete sanitized measurement payload'
 ) 'The Markdown report does not carry the equivalent sanitized measurements.'
+Add-Check (
+    $markdown -match 'Host-admission observations' -and
+    $markdown -match 'host-admission-withheld'
+) 'The Markdown report omitted host-admission interpretation.'
+Add-Check (
+    @($report.limitations |
+        Where-Object {
+            $_ -match 'abstract policy accounting' -and
+            $_ -match 'universal workload weights'
+        }).Count -eq 1 -and
+    @($report.limitations |
+        Where-Object {
+            $_ -match 'do not prove GitHub queue delay'
+        }).Count -eq 1
+) 'The report omitted host-admission interpretation limits.'
 $malicious = ConvertTo-PitCrewMarkdownText "bad`n<img src=https://example.invalid/a>` ````"
 Add-Check (
     $malicious -notmatch '<img|https://example\.invalid/a>`'
