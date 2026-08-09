@@ -11,14 +11,15 @@ import (
 )
 
 const (
-	managedProfileLabelKey = "ephemeral-managed-runner-profile"
-	managedSlotLabelKey    = "ephemeral-managed-runner-slot"
-	managerProfileLabelKey = "ephemeral-runner-manager-profile"
-	autoscalerLabelKey     = "pitcrew-autoscaler"
-	targetKeyLabelKey      = "pitcrew-autoscaler-target-key"
-	runnerNameLabelKey     = "pitcrew-autoscaler-runner-name"
-	runnerIDLabelKey       = "pitcrew-autoscaler-runner-id"
-	workerRevisionLabelKey = "pitcrew-worker-revision"
+	managedProfileLabelKey    = "ephemeral-managed-runner-profile"
+	managedSlotLabelKey       = "ephemeral-managed-runner-slot"
+	managerProfileLabelKey    = "ephemeral-runner-manager-profile"
+	autoscalerLabelKey        = "pitcrew-autoscaler"
+	targetKeyLabelKey         = "pitcrew-autoscaler-target-key"
+	runnerNameLabelKey        = "pitcrew-autoscaler-runner-name"
+	runnerIDLabelKey          = "pitcrew-autoscaler-runner-id"
+	workerRevisionLabelKey    = "pitcrew-worker-revision"
+	hostAdmissionSlotLabelKey = "pitcrew-host-admission-slot"
 )
 
 type targetSpec struct {

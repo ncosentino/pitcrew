@@ -67,6 +67,26 @@ func (d *instrumentedDockerClient) run(
 	return containerID, err
 }
 
+func (d *instrumentedDockerClient) create(
+	ctx context.Context,
+	launch containerLaunch,
+) (string, error) {
+	startedAt := time.Now()
+	containerID, err := d.inner.create(ctx, launch)
+	d.observe(operationDockerRun, "", startedAt, err)
+	return containerID, err
+}
+
+func (d *instrumentedDockerClient) start(
+	ctx context.Context,
+	containerID string,
+) error {
+	startedAt := time.Now()
+	err := d.inner.start(ctx, containerID)
+	d.observe(operationDockerRun, "", startedAt, err)
+	return err
+}
+
 func (d *instrumentedDockerClient) wait(
 	ctx context.Context,
 	containerID string,

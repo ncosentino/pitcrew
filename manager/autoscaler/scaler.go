@@ -60,6 +60,16 @@ type runnerRecord struct {
 	recovered           bool
 	protected           bool
 	registrationRemoved bool
+	// hostSlotKey is the host-admission lease slot key acquired before this
+	// worker's JIT config was generated (see host_admission.go). It is empty
+	// when host admission is disabled, or when a recovered running
+	// container's lease could not be confirmed (busy-worker survival never
+	// destroys the worker, but this manager instance then has no lease it
+	// can prove is still its own to release).
+	hostSlotKey string
+	// hostLeaseReleased guards exactly-once release. It must only be set
+	// with s.mu held, by markHostLeaseReleaseLocked.
+	hostLeaseReleased bool
 }
 
 type scalerStatistics struct {
@@ -133,6 +143,7 @@ type runnerScaler struct {
 	cleanupStore         registrationCleanupStore
 	pendingRegistrations map[string]registrationCleanupRecord
 	admission            *admissionController
+	hostAdmission        *hostAdmissionCoordinator
 	diagnostics          *diagnosticsRecorder
 	blocking             capacityBlock
 }
@@ -146,6 +157,7 @@ func newRunnerScaler(
 	docker dockerClient,
 	scalerClock clock,
 	admission *admissionController,
+	hostAdmission *hostAdmissionCoordinator,
 	diagnostics *diagnosticsRecorder,
 	logger *slog.Logger,
 	onChange func(),
@@ -194,6 +206,7 @@ func newRunnerScaler(
 		),
 		pendingRegistrations: make(map[string]registrationCleanupRecord),
 		admission:            admission,
+		hostAdmission:        hostAdmission,
 		diagnostics:          diagnostics,
 	}
 	scaler.restorePendingRegistrations()
@@ -538,6 +551,7 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 
 	if target > current {
 		missing := target - current
+		s.hostAdmission.setTargetDemand(s.target.key, missing)
 		if blocked := s.pendingRegistrationCount(); blocked > 0 {
 			if blocked > missing {
 				blocked = missing
@@ -589,10 +603,12 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
 	if target == current {
+		s.hostAdmission.setTargetDemand(s.target.key, 0)
 		s.clearBlocking()
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
 	s.clearBlocking()
+	s.hostAdmission.setTargetDemand(s.target.key, 0)
 
 	now := s.clock.now().UTC()
 	s.mu.Lock()
@@ -678,8 +694,24 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		}
 
 		s.mu.Lock()
+		currentRunner := s.runners[runnerKey]
+		var hostSlotKey string
+		released := false
+		if currentRunner != nil {
+			hostSlotKey = currentRunner.hostSlotKey
+			released = s.markHostLeaseReleaseLocked(currentRunner)
+		}
 		delete(s.runners, runnerKey)
 		s.mu.Unlock()
+		if released {
+			if err := s.hostAdmission.release(hostSlotKey); err != nil {
+				operationErrors = append(operationErrors, fmt.Errorf(
+					"release host admission lease %s after scale-down: %w",
+					hostSlotKey,
+					err,
+				))
+			}
+		}
 		s.onChange()
 	}
 }
@@ -722,11 +754,24 @@ func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {
 			continue
 		}
 		s.mu.Lock()
+		var hostSlotKey string
+		released := false
 		if current := s.runners[runner.key]; current != nil &&
 			current.state == runnerCleanupPending {
+			hostSlotKey = current.hostSlotKey
+			released = s.markHostLeaseReleaseLocked(current)
 			delete(s.runners, runner.key)
 		}
 		s.mu.Unlock()
+		if released {
+			if err := s.hostAdmission.release(hostSlotKey); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf(
+					"release host admission lease %s after delayed cleanup: %w",
+					hostSlotKey,
+					err,
+				))
+			}
+		}
 		s.onChange()
 	}
 	return errors.Join(cleanupErrors...)
@@ -983,8 +1028,39 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		return nil, err
 	}
 	launchStartedAt := s.clock.now()
+
+	hostAdmissionEnabled := s.hostAdmission.enabled()
+	var hostSlotKey string
+	if hostAdmissionEnabled {
+		hostSlotKey = requestedName
+		pendingDemand := s.hostAdmission.currentDemand()
+		_, outcome, err := s.hostAdmission.acquire(hostSlotKey, pendingDemand)
+		if err != nil {
+			reason := reasonCapacityCeiling
+			evidence := "host admission coordinator denied worker activation"
+			if outcome == hostAdmissionOutage {
+				reason = reasonUnknown
+				evidence = "host admission coordinator unavailable"
+			}
+			s.setBlocking(deficitAdmissionCeiling, evidence)
+			s.recordLaunchFailure("", reason, evidence, launchStartedAt)
+			s.diagnostics.record(diagnosticsObservation{
+				subsystem: subsystemAdmission,
+				operation: operationAdmissionReserve,
+				target:    s.target.key,
+				outcome:   outcomeBlocked,
+				reason:    reason,
+				evidence:  evidence,
+			})
+			return nil, fmt.Errorf("acquire host admission lease: %w", err)
+		}
+	}
+
 	jit, err := s.api.generateJIT(ctx, s.scaleSetID, requestedName)
 	if err != nil {
+		if hostAdmissionEnabled {
+			_ = s.hostAdmission.release(hostSlotKey)
+		}
 		s.setBlocking(
 			deficitJITFailed,
 			"just-in-time runner configuration could not be generated",
@@ -1006,6 +1082,9 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 			s.api.removeRunner(cleanupContext, jit.runnerID),
 		)
 		cleanupCancel()
+		if hostAdmissionEnabled {
+			cleanupErr = errors.Join(cleanupErr, s.hostAdmission.release(hostSlotKey))
+		}
 		return nil, errors.Join(
 			errors.New("JIT runner name cannot form a Docker container name"),
 			cleanupErr,
@@ -1020,7 +1099,10 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		runnerIDLabelKey:       strconv.FormatInt(jit.runnerID, 10),
 		workerRevisionLabelKey: s.workerRevision,
 	}
-	containerID, err := s.docker.run(ctx, containerLaunch{
+	if hostAdmissionEnabled {
+		labels[hostAdmissionSlotLabelKey] = hostSlotKey
+	}
+	launch := containerLaunch{
 		name:      containerName,
 		image:     s.image,
 		jitConfig: jit.encoded,
@@ -1028,35 +1110,143 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		resources: s.resources,
 		volumes:   s.volumes,
 		network:   s.network,
-	})
-	if err != nil {
-		launchFailure := launchFailureDiagnostic(s.clock.now())
-		s.setBlocking(deficitDockerFailed, "worker container launch failed")
-		s.recordLaunchFailure(
-			slotKey,
-			dockerFailureReason(err),
-			"worker container launch failed",
-			launchStartedAt,
-		)
-		s.logger.Warn(
-			"Runner container launch failed",
-			"slotKey", slotKey,
-			"classification", launchFailure.Classification,
-			"observedAt", launchFailure.ObservedAt,
-		)
+	}
+
+	// abandonLaunch performs the exact cleanup for a launch abandoned after
+	// GitHub registration exists: remove the registration, remove the
+	// container if one was created, and release the host lease if one was
+	// acquired. It is only ever reached before the runner record is
+	// inserted into s.runners, so no other goroutine can be racing this
+	// specific slot key's lease.
+	abandonLaunch := func(containerID string, cause error) (*runnerRecord, error) {
 		cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
-		cleanupErr := registrationRemovalError(
+		defer cleanupCancel()
+		var cleanupErrors []error
+		if err := registrationRemovalError(
 			s.api.removeRunner(cleanupContext, jit.runnerID),
-		)
-		cleanupCancel()
-		if cleanupErr != nil {
-			return nil, errors.Join(err, fmt.Errorf(
-				"remove registration for unlaunched runner %d: %w",
+		); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf(
+				"remove registration for abandoned runner %d: %w",
 				jit.runnerID,
-				cleanupErr,
+				err,
 			))
 		}
-		return nil, err
+		if containerID != "" {
+			if err := s.docker.stopAndRemove(cleanupContext, containerID); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf(
+					"remove abandoned container %s: %w",
+					containerID,
+					err,
+				))
+			}
+		}
+		if hostAdmissionEnabled {
+			if err := s.hostAdmission.release(hostSlotKey); err != nil {
+				cleanupErrors = append(cleanupErrors, fmt.Errorf(
+					"release host admission lease %s: %w",
+					hostSlotKey,
+					err,
+				))
+			}
+		}
+		return nil, errors.Join(append([]error{cause}, cleanupErrors...)...)
+	}
+
+	var containerID string
+	if hostAdmissionEnabled {
+		if err := s.hostAdmission.renew(hostSlotKey); err != nil {
+			return abandonLaunch("", fmt.Errorf(
+				"renew host admission lease before container create: %w",
+				err,
+			))
+		}
+		containerID, err = s.docker.create(ctx, launch)
+		if err != nil {
+			launchFailure := launchFailureDiagnostic(s.clock.now())
+			s.setBlocking(deficitDockerFailed, "worker container create failed")
+			s.recordLaunchFailure(
+				slotKey,
+				dockerFailureReason(err),
+				"worker container create failed",
+				launchStartedAt,
+			)
+			s.logger.Warn(
+				"Runner container create failed",
+				"slotKey", slotKey,
+				"classification", launchFailure.Classification,
+				"observedAt", launchFailure.ObservedAt,
+			)
+			return abandonLaunch("", err)
+		}
+		if err := s.hostAdmission.renew(hostSlotKey); err != nil {
+			return abandonLaunch(containerID, fmt.Errorf(
+				"renew host admission lease before activation: %w",
+				err,
+			))
+		}
+		if _, err := s.hostAdmission.activate(hostSlotKey); err != nil {
+			s.setBlocking(deficitAdmissionCeiling, "host admission activation failed")
+			s.diagnostics.record(diagnosticsObservation{
+				subsystem: subsystemAdmission,
+				operation: operationAdmissionSettle,
+				target:    s.target.key,
+				outcome:   outcomeFailed,
+				reason:    reasonUnknown,
+				evidence:  "host admission activation failed",
+			})
+			return abandonLaunch(containerID, fmt.Errorf(
+				"activate host admission lease: %w",
+				err,
+			))
+		}
+		if err := s.docker.start(ctx, containerID); err != nil {
+			launchFailure := launchFailureDiagnostic(s.clock.now())
+			s.setBlocking(deficitDockerFailed, "worker container start failed")
+			s.recordLaunchFailure(
+				slotKey,
+				dockerFailureReason(err),
+				"worker container start failed",
+				launchStartedAt,
+			)
+			s.logger.Warn(
+				"Runner container start failed",
+				"slotKey", slotKey,
+				"classification", launchFailure.Classification,
+				"observedAt", launchFailure.ObservedAt,
+			)
+			return abandonLaunch(containerID, err)
+		}
+	} else {
+		containerID, err = s.docker.run(ctx, launch)
+		if err != nil {
+			launchFailure := launchFailureDiagnostic(s.clock.now())
+			s.setBlocking(deficitDockerFailed, "worker container launch failed")
+			s.recordLaunchFailure(
+				slotKey,
+				dockerFailureReason(err),
+				"worker container launch failed",
+				launchStartedAt,
+			)
+			s.logger.Warn(
+				"Runner container launch failed",
+				"slotKey", slotKey,
+				"classification", launchFailure.Classification,
+				"observedAt", launchFailure.ObservedAt,
+			)
+			cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
+			cleanupErr := registrationRemovalError(
+				s.api.removeRunner(cleanupContext, jit.runnerID),
+			)
+			cleanupCancel()
+			if cleanupErr != nil {
+				return nil, errors.Join(err, fmt.Errorf(
+					"remove registration for unlaunched runner %d: %w",
+					jit.runnerID,
+					cleanupErr,
+				))
+			}
+			return nil, err
+		}
 	}
 
 	now := s.clock.now().UTC()
@@ -1072,6 +1262,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		revision:    s.workerRevision,
 		startedAt:   now,
 		updatedAt:   now,
+		hostSlotKey: hostSlotKey,
 	}
 	s.mu.Lock()
 	if s.shuttingDown {
@@ -1092,10 +1283,15 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 			cleanupContext,
 			runner.containerID,
 		)
+		var releaseErr error
+		if hostAdmissionEnabled {
+			releaseErr = s.hostAdmission.release(hostSlotKey)
+		}
 		return nil, errors.Join(
 			errors.New("autoscaler began shutdown while starting a runner"),
 			removeErr,
 			containerErr,
+			releaseErr,
 		)
 	}
 	s.runners[runner.key] = runner
@@ -1161,6 +1357,92 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 			s.target.key,
 		)
 	}
+	if container.unstarted {
+		return s.recoverCreated(container)
+	}
+	return s.recoverRunning(container)
+}
+
+// recoverCreated handles a container a prior manager process created but
+// never started (a crash between docker create and docker start). It must
+// never call logs/wait on the container: those Docker calls are undefined
+// for a container that has never run. When host admission is enabled, the
+// container's recorded lease is re-activated before starting; a missing or
+// rejected lease exactly removes the container instead of starting it.
+func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
+	hostAdmissionEnabled := s.hostAdmission.enabled()
+	if hostAdmissionEnabled {
+		if container.hostSlotKey == "" {
+			return s.discardUnstartedContainer(
+				container,
+				"",
+				errors.New("created container has no host admission lease"),
+			)
+		}
+		if _, err := s.hostAdmission.activate(container.hostSlotKey); err != nil {
+			return s.discardUnstartedContainer(
+				container,
+				container.hostSlotKey,
+				fmt.Errorf("activate recovered host admission lease: %w", err),
+			)
+		}
+	}
+	if err := s.docker.start(s.lifecycleContext, container.containerID); err != nil {
+		return s.discardUnstartedContainer(
+			container,
+			container.hostSlotKey,
+			fmt.Errorf("start recovered created container: %w", err),
+		)
+	}
+	return s.insertRecoveredRunner(container, false)
+}
+
+// recoverRunning handles a container already running when this manager
+// process started. When host admission is enabled it re-confirms the
+// recorded lease is still active for this manager instance; a failure here
+// never destroys the worker (busy-worker survival), it only means this
+// process will not later attempt to release a lease it cannot prove is
+// still its own.
+func (s *runnerScaler) recoverRunning(container recoveredContainer) error {
+	if s.hostAdmission.enabled() && container.hostSlotKey != "" {
+		if _, err := s.hostAdmission.activate(container.hostSlotKey); err != nil {
+			s.onError(fmt.Errorf(
+				"re-confirm host admission lease for running container %s: %w",
+				container.containerID,
+				err,
+			))
+			container.hostSlotKey = ""
+		}
+	}
+	return s.insertRecoveredRunner(container, true)
+}
+
+// discardUnstartedContainer removes a created-but-unstarted container that
+// cannot be safely started, releasing any lease it held. Release is
+// best-effort: an already-released or unknown lease is a no-op.
+func (s *runnerScaler) discardUnstartedContainer(
+	container recoveredContainer,
+	hostSlotKey string,
+	cause error,
+) error {
+	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
+	defer cleanupCancel()
+	removeErr := s.docker.stopAndRemove(cleanupContext, container.containerID)
+	var releaseErr error
+	if hostSlotKey != "" {
+		releaseErr = s.hostAdmission.release(hostSlotKey)
+	}
+	return errors.Join(cause, removeErr, releaseErr)
+}
+
+// insertRecoveredRunner records the recovered container as a runner and
+// resumes lifecycle monitoring. readLogs is only ever attempted for an
+// already-running container: replayLogs is false for a container recovered
+// this instance just started, since it has no prior log history to replay.
+func (s *runnerScaler) insertRecoveredRunner(
+	container recoveredContainer,
+	replayLogs bool,
+) error {
 	startedAt := container.createdAt.UTC()
 	if startedAt.IsZero() {
 		startedAt = s.clock.now().UTC()
@@ -1177,10 +1459,11 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 		revision:    container.revision,
 		stale: container.revision != s.workerRevision &&
 			!(container.revision == "" && s.assumeUnversioned),
-		startedAt: startedAt,
-		updatedAt: s.clock.now().UTC(),
-		recovered: true,
-		protected: true,
+		startedAt:   startedAt,
+		updatedAt:   s.clock.now().UTC(),
+		recovered:   true,
+		protected:   true,
+		hostSlotKey: container.hostSlotKey,
 	}
 
 	s.mu.Lock()
@@ -1192,19 +1475,21 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 	s.mu.Unlock()
 	snapshotAt := s.clock.now().UTC()
 	monitorSince := snapshotAt
-	lines, err := s.docker.readLogs(s.lifecycleContext, runner.containerID)
-	if err != nil {
-		s.onError(err)
-		monitorSince = startedAt
-	} else {
-		var latest runnerLifecycleState
-		for _, line := range lines {
-			if state, ok := lifecycleStateFromLog(line); ok {
-				latest = state
+	if replayLogs {
+		lines, err := s.docker.readLogs(s.lifecycleContext, runner.containerID)
+		if err != nil {
+			s.onError(err)
+			monitorSince = startedAt
+		} else {
+			var latest runnerLifecycleState
+			for _, line := range lines {
+				if state, ok := lifecycleStateFromLog(line); ok {
+					latest = state
+				}
 			}
-		}
-		if latest != "" {
-			s.applyLogState(runner.containerID, latest, snapshotAt)
+			if latest != "" {
+				s.applyLogState(runner.containerID, latest, snapshotAt)
+			}
 		}
 	}
 	s.monitorRunner(runner, monitorSince)
@@ -1475,6 +1760,8 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	exited := *runner
 	shuttingDown := s.shuttingDown
 	unexpected := runner.state != runnerDraining && !shuttingDown
+	hostSlotKey := runner.hostSlotKey
+	releaseLease := s.markHostLeaseReleaseLocked(runner)
 	delete(s.runners, runner.key)
 	needsReconcile := !s.shuttingDown && s.capacityCountLocked() < s.targetSlots
 	if s.capacityCountLocked() <= s.targetSlots {
@@ -1482,6 +1769,15 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	}
 	s.mu.Unlock()
 	s.onChange()
+	if releaseLease {
+		if err := s.hostAdmission.release(hostSlotKey); err != nil {
+			s.onError(fmt.Errorf(
+				"release host admission lease %s after container exit: %w",
+				hostSlotKey,
+				err,
+			))
+		}
+	}
 
 	s.diagnostics.record(diagnosticsObservation{
 		subsystem: subsystemWorkerExit,
@@ -1561,8 +1857,23 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 				return err
 			}
 			s.mu.Lock()
+			var hostSlotKey string
+			released := false
+			if current := s.runners[runner.key]; current != nil {
+				hostSlotKey = current.hostSlotKey
+				released = s.markHostLeaseReleaseLocked(current)
+			}
 			delete(s.runners, runner.key)
 			s.mu.Unlock()
+			if released {
+				if err := s.hostAdmission.release(hostSlotKey); err != nil {
+					return fmt.Errorf(
+						"release host admission lease %s during shutdown: %w",
+						hostSlotKey,
+						err,
+					)
+				}
+			}
 			return nil
 		})...,
 	)
@@ -1658,6 +1969,20 @@ func (s *runnerScaler) capacityCountLocked() int {
 		}
 	}
 	return count
+}
+
+// markHostLeaseReleaseLocked flips a runner's hostLeaseReleased flag from
+// false to true and reports whether this call won that transition. Callers
+// must hold s.mu. Because s.runners stores shared *runnerRecord pointers,
+// this makes lease release exactly-once even when two lifecycle paths
+// (e.g. a scale-down and a concurrent container-exit event) observe the
+// same runner.
+func (s *runnerScaler) markHostLeaseReleaseLocked(runner *runnerRecord) bool {
+	if runner == nil || runner.hostSlotKey == "" || runner.hostLeaseReleased {
+		return false
+	}
+	runner.hostLeaseReleased = true
+	return true
 }
 
 func (s *runnerScaler) oldestIdleRunnerLocked() *runnerRecord {

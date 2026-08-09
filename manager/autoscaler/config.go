@@ -41,6 +41,21 @@ type config struct {
 	legacyRepositoryURLs string
 	legacyRepositoryURL  string
 	legacyReplicas       string
+	hostAdmission        hostAdmissionConfig
+}
+
+// hostAdmissionConfig carries this profile's identity for the host-local
+// admission coordinator (ADR-0003). Enabled is false, and every other field
+// is empty, unless all four PITCREW_HOST_ADMISSION_* variables were
+// supplied together; a partially configured identity fails config loading
+// closed rather than silently falling back to disabled or partially
+// enabled behavior.
+type hostAdmissionConfig struct {
+	enabled            bool
+	namespace          string
+	socketPath         string
+	hostFingerprint    string
+	profileFingerprint string
 }
 
 type readOnlyVolume struct {
@@ -261,6 +276,10 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 			"PITCREW_SERVICE_NETWORK must be a Docker-safe external network name and cannot identify a reserved manager network",
 		)
 	}
+	hostAdmission, err := loadHostAdmissionConfig(value)
+	if err != nil {
+		return config{}, err
+	}
 
 	cfg := config{
 		accessToken:          strings.TrimSpace(value("ACCESS_TOKEN", "")),
@@ -289,6 +308,7 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		legacyRepositoryURLs: value("REPO_URLS", ""),
 		legacyRepositoryURL:  value("REPO_URL", ""),
 		legacyReplicas:       value("RUNNER_REPLICAS", "1"),
+		hostAdmission:        hostAdmission,
 	}
 	if cfg.runnerGroup == "" {
 		cfg.runnerGroup = scaleset.DefaultRunnerGroup
@@ -330,6 +350,15 @@ func (c config) validate() error {
 		return errors.New("current architecture cannot be empty")
 	case c.maximumActiveWorkers < 0:
 		return errors.New("PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS must be a positive integer")
+	case c.hostAdmission.enabled && (c.hostAdmission.namespace == "" ||
+		c.hostAdmission.socketPath == "" ||
+		c.hostAdmission.hostFingerprint == "" ||
+		c.hostAdmission.profileFingerprint == ""):
+		return errors.New(
+			"host admission requires PITCREW_HOST_ADMISSION_NAMESPACE, " +
+				"PITCREW_HOST_ADMISSION_SOCKET, PITCREW_HOST_ADMISSION_HOST_FINGERPRINT, " +
+				"and PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT together",
+		)
 	}
 
 	if err := c.resources.validate(); err != nil {
@@ -383,12 +412,56 @@ func (c config) validate() error {
 		c.legacyRepositoryURLs,
 		c.legacyRepositoryURL,
 		c.legacyReplicas,
+		c.hostAdmission.namespace,
+		c.hostAdmission.socketPath,
+		c.hostAdmission.hostFingerprint,
+		c.hostAdmission.profileFingerprint,
 	} {
 		if strings.ContainsAny(value, "\r\n") {
 			return errors.New("runner configuration values cannot contain newlines")
 		}
 	}
 	return nil
+}
+
+// loadHostAdmissionConfig reads the four PITCREW_HOST_ADMISSION_* variables
+// that identify this profile to the host-local admission coordinator
+// (ADR-0003). All four empty means host admission is disabled and the
+// autoscaler behaves exactly as it did before this coordinator existed; any
+// other subset is an incomplete identity and fails closed rather than
+// guessing which combination the operator intended.
+func loadHostAdmissionConfig(
+	value func(name, fallback string) string,
+) (hostAdmissionConfig, error) {
+	namespace := strings.TrimSpace(value("PITCREW_HOST_ADMISSION_NAMESPACE", ""))
+	socketPath := strings.TrimSpace(value("PITCREW_HOST_ADMISSION_SOCKET", ""))
+	hostFingerprint := strings.TrimSpace(value("PITCREW_HOST_ADMISSION_HOST_FINGERPRINT", ""))
+	profileFingerprint := strings.TrimSpace(value("PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT", ""))
+
+	present := 0
+	for _, field := range []string{namespace, socketPath, hostFingerprint, profileFingerprint} {
+		if field != "" {
+			present++
+		}
+	}
+	switch present {
+	case 0:
+		return hostAdmissionConfig{}, nil
+	case 4:
+		return hostAdmissionConfig{
+			enabled:            true,
+			namespace:          namespace,
+			socketPath:         socketPath,
+			hostFingerprint:    hostFingerprint,
+			profileFingerprint: profileFingerprint,
+		}, nil
+	default:
+		return hostAdmissionConfig{}, errors.New(
+			"PITCREW_HOST_ADMISSION_NAMESPACE, PITCREW_HOST_ADMISSION_SOCKET, " +
+				"PITCREW_HOST_ADMISSION_HOST_FINGERPRINT, and " +
+				"PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT must be set together or not at all",
+		)
+	}
 }
 
 // loadWorkerResourcePolicy reads the canonical per-worker limits. Empty values

@@ -36,10 +36,24 @@ type recoveredContainer struct {
 	slotKey     string
 	revision    string
 	createdAt   time.Time
+	// unstarted reports a container Docker created but never started (a
+	// manager crash between docker create and docker start). Its zero value
+	// (false) means "already running", so existing recoveredContainer
+	// literals across the test suite keep their prior implicit meaning
+	// without needing to be updated. It must never be waited on or have its
+	// logs read until recovery either starts it or removes it exactly.
+	unstarted bool
+	// hostSlotKey is the pre-JIT host-admission lease slot key recorded on
+	// the container at create time (see hostAdmissionSlotLabelKey). It is
+	// empty when host admission was disabled when this container was
+	// created.
+	hostSlotKey string
 }
 
 type dockerClient interface {
 	run(ctx context.Context, launch containerLaunch) (string, error)
+	create(ctx context.Context, launch containerLaunch) (string, error)
+	start(ctx context.Context, containerID string) error
 	wait(ctx context.Context, containerID string) (int, error)
 	isRunning(ctx context.Context, containerID string) (bool, error)
 	inspectExit(ctx context.Context, containerID string) (containerExitState, bool)
@@ -148,6 +162,34 @@ func (d *dockerCLI) run(ctx context.Context, launch containerLaunch) (string, er
 	return containerID, nil
 }
 
+// create builds a container without starting it, so a caller can obtain an
+// active host-admission lease (see host_admission.go) before the runner
+// process ever executes. It must be followed by start; a container this
+// method returns is never running on its own.
+func (d *dockerCLI) create(ctx context.Context, launch containerLaunch) (string, error) {
+	if err := launch.resources.validate(); err != nil {
+		return "", fmt.Errorf("reject worker launch with invalid resource policy: %w", err)
+	}
+	output, err := d.executor.run(ctx, buildDockerCreateArguments(launch)...)
+	if err != nil {
+		return "", fmt.Errorf("docker create failed: %w", err)
+	}
+	containerID := strings.TrimSpace(string(output))
+	if containerID == "" {
+		return "", errors.New("docker create returned an empty container ID")
+	}
+	return containerID, nil
+}
+
+// start begins a container docker create returned. It must never be called
+// for a slot key without an active host-admission lease.
+func (d *dockerCLI) start(ctx context.Context, containerID string) error {
+	if _, err := d.executor.run(ctx, "start", containerID); err != nil {
+		return fmt.Errorf("docker start %s failed: %w", containerID, err)
+	}
+	return nil
+}
+
 func (d *dockerCLI) validateVolumes(
 	ctx context.Context,
 	volumes []readOnlyVolume,
@@ -214,15 +256,28 @@ func (d *dockerCLI) validateNetwork(
 }
 
 func buildDockerRunArguments(launch containerLaunch) []string {
-	arguments := []string{
-		"run",
-		"--rm",
-		"--detach",
+	return dockerLaunchArguments("run", true, launch)
+}
+
+// buildDockerCreateArguments produces the same container configuration as
+// buildDockerRunArguments, minus --detach, since docker create never starts
+// the container's entrypoint.
+func buildDockerCreateArguments(launch containerLaunch) []string {
+	return dockerLaunchArguments("create", false, launch)
+}
+
+func dockerLaunchArguments(verb string, detach bool, launch containerLaunch) []string {
+	arguments := []string{verb, "--rm"}
+	if detach {
+		arguments = append(arguments, "--detach")
+	}
+	arguments = append(
+		arguments,
 		"--init",
 		"--workdir", "/actions-runner",
 		"--entrypoint", "/actions-runner/bin/Runner.Listener",
 		"--name", launch.name,
-	}
+	)
 	if launch.network != "" {
 		arguments = append(arguments, "--network", launch.network)
 	}
@@ -379,9 +434,12 @@ func (d *dockerCLI) listManaged(
 	output, err := d.executor.run(
 		ctx,
 		"ps",
+		"--all",
 		"--quiet",
 		"--filter", "label="+managedProfileLabelKey+"="+profileID,
 		"--filter", "label="+autoscalerLabelKey+"=true",
+		"--filter", "status=running",
+		"--filter", "status=created",
 	)
 	if err != nil {
 		return nil, fmt.Errorf("list managed autoscaler containers: %w", err)
@@ -414,9 +472,6 @@ func (d *dockerCLI) listManaged(
 
 	recovered := make([]recoveredContainer, 0, len(records))
 	for _, record := range records {
-		if !record.State.Running {
-			continue
-		}
 		labels := record.Config.Labels
 		if labels[managedProfileLabelKey] != profileID || labels[autoscalerLabelKey] != "true" {
 			return nil, fmt.Errorf("container %s does not have exact autoscaler ownership labels", record.ID)
@@ -441,6 +496,8 @@ func (d *dockerCLI) listManaged(
 			slotKey:     slotKey,
 			revision:    labels[workerRevisionLabelKey],
 			createdAt:   record.Created,
+			unstarted:   !record.State.Running,
+			hostSlotKey: labels[hostAdmissionSlotLabelKey],
 		})
 	}
 	sort.Slice(recovered, func(i, j int) bool {

@@ -294,6 +294,32 @@ func (d *boundedDockerClient) run(
 	)
 }
 
+func (d *boundedDockerClient) create(
+	ctx context.Context,
+	launch containerLaunch,
+) (string, error) {
+	return runContextOperation(
+		ctx,
+		dockerOperationTimeout,
+		func(operationContext context.Context) (string, error) {
+			return d.inner.create(operationContext, launch)
+		},
+	)
+}
+
+func (d *boundedDockerClient) start(
+	ctx context.Context,
+	containerID string,
+) error {
+	return runContextError(
+		ctx,
+		dockerOperationTimeout,
+		func(operationContext context.Context) error {
+			return d.inner.start(operationContext, containerID)
+		},
+	)
+}
+
 func (d *boundedDockerClient) wait(
 	ctx context.Context,
 	containerID string,
