@@ -1,0 +1,25 @@
+services:
+  admission-coordinator:
+    build: ./manager
+    image: ephemeral-runner-manager:host-admission
+    restart: unless-stopped
+    stop_grace_period: 30s
+    network_mode: none
+    entrypoint:
+      - /usr/local/bin/pitcrew-admission
+      - serve
+      - --socket
+      - /var/lib/pitcrew-admission/coordinator.sock
+      - --state-dir
+      - /var/lib/pitcrew-admission/state
+    labels:
+      pitcrew-host-admission-namespace: ${PITCREW_HOST_ADMISSION_NAMESPACE}
+      pitcrew-host-admission-protocol-version: ${PITCREW_HOST_ADMISSION_PROTOCOL_VERSION:-1}
+    volumes:
+      - host-admission-state:/var/lib/pitcrew-admission
+
+volumes:
+  host-admission-state:
+    name: ${PITCREW_HOST_ADMISSION_VOLUME}
+    labels:
+      pitcrew-host-admission-namespace: ${PITCREW_HOST_ADMISSION_NAMESPACE}

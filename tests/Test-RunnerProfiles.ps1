@@ -33,6 +33,8 @@ $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
+$hostAdmissionComposePath = Join-Path $runnerRoot 'host-admission.compose.yml'
+$hostAdmissionManagerComposePath = Join-Path $runnerRoot 'host-admission.manager.compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
 $activeManagerContractVersion = 17
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
@@ -88,6 +90,8 @@ function Copy-RunnerFixture {
         'RunnerProfiles.Functions.ps1',
         'runner-profile.schema.json',
         'docker-compose.yml',
+        'host-admission.compose.yml',
+        'host-admission.manager.compose.yml',
         'manager',
         'profiles'
     )) {
@@ -301,6 +305,8 @@ $requiredPaths = @(
     $diagnosticsPath,
     $reconciliationPath,
     $composePath,
+    $hostAdmissionComposePath,
+    $hostAdmissionManagerComposePath,
     $routingPath
 )
 foreach ($path in $requiredPaths) {
@@ -2020,6 +2026,9 @@ Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Na
 Add-Check ($defaultProfile.ManagerContractVersion -eq 17) 'The setup contract does not activate the zero-capacity manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
+    $defaultProfile.DefinedHostAdmissionContractVersion -eq 18
+) 'The setup contract does not expose the defined host-admission contract.'
+Add-Check (
     $defaultProfile.DefinedDiagnosticsContractVersion -eq 17
 ) 'The setup contract does not expose the defined zero-capacity manager contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
@@ -2513,14 +2522,6 @@ try {
         serviceNetwork = @{
             source = 'pitcrew-browser-services-v1'
         }
-        hostAdmission = @{
-            namespace = 'primary'
-            capacityUnits = 12
-            safetyMarginUnits = 2
-            workerCostUnits = 2
-            reservationUnits = 4
-            borrowable = $false
-        }
         verificationCommands = @('browser --version')
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $externalManifestPath -Encoding UTF8
 
@@ -2544,19 +2545,192 @@ try {
     Add-Check (
         $externalProfile.ServiceNetworkValue -eq 'pitcrew-browser-services-v1'
     ) 'External profile service network was not serialized canonically.'
+
+    $admissionManifestPath = Join-Path $externalDirectory 'admission-profile.json'
+    $admissionManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $admissionManifest |
+        Add-Member -NotePropertyName hostAdmission -NotePropertyValue ([PSCustomObject]@{
+            namespace = 'primary'
+            capacityUnits = 12
+            safetyMarginUnits = 2
+            workerCostUnits = 2
+            reservationUnits = 4
+            borrowable = $false
+        })
+    $admissionManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $admissionManifestPath -Encoding UTF8
+    $admissionProfile = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $admissionManifestPath `
+        -HostName 'test-host'
+    Add-ThrowsCheck `
+        -Action {
+            Assert-RunnerResilienceContractActivation -Profile $admissionProfile
+        } `
+        -ExpectedMessage 'Host-local admission requires manager contract 18.*activates contract 17' `
+        -Failure 'Host-local admission activated before both manager modes implement its contract.'
     Add-Check (
-        $externalProfile.HostAdmission.Namespace -ceq 'primary' -and
-        $externalProfile.HostAdmission.CapacityUnits -eq 12 -and
-        $externalProfile.HostAdmission.SafetyMarginUnits -eq 2 -and
-        $externalProfile.HostAdmission.EffectiveBudgetUnits -eq 10 -and
-        $externalProfile.HostAdmission.WorkerCostUnits -eq 2 -and
-        $externalProfile.HostAdmission.ReservationUnits -eq 4 -and
-        -not $externalProfile.HostAdmission.Borrowable
+        $admissionProfile.HostAdmission.Namespace -ceq 'primary' -and
+        $admissionProfile.HostAdmission.CapacityUnits -eq 12 -and
+        $admissionProfile.HostAdmission.SafetyMarginUnits -eq 2 -and
+        $admissionProfile.HostAdmission.EffectiveBudgetUnits -eq 10 -and
+        $admissionProfile.HostAdmission.WorkerCostUnits -eq 2 -and
+        $admissionProfile.HostAdmission.ReservationUnits -eq 4 -and
+        -not $admissionProfile.HostAdmission.Borrowable
     ) 'External profile host-admission policy was not canonicalized.'
     Add-Check (
-        $externalProfile.HostAdmission.HostPolicyFingerprint -match '^[0-9a-f]{64}$' -and
-        $externalProfile.HostAdmission.ProfilePolicyFingerprint -match '^[0-9a-f]{64}$'
+        $admissionProfile.HostAdmission.HostPolicyFingerprint -match '^[0-9a-f]{64}$' -and
+        $admissionProfile.HostAdmission.ProfilePolicyFingerprint -match '^[0-9a-f]{64}$'
     ) 'External profile host-admission policy was not fingerprinted.'
+    Add-Check (
+        $admissionProfile.HostAdmissionDirectory -eq (
+            Join-Path $runnerRoot '.pitcrew-state' 'host-admission' 'primary'
+        ) -and
+        $admissionProfile.HostAdmissionDesiredPolicyPath -eq (
+            Join-Path $runnerRoot '.pitcrew-state' 'host-admission' 'primary' 'desired-policy.json'
+        ) -and
+        $admissionProfile.HostAdmissionAcknowledgementPath -eq (
+            Join-Path $runnerRoot '.pitcrew-state' 'host-admission' 'primary' 'acknowledged-policy.json'
+        ) -and
+        $admissionProfile.HostAdmissionVolumeName -ceq 'pitcrew-host-admission-primary' -and
+        $admissionProfile.HostAdmissionComposeProjectName -ceq 'pitcrew-host-admission-primary' -and
+        $admissionProfile.HostAdmissionSocketPath -ceq
+            '/var/lib/pitcrew-admission/coordinator.sock'
+    ) 'External profile did not derive stable host-admission state and runtime identities.'
+
+    $hostAdmissionPolicy = Update-RunnerHostAdmissionDesiredPolicy `
+        -CurrentPolicy $null `
+        -Profile $admissionProfile `
+        -Generation 1
+    Add-Check (
+        $hostAdmissionPolicy.schemaVersion -eq 1 -and
+        $hostAdmissionPolicy.generation -eq 1 -and
+        $hostAdmissionPolicy.namespace -ceq 'primary' -and
+        $hostAdmissionPolicy.capacityUnits -eq 12 -and
+        $hostAdmissionPolicy.safetyMarginUnits -eq 2 -and
+        $hostAdmissionPolicy.effectiveBudgetUnits -eq 10 -and
+        $hostAdmissionPolicy.profiles.Count -eq 1 -and
+        $hostAdmissionPolicy.profiles[0].profile -ceq 'browser-testing'
+    ) 'Selected profile did not create a canonical desired host-admission policy.'
+    $sameHostAdmissionPolicy = New-RunnerHostAdmissionDesiredPolicy `
+        -Generation 99 `
+        -Namespace primary `
+        -CapacityUnits 12 `
+        -SafetyMarginUnits 2 `
+        -ProfilePolicies @(
+            [PSCustomObject]@{
+                Profile = 'browser-testing'
+                WorkerCostUnits = 2
+                ReservationUnits = 4
+                Borrowable = $false
+            }
+        )
+    Add-Check (
+        (Get-RunnerHostAdmissionPolicySignature -Policy $hostAdmissionPolicy) -ceq
+        (Get-RunnerHostAdmissionPolicySignature -Policy $sameHostAdmissionPolicy)
+    ) 'Host-admission policy equality incorrectly depends on generation.'
+    $serviceAdmissionPolicy = ConvertTo-RunnerHostAdmissionServicePolicy `
+        -Policy $hostAdmissionPolicy
+    Add-Check (
+        $serviceAdmissionPolicy.generation -eq 1 -and
+        $serviceAdmissionPolicy.totalUnits -eq 10 -and
+        $serviceAdmissionPolicy.profiles.Count -eq 1 -and
+        $serviceAdmissionPolicy.profiles[0].profileId -ceq 'browser-testing' -and
+        $serviceAdmissionPolicy.profiles[0].unitCost -eq 2 -and
+        $serviceAdmissionPolicy.profiles[0].reservedUnits -eq 4 -and
+        -not $serviceAdmissionPolicy.profiles[0].borrowable
+    ) 'Desired host policy did not project into the coordinator wire contract.'
+    $roundTrippedServicePolicy = (
+        $serviceAdmissionPolicy |
+            ConvertTo-Json -Depth 10 |
+            ConvertFrom-Json -Depth 10
+    )
+    $roundTrippedServicePolicy |
+        Add-Member -NotePropertyName ignoredFutureField -NotePropertyValue 'ignored'
+    Add-Check (
+        (
+            Get-RunnerHostAdmissionServicePolicySignature `
+                -Policy $serviceAdmissionPolicy
+        ) -ceq (
+            Get-RunnerHostAdmissionServicePolicySignature `
+                -Policy $roundTrippedServicePolicy
+        )
+    ) 'Coordinator service-policy identity depends on JSON property order or additive fields.'
+
+    $batchAdmissionProfile = [PSCustomObject]@{
+        Name = 'batch'
+        HostAdmission = ConvertTo-RunnerHostAdmissionPolicy `
+            -Policy ([PSCustomObject]@{
+                namespace = 'primary'
+                capacityUnits = 12
+                safetyMarginUnits = 2
+                workerCostUnits = 3
+                reservationUnits = 3
+                borrowable = $true
+            }) `
+            -ProfileName batch
+    }
+    $twoProfileAdmissionPolicy = Update-RunnerHostAdmissionDesiredPolicy `
+        -CurrentPolicy $hostAdmissionPolicy `
+        -Profile $batchAdmissionProfile `
+        -Generation 2
+    Add-Check (
+        ($twoProfileAdmissionPolicy.profiles.profile -join ',') -ceq
+            'batch,browser-testing'
+    ) 'Host-admission policy update did not preserve and sort unrelated profiles.'
+
+    $conflictingAdmissionProfile = [PSCustomObject]@{
+        Name = 'conflicting'
+        HostAdmission = ConvertTo-RunnerHostAdmissionPolicy `
+            -Policy ([PSCustomObject]@{
+                namespace = 'primary'
+                capacityUnits = 14
+                safetyMarginUnits = 2
+                workerCostUnits = 2
+                reservationUnits = 2
+                borrowable = $true
+            }) `
+            -ProfileName conflicting
+    }
+    Add-ThrowsCheck `
+        -Action {
+            Update-RunnerHostAdmissionDesiredPolicy `
+                -CurrentPolicy $twoProfileAdmissionPolicy `
+                -Profile $conflictingAdmissionProfile `
+                -Generation 3
+        } `
+        -ExpectedMessage 'conflicts with other participating profiles' `
+        -Failure 'One profile changed host-wide admission policy while other profiles remained enrolled.'
+
+    $disabledExternalProfile = [PSCustomObject]@{
+        Name = 'browser-testing'
+        HostAdmission = $null
+    }
+    $oneProfileAdmissionPolicy = Update-RunnerHostAdmissionDesiredPolicy `
+        -CurrentPolicy $twoProfileAdmissionPolicy `
+        -Profile $disabledExternalProfile `
+        -Generation 3
+    Add-Check (
+        $oneProfileAdmissionPolicy.profiles.Count -eq 1 -and
+        $oneProfileAdmissionPolicy.profiles[0].profile -ceq 'batch'
+    ) 'Disabling one profile removed or changed an unrelated admission policy.'
+    $disabledBatchProfile = [PSCustomObject]@{
+        Name = 'batch'
+        HostAdmission = $null
+    }
+    $emptyAdmissionPolicy = Update-RunnerHostAdmissionDesiredPolicy `
+        -CurrentPolicy $oneProfileAdmissionPolicy `
+        -Profile $disabledBatchProfile `
+        -Generation 4
+    Add-Check (
+        $emptyAdmissionPolicy.profiles.Count -eq 0 -and
+        $emptyAdmissionPolicy.namespace -ceq 'primary'
+    ) 'Removing the final profile did not preserve a drainable empty host policy.'
     Add-Check ($externalProfile.ManifestKind -eq 'external') 'An external profile did not retain its manifest source kind.'
     Add-Check (
         $externalProfile.ManifestSha256 -match '^[0-9a-f]{64}$'
@@ -2584,12 +2758,6 @@ try {
         $externalStaticProfile.configuration.serviceNetwork.source -eq
             'pitcrew-browser-services-v1'
     ) 'Static profile state did not retain the external service network.'
-    Add-Check (
-        $externalStaticProfile.configuration.hostAdmission.namespace -ceq 'primary' -and
-        -not $externalStaticProfile.configuration.hostAdmission.PSObject.Properties[
-            'capacityUnits'
-        ]
-    ) 'Static profile state did not isolate host-admission topology from mutable policy.'
     $externalEnvironment = New-RunnerEnvironmentContent `
         -Profile $externalProfile `
         -AccessToken 'test-registration-token' `
@@ -2605,10 +2773,41 @@ try {
         $externalEnvironment -match
             '(?m)^PITCREW_SERVICE_NETWORK=pitcrew-browser-services-v1$'
     ) 'External profile environment omitted its service network contract.'
+    $admissionStaticProfile = New-RunnerStaticProfileState `
+        -Profile $admissionProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $admissionStaticProfile.configuration.hostAdmission.namespace -ceq 'primary' -and
+        -not $admissionStaticProfile.configuration.hostAdmission.PSObject.Properties[
+            'capacityUnits'
+        ]
+    ) 'Static profile state did not isolate host-admission topology from mutable policy.'
+    $admissionEnvironment = New-RunnerEnvironmentContent `
+        -Profile $admissionProfile `
+        -AccessToken 'test-registration-token' `
+        -WorkerRevision $admissionStaticProfile.workerRevision `
+        -SessionOwner 'pitcrew-browser-testing' `
+        -AssumeUnversionedCurrent $false `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $admissionEnvironment -match
+            '(?m)^PITCREW_HOST_ADMISSION_NAMESPACE=primary$' -and
+        $admissionEnvironment -match
+            '(?m)^PITCREW_HOST_ADMISSION_VOLUME=pitcrew-host-admission-primary$' -and
+        $admissionEnvironment -match
+            '(?m)^PITCREW_HOST_ADMISSION_SOCKET=/var/lib/pitcrew-admission/coordinator\.sock$' -and
+        $admissionEnvironment -match
+            '(?m)^PITCREW_HOST_ADMISSION_HOST_FINGERPRINT=[0-9a-f]{64}$' -and
+        $admissionEnvironment -match
+            '(?m)^PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT=[0-9a-f]{64}$'
+    ) 'Admission profile environment omitted its host-admission identity contract.'
 
     $changedAdmissionManifestPath = Join-Path $externalDirectory 'changed-admission-profile.json'
     $changedAdmissionManifest = Get-Content `
-        -LiteralPath $externalManifestPath `
+        -LiteralPath $admissionManifestPath `
         -Raw `
         -Encoding UTF8 |
         ConvertFrom-Json -Depth 10
@@ -2622,12 +2821,12 @@ try {
         -HostName 'test-host'
     Add-Check (
         $changedAdmissionProfile.HostAdmission.HostPolicyFingerprint -cne
-            $externalProfile.HostAdmission.HostPolicyFingerprint -and
+            $admissionProfile.HostAdmission.HostPolicyFingerprint -and
         $changedAdmissionProfile.HostAdmission.ProfilePolicyFingerprint -ceq
-            $externalProfile.HostAdmission.ProfilePolicyFingerprint
+            $admissionProfile.HostAdmission.ProfilePolicyFingerprint
     ) 'Host-wide admission changes did not isolate the host-policy fingerprint.'
     $externalStaticForAdmissionComparison = New-RunnerStaticProfileState `
-        -Profile $externalProfile `
+        -Profile $admissionProfile `
         -Scope repo `
         -OrgName '' `
         -EnterpriseName '' `
@@ -2647,7 +2846,7 @@ try {
 
     $changedProfilePolicyManifestPath = Join-Path $externalDirectory 'changed-admission-profile-policy.json'
     $changedProfilePolicyManifest = Get-Content `
-        -LiteralPath $externalManifestPath `
+        -LiteralPath $admissionManifestPath `
         -Raw `
         -Encoding UTF8 |
         ConvertFrom-Json -Depth 10
@@ -2662,12 +2861,12 @@ try {
         -HostName 'test-host'
     Add-Check (
         $changedProfilePolicy.HostAdmission.HostPolicyFingerprint -ceq
-            $externalProfile.HostAdmission.HostPolicyFingerprint -and
+            $admissionProfile.HostAdmission.HostPolicyFingerprint -and
         $changedProfilePolicy.HostAdmission.ProfilePolicyFingerprint -cne
-            $externalProfile.HostAdmission.ProfilePolicyFingerprint
+            $admissionProfile.HostAdmission.ProfilePolicyFingerprint
     ) 'Per-profile admission changes did not isolate the profile-policy fingerprint.'
     $externalStaticForProfilePolicyComparison = New-RunnerStaticProfileState `
-        -Profile $externalProfile `
+        -Profile $admissionProfile `
         -Scope repo `
         -OrgName '' `
         -EnterpriseName '' `
@@ -2687,7 +2886,7 @@ try {
 
     $changedNamespaceManifestPath = Join-Path $externalDirectory 'changed-admission-namespace-profile.json'
     $changedNamespaceManifest = Get-Content `
-        -LiteralPath $externalManifestPath `
+        -LiteralPath $admissionManifestPath `
         -Raw `
         -Encoding UTF8 |
         ConvertFrom-Json -Depth 10
@@ -2700,7 +2899,7 @@ try {
         -ProfilePath $changedNamespaceManifestPath `
         -HostName 'test-host'
     $externalStaticForNamespaceComparison = New-RunnerStaticProfileState `
-        -Profile $externalProfile `
+        -Profile $admissionProfile `
         -Scope repo `
         -OrgName '' `
         -EnterpriseName '' `
@@ -2761,7 +2960,7 @@ try {
     )) {
         $invalidAdmissionManifestPath = Join-Path $externalDirectory $invalidAdmissionCase.Name
         $invalidAdmissionManifest = Get-Content `
-            -LiteralPath $externalManifestPath `
+            -LiteralPath $admissionManifestPath `
             -Raw `
             -Encoding UTF8 |
             ConvertFrom-Json -Depth 10
@@ -4442,9 +4641,18 @@ $managerEntrypoint = Get-Content -LiteralPath $managerEntrypointPath -Raw -Encod
 $autoscalerModule = Get-Content -LiteralPath $autoscalerModulePath -Raw -Encoding UTF8
 $autoscalerHardware = Get-Content -LiteralPath $autoscalerHardwarePath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
+$setupSource = Get-Content -LiteralPath $setupPath -Raw -Encoding UTF8
 $observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
 $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
+$hostAdmissionCompose = Get-Content `
+    -LiteralPath $hostAdmissionComposePath `
+    -Raw `
+    -Encoding UTF8
+$hostAdmissionManagerCompose = Get-Content `
+    -LiteralPath $hostAdmissionManagerComposePath `
+    -Raw `
+    -Encoding UTF8
 $exampleEnvironment = Get-Content -LiteralPath (Join-Path $runnerRoot '.env.example') -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
 Add-Check ($manager -match [regex]::Escape('MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"')) 'The manager cleanup label is not profile-specific.'
@@ -4491,6 +4699,36 @@ Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The man
 Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
 Add-Check ($managerDockerfile -match [regex]::Escape('ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]')) 'The manager image does not use the mode-selecting entrypoint.'
+Add-Check (
+    $hostAdmissionCompose -match '(?m)^  admission-coordinator:\r?$' -and
+    $hostAdmissionCompose -match
+        [regex]::Escape('/usr/local/bin/pitcrew-admission') -and
+    $hostAdmissionCompose -match
+        [regex]::Escape('/var/lib/pitcrew-admission/coordinator.sock') -and
+    $hostAdmissionCompose -match
+        'pitcrew-host-admission-namespace: \$\{PITCREW_HOST_ADMISSION_NAMESPACE\}' -and
+    ([regex]::Matches(
+        $hostAdmissionCompose,
+        'pitcrew-host-admission-namespace: \$\{PITCREW_HOST_ADMISSION_NAMESPACE\}'
+    )).Count -eq 2 -and
+    $hostAdmissionCompose -match '(?m)^    network_mode: none\r?$' -and
+    $hostAdmissionCompose -notmatch 'docker\.sock|ports:'
+) 'The admission service Compose contract exposes Docker or a host port, or omits exact identity.'
+Add-Check (
+    $hostAdmissionManagerCompose -match
+        'external:\s+true' -and
+    $hostAdmissionManagerCompose -match
+        [regex]::Escape('PITCREW_HOST_ADMISSION_SOCKET') -and
+    $hostAdmissionManagerCompose -match
+        [regex]::Escape('host-admission-state:/var/lib/pitcrew-admission') -and
+    $hostAdmissionManagerCompose -notmatch 'docker\.sock'
+) 'The manager admission override does not mount only the external internal-state volume.'
+Add-Check (
+    $setupSource -match
+        '(?s)function Invoke-RunnerHostAdmissionCompose.*?hostAdmissionComposeEnvironmentNames.*?Remove-Item.*?finally.*?Set-Item' -and
+    $setupSource -match
+        [regex]::Escape('Get-RunnerHostAdmissionServicePolicySignature -Policy $status.policy')
+) 'Host-admission Compose or acknowledgement handling is vulnerable to ambient environment or raw JSON ordering.'
 Add-Check ($manager -match [regex]::Escape('diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}"')) 'The fixed manager does not restore its durable operation journal.'
 Add-Check ($manager -match [regex]::Escape('record_manager_diagnostic')) 'The fixed manager does not record operation evidence.'
 Add-Check ($manager -match [regex]::Escape('render_fixed_capacity_evidence')) 'The fixed manager does not publish capacity-deficit evidence.'
