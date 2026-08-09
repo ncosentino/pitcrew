@@ -149,15 +149,15 @@ fixed_acquire_activate() {
         --entrypoint /bin/sh \
         "${IMAGE}" \
         -c '
-            set -eu
+            set -u
             . /usr/local/bin/host-admission.sh
             host_admission_acquire \
                 "/state/slots/${TEST_SLOT}" \
                 "${TEST_SLOT}" \
-                /state/slots
+                /state/slots || exit $?
             host_admission_activate \
                 "/state/slots/${TEST_SLOT}" \
-                "${TEST_SLOT}"
+                "${TEST_SLOT}" || exit $?
         '
 }
 
@@ -260,7 +260,8 @@ run_mode_pair() {
     [ "${success_count}" -eq 2 ] ||
         fail "${scenario} admitted ${success_count} slots against budget 2."
     if ! awk -F'|' '$1 == "denied" && $4 != 3 { exit 1 }' "${results}"/*; then
-        fail "${scenario} observed a non-budget admission failure."
+        failures=$(awk -F'|' '$1 == "denied" && $4 != 3 { print }' "${results}"/*)
+        fail "${scenario} observed a non-budget admission failure: ${failures}"
     fi
     for profile in "${left_profile}" "${right_profile}"; do
         profile_successes=$(awk -F'|' \
