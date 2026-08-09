@@ -36,7 +36,7 @@ $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $hostAdmissionComposePath = Join-Path $runnerRoot 'host-admission.compose.yml'
 $hostAdmissionManagerComposePath = Join-Path $runnerRoot 'host-admission.manager.compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 17
+$activeManagerContractVersion = 18
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 
@@ -1830,6 +1830,254 @@ Add-Check (
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract fifteen stopped accepting telemetry without host pressure.'
 
+$disabledHostAdmissionV18 = [PSCustomObject][ordered]@{
+    status = 'disabled'
+    namespace = $null
+    epoch = $null
+    decisionSequence = $null
+    capacityUnits = $null
+    safetyMarginUnits = $null
+    effectiveTotalUnits = $null
+    availableUnits = $null
+    hostPolicyFingerprint = $null
+    accounting = $null
+    lastDecision = $null
+}
+$unavailableHostAdmissionV18 = [PSCustomObject][ordered]@{
+    status = 'unavailable'
+    namespace = 'primary'
+    epoch = $null
+    decisionSequence = $null
+    capacityUnits = $null
+    safetyMarginUnits = $null
+    effectiveTotalUnits = $null
+    availableUnits = $null
+    hostPolicyFingerprint = $null
+    accounting = $null
+    lastDecision = $null
+}
+$availableHostAdmissionAccountingV18 = [PSCustomObject][ordered]@{
+    unitCost = 1
+    reservedUnits = 2
+    borrowable = $true
+    profilePolicyFingerprint = 'def456abc789'
+    activeUnits = 3
+    provisionalUnits = 1
+    heldUnits = 4
+    borrowedUnits = 2
+    pendingUnits = 5
+    withheldUnits = 1
+}
+$availableHostAdmissionDecisionV18 = [PSCustomObject][ordered]@{
+    sequence = 42
+    command = 'acquire'
+    granted = $true
+    failureCategory = $null
+    decidedAtUnixNano = 1700000000000000000
+}
+$availableHostAdmissionV18 = [PSCustomObject][ordered]@{
+    status = 'available'
+    namespace = 'primary'
+    epoch = 3
+    decisionSequence = 42
+    capacityUnits = 12
+    safetyMarginUnits = 2
+    effectiveTotalUnits = 10
+    availableUnits = 4
+    hostPolicyFingerprint = 'abc123def456'
+    accounting = $availableHostAdmissionAccountingV18
+    lastDecision = $availableHostAdmissionDecisionV18
+}
+
+function New-RunnerHostAdmissionSchemaFixture {
+    param(
+        [Parameter(Mandatory)][int]$ManagerContractVersion,
+        [object]$HostAdmission
+    )
+
+    $fixture = (
+        $fixedStateV16 |
+            ConvertTo-Json -Depth 20 |
+            ConvertFrom-Json -Depth 20
+    )
+    $fixture.managerContractVersion = $ManagerContractVersion
+    if ($PSBoundParameters.ContainsKey('HostAdmission')) {
+        $fixture |
+            Add-Member -NotePropertyName hostAdmission -NotePropertyValue (
+                $HostAdmission |
+                    ConvertTo-Json -Depth 20 |
+                    ConvertFrom-Json -Depth 20
+            )
+    }
+    return $fixture
+}
+
+Add-Check (
+    (
+        (New-RunnerHostAdmissionSchemaFixture -ManagerContractVersion 17) |
+            ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract seventeen stopped accepting state without hostAdmission.'
+
+Add-Check (-not (
+    (
+        (New-RunnerHostAdmissionSchemaFixture -ManagerContractVersion 18) |
+            ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract eighteen accepted state without hostAdmission.'
+
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $null
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'Manager contract eighteen accepted a null hostAdmission.'
+
+Add-Check (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $disabledHostAdmissionV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eighteen rejected an explicit disabled hostAdmission.'
+
+Add-Check (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $unavailableHostAdmissionV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eighteen rejected an unavailable hostAdmission with a namespace.'
+
+Add-Check (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $availableHostAdmissionV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eighteen rejected a fully populated available hostAdmission.'
+
+$degradedHostAdmissionV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$degradedHostAdmissionV18.status = 'degraded'
+Add-Check (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $degradedHostAdmissionV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract eighteen rejected a fully populated degraded hostAdmission.'
+
+$disabledWithNamespaceV18 = (
+    $disabledHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$disabledWithNamespaceV18.namespace = 'primary'
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $disabledWithNamespaceV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A disabled hostAdmission accepted a leaked namespace.'
+
+$unavailableWithoutNamespaceV18 = (
+    $unavailableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unavailableWithoutNamespaceV18.namespace = $null
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $unavailableWithoutNamespaceV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'An unavailable hostAdmission accepted a missing namespace.'
+
+$availableWithoutNamespaceV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$availableWithoutNamespaceV18.namespace = $null
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $availableWithoutNamespaceV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'An available hostAdmission accepted a missing namespace.'
+
+$staleHostAdmissionAccountingV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$staleHostAdmissionAccountingV18.accounting.PSObject.Properties.Remove('borrowable')
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $staleHostAdmissionAccountingV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A hostAdmission accounting object accepted a missing borrowable field.'
+
+$invalidDecisionCommandV18 = (
+    $availableHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidDecisionCommandV18.lastDecision.command = 'delete'
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $invalidDecisionCommandV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A hostAdmission lastDecision accepted an unsupported command.'
+
+$fabricatedZeroCapacityV18 = (
+    $disabledHostAdmissionV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$fabricatedZeroCapacityV18.capacityUnits = 0
+Add-Check (-not (
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $fabricatedZeroCapacityV18
+        ) | ConvertTo-Json -Depth 20
+    ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
+)) 'A disabled hostAdmission accepted a fabricated zero capacityUnits instead of null.'
+
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
 
@@ -2023,13 +2271,13 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 17) 'The setup contract does not activate the zero-capacity manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 18) 'The setup contract does not activate the host-admission manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
     $defaultProfile.DefinedHostAdmissionContractVersion -eq 18
 ) 'The setup contract does not expose the defined host-admission contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 17
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 18
 ) 'The setup contract does not expose the defined zero-capacity manager contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
@@ -2382,7 +2630,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=18$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -2568,9 +2816,14 @@ try {
         -RootPath $runnerRoot `
         -ProfilePath $admissionManifestPath `
         -HostName 'test-host'
+    Assert-RunnerResilienceContractActivation -Profile $admissionProfile
+    Add-Check $true 'Host-local admission did not activate now that both manager modes implement contract 18.'
+    $legacyHostAdmissionProfile = $admissionProfile.PSObject.Copy()
+    $legacyHostAdmissionProfile.ManagerContractVersion =
+        $admissionProfile.DefinedHostAdmissionContractVersion - 1
     Add-ThrowsCheck `
         -Action {
-            Assert-RunnerResilienceContractActivation -Profile $admissionProfile
+            Assert-RunnerResilienceContractActivation -Profile $legacyHostAdmissionProfile
         } `
         -ExpectedMessage 'Host-local admission requires manager contract 18.*activates contract 17' `
         -Failure 'Host-local admission activated before both manager modes implement its contract.'
@@ -2639,11 +2892,16 @@ try {
     Add-Check (
         $serviceAdmissionPolicy.generation -eq 1 -and
         $serviceAdmissionPolicy.totalUnits -eq 10 -and
+        $serviceAdmissionPolicy.namespace -ceq 'primary' -and
+        $serviceAdmissionPolicy.capacityUnits -eq 12 -and
+        $serviceAdmissionPolicy.safetyMarginUnits -eq 2 -and
+        $serviceAdmissionPolicy.hostPolicyFingerprint -match '^[0-9a-f]{64}$' -and
         $serviceAdmissionPolicy.profiles.Count -eq 1 -and
         $serviceAdmissionPolicy.profiles[0].profileId -ceq 'browser-testing' -and
         $serviceAdmissionPolicy.profiles[0].unitCost -eq 2 -and
         $serviceAdmissionPolicy.profiles[0].reservedUnits -eq 4 -and
-        -not $serviceAdmissionPolicy.profiles[0].borrowable
+        -not $serviceAdmissionPolicy.profiles[0].borrowable -and
+        $serviceAdmissionPolicy.profiles[0].profilePolicyFingerprint -match '^[0-9a-f]{64}$'
     ) 'Desired host policy did not project into the coordinator wire contract.'
     $roundTrippedServicePolicy = (
         $serviceAdmissionPolicy |
@@ -3594,7 +3852,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'Fixed setup did not activate manager contract 17.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=18$') 'Fixed setup did not activate manager contract 18.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -3614,7 +3872,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'Autoscaled setup did not activate manager contract 17.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=18$') 'Autoscaled setup did not activate manager contract 18.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -4791,12 +5049,12 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_W
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-17}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-18}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_HOST_PROC_PATH: /host/proc')) 'Manager containers do not use the fixed host-proc telemetry path.'
 Add-Check ($compose -match [regex]::Escape('/proc:/host/proc:ro')) 'Manager containers do not mount Docker-host proc read-only.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
 Add-Check ($compose -notmatch '/host/proc:.+runner') 'Compose appears to expose Docker-host proc to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=17$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=18$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

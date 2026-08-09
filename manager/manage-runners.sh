@@ -11,8 +11,8 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/diagnostics.sh"
 . "${SCRIPT_DIRECTORY}/host-admission.sh"
 
-MANAGER_CONTRACT_VERSION=17
-EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-17}"
+MANAGER_CONTRACT_VERSION=18
+EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-18}"
 if [ "${EXPECTED_CONTRACT_VERSION}" != "${MANAGER_CONTRACT_VERSION}" ]; then
     echo "[manager] contract mismatch: setup expects ${EXPECTED_CONTRACT_VERSION}, manager provides ${MANAGER_CONTRACT_VERSION}" >&2
     exit 1
@@ -449,6 +449,7 @@ publish_observed_state() {
     observed_journal_path="/tmp/pitcrew-observed-journal.json"
     observed_health_path="/tmp/pitcrew-observed-subsystem-health.json"
     observed_capacity_path="/tmp/pitcrew-observed-capacity-evidence.json"
+    observed_host_admission_path="/tmp/pitcrew-observed-host-admission.json"
     render_operation_journal "${DIAGNOSTICS_DIRECTORY}" "${observed_journal_path}" || true
     if render_subsystem_health "${DIAGNOSTICS_DIRECTORY}" "${observed_health_path}"; then
         render_fixed_capacity_evidence \
@@ -460,6 +461,7 @@ publish_observed_state() {
     else
         write_unavailable_capacity_evidence "${observed_capacity_path}" || true
     fi
+    host_admission_status "${observed_host_admission_path}" || true
 
     if write_manager_observed_state \
         "${OBSERVED_STATE_PATH}" \
@@ -482,7 +484,8 @@ publish_observed_state() {
         "${observed_capacity_path}" \
         "${IMAGE}" \
         "${WORKER_IMAGE_ID}" \
-        "${observed_hardware_path}"; then
+        "${observed_hardware_path}" \
+        "${observed_host_admission_path}"; then
         LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
     else
         mark_observed_state_dirty
@@ -500,7 +503,8 @@ publish_observed_state() {
         "${observed_slots_path}" \
         "${observed_journal_path}" \
         "${observed_health_path}" \
-        "${observed_capacity_path}"
+        "${observed_capacity_path}" \
+        "${observed_host_admission_path}"
     rm -f "${HOST_HARDWARE_FALLBACK_PATH}"
 }
 

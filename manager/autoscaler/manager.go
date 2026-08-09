@@ -955,6 +955,7 @@ func (m *autoscalerManager) publishObserved() error {
 	}
 	applyResourceSample(&state, resourceSample)
 	m.applyDiagnostics(&state, snapshots)
+	m.applyHostAdmission(&state)
 	sort.Slice(state.Slots, func(i, j int) bool {
 		return state.Slots[i].Key < state.Slots[j].Key
 	})
@@ -962,6 +963,16 @@ func (m *autoscalerManager) publishObserved() error {
 		return fmt.Errorf("publish observed state: %w", err)
 	}
 	return nil
+}
+
+// applyHostAdmission publishes this profile's scoped host-local admission
+// telemetry (ADR-0003). Sampling it never fails: an unreachable coordinator
+// is reported as hostAdmission.status "unavailable" rather than as an error
+// that would block observed-state publication, since read/status failure
+// here affects diagnostics only and must never influence lifecycle.
+func (m *autoscalerManager) applyHostAdmission(state *observedState) {
+	observed := m.hostAdmission.sampleObservedHostAdmission()
+	state.HostAdmission = &observed
 }
 
 // applyDiagnostics publishes contract-12 durable operation evidence, subsystem

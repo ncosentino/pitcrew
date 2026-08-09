@@ -941,7 +941,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "17" \
+    "18" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1665,5 +1665,156 @@ jq '.managerContractVersion = 15 | del(.resourceTelemetry.hostPressure)' \
 assert_true \
     "Observed-state validation rejected contract-fifteen telemetry without host pressure." \
     observed_state_is_valid "${legacy_contract_sixteen_state}"
+
+assert_equals \
+    "18" \
+    "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "The fixed manager does not declare the contract-eighteen host admission activation."
+
+contract_eighteen_disabled_state="${TEMP_DIRECTORY}/contract-eighteen-disabled-state.json"
+jq '
+    .managerContractVersion = 18
+    | .hostAdmission = {
+        status: "disabled",
+        namespace: null,
+        epoch: null,
+        decisionSequence: null,
+        capacityUnits: null,
+        safetyMarginUnits: null,
+        effectiveTotalUnits: null,
+        availableUnits: null,
+        hostPolicyFingerprint: null,
+        accounting: null,
+        lastDecision: null
+    }
+' "${contract_sixteen_state_json}" > "${contract_eighteen_disabled_state}"
+assert_true \
+    "Contract-eighteen observed state with disabled host admission was rejected." \
+    observed_state_is_valid "${contract_eighteen_disabled_state}"
+
+invalid_contract_eighteen_state="${TEMP_DIRECTORY}/invalid-contract-eighteen-state.json"
+jq 'del(.hostAdmission)' \
+    "${contract_eighteen_disabled_state}" > "${invalid_contract_eighteen_state}"
+assert_false \
+    "Manager contract eighteen accepted a missing hostAdmission field." \
+    observed_state_is_valid "${invalid_contract_eighteen_state}"
+jq '.hostAdmission = null' \
+    "${contract_eighteen_disabled_state}" > "${invalid_contract_eighteen_state}"
+assert_false \
+    "Manager contract eighteen accepted a null hostAdmission field." \
+    observed_state_is_valid "${invalid_contract_eighteen_state}"
+jq '.hostAdmission.namespace = "ns"' \
+    "${contract_eighteen_disabled_state}" > "${invalid_contract_eighteen_state}"
+assert_false \
+    "Disabled host admission retained a measured namespace." \
+    observed_state_is_valid "${invalid_contract_eighteen_state}"
+
+legacy_contract_eighteen_state="${TEMP_DIRECTORY}/legacy-contract-eighteen-state.json"
+jq '.managerContractVersion = 17 | del(.hostAdmission)' \
+    "${contract_eighteen_disabled_state}" > "${legacy_contract_eighteen_state}"
+assert_true \
+    "Observed-state validation rejected a contract-seventeen manager without hostAdmission." \
+    observed_state_is_valid "${legacy_contract_eighteen_state}"
+
+contract_eighteen_available_state="${TEMP_DIRECTORY}/contract-eighteen-available-state.json"
+jq '
+    .hostAdmission = {
+        status: "available",
+        namespace: "runners",
+        epoch: 3,
+        decisionSequence: 42,
+        capacityUnits: 10,
+        safetyMarginUnits: 2,
+        effectiveTotalUnits: 8,
+        availableUnits: 5,
+        hostPolicyFingerprint: "hostfp-v1",
+        accounting: {
+            unitCost: 1,
+            reservedUnits: 2,
+            borrowable: true,
+            profilePolicyFingerprint: "profilefp-v1",
+            activeUnits: 2,
+            provisionalUnits: 1,
+            heldUnits: 3,
+            borrowedUnits: 1,
+            pendingUnits: 4,
+            withheldUnits: 1
+        },
+        lastDecision: {
+            sequence: 42,
+            command: "acquire",
+            granted: true,
+            failureCategory: null,
+            decidedAtUnixNano: 1700000000000000000
+        }
+    }
+' "${contract_eighteen_disabled_state}" > "${contract_eighteen_available_state}"
+assert_true \
+    "Contract-eighteen observed state with available host admission was rejected." \
+    observed_state_is_valid "${contract_eighteen_available_state}"
+
+contract_eighteen_degraded_state="${TEMP_DIRECTORY}/contract-eighteen-degraded-state.json"
+jq '.hostAdmission.status = "degraded" | .hostAdmission.accounting = null | .hostAdmission.lastDecision = null' \
+    "${contract_eighteen_available_state}" > "${contract_eighteen_degraded_state}"
+assert_true \
+    "Contract-eighteen observed state with degraded host admission was rejected." \
+    observed_state_is_valid "${contract_eighteen_degraded_state}"
+
+contract_eighteen_unavailable_state="${TEMP_DIRECTORY}/contract-eighteen-unavailable-state.json"
+jq '
+    .hostAdmission = {
+        status: "unavailable",
+        namespace: "runners",
+        epoch: null,
+        decisionSequence: null,
+        capacityUnits: null,
+        safetyMarginUnits: null,
+        effectiveTotalUnits: null,
+        availableUnits: null,
+        hostPolicyFingerprint: null,
+        accounting: null,
+        lastDecision: null
+    }
+' "${contract_eighteen_available_state}" > "${contract_eighteen_unavailable_state}"
+assert_true \
+    "Contract-eighteen observed state with unavailable host admission was rejected." \
+    observed_state_is_valid "${contract_eighteen_unavailable_state}"
+
+invalid_contract_eighteen_accounting="${TEMP_DIRECTORY}/invalid-contract-eighteen-accounting.json"
+jq '.hostAdmission.accounting.heldUnits = 99' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Host admission accounting accepted heldUnits inconsistent with active+provisional." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.accounting.borrowedUnits = 99' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Host admission accounting accepted borrowedUnits inconsistent with max(held-reserved,0)." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.accounting.withheldUnits = 99' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Host admission accounting accepted withheldUnits inconsistent with max(pending-held,0)." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.status = "invalid-status"' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Host admission accepted an unsupported status value." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.namespace = null' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Available host admission accepted a missing namespace." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.epoch = null' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Available host admission accepted a missing epoch." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+jq '.hostAdmission.lastDecision.command = "status"' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_accounting}"
+assert_false \
+    "Host admission accepted a non-lease last-decision command." \
+    observed_state_is_valid "${invalid_contract_eighteen_accounting}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

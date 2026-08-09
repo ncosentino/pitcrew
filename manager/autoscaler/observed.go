@@ -100,6 +100,70 @@ type observedUpdate struct {
 	LastError      *string `json:"lastError"`
 }
 
+// observedHostAdmissionAccounting is this profile's own bounded accounting
+// view of the shared host-local admission budget (ADR-0003). See
+// admission.Snapshot's doc comment for the exact accounting semantics
+// (heldUnits, borrowedUnits, pendingUnits, withheldUnits, and so on); this
+// struct mirrors that vocabulary field-for-field for observed-state.
+type observedHostAdmissionAccounting struct {
+	UnitCost                 int     `json:"unitCost"`
+	ReservedUnits            int     `json:"reservedUnits"`
+	Borrowable               bool    `json:"borrowable"`
+	ProfilePolicyFingerprint *string `json:"profilePolicyFingerprint"`
+	ActiveUnits              int     `json:"activeUnits"`
+	ProvisionalUnits         int     `json:"provisionalUnits"`
+	HeldUnits                int     `json:"heldUnits"`
+	BorrowedUnits            int     `json:"borrowedUnits"`
+	PendingUnits             int     `json:"pendingUnits"`
+	WithheldUnits            int     `json:"withheldUnits"`
+}
+
+// observedHostAdmissionDecision is a bounded, sanitized last-decision record
+// scoped to this profile: it is only ever populated when the coordinator's
+// most recent lease decision belonged to this profile. FailureCategory
+// carries only a closed vocabulary code (see admission.ErrorCode), never a
+// raw error, host name, runner name, container ID, path, URL, job output,
+// or credential.
+type observedHostAdmissionDecision struct {
+	Sequence          int64   `json:"sequence"`
+	Command           string  `json:"command"`
+	Granted           bool    `json:"granted"`
+	FailureCategory   *string `json:"failureCategory"`
+	DecidedAtUnixNano int64   `json:"decidedAtUnixNano"`
+}
+
+// observedHostAdmission is this manager's published, profile-scoped view of
+// the shared host-local admission coordinator (ADR-0003). Status is a
+// closed vocabulary:
+//   - "disabled": PITCREW_HOST_ADMISSION_* is unset for this profile; every
+//     other field is null.
+//   - "unavailable": host admission is configured, but the most recent
+//     Status() call to the coordinator failed (socket or protocol error);
+//     every measured field is null, never zero.
+//   - "degraded": the coordinator responded, but this profile is absent
+//     from its policy, or its host/profile policy fingerprint does not
+//     match this manager's own configured fingerprint.
+//   - "available": the coordinator responded, this profile is present in
+//     its policy, and every configured fingerprint matches.
+//
+// This object never carries any other profile's identity, accounting, or
+// decision detail, and never carries a measured physical CPU or memory
+// value; see admission.Snapshot for the full, trusted-operator-only ledger
+// this projects from.
+type observedHostAdmission struct {
+	Status                string                           `json:"status"`
+	Namespace             *string                          `json:"namespace"`
+	Epoch                 *int64                           `json:"epoch"`
+	DecisionSequence      *int64                           `json:"decisionSequence"`
+	CapacityUnits         *int                             `json:"capacityUnits"`
+	SafetyMarginUnits     *int                             `json:"safetyMarginUnits"`
+	EffectiveTotalUnits   *int                             `json:"effectiveTotalUnits"`
+	AvailableUnits        *int                             `json:"availableUnits"`
+	HostPolicyFingerprint *string                          `json:"hostPolicyFingerprint"`
+	Accounting            *observedHostAdmissionAccounting `json:"accounting"`
+	LastDecision          *observedHostAdmissionDecision   `json:"lastDecision"`
+}
+
 type observedState struct {
 	SchemaVersion          int                     `json:"schemaVersion"`
 	ManagerContractVersion int                     `json:"managerContractVersion"`
@@ -129,6 +193,13 @@ type observedState struct {
 	OperationJournal *managerOperationJournal `json:"operationJournal,omitempty"`
 	SubsystemHealth  *managerSubsystemHealth  `json:"subsystemHealth,omitempty"`
 	CapacityEvidence *managerCapacityEvidence `json:"capacityEvidence,omitempty"`
+
+	// HostAdmission stays additive (contract <=17 never populates it) so an
+	// observation built by an older manager, or read by a connector built
+	// for an earlier contract, remains valid; contract 18 requires it to be
+	// a complete, non-null object (see observed_state_is_valid /
+	// observed-state.schema.json).
+	HostAdmission *observedHostAdmission `json:"hostAdmission,omitempty"`
 }
 
 func buildObservedState(

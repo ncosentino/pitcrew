@@ -60,6 +60,19 @@ const (
 	CommandStatus      Command = "status"
 )
 
+// isLeaseDecision reports whether Command identifies one of the five lease
+// operations Decision.Command records. ApplyPolicy, SetDemand, and Status
+// are policy/reporting operations, not lease admission decisions, and are
+// never recorded as a Decision.
+func (c Command) isLeaseDecision() bool {
+	switch c {
+	case CommandAcquire, CommandRenew, CommandActivate, CommandRelease, CommandReconcile:
+		return true
+	default:
+		return false
+	}
+}
+
 // Request is the exact, versioned wire envelope a client sends to the
 // admission service over the Unix domain socket. ProtocolVersions lists
 // every protocol version the client is willing to speak; the server picks

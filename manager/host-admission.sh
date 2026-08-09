@@ -4,6 +4,8 @@ HOST_ADMISSION_NAMESPACE="${PITCREW_HOST_ADMISSION_NAMESPACE:-}"
 HOST_ADMISSION_SOCKET="${PITCREW_HOST_ADMISSION_SOCKET:-}"
 HOST_ADMISSION_CLI_TIMEOUT="${PITCREW_HOST_ADMISSION_CLI_TIMEOUT:-10}"
 HOST_ADMISSION_CLI="${PITCREW_HOST_ADMISSION_CLI:-/usr/local/bin/pitcrew-admission}"
+HOST_ADMISSION_HOST_FINGERPRINT="${PITCREW_HOST_ADMISSION_HOST_FINGERPRINT:-}"
+HOST_ADMISSION_PROFILE_FINGERPRINT="${PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT:-}"
 HOST_ADMISSION_WAIT_MARKER="host-admission-waiting"
 HOST_ADMISSION_LEASE_FILE="host-admission-lease.json"
 
@@ -209,4 +211,133 @@ host_admission_retry_releases() {
             rm -f "${pending_path}"
         fi
     done
+}
+
+_host_admission_write_closed_status() {
+    output_path="$1"
+    closed_status="$2"
+    namespace_argument="$3"
+    jq -n \
+        --arg status "${closed_status}" \
+        --arg namespace "${namespace_argument}" \
+        '{
+            status: $status,
+            namespace: (if $namespace == "" then null else $namespace end),
+            epoch: null,
+            decisionSequence: null,
+            capacityUnits: null,
+            safetyMarginUnits: null,
+            effectiveTotalUnits: null,
+            availableUnits: null,
+            hostPolicyFingerprint: null,
+            accounting: null,
+            lastDecision: null
+        }' > "${output_path}"
+}
+
+# host_admission_status writes this profile's scoped hostAdmission
+# observed-state object to "${output_path}". It never fails the caller:
+# reading the coordinator's status is diagnostics-only, so an unreachable
+# coordinator is reported as status "unavailable" (every measured field
+# null, never a fabricated zero) rather than surfaced as an error that
+# could influence lifecycle. This mirrors
+# hostAdmissionCoordinator.sampleObservedHostAdmission in the autoscaler:
+# only this profile's own accounting entry and (if it belongs to this
+# profile) last decision are ever reported, never another profile's
+# identity, even though `host_admission_cli status` itself returns the
+# full multi-profile ledger.
+host_admission_status() {
+    output_path="$1"
+    if ! host_admission_enabled; then
+        _host_admission_write_closed_status "${output_path}" "disabled" ""
+        return 0
+    fi
+
+    status_temporary="${output_path}.$$.tmp"
+    if ! host_admission_cli status > "${status_temporary}" 2>/dev/null ||
+        ! jq -e 'type == "object"' "${status_temporary}" >/dev/null 2>&1; then
+        rm -f "${status_temporary}"
+        _host_admission_write_closed_status \
+            "${output_path}" \
+            "unavailable" \
+            "${HOST_ADMISSION_NAMESPACE}"
+        return 0
+    fi
+
+    if jq \
+        --arg profile "${PROFILE_ID}" \
+        --arg namespace "${HOST_ADMISSION_NAMESPACE}" \
+        --arg hostFingerprint "${HOST_ADMISSION_HOST_FINGERPRINT}" \
+        --arg profileFingerprint "${HOST_ADMISSION_PROFILE_FINGERPRINT}" \
+        '
+            (.accounting // [] | map(select(.profileId == $profile)) | .[0]) as $own
+            | ($own != null) as $known
+            | (
+                (
+                    $hostFingerprint != ""
+                    and (.hostPolicyFingerprint // "") != ""
+                    and .hostPolicyFingerprint != $hostFingerprint
+                )
+                or (
+                    $known
+                    and $profileFingerprint != ""
+                    and ($own.profilePolicyFingerprint // "") != ""
+                    and $own.profilePolicyFingerprint != $profileFingerprint
+                )
+                or ($known | not)
+            ) as $degraded
+            | (.lastDecision // null) as $decision
+            | (
+                if $decision != null and $decision.profileId == $profile then
+                    {
+                        sequence: $decision.sequence,
+                        command: $decision.command,
+                        granted: $decision.granted,
+                        failureCategory: ($decision.failureCategory // null),
+                        decidedAtUnixNano: $decision.decidedAtUnixNano
+                    }
+                else
+                    null
+                end
+            ) as $ownDecision
+            | {
+                status: (if $degraded then "degraded" else "available" end),
+                namespace: (if $namespace == "" then null else $namespace end),
+                epoch: .epoch,
+                decisionSequence: .decisionSequence,
+                capacityUnits: (
+                    if (.capacityUnits // 0) > 0 then .capacityUnits else null end
+                ),
+                safetyMarginUnits: (
+                    if (.capacityUnits // 0) > 0 then (.safetyMarginUnits // 0) else null end
+                ),
+                effectiveTotalUnits: .effectiveTotalUnits,
+                availableUnits: .availableUnits,
+                hostPolicyFingerprint: (.hostPolicyFingerprint // null),
+                accounting: (
+                    if $known then {
+                        unitCost: $own.unitCost,
+                        reservedUnits: $own.reservedUnits,
+                        borrowable: $own.borrowable,
+                        profilePolicyFingerprint: ($own.profilePolicyFingerprint // null),
+                        activeUnits: $own.activeUnits,
+                        provisionalUnits: $own.provisionalUnits,
+                        heldUnits: $own.heldUnits,
+                        borrowedUnits: $own.borrowedUnits,
+                        pendingUnits: $own.pendingUnits,
+                        withheldUnits: $own.withheldUnits
+                    } else null end
+                ),
+                lastDecision: $ownDecision
+            }
+        ' "${status_temporary}" > "${output_path}"; then
+        rm -f "${status_temporary}"
+        return 0
+    fi
+    rm -f "${status_temporary}"
+    _host_admission_write_closed_status \
+        "${output_path}" \
+        "unavailable" \
+        "${HOST_ADMISSION_NAMESPACE}"
+    return 0
 }

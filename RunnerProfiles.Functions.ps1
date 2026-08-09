@@ -4,10 +4,10 @@ Set-StrictMode -Version Latest
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerHostAdmissionPolicySchemaVersion = 1
-$script:RunnerManagerContractVersion = 17
+$script:RunnerManagerContractVersion = 18
 $script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerDefinedHostAdmissionContractVersion = 18
-$script:RunnerDefinedDiagnosticsContractVersion = 17
+$script:RunnerDefinedDiagnosticsContractVersion = 18
 $script:RunnerWorkerRuntimeContractVersion = 2
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384
@@ -1620,6 +1620,10 @@ function ConvertTo-RunnerHostAdmissionServicePolicy {
     return [PSCustomObject][ordered]@{
         generation = [int]$normalized.generation
         totalUnits = [int]$normalized.effectiveBudgetUnits
+        namespace = [string]$normalized.namespace
+        capacityUnits = [int]$normalized.capacityUnits
+        safetyMarginUnits = [int]$normalized.safetyMarginUnits
+        hostPolicyFingerprint = [string]$normalized.hostPolicyFingerprint
         profiles = @(
             $normalized.profiles |
                 ForEach-Object {
@@ -1628,6 +1632,7 @@ function ConvertTo-RunnerHostAdmissionServicePolicy {
                         unitCost = [int]$_.workerCostUnits
                         reservedUnits = [int]$_.reservationUnits
                         borrowable = [bool]$_.borrowable
+                        profilePolicyFingerprint = [string]$_.profilePolicyFingerprint
                     }
                 }
         )
@@ -1648,6 +1653,10 @@ function Get-RunnerHostAdmissionServicePolicySignature {
     $normalized = [PSCustomObject][ordered]@{
         generation = [int]$Policy.generation
         totalUnits = [int]$Policy.totalUnits
+        namespace = [string]$Policy.namespace
+        capacityUnits = [int]$Policy.capacityUnits
+        safetyMarginUnits = [int]$Policy.safetyMarginUnits
+        hostPolicyFingerprint = [string]$Policy.hostPolicyFingerprint
         profiles = @(
             @($Policy.profiles) |
                 ForEach-Object {
@@ -1656,6 +1665,7 @@ function Get-RunnerHostAdmissionServicePolicySignature {
                         unitCost = [int]$_.unitCost
                         reservedUnits = [int]$_.reservedUnits
                         borrowable = [bool]$_.borrowable
+                        profilePolicyFingerprint = [string]$_.profilePolicyFingerprint
                     }
                 } |
                 Sort-Object profileId

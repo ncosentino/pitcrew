@@ -176,7 +176,7 @@ try {
             schemaVersion = 1
             status = 'accepted'
             generation = 4
-            managerContractVersion = 17
+            managerContractVersion = 18
             desiredStateHash = ('a' * 64)
             observedAt = '2026-08-07T08:59:55Z'
             desiredSlots = 1
@@ -192,7 +192,7 @@ try {
             workerRevision = ('c' * 64)
             manifest = $null
             configuration = @{
-                managerContractVersion = 17
+                managerContractVersion = 18
                 workerRuntimeContractVersion = 1
                 profile = 'default'
                 image = 'ghcr.io/example/worker:1.0.0'
@@ -212,7 +212,7 @@ try {
         -Path (Join-Path $profileRoot 'observed-state.json') `
         -Content (@{
             schemaVersion = 1
-            managerContractVersion = 17
+            managerContractVersion = 18
             profileId = 'default'
             managerStatus = 'running'
             observedAt = '2026-08-07T09:00:00Z'
@@ -261,6 +261,10 @@ try {
                     observedAt = '2026-08-07T09:00:00Z'
                     summary = 'within-policy'
                 }
+            }
+            hostAdmission = @{
+                status = 'degraded'
+                namespace = 'primary'
             }
         } | ConvertTo-Json -Depth 30)
 
@@ -777,6 +781,10 @@ if ($CommandArguments[0] -eq '-Pi') {
         ([DateTimeOffset]$diagnosisJson.correlation.preflightCapturedAt) -eq
             ([DateTimeOffset]$preflightResult.capturedAt)
     ) 'The importer did not correlate the preflight timestamp.'
+    Add-Check (
+        $diagnosisJson.verifiedMeasurements.host.state.hostAdmissionStatus -ceq
+            'degraded'
+    ) 'The imported diagnosis did not surface the bounded host admission status.'
 
     Write-Host 'Remote diagnostics test: direct orchestrator'
     $directOutput = Join-Path $outputRoot 'direct'

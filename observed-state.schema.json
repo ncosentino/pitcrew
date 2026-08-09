@@ -818,6 +818,245 @@
       ],
       "$comment": "Pressure describes the Docker engine host or VM visible through the manager-only read-only host-proc mount. It is not necessarily the physical machine on Docker Desktop."
     },
+    "hostAdmissionAccounting": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unitCost",
+        "reservedUnits",
+        "borrowable",
+        "profilePolicyFingerprint",
+        "activeUnits",
+        "provisionalUnits",
+        "heldUnits",
+        "borrowedUnits",
+        "pendingUnits",
+        "withheldUnits"
+      ],
+      "properties": {
+        "unitCost": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reservedUnits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "borrowable": {
+          "type": "boolean"
+        },
+        "profilePolicyFingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_-]{1,128}$"
+        },
+        "activeUnits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "provisionalUnits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "heldUnits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "borrowedUnits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "pendingUnits": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "withheldUnits": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "$comment": "heldUnits equals activeUnits plus provisionalUnits. borrowedUnits equals max(heldUnits - reservedUnits, 0): shared capacity held beyond this profile's own reservation. withheldUnits equals max(pendingUnits - heldUnits, 0): demand this profile has not yet been granted."
+    },
+    "hostAdmissionDecision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "command",
+        "granted",
+        "failureCategory",
+        "decidedAtUnixNano"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "command": {
+          "enum": ["acquire", "renew", "activate", "release", "reconcile"]
+        },
+        "granted": {
+          "type": "boolean"
+        },
+        "failureCategory": {
+          "type": ["string", "null"],
+          "minLength": 1,
+          "maxLength": 64
+        },
+        "decidedAtUnixNano": {
+          "type": "number",
+          "minimum": 0
+        }
+      },
+      "$comment": "failureCategory is a bounded classification (for example coordinator-outage, budget-denied, profile-policy-mismatch). It never carries raw errors, host names, runner names, container IDs, paths, URLs, job output, or credentials."
+    },
+    "hostAdmissionState": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "namespace",
+        "epoch",
+        "decisionSequence",
+        "capacityUnits",
+        "safetyMarginUnits",
+        "effectiveTotalUnits",
+        "availableUnits",
+        "hostPolicyFingerprint",
+        "accounting",
+        "lastDecision"
+      ],
+      "properties": {
+        "status": {
+          "enum": ["disabled", "available", "degraded", "unavailable"]
+        },
+        "namespace": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9-]{0,31}$"
+        },
+        "epoch": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "decisionSequence": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "capacityUnits": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "safetyMarginUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "effectiveTotalUnits": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "availableUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "hostPolicyFingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_-]{1,128}$"
+        },
+        "accounting": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/hostAdmissionAccounting"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "lastDecision": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/hostAdmissionDecision"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "disabled"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "namespace": { "type": "null" },
+              "epoch": { "type": "null" },
+              "decisionSequence": { "type": "null" },
+              "capacityUnits": { "type": "null" },
+              "safetyMarginUnits": { "type": "null" },
+              "effectiveTotalUnits": { "type": "null" },
+              "availableUnits": { "type": "null" },
+              "hostPolicyFingerprint": { "type": "null" },
+              "accounting": { "type": "null" },
+              "lastDecision": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "const": "unavailable"
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "namespace": { "type": "string" },
+              "epoch": { "type": "null" },
+              "decisionSequence": { "type": "null" },
+              "capacityUnits": { "type": "null" },
+              "safetyMarginUnits": { "type": "null" },
+              "effectiveTotalUnits": { "type": "null" },
+              "availableUnits": { "type": "null" },
+              "hostPolicyFingerprint": { "type": "null" },
+              "accounting": { "type": "null" },
+              "lastDecision": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "status": {
+                "enum": ["available", "degraded"]
+              }
+            }
+          },
+          "then": {
+            "properties": {
+              "namespace": { "type": "string" },
+              "epoch": { "type": "integer" },
+              "decisionSequence": { "type": "integer" },
+              "effectiveTotalUnits": { "type": "integer" },
+              "availableUnits": { "type": "integer" }
+            },
+            "required": [
+              "namespace",
+              "epoch",
+              "decisionSequence",
+              "effectiveTotalUnits",
+              "availableUnits"
+            ]
+          }
+        }
+      ],
+      "$comment": "hostAdmission never infers physical CPU or memory. disabled and unavailable statuses report null (never a fabricated zero) for every measured field; unavailable still reports the configured namespace because it is policy, not a measurement."
+    },
     "managerResourceTelemetry": {
       "type": "object",
       "additionalProperties": false,
@@ -1862,6 +2101,16 @@
         }
       ]
     },
+    "hostAdmission": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/hostAdmissionState"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
     "slots": {
       "type": "array",
       "items": {
@@ -2109,6 +2358,29 @@
         }
       },
       "$comment": "Contract 16 publishes Docker-host or VM pressure from the manager-only read-only host-proc mount."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 18
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "hostAdmission"
+        ],
+        "properties": {
+          "hostAdmission": {
+            "$ref": "#/$defs/hostAdmissionState"
+          }
+        }
+      },
+      "$comment": "Contract 18 requires a complete, explicit hostAdmission object from both fixed and autoscaled managers. Contract 17 and earlier readers accept the field missing entirely; disabled profiles still publish every field, using null only for values that were never measured."
     },
     {
       "if": {

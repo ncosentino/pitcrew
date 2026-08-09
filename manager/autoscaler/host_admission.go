@@ -17,6 +17,7 @@ type hostAdmissionLeaseClient interface {
 	Activate(profileID, slotKey string) (admission.Lease, error)
 	Release(profileID, slotKey string) error
 	Reconcile(profileID, slotKey, evidence string) error
+	Status() (admission.Snapshot, error)
 }
 
 var _ hostAdmissionLeaseClient = (*admission.Client)(nil)
@@ -45,6 +46,15 @@ type hostAdmissionCoordinator struct {
 	client    hostAdmissionLeaseClient
 	profileID string
 
+	// namespace, hostFingerprint, and profileFingerprint are this
+	// manager's own configured identity (see hostAdmissionConfig),
+	// reported and compared against the coordinator's actual policy
+	// independently of whether the coordinator is currently reachable, so
+	// an outage never has to guess this manager's own configuration.
+	namespace          string
+	hostFingerprint    string
+	profileFingerprint string
+
 	mu     sync.Mutex
 	demand map[string]int
 }
@@ -60,10 +70,14 @@ func newHostAdmissionCoordinator(
 	if !cfg.enabled {
 		return &hostAdmissionCoordinator{}
 	}
-	return newHostAdmissionCoordinatorWithClient(
+	coordinator := newHostAdmissionCoordinatorWithClient(
 		admission.NewClient(cfg.socketPath),
 		profileID,
 	)
+	coordinator.namespace = cfg.namespace
+	coordinator.hostFingerprint = cfg.hostFingerprint
+	coordinator.profileFingerprint = cfg.profileFingerprint
+	return coordinator
 }
 
 // newHostAdmissionCoordinatorWithClient builds a coordinator around an
@@ -190,4 +204,125 @@ func (h *hostAdmissionCoordinator) release(slotKey string) error {
 		return nil
 	}
 	return err
+}
+
+// Closed hostAdmission.status vocabulary for the observed-state contract
+// (see observed-state.schema.json). Only "available" and "degraded" ever
+// carry measured values; "disabled" and "unavailable" never do.
+const (
+	hostAdmissionStatusDisabled    = "disabled"
+	hostAdmissionStatusAvailable   = "available"
+	hostAdmissionStatusDegraded    = "degraded"
+	hostAdmissionStatusUnavailable = "unavailable"
+)
+
+// sampleObservedHostAdmission builds this profile's scoped hostAdmission
+// telemetry object for observed-state. It never blocks lifecycle: a
+// Status() failure is captured as status "unavailable", never propagated as
+// an error, matching the diagnostics-only isolation every other
+// observed-state subsystem already uses (see manager.go's
+// tryPublishObserved / applyDiagnostics).
+//
+// Scope: this reports only namespace/host-wide budget totals plus this
+// profile's own accounting entry. It intentionally never republishes any
+// other profile's identity, accounting, or lease/decision detail, even
+// though the coordinator's Status() carries that full ledger -- this
+// manager's own public observed-state contract stays scoped to itself,
+// never leaking a sibling profile's identity through this profile's own
+// published state.
+func (h *hostAdmissionCoordinator) sampleObservedHostAdmission() observedHostAdmission {
+	if !h.enabled() {
+		return observedHostAdmission{Status: hostAdmissionStatusDisabled}
+	}
+	namespace := nonEmptyString(h.namespace)
+	snapshot, err := h.client.Status()
+	if err != nil {
+		return observedHostAdmission{
+			Status:    hostAdmissionStatusUnavailable,
+			Namespace: namespace,
+		}
+	}
+
+	profile, known := findProfileAccounting(snapshot.Accounting, h.profileID)
+	degraded := !known
+	if h.hostFingerprint != "" && snapshot.HostPolicyFingerprint != "" &&
+		h.hostFingerprint != snapshot.HostPolicyFingerprint {
+		degraded = true
+	}
+	if known && h.profileFingerprint != "" && profile.ProfilePolicyFingerprint != "" &&
+		h.profileFingerprint != profile.ProfilePolicyFingerprint {
+		degraded = true
+	}
+	status := hostAdmissionStatusAvailable
+	if degraded {
+		status = hostAdmissionStatusDegraded
+	}
+
+	epoch := snapshot.Epoch
+	decisionSequence := snapshot.DecisionSequence
+	effectiveTotalUnits := snapshot.EffectiveTotalUnits
+	availableUnits := snapshot.AvailableUnits
+	observed := observedHostAdmission{
+		Status:                status,
+		Namespace:             namespace,
+		Epoch:                 &epoch,
+		DecisionSequence:      &decisionSequence,
+		EffectiveTotalUnits:   &effectiveTotalUnits,
+		AvailableUnits:        &availableUnits,
+		HostPolicyFingerprint: nonEmptyString(snapshot.HostPolicyFingerprint),
+	}
+	if snapshot.CapacityUnits > 0 {
+		capacityUnits := snapshot.CapacityUnits
+		safetyMarginUnits := snapshot.SafetyMarginUnits
+		observed.CapacityUnits = &capacityUnits
+		observed.SafetyMarginUnits = &safetyMarginUnits
+	}
+	if known {
+		observed.Accounting = &observedHostAdmissionAccounting{
+			UnitCost:                 profile.UnitCost,
+			ReservedUnits:            profile.ReservedUnits,
+			Borrowable:               profile.Borrowable,
+			ProfilePolicyFingerprint: nonEmptyString(profile.ProfilePolicyFingerprint),
+			ActiveUnits:              profile.ActiveUnits,
+			ProvisionalUnits:         profile.ProvisionalUnits,
+			HeldUnits:                profile.HeldUnits,
+			BorrowedUnits:            profile.BorrowedUnits,
+			PendingUnits:             profile.PendingUnits,
+			WithheldUnits:            profile.WithheldUnits,
+		}
+	}
+	if decision := snapshot.LastDecision; decision != nil && decision.ProfileID == h.profileID {
+		observed.LastDecision = &observedHostAdmissionDecision{
+			Sequence:          decision.Sequence,
+			Command:           string(decision.Command),
+			Granted:           decision.Granted,
+			FailureCategory:   nonEmptyString(string(decision.FailureCategory)),
+			DecidedAtUnixNano: decision.DecidedAtUnixNano,
+		}
+	}
+	return observed
+}
+
+// findProfileAccounting looks up one profile's accounting entry by
+// identity in a Status() snapshot's bounded, policy-sized accounting list.
+func findProfileAccounting(
+	accounting []admission.ProfileAccounting,
+	profileID string,
+) (admission.ProfileAccounting, bool) {
+	for _, entry := range accounting {
+		if entry.ProfileID == profileID {
+			return entry, true
+		}
+	}
+	return admission.ProfileAccounting{}, false
+}
+
+// nonEmptyString reports an optional string as null rather than an empty
+// string, so an unset or not-yet-reported value is never confused with a
+// deliberately empty one.
+func nonEmptyString(value string) *string {
+	if value == "" {
+		return nil
+	}
+	return &value
 }

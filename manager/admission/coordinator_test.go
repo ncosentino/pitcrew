@@ -1329,3 +1329,438 @@ func TestFairnessRotationIsSeededFromDurableDecisionSequenceAcrossRestart(t *tes
 		t.Fatalf("expected alpha to lose the seeded rotation's tie, got %v", err)
 	}
 }
+
+// --- Accounting semantics ---------------------------------------------------
+
+// TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld
+// exercises the exact accounting definitions documented on Snapshot:
+// activeUnits, provisionalUnits, heldUnits, reservedUnits,
+// borrowedUnits=max(heldUnits-reservedUnits,0), pendingUnits, and
+// withheldUnits=max(pendingUnits-heldUnits,0), for two profiles in one
+// policy, including a profile that borrows shared-pool capacity beyond its
+// own reservation.
+func TestStatusAccountingSemanticsAcrossActiveProvisionalBorrowedPendingWithheld(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 6,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1, ReservedUnits: 2, Borrowable: false},
+			{ProfileID: "beta", UnitCost: 1, ReservedUnits: 1, Borrowable: true},
+		},
+	})
+
+	if _, err := coordinator.Acquire("alpha", "a1", 1); err != nil {
+		t.Fatalf("acquire alpha a1: %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "a2", 2); err != nil {
+		t.Fatalf("acquire alpha a2: %v", err)
+	}
+	if _, err := coordinator.Activate("alpha", "a1"); err != nil {
+		t.Fatalf("activate alpha a1: %v", err)
+	}
+	if _, err := coordinator.Acquire("beta", "b1", 1); err != nil {
+		t.Fatalf("acquire beta b1 (own reservation): %v", err)
+	}
+	// beta's own reservation is now fully held (1/1); this second beta
+	// lease must be granted from the shared pool instead, so beta ends up
+	// holding one unit beyond its own reservation (a borrowed unit).
+	if _, err := coordinator.Acquire("beta", "b2", 4); err != nil {
+		t.Fatalf("acquire beta b2 (shared pool): %v", err)
+	}
+	if err := coordinator.SetDemand("alpha", 5); err != nil {
+		t.Fatalf("set demand alpha: %v", err)
+	}
+
+	snapshot := coordinator.Status()
+	accounting := make(map[string]ProfileAccounting, len(snapshot.Accounting))
+	for _, entry := range snapshot.Accounting {
+		accounting[entry.ProfileID] = entry
+	}
+
+	alpha, ok := accounting["alpha"]
+	if !ok {
+		t.Fatal("expected alpha accounting to be present")
+	}
+	if alpha.ActiveUnits != 1 || alpha.ProvisionalUnits != 1 || alpha.HeldUnits != 2 {
+		t.Fatalf("expected alpha active=1 provisional=1 held=2, got %#v", alpha)
+	}
+	if alpha.ReservedUnits != 2 || alpha.BorrowedUnits != 0 {
+		t.Fatalf("expected alpha fully within its own reservation (borrowed=0), got %#v", alpha)
+	}
+	if alpha.PendingUnits != 5 || alpha.WithheldUnits != 3 {
+		t.Fatalf("expected alpha pending=5 withheld=max(5-2,0)=3, got %#v", alpha)
+	}
+
+	beta, ok := accounting["beta"]
+	if !ok {
+		t.Fatal("expected beta accounting to be present")
+	}
+	if beta.ActiveUnits != 0 || beta.ProvisionalUnits != 2 || beta.HeldUnits != 2 {
+		t.Fatalf("expected beta active=0 provisional=2 held=2, got %#v", beta)
+	}
+	if beta.ReservedUnits != 1 || beta.BorrowedUnits != 1 {
+		t.Fatalf("expected beta reserved=1 borrowed=max(2-1,0)=1, got %#v", beta)
+	}
+	if beta.PendingUnits != 4 || beta.WithheldUnits != 2 {
+		t.Fatalf("expected beta pending=4 withheld=max(4-2,0)=2, got %#v", beta)
+	}
+
+	if snapshot.EffectiveTotalUnits != 6 {
+		t.Fatalf("expected effective total units 6, got %d", snapshot.EffectiveTotalUnits)
+	}
+	if snapshot.AvailableUnits != 2 {
+		t.Fatalf("expected available units 6-4=2, got %d", snapshot.AvailableUnits)
+	}
+}
+
+// TestStatusReportsNamespaceCapacitySafetyMarginAndFingerprints proves the
+// additive host-wide policy fields (Namespace, CapacityUnits,
+// SafetyMarginUnits, EffectiveTotalUnits, HostPolicyFingerprint) and each
+// profile's ProfilePolicyFingerprint round-trip unchanged from ApplyPolicy
+// through Status.
+func TestStatusReportsNamespaceCapacitySafetyMarginAndFingerprints(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation:            1,
+		TotalUnits:            8,
+		Namespace:             "ns-a",
+		CapacityUnits:         10,
+		SafetyMarginUnits:     2,
+		HostPolicyFingerprint: "host-fingerprint-abc123",
+		Profiles: []ProfilePolicy{
+			{
+				ProfileID:                "alpha",
+				UnitCost:                 1,
+				ProfilePolicyFingerprint: "profile-fingerprint-xyz789",
+			},
+		},
+	})
+
+	snapshot := coordinator.Status()
+	if snapshot.Namespace != "ns-a" {
+		t.Fatalf("expected namespace ns-a, got %q", snapshot.Namespace)
+	}
+	if snapshot.CapacityUnits != 10 || snapshot.SafetyMarginUnits != 2 {
+		t.Fatalf("expected capacity=10 safetyMargin=2, got capacity=%d safetyMargin=%d",
+			snapshot.CapacityUnits, snapshot.SafetyMarginUnits)
+	}
+	if snapshot.EffectiveTotalUnits != 8 {
+		t.Fatalf("expected effective total units 8, got %d", snapshot.EffectiveTotalUnits)
+	}
+	if snapshot.HostPolicyFingerprint != "host-fingerprint-abc123" {
+		t.Fatalf("expected host fingerprint to round-trip, got %q", snapshot.HostPolicyFingerprint)
+	}
+	if len(snapshot.Accounting) != 1 || snapshot.Accounting[0].ProfilePolicyFingerprint != "profile-fingerprint-xyz789" {
+		t.Fatalf("expected profile fingerprint to round-trip, got %#v", snapshot.Accounting)
+	}
+}
+
+// --- Capacity/safety-margin/fingerprint/namespace validation ---------------
+
+func TestPolicyValidationRejectsCapacitySafetyMarginTotalMismatch(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 7, 1, 0, false)
+	policy.CapacityUnits = 10
+	policy.SafetyMarginUnits = 2
+	if err := policy.validate(); !errors.Is(err, ErrInvalidPolicy) {
+		t.Fatalf("expected total units 7 to be rejected against capacity 10 minus margin 2 (=8), got %v", err)
+	}
+}
+
+func TestPolicyValidationAcceptsMatchingCapacitySafetyMarginTotal(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 8, 1, 0, false)
+	policy.CapacityUnits = 10
+	policy.SafetyMarginUnits = 2
+	if err := policy.validate(); err != nil {
+		t.Fatalf("expected total units 8 to match capacity 10 minus margin 2, got %v", err)
+	}
+}
+
+func TestPolicyValidationRejectsSafetyMarginWithoutCapacity(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.SafetyMarginUnits = 1
+	if err := policy.validate(); !errors.Is(err, ErrInvalidPolicy) {
+		t.Fatalf("expected safety margin without capacity to be rejected, got %v", err)
+	}
+}
+
+func TestPolicyValidationRejectsSafetyMarginAtOrAboveCapacity(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.CapacityUnits = 5
+	policy.SafetyMarginUnits = 5
+	if err := policy.validate(); !errors.Is(err, ErrInvalidPolicy) {
+		t.Fatalf("expected safety margin equal to capacity to be rejected, got %v", err)
+	}
+}
+
+func TestPolicyValidationRejectsMalformedNamespace(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.Namespace = "Bad_Namespace!"
+	if err := policy.validate(); err == nil {
+		t.Fatal("expected a malformed namespace to be rejected")
+	}
+}
+
+func TestPolicyValidationAcceptsWellFormedNamespace(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.Namespace = "ns-a"
+	if err := policy.validate(); err != nil {
+		t.Fatalf("expected a well-formed namespace to be accepted, got %v", err)
+	}
+}
+
+func TestPolicyValidationRejectsMalformedHostPolicyFingerprint(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.HostPolicyFingerprint = "not a valid fingerprint!"
+	if err := policy.validate(); err == nil {
+		t.Fatal("expected a malformed host policy fingerprint to be rejected")
+	}
+}
+
+func TestPolicyValidationRejectsMalformedProfilePolicyFingerprint(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.Profiles[0].ProfilePolicyFingerprint = "not a valid fingerprint!"
+	if err := policy.validate(); err == nil {
+		t.Fatal("expected a malformed profile policy fingerprint to be rejected")
+	}
+}
+
+func TestPolicyValidationRejectsOversizedFingerprint(t *testing.T) {
+	policy := singleProfilePolicy("alpha", 5, 1, 0, false)
+	policy.HostPolicyFingerprint = strings.Repeat("a", maxFingerprintBytes+1)
+	if err := policy.validate(); err == nil {
+		t.Fatal("expected an oversized host policy fingerprint to be rejected")
+	}
+}
+
+// --- LastDecision bounds -----------------------------------------------------
+
+func TestLastDecisionRecordsGrantedAcquire(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	snapshot := coordinator.Status()
+	decision := snapshot.LastDecision
+	if decision == nil {
+		t.Fatal("expected a last decision to be recorded")
+	}
+	if decision.Command != CommandAcquire || !decision.Granted {
+		t.Fatalf("expected a granted acquire decision, got %#v", decision)
+	}
+	if decision.ProfileID != "alpha" || decision.SlotKey != "slot-1" {
+		t.Fatalf("expected the decision to carry the exact lease identity, got %#v", decision)
+	}
+	if decision.FailureCategory != "" {
+		t.Fatalf("expected no failure category on a granted decision, got %q", decision.FailureCategory)
+	}
+	if decision.Sequence != snapshot.DecisionSequence {
+		t.Fatalf("expected a granted decision's sequence to match the new decision sequence, got %d want %d",
+			decision.Sequence, snapshot.DecisionSequence)
+	}
+}
+
+func TestLastDecisionRecordsDeniedAcquireWithBoundedFailureCategory(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	sequenceBeforeDenial := coordinator.Status().DecisionSequence
+
+	if _, err := coordinator.Acquire("alpha", "slot-2", 1); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected the second acquire to be denied by budget, got %v", err)
+	}
+
+	snapshot := coordinator.Status()
+	decision := snapshot.LastDecision
+	if decision == nil {
+		t.Fatal("expected a last decision to be recorded for the denial")
+	}
+	if decision.Granted {
+		t.Fatal("expected the denied acquire to be recorded as not granted")
+	}
+	if decision.FailureCategory != ErrorCodeBudgetExceeded {
+		t.Fatalf("expected failure category %q, got %q", ErrorCodeBudgetExceeded, decision.FailureCategory)
+	}
+	if decision.SlotKey != "slot-2" {
+		t.Fatalf("expected the denial to carry the denied slot's identity, got %#v", decision)
+	}
+	if decision.Sequence != sequenceBeforeDenial {
+		t.Fatalf("expected a denial to leave the decision sequence unchanged, got %d want %d",
+			decision.Sequence, sequenceBeforeDenial)
+	}
+}
+
+func TestLastDecisionTreatsDuplicateAcquireAsGranted(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); !errors.Is(err, ErrDuplicateLease) {
+		t.Fatalf("expected a duplicate acquire, got %v", err)
+	}
+
+	decision := coordinator.Status().LastDecision
+	if decision == nil || !decision.Granted {
+		t.Fatalf("expected a duplicate acquire to be recorded as granted, got %#v", decision)
+	}
+	if decision.FailureCategory != "" {
+		t.Fatalf("expected no failure category on a duplicate-lease decision, got %q", decision.FailureCategory)
+	}
+}
+
+func TestLastDecisionRecordsRelease(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := coordinator.Release("alpha", "slot-1"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	decision := coordinator.Status().LastDecision
+	if decision == nil || decision.Command != CommandRelease || !decision.Granted {
+		t.Fatalf("expected a granted release decision, got %#v", decision)
+	}
+}
+
+// TestLastDecisionNeverRecordedForNonLeaseCommands proves ApplyPolicy,
+// SetDemand, and Status never produce a Decision: only Acquire, Renew,
+// Activate, Release, and Reconcile are lease decisions.
+func TestLastDecisionNeverRecordedForNonLeaseCommands(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+	if err := coordinator.SetDemand("alpha", 2); err != nil {
+		t.Fatalf("set demand: %v", err)
+	}
+	_ = coordinator.Status()
+
+	if decision := coordinator.Status().LastDecision; decision != nil {
+		t.Fatalf("expected no last decision from policy/demand/status calls alone, got %#v", decision)
+	}
+}
+
+func TestCommandIsLeaseDecisionClosedVocabulary(t *testing.T) {
+	cases := map[Command]bool{
+		CommandAcquire:     true,
+		CommandRenew:       true,
+		CommandActivate:    true,
+		CommandRelease:     true,
+		CommandReconcile:   true,
+		CommandApplyPolicy: false,
+		CommandSetDemand:   false,
+		CommandStatus:      false,
+	}
+	for command, expected := range cases {
+		if got := command.isLeaseDecision(); got != expected {
+			t.Fatalf("isLeaseDecision(%q) = %v, want %v", command, got, expected)
+		}
+	}
+}
+
+// TestLastDecisionPersistsAcrossRestart proves the bounded last decision
+// survives a restart, including when the underlying lease was a
+// provisional lease that Open discards on restart (ADR-0003): the decision
+// record itself is independent durable bookkeeping, not tied to the
+// lease's continued existence.
+func TestLastDecisionPersistsAcrossRestart(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+	if _, err := coordinator.Acquire("alpha", "slot-1", 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	before := coordinator.Status().LastDecision
+	if before == nil {
+		t.Fatal("expected a last decision before restart")
+	}
+
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	after := restarted.Status().LastDecision
+	if after == nil {
+		t.Fatal("expected the last decision to survive a restart")
+	}
+	if after.Sequence != before.Sequence || after.Command != before.Command ||
+		after.ProfileID != before.ProfileID || after.SlotKey != before.SlotKey ||
+		after.Granted != before.Granted {
+		t.Fatalf("expected the last decision to be unchanged across restart, before=%#v after=%#v", before, after)
+	}
+}
+
+// TestDurableStateValidationRejectsNonLeaseDecisionCommand proves a
+// hand-crafted durable document whose lastDecision.command is not one of
+// the five lease commands fails closed as corrupt state, rather than being
+// silently accepted.
+func TestDurableStateValidationRejectsNonLeaseDecisionCommand(t *testing.T) {
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "admission-state.json")
+	document := `{"schemaVersion":1,"epoch":0,"decisionSequence":1,` +
+		`"policy":{"generation":0,"totalUnits":0,"profiles":null},"leases":{},"tombstones":{},` +
+		`"lastDecision":{"sequence":1,"command":"status","granted":true,"decidedAtUnixNano":1}}`
+	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if _, err := OpenFile(directory, newManualClock(), time.Minute); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("expected a non-lease decision command to fail closed as corrupt state, got %v", err)
+	}
+}
+
+// TestDurableStateValidationRejectsNegativeLastDecisionSequence proves a
+// hand-crafted durable document whose lastDecision.sequence is negative
+// fails closed as corrupt state.
+func TestDurableStateValidationRejectsNegativeLastDecisionSequence(t *testing.T) {
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "admission-state.json")
+	document := `{"schemaVersion":1,"epoch":0,"decisionSequence":1,` +
+		`"policy":{"generation":0,"totalUnits":0,"profiles":null},"leases":{},"tombstones":{},` +
+		`"lastDecision":{"sequence":-1,"command":"acquire","granted":true,"decidedAtUnixNano":1}}`
+	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	if _, err := OpenFile(directory, newManualClock(), time.Minute); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("expected a negative last decision sequence to fail closed as corrupt state, got %v", err)
+	}
+}
+
+// TestAbsentLastDecisionRemainsValidForOlderDocuments proves a durable
+// document written before lastDecision existed (schema-compatible but
+// missing the field) decodes with a nil LastDecision and remains valid,
+// rather than being treated as corrupt.
+func TestAbsentLastDecisionRemainsValidForOlderDocuments(t *testing.T) {
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "admission-state.json")
+	document := `{"schemaVersion":1,"epoch":0,"decisionSequence":0,` +
+		`"policy":{"generation":0,"totalUnits":0,"profiles":null},"leases":{},"tombstones":{}}`
+	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
+		t.Fatalf("seed state: %v", err)
+	}
+	coordinator, err := OpenFile(directory, newManualClock(), time.Minute)
+	if err != nil {
+		t.Fatalf("expected an absent lastDecision field to remain valid, got %v", err)
+	}
+	if decision := coordinator.Status().LastDecision; decision != nil {
+		t.Fatalf("expected a nil last decision for a document that predates it, got %#v", decision)
+	}
+}

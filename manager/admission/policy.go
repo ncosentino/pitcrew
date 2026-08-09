@@ -44,6 +44,16 @@ type ProfilePolicy struct {
 	// profiles through the fair shared pool. A non-borrowable reservation
 	// remains protected headroom even while unused.
 	Borrowable bool `json:"borrowable"`
+	// ProfilePolicyFingerprint is an optional, opaque, bounded identity over
+	// the exact profile policy Setup computed (see
+	// RunnerProfiles.Functions.ps1's Get-RunnerObjectFingerprint /
+	// ConvertTo-RunnerHostAdmissionPolicy). It carries no host, path, or
+	// credential detail; this package never derives or interprets it, only
+	// validates its bounded shape and republishes it in Status() so a
+	// participating manager can detect drift against its own configured
+	// fingerprint. An empty value means the publisher predates fingerprint
+	// reporting (contract <=17), which remains valid.
+	ProfilePolicyFingerprint string `json:"profilePolicyFingerprint,omitempty"`
 }
 
 func (p ProfilePolicy) validate() error {
@@ -64,6 +74,9 @@ func (p ProfilePolicy) validate() error {
 			p.ProfileID,
 		)
 	}
+	if err := validateFingerprint("profilePolicyFingerprint", p.ProfilePolicyFingerprint); err != nil {
+		return err
+	}
 	return nil
 }
 
@@ -78,8 +91,35 @@ type HostPolicy struct {
 	// never roll admission back to older, less-informed state.
 	Generation int `json:"generation"`
 	// TotalUnits is the abstract host-wide budget shared by every
-	// participating profile.
+	// participating profile, and is always this package's sole authority
+	// for admission math. When CapacityUnits is also supplied, TotalUnits
+	// must equal CapacityUnits-SafetyMarginUnits exactly; this package
+	// never derives one from the other, so a caller can never silently
+	// disagree with itself about the effective budget it published.
 	TotalUnits int `json:"totalUnits"`
+	// Namespace is the single active admission namespace this policy
+	// belongs to (see ADR-0003). It is opaque to this package beyond shape
+	// validation and is republished unchanged in Status() so a
+	// participating manager can confirm it is talking to the namespace it
+	// expects. Empty means the publisher predates namespace reporting
+	// (contract <=17), which remains valid.
+	Namespace string `json:"namespace,omitempty"`
+	// CapacityUnits is the measured abstract host capacity before safety
+	// margin, and SafetyMarginUnits is the portion withheld from the
+	// effective budget. Both are optional, publisher-supplied, and purely
+	// informational for Status() reporting: this package never infers a
+	// physical CPU or memory quantity from them, and never uses them in
+	// place of TotalUnits for any admission decision. Zero for both means
+	// the publisher predates measured-capacity reporting (contract <=17).
+	CapacityUnits int `json:"capacityUnits,omitempty"`
+	// SafetyMarginUnits is documented with CapacityUnits above.
+	SafetyMarginUnits int `json:"safetyMarginUnits,omitempty"`
+	// HostPolicyFingerprint is an optional, opaque, bounded identity over
+	// the exact host-wide policy Setup computed. This package never
+	// derives or interprets it, only validates its bounded shape and
+	// republishes it in Status(). Empty means the publisher predates
+	// fingerprint reporting (contract <=17).
+	HostPolicyFingerprint string `json:"hostPolicyFingerprint,omitempty"`
 	// Profiles enumerates every participating profile's cost and
 	// reservation policy. Profile identities must be unique.
 	Profiles []ProfilePolicy `json:"profiles"`
@@ -91,6 +131,42 @@ func (h HostPolicy) validate() error {
 	}
 	if h.TotalUnits < 1 {
 		return fmt.Errorf("%w: total units must be a positive integer", ErrInvalidPolicy)
+	}
+	if err := validateNamespace(h.Namespace); err != nil {
+		return err
+	}
+	if err := validateFingerprint("hostPolicyFingerprint", h.HostPolicyFingerprint); err != nil {
+		return err
+	}
+	if h.CapacityUnits < 0 || h.SafetyMarginUnits < 0 {
+		return fmt.Errorf(
+			"%w: capacity units and safety-margin units cannot be negative",
+			ErrInvalidPolicy,
+		)
+	}
+	switch {
+	case h.CapacityUnits == 0 && h.SafetyMarginUnits > 0:
+		return fmt.Errorf(
+			"%w: safety-margin units cannot be set without measured capacity units",
+			ErrInvalidPolicy,
+		)
+	case h.CapacityUnits > 0:
+		if h.SafetyMarginUnits >= h.CapacityUnits {
+			return fmt.Errorf(
+				"%w: safety-margin units must be lower than capacity units",
+				ErrInvalidPolicy,
+			)
+		}
+		if effective := h.CapacityUnits - h.SafetyMarginUnits; effective != h.TotalUnits {
+			return fmt.Errorf(
+				"%w: total units %d does not match effective capacity %d (capacity %d minus safety margin %d)",
+				ErrInvalidPolicy,
+				h.TotalUnits,
+				effective,
+				h.CapacityUnits,
+				h.SafetyMarginUnits,
+			)
+		}
 	}
 	seen := make(map[string]struct{}, len(h.Profiles))
 	reserved := 0
@@ -137,6 +213,14 @@ func (h HostPolicy) validate() error {
 	return nil
 }
 
+// EffectiveTotalUnits returns the effective host-wide budget. It is always
+// TotalUnits: when CapacityUnits is also supplied, validate() has already
+// enforced that TotalUnits equals CapacityUnits-SafetyMarginUnits exactly,
+// so there is only ever one value to report.
+func (h HostPolicy) EffectiveTotalUnits() int {
+	return h.TotalUnits
+}
+
 // profile looks up one profile's policy by identity.
 func (h HostPolicy) profile(profileID string) (ProfilePolicy, bool) {
 	for _, profile := range h.Profiles {
@@ -161,9 +245,13 @@ func (h HostPolicy) sortedProfileIDs() []string {
 
 func clonePolicy(policy HostPolicy) HostPolicy {
 	cloned := HostPolicy{
-		Generation: policy.Generation,
-		TotalUnits: policy.TotalUnits,
-		Profiles:   make([]ProfilePolicy, len(policy.Profiles)),
+		Generation:            policy.Generation,
+		TotalUnits:            policy.TotalUnits,
+		Namespace:             policy.Namespace,
+		CapacityUnits:         policy.CapacityUnits,
+		SafetyMarginUnits:     policy.SafetyMarginUnits,
+		HostPolicyFingerprint: policy.HostPolicyFingerprint,
+		Profiles:              make([]ProfilePolicy, len(policy.Profiles)),
 	}
 	copy(cloned.Profiles, policy.Profiles)
 	return cloned

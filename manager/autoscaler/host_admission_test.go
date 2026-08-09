@@ -39,6 +39,20 @@ type fakeHostAdmissionClient struct {
 	renewCalls     []string
 	activateCalls  []string
 	releaseCalls   []string
+
+	// statusErr, when set, is returned by every Status call, simulating a
+	// coordinator/socket outage. statusNamespace, statusEpoch,
+	// statusDecisionSequence, statusHostFingerprint, statusProfileFingerprint,
+	// statusLastDecision, and statusAccounting let tests shape the
+	// synthetic snapshot Status otherwise builds from current leases.
+	statusErr                error
+	statusNamespace          string
+	statusEpoch              int64
+	statusDecisionSequence   int64
+	statusHostFingerprint    string
+	statusProfileFingerprint string
+	statusLastDecision       *admission.Decision
+	statusAccounting         map[string]admission.ProfileAccounting
 }
 
 func newFakeHostAdmissionClient(budget int) *fakeHostAdmissionClient {
@@ -151,6 +165,55 @@ func (c *fakeHostAdmissionClient) Release(profileID, slotKey string) error {
 
 func (c *fakeHostAdmissionClient) Reconcile(profileID, slotKey, _ string) error {
 	return c.Release(profileID, slotKey)
+}
+
+// Status reports a deterministic synthetic snapshot built from this fake's
+// current leases, so tests can exercise sampleObservedHostAdmission without
+// a real coordinator. statusErr, when set, simulates a coordinator/socket
+// outage instead.
+func (c *fakeHostAdmissionClient) Status() (admission.Snapshot, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.statusErr != nil {
+		return admission.Snapshot{}, c.statusErr
+	}
+	snapshot := admission.Snapshot{
+		Namespace:             c.statusNamespace,
+		Epoch:                 c.statusEpoch,
+		DecisionSequence:      c.statusDecisionSequence,
+		EffectiveTotalUnits:   c.budget + len(c.leases),
+		HostPolicyFingerprint: c.statusHostFingerprint,
+		LastDecision:          c.statusLastDecision,
+	}
+	held := make(map[string]int)
+	for _, lease := range c.leases {
+		held[lease.ProfileID] += lease.Units
+	}
+	totalHeld := 0
+	for profileID, units := range held {
+		totalHeld += units
+		accounting := admission.ProfileAccounting{
+			ProfileID:                profileID,
+			HeldUnits:                units,
+			ActiveUnits:              units,
+			ProfilePolicyFingerprint: c.statusProfileFingerprint,
+		}
+		if c.statusAccounting != nil {
+			if override, ok := c.statusAccounting[profileID]; ok {
+				accounting = override
+			}
+		}
+		snapshot.Accounting = append(snapshot.Accounting, accounting)
+	}
+	if c.statusAccounting != nil {
+		for profileID, accounting := range c.statusAccounting {
+			if _, exists := held[profileID]; !exists {
+				snapshot.Accounting = append(snapshot.Accounting, accounting)
+			}
+		}
+	}
+	snapshot.AvailableUnits = max(snapshot.EffectiveTotalUnits-totalHeld, 0)
+	return snapshot, nil
 }
 
 // preGrant seeds a lease directly, bypassing Acquire, so recovery tests can
@@ -1463,5 +1526,168 @@ func TestHostAdmissionCreatedRecoveryDiscardRegistrationFailureIsRetried(t *test
 	}
 	if !reflect.DeepEqual(api.removeCalls, []int64{202, 202}) {
 		t.Fatalf("expected exactly two registration removal attempts, got %#v", api.removeCalls)
+	}
+}
+
+// TestSampleObservedHostAdmissionDisabled proves a coordinator built from
+// disabled configuration (PITCREW_HOST_ADMISSION_* unset) publishes exactly
+// status "disabled" with every other field null, never a measured zero.
+func TestSampleObservedHostAdmissionDisabled(t *testing.T) {
+	coordinator := newHostAdmissionCoordinator(hostAdmissionConfig{}, "profile-a")
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusDisabled {
+		t.Fatalf("expected status %q, got %q", hostAdmissionStatusDisabled, observed.Status)
+	}
+	if observed.Namespace != nil || observed.Epoch != nil || observed.DecisionSequence != nil ||
+		observed.CapacityUnits != nil || observed.SafetyMarginUnits != nil ||
+		observed.EffectiveTotalUnits != nil || observed.AvailableUnits != nil ||
+		observed.HostPolicyFingerprint != nil || observed.Accounting != nil ||
+		observed.LastDecision != nil {
+		t.Fatalf("expected every other field null for a disabled coordinator, got %#v", observed)
+	}
+}
+
+// TestSampleObservedHostAdmissionUnavailableOnCoordinatorOutage proves a
+// Status() failure is reported as status "unavailable" with every measured
+// field null, and never returned as an error that could block observed-state
+// publication: read/status failure affects diagnostics only.
+func TestSampleObservedHostAdmissionUnavailableOnCoordinatorOutage(t *testing.T) {
+	client := newFakeHostAdmissionClient(4)
+	client.statusErr = errors.New("dial admission socket: connection refused")
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+	coordinator.namespace = "ns-a"
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusUnavailable {
+		t.Fatalf("expected status %q, got %q", hostAdmissionStatusUnavailable, observed.Status)
+	}
+	if observed.Namespace == nil || *observed.Namespace != "ns-a" {
+		t.Fatalf("expected the locally configured namespace to be reported even during an outage, got %#v", observed.Namespace)
+	}
+	if observed.Epoch != nil || observed.DecisionSequence != nil ||
+		observed.EffectiveTotalUnits != nil || observed.AvailableUnits != nil ||
+		observed.HostPolicyFingerprint != nil || observed.Accounting != nil ||
+		observed.LastDecision != nil {
+		t.Fatalf("expected every measured field null during a coordinator outage, got %#v", observed)
+	}
+}
+
+// TestSampleObservedHostAdmissionAvailable proves a reachable coordinator
+// with a matching fingerprint and a present profile publishes status
+// "available" together with this profile's own bounded accounting.
+func TestSampleObservedHostAdmissionAvailable(t *testing.T) {
+	client := newFakeHostAdmissionClient(10)
+	client.statusNamespace = "ns-a"
+	client.statusEpoch = 3
+	client.statusDecisionSequence = 7
+	client.statusHostFingerprint = "host-fingerprint-1"
+	client.statusProfileFingerprint = "profile-fingerprint-1"
+	client.statusAccounting = map[string]admission.ProfileAccounting{
+		"profile-a": {
+			ProfileID:                "profile-a",
+			UnitCost:                 2,
+			ReservedUnits:            3,
+			Borrowable:               true,
+			ProfilePolicyFingerprint: "profile-fingerprint-1",
+			ActiveUnits:              4,
+			ProvisionalUnits:         1,
+			HeldUnits:                5,
+			BorrowedUnits:            2,
+			PendingUnits:             6,
+			WithheldUnits:            1,
+		},
+	}
+	client.statusLastDecision = &admission.Decision{
+		Sequence:          7,
+		Command:           admission.CommandAcquire,
+		ProfileID:         "profile-a",
+		SlotKey:           "slot-1",
+		Granted:           true,
+		DecidedAtUnixNano: 123,
+	}
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+	coordinator.namespace = "ns-a"
+	coordinator.hostFingerprint = "host-fingerprint-1"
+	coordinator.profileFingerprint = "profile-fingerprint-1"
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusAvailable {
+		t.Fatalf("expected status %q, got %q", hostAdmissionStatusAvailable, observed.Status)
+	}
+	if observed.Namespace == nil || *observed.Namespace != "ns-a" {
+		t.Fatalf("expected namespace ns-a, got %#v", observed.Namespace)
+	}
+	if observed.Accounting == nil {
+		t.Fatal("expected this profile's accounting to be populated")
+	}
+	if observed.Accounting.HeldUnits != 5 || observed.Accounting.BorrowedUnits != 2 ||
+		observed.Accounting.PendingUnits != 6 || observed.Accounting.WithheldUnits != 1 {
+		t.Fatalf("expected accounting fields to round-trip exactly, got %#v", observed.Accounting)
+	}
+	if observed.LastDecision == nil || observed.LastDecision.Sequence != 7 ||
+		!observed.LastDecision.Granted {
+		t.Fatalf("expected this profile's last decision to be published, got %#v", observed.LastDecision)
+	}
+}
+
+// TestSampleObservedHostAdmissionDegradedOnFingerprintMismatch proves a
+// reachable coordinator whose reported host policy fingerprint disagrees
+// with this manager's own configured fingerprint is published as
+// "degraded", not "available", even though every other field is populated.
+func TestSampleObservedHostAdmissionDegradedOnFingerprintMismatch(t *testing.T) {
+	client := newFakeHostAdmissionClient(10)
+	client.statusHostFingerprint = "host-fingerprint-actual"
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+	coordinator.hostFingerprint = "host-fingerprint-expected"
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusDegraded {
+		t.Fatalf("expected status %q, got %q", hostAdmissionStatusDegraded, observed.Status)
+	}
+	if observed.HostPolicyFingerprint == nil || *observed.HostPolicyFingerprint != "host-fingerprint-actual" {
+		t.Fatalf("expected the coordinator's actual fingerprint to still be published, got %#v", observed.HostPolicyFingerprint)
+	}
+}
+
+// TestSampleObservedHostAdmissionDegradedWhenProfileAbsentFromPolicy proves
+// a reachable coordinator that does not know this profile (for example, a
+// policy applied before this profile was added) is published as "degraded"
+// with a null accounting object rather than a fabricated zero one.
+func TestSampleObservedHostAdmissionDegradedWhenProfileAbsentFromPolicy(t *testing.T) {
+	client := newFakeHostAdmissionClient(10)
+	client.statusAccounting = map[string]admission.ProfileAccounting{
+		"profile-other": {ProfileID: "profile-other"},
+	}
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusDegraded {
+		t.Fatalf("expected status %q, got %q", hostAdmissionStatusDegraded, observed.Status)
+	}
+	if observed.Accounting != nil {
+		t.Fatalf("expected accounting to stay null when this profile is absent from policy, got %#v", observed.Accounting)
+	}
+}
+
+// TestSampleObservedHostAdmissionOmitsOtherProfileLastDecision proves this
+// profile's published view never republishes another profile's last
+// decision, keeping host-admission telemetry scoped to the reporting
+// profile.
+func TestSampleObservedHostAdmissionOmitsOtherProfileLastDecision(t *testing.T) {
+	client := newFakeHostAdmissionClient(10)
+	client.statusAccounting = map[string]admission.ProfileAccounting{
+		"profile-a": {ProfileID: "profile-a"},
+	}
+	client.statusLastDecision = &admission.Decision{
+		Sequence:  9,
+		Command:   admission.CommandAcquire,
+		ProfileID: "profile-other",
+		SlotKey:   "slot-1",
+		Granted:   true,
+	}
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.LastDecision != nil {
+		t.Fatalf("expected another profile's last decision to be omitted, got %#v", observed.LastDecision)
 	}
 }
