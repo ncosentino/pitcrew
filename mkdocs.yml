@@ -57,6 +57,7 @@ nav:
       - Read-Only External Data Volumes: guides/external-data-volumes.md
       - Pool-Local Services: guides/pool-local-services.md
       - Routing Workloads: guides/routing-workloads.md
+      - Host-Local Admission: guides/host-admission.md
       - Demand-Driven Autoscaling: guides/autoscaling.md
       - Rolling Updates: guides/rolling-updates.md
       - Security Boundaries: guides/security-boundaries.md

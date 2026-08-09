@@ -62,6 +62,8 @@ GitHub runner scale-set demand to return toward their operator-defined maximum.
   workflow.
 - [Configuration](configuration.md) defines setup parameters, profile manifests,
   generated state, and manager contracts.
+- [Host-Local Admission Operations](guides/host-admission.md) explains policy
+  calibration, rollout, diagnostics, and rollback.
 - [Troubleshooting](troubleshooting.md) diagnoses registration, routing, capacity,
   image, and Docker failures.
 - [Building from Source](building.md) identifies local validation entry points.

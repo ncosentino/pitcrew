@@ -172,6 +172,14 @@ acknowledged, and observed capacity plus any scale-set statistics already in
 observed state, including their freshness. It never issues a credentialed GitHub
 query to fill that gap; missing evidence is reported as missing.
 
+For manager contract 18, the same report projects the complete bounded
+`hostAdmission` status, namespace, epoch, decision sequence, host policy,
+profile cost and reservation, borrowing mode, active/provisional/held/borrowed
+accounting, pending and withheld demand, and last decision. It keeps
+`host-admission-withheld`, `host-admission-degraded`, and
+`host-admission-unavailable` distinct from profile ceilings and provisioning
+failures. `unavailable` and stale demand remain missing evidence, never zero.
+
 Caller-approved URLs are timed from the host and from exactly one disposable
 container built from the profile's exact worker image, using a caller-approved
 finite probe timeout that defaults to 300 seconds so a large artifact is not
@@ -198,7 +206,7 @@ The public Dashboard probe accepts an origin-only HTTPS URL (or explicit
 loopback HTTP for local testing) and does not follow redirects.
 
 ```text
-Use the pitcrew-remote-diagnostics skill to investigate why Zephyr is offline
+Use the pitcrew-remote-diagnostics skill to investigate why example-node is offline
 without changing the node. I do not have a remote transport, so create the
 operator handoff bundle.
 ```
@@ -231,6 +239,11 @@ mismatches, oversized files, unredacted roots, and secret-bearing property
 names. It correlates preflight, connector outage, observed-state, and collection
 timestamps and emits equivalent JSON and Markdown diagnoses with verified,
 unavailable, and hypothesis sections.
+
+The imported diagnosis validates and projects contract-18 host-admission and
+capacity-deficit evidence. A missing pre-contract field, coordinator outage, or
+unavailable capacity sample is classified explicitly; the importer does not
+infer a zero balance or a cause from absent evidence.
 
 Published PitCrew releases include `Collect-PitCrewDiagnostics.ps1` and
 `Collect-PitCrewDiagnostics.ps1.sha256` so an operator can verify the same
@@ -273,6 +286,13 @@ count, median, p95, range, timeout/cancellation rate, cross-profile overlap,
 sanitized hardware context, explicit evidence gaps, and ranked hypotheses.
 They state that correlation is not causation and one paired sample is not a
 host benchmark.
+
+Contract-18 history adds per-profile admission status counts, latest epoch and
+decision sequence, maximum held/borrowed/pending/withheld units, and the
+admission-related capacity-deficit reasons observed in the range. These units
+are abstract policy accounting, not CPU, memory, or universal workload weights.
+Withheld units show that a worker start was gated; they do not prove how long a
+GitHub job waited or why a completed job ran slowly.
 
 ## Profile recovery skill
 

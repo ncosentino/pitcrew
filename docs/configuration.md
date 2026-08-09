@@ -97,16 +97,17 @@ contract:
 ```json
 {
   "hostAdmission": {
-    "namespace": "primary",
-    "capacityUnits": 12,
-    "safetyMarginUnits": 2,
-    "workerCostUnits": 2,
-    "reservationUnits": 4,
+    "namespace": "shared-ci",
+    "capacityUnits": 20,
+    "safetyMarginUnits": 4,
+    "workerCostUnits": 4,
+    "reservationUnits": 8,
     "borrowable": false
   }
 }
 ```
 
+These values are synthetic examples, not measurements or recommendations.
 `capacityUnits` and `safetyMarginUnits` are host-wide values and must match every
 participating profile in the namespace. The effective admission budget is capacity
 minus safety margin.
@@ -122,11 +123,20 @@ CPU cores, memory bytes, worker counts, or inferred hardware capacity. Built-in
 profiles declare no host-admission policy, and independent-profile behavior remains
 the default.
 
-This manifest contract only resolves and fingerprints policy. The dedicated
-coordinator, generated host state, and manager enforcement activate starting at
-manager contract 18, once every fixed and autoscaled manager implements that
-contract. Disabled profiles (no `hostAdmission` manifest entry) remain
-behavior-compatible; they never touch the coordinator.
+Manager contract 18 resolves and fingerprints this policy, starts the dedicated
+coordinator through `Setup-Runner.ps1`, and enforces leases for both fixed and
+autoscaled managers. Disabled profiles (no `hostAdmission` manifest entry)
+remain behavior-compatible; they never touch the coordinator.
+
+Labels, runner groups, and scale sets control GitHub queue eligibility.
+Host-local admission separately controls whether a participating manager may
+start a new worker. It does not constrain non-participating profiles or other
+host processes and does not preempt existing workers.
+
+Use the [Host-Local Admission Operations](guides/host-admission.md) guide to
+calibrate service classes, enable and update policy, validate reservations and
+borrowing, diagnose failures, and roll back through supported setup paths.
+Configured reservation alone is not proof of protected headroom.
 
 #### Observed-state telemetry
 
@@ -139,14 +149,24 @@ state. Its `status` is one of:
 | `disabled` | This profile has no `hostAdmission` policy. Every other field is `null`. |
 | `available` | The coordinator responded with the expected namespace, complete policy identities, and current demand accounting for this profile. |
 | `degraded` | The coordinator responded, but its namespace or policy identity does not match, this profile is unknown, or demand has not yet been republished after coordinator restart or policy replacement. |
-| `unavailable` | The coordinator could not be reached or returned an unreadable response. Reading status is diagnostics-only and never affects worker lifecycle. |
+| `unavailable` | The configured namespace is known, but the coordinator could not be reached or returned an unreadable response. Existing workers continue; new admission fails closed. |
 
-`unavailable` values are always `null`, never a fabricated zero, so a reader can
-never mistake "could not measure" for "measured as empty."
+With `unavailable`, the configured namespace remains populated and measured
+values are `null`, never a fabricated zero, so a reader cannot mistake "could
+not measure" for "measured as empty."
 
 Accounting is scoped to this profile only; the coordinator's full multi-profile
 ledger is never published. The published fields use these precise semantics:
 
+- `epoch` — applied host-policy epoch.
+- `decisionSequence` — durable sequence of granted lease operations. A denied
+  decision does not advance it.
+- `capacityUnits`, `safetyMarginUnits`, and `effectiveTotalUnits` — configured
+  host policy and its effective budget.
+- `availableUnits` — coordinator budget not currently held by leases.
+- `hostPolicyFingerprint` and `profilePolicyFingerprint` — bounded identities
+  used to detect incompatible policy.
+- `unitCost`, `reservedUnits`, and `borrowable` — this profile's current policy.
 - `activeUnits` — units held by active leases. Ambiguous recovery may retain an
   active lease until exact worker absence and release are proven.
 - `provisionalUnits` — units tentatively held for a worker still starting.
@@ -169,6 +189,12 @@ new launch is blocked because the coordinator cannot be reached.
 admission decision (`sequence`, `command`, `granted`, `failureCategory`,
 `decidedAtUnixNano`) — never an exact slot identity, raw error message, host
 name, runner name, container ID, path, URL, or job output.
+
+Shared-pool fairness rotates equal unit opportunity among profiles with
+registered pending demand after own reservations and unused non-borrowable
+reservations are accounted for. It is not GitHub queue weighting or worker
+priority. Different worker costs can produce different worker counts and leave
+fragments smaller than one whole worker cost.
 
 ### Read-only external volumes
 
@@ -692,9 +718,9 @@ coordinator directly through its status client. Both project an identical
 contract shape and distinguish coordinator outage (`unavailable`) from budget
 denial, profile-policy mismatch (`degraded`), and ordinary GitHub demand or
 Docker/JIT/listener failure, which remain reported through their existing,
-unrelated fields. Reading admission status is diagnostics-only: a coordinator
-that cannot be reached never blocks reconciliation, never fails a worker, and
-never changes desired or acknowledged state.
+unrelated fields. Reading admission status is diagnostics-only. A coordinator
+that cannot be reached never stops an existing worker or changes desired or
+acknowledged state, but it does fail closed for every new worker admission.
 
 ## Capacity reconciliation
 

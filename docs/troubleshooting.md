@@ -46,6 +46,95 @@ demand plus the warm idle floor, and `activeSlots` is the live container count.
 A `degraded` status or non-empty `lastError` identifies scale-set, JIT
 configuration, or Docker provisioning failures.
 
+For a contract-18 profile, inspect host admission and per-target capacity
+evidence separately:
+
+```powershell
+$state = Get-Content .pitcrew-state\PROFILE\observed-state.json |
+    ConvertFrom-Json
+$state.hostAdmission | ConvertTo-Json -Depth 8
+$state.capacityEvidence | ConvertTo-Json -Depth 8
+```
+
+`host-admission-withheld`, `host-admission-degraded`, and
+`host-admission-unavailable` describe the host start gate. They are not GitHub
+queue, profile `admission-ceiling`, Docker, JIT, listener, or cleanup failures.
+See [Host-Local Admission Operations](guides/host-admission.md) for the complete
+field contract and supported policy lifecycle.
+
+## Host-admission demand is withheld
+
+When `status` is `available`, positive `pendingUnits` and `withheldUnits` plus
+`host-admission-withheld` prove that current worker demand reached the host
+gate and was not admitted.
+
+- `availableUnits < unitCost` means aggregate free budget cannot fit one whole
+  worker for this profile.
+- With enough aggregate units visible, an unused non-borrowable reservation or
+  rotating shared-pool fairness may still protect another contender.
+
+The published accounting is profile-scoped, so it does not identify another
+profile's exact lease. Wait for capacity to release, reduce demand, or apply a
+reviewed policy update. Never convert abstract units into CPU or memory without
+separate measurement.
+
+## Host-admission coordination stays degraded
+
+After a coordinator restart or policy replacement, `pendingUnits` and
+`withheldUnits` remain `null` until the manager republishes demand. Null is
+unavailable evidence, not zero.
+
+Take a second fresh sample. If `degraded` persists, compare namespace and policy
+fingerprints with the reviewed manifests, verify the profile is present in the
+coordinator policy, and confirm observed state is current. Reapply the complete
+profile command through `Setup-Runner.ps1`; do not edit generated fingerprints
+or coordinator state.
+
+## Host-admission budget is exhausted
+
+Positive withheld units, fewer available units than one worker cost, and a
+bounded `lastDecision.failureCategory` of `budget-exceeded` identify a denied
+lease attempt. Running workers are never removed to make room. Allow a lease to
+release or perform a reviewed policy change; a higher GitHub queue depth does
+not override the budget.
+
+## A host-admission policy is rejected
+
+Setup rejects invalid arithmetic, inconsistent capacity or safety margin across
+participating profiles, live namespace replacement, and policy removal while a
+profile still owns leases. Correct the external manifest and replay its complete
+setup command. Do not start containers manually or change generated state.
+
+For a host-wide capacity or safety-margin change, pause and drain all
+participants, remove all but one, update the remaining profile, then re-enroll
+the others with matching values. A full remove-and-reapply sequence is simpler
+but creates a complete outage. A namespace change requires that full sequence;
+the final `-Down` removes the empty coordinator.
+
+## The host-admission coordinator is unavailable
+
+`hostAdmission.status: unavailable` and
+`host-admission-unavailable` mean configured identity is known but current
+coordinator measurements are not. Measured fields are `null`. Existing workers
+survive; only new admission stops.
+
+Collect read-only diagnostics first. Then replay one participating profile's
+complete current setup command with `-Refresh` so setup restores the
+coordinator from durable state before handing off that manager. `-RecoverManager`
+does not repair the coordinator. If durable state is unreadable, preserve it
+for diagnosis and stop; never delete or rewrite it to force admission.
+
+## Rollback is blocked by host-admission leases
+
+Pause the selected profile and wait for `activeUnits`, `provisionalUnits`, and
+`heldUnits` to reach zero before `-Down`. If setup still reports retained
+leases, reapply the current reviewed profile with `-Refresh` so the replacement
+manager can perform exact lease reconciliation, then pause and retry.
+
+Never remove coordinator state before leases reconcile. For a full rollback,
+pause and drain every participant, run `-Down` for every participant, and only
+then reapply manifests without `hostAdmission`.
+
 ## A specialized profile receives routine jobs
 
 Inspect the manifest and runner labels. Named profiles should keep

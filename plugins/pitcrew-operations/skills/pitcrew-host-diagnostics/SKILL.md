@@ -85,6 +85,43 @@ Count what is actually running and compare it with what each layer believes.
    missing evidence explicitly and name the non-destructive follow-up that
    would supply it.
 
+## Host-admission evidence
+
+For manager contract 18, project the complete root-level `hostAdmission`
+object from `observed-state.json` without querying or changing the coordinator:
+
+- `status`, `namespace`, `epoch`, and `decisionSequence`
+- `capacityUnits`, `safetyMarginUnits`, `effectiveTotalUnits`, and
+  `availableUnits`
+- `hostPolicyFingerprint`
+- accounting `unitCost`, `reservedUnits`, `borrowable`,
+  `profilePolicyFingerprint`, `activeUnits`, `provisionalUnits`, `heldUnits`,
+  `borrowedUnits`, `pendingUnits`, and `withheldUnits`
+- the bounded `lastDecision`
+
+Also project `capacityEvidence.fixed` and every
+`capacityEvidence.targets[]` entry, including freshness, local and eligibility
+deficits, reason, and bounded evidence. Keep
+`host-admission-withheld`, `host-admission-degraded`, and
+`host-admission-unavailable` distinct from `admission-ceiling`, GitHub demand,
+Docker, JIT, listener, cleanup, and unknown evidence.
+
+Interpret statuses conservatively:
+
+- `disabled` is a measured configuration state, not missing evidence.
+- `available` means current policy identity and demand accounting are complete
+  for this profile.
+- `degraded` means coordination responded but identity or demand freshness is
+  incomplete. Null pending and withheld units are unavailable, not zero.
+- `unavailable` retains only the configured namespace and makes coordinator
+  measurements unavailable. Existing workers survive; new admission stops.
+
+`pendingUnits` and `withheldUnits` are abstract policy units. Never call them
+CPU, memory, workers, queue priority, or universal workload weights. Positive
+withheld units prove only that a new worker start was gated. The profile-scoped
+projection cannot identify another profile's exact leases or prove why a
+completed job was slow.
+
 ## Exact identity of the running images
 
 Resolve the exact references before any resource query:
@@ -291,6 +328,11 @@ Structure the report in three explicitly separated sections:
    level, or timeout prevented, with the reason.
 3. **Hypotheses** — ranked, clearly labelled as unverified, each with the
    non-destructive follow-up that would confirm it.
+
+Include a host-admission subsection with the complete bounded contract-18
+projection and per-target capacity-deficit reasons. Never convert `degraded`,
+`unavailable`, a null demand field, or stale observed state into a zero balance
+or a root cause.
 
 Never present a hypothesis as a measurement, and never fill a gap in the
 unavailable section with an estimate.

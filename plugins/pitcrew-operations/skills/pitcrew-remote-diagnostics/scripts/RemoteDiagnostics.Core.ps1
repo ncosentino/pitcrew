@@ -455,6 +455,545 @@ function ConvertTo-PitCrewRemoteDiagnosticsInteger {
     return $parsed
 }
 
+function ConvertTo-PitCrewRemoteDiagnosticsBoolean {
+    param(
+        [AllowNull()][object]$Value,
+        [Parameter(Mandatory)][string]$Context
+    )
+
+    if ($null -eq $Value) {
+        return $null
+    }
+    if ($Value -is [bool]) {
+        return [bool]$Value
+    }
+    $parsed = $false
+    if (-not [bool]::TryParse([string]$Value, [ref]$parsed)) {
+        throw "$Context is not a Boolean."
+    }
+    return $parsed
+}
+
+function ConvertTo-PitCrewRemoteDiagnosticsAdmissionFingerprint {
+    param(
+        [AllowNull()][object]$Value,
+        [Parameter(Mandatory)][string]$Context
+    )
+
+    $fingerprint = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+        -Value $Value `
+        -Context $Context `
+        -MaximumLength 128
+    if ($null -ne $fingerprint -and
+        $fingerprint -notmatch '^[A-Za-z0-9_-]{1,128}$') {
+        throw "$Context is invalid."
+    }
+    return $fingerprint
+}
+
+function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
+    param([AllowNull()][object]$Admission)
+
+    if ($null -eq $Admission) {
+        return $null
+    }
+    Assert-PitCrewRemoteDiagnosticsProperties `
+        -Value $Admission `
+        -Allowed @(
+            'status',
+            'namespace',
+            'epoch',
+            'decisionSequence',
+            'capacityUnits',
+            'safetyMarginUnits',
+            'effectiveTotalUnits',
+            'availableUnits',
+            'hostPolicyFingerprint',
+            'accounting',
+            'lastDecision') `
+        -Context 'Host admission'
+
+    $status = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty $Admission 'status') `
+        -Context 'Host admission status' `
+        -MaximumLength 32
+    if ($status -notin @('disabled', 'available', 'degraded', 'unavailable')) {
+        throw 'Host admission status is invalid.'
+    }
+    $namespaceValue =
+        Get-PitCrewRemoteDiagnosticsProperty $Admission 'namespace'
+    $namespace = if ($null -eq $namespaceValue) {
+        $null
+    } else {
+        [string]$namespaceValue
+    }
+    if ($null -ne $namespace -and
+        $namespace -notmatch '\A[a-z][a-z0-9-]{0,31}\z') {
+        throw 'Host admission namespace is invalid.'
+    }
+    $epoch = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty $Admission 'epoch') `
+        -Context 'Host admission epoch'
+    $decisionSequence = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty `
+            $Admission `
+            'decisionSequence') `
+        -Context 'Host admission decision sequence'
+    $capacityUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty `
+            $Admission `
+            'capacityUnits') `
+        -Context 'Host admission capacity'
+    $safetyMarginUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty `
+            $Admission `
+            'safetyMarginUnits') `
+        -Context 'Host admission safety margin'
+    $effectiveTotalUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty `
+            $Admission `
+            'effectiveTotalUnits') `
+        -Context 'Host admission effective total'
+    $availableUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty `
+            $Admission `
+            'availableUnits') `
+        -Context 'Host admission available units'
+    foreach ($positiveField in @(
+            @('capacityUnits', $capacityUnits),
+            @('effectiveTotalUnits', $effectiveTotalUnits))) {
+        if ($null -ne $positiveField[1] -and
+            [long]$positiveField[1] -lt 1) {
+            throw "Host admission $($positiveField[0]) must be positive."
+        }
+    }
+    if ($null -ne $capacityUnits -and
+        $null -ne $safetyMarginUnits -and
+        $null -ne $effectiveTotalUnits -and
+        $effectiveTotalUnits -ne $capacityUnits - $safetyMarginUnits) {
+        throw 'Host admission effective total is inconsistent.'
+    }
+    if ($null -ne $availableUnits -and
+        $null -ne $effectiveTotalUnits -and
+        $availableUnits -gt $effectiveTotalUnits) {
+        throw 'Host admission available units exceed the effective total.'
+    }
+    $hostPolicyFingerprint =
+        ConvertTo-PitCrewRemoteDiagnosticsAdmissionFingerprint `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $Admission `
+                'hostPolicyFingerprint') `
+            -Context 'Host admission policy fingerprint'
+
+    $accountingValue = Get-PitCrewRemoteDiagnosticsProperty `
+        $Admission `
+        'accounting'
+    $accounting = if ($null -eq $accountingValue) {
+        $null
+    } else {
+        Assert-PitCrewRemoteDiagnosticsProperties `
+            -Value $accountingValue `
+            -Allowed @(
+                'unitCost',
+                'reservedUnits',
+                'borrowable',
+                'profilePolicyFingerprint',
+                'activeUnits',
+                'provisionalUnits',
+                'heldUnits',
+                'borrowedUnits',
+                'pendingUnits',
+                'withheldUnits') `
+            -Context 'Host admission accounting'
+        $unitCost = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'unitCost') `
+            -Context 'Host admission unit cost'
+        if ($null -eq $unitCost -or $unitCost -lt 1) {
+            throw 'Host admission unit cost must be positive.'
+        }
+        $reservedUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'reservedUnits') `
+            -Context 'Host admission reserved units'
+        $borrowable = ConvertTo-PitCrewRemoteDiagnosticsBoolean `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'borrowable') `
+            -Context 'Host admission borrowing policy'
+        if ($null -eq $borrowable) {
+            throw 'Host admission borrowing policy is missing.'
+        }
+        $profilePolicyFingerprint =
+            ConvertTo-PitCrewRemoteDiagnosticsAdmissionFingerprint `
+                -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                    $accountingValue `
+                    'profilePolicyFingerprint') `
+                -Context 'Host admission profile policy fingerprint'
+        $activeUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'activeUnits') `
+            -Context 'Host admission active units'
+        $provisionalUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'provisionalUnits') `
+            -Context 'Host admission provisional units'
+        $heldUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'heldUnits') `
+            -Context 'Host admission held units'
+        $borrowedUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'borrowedUnits') `
+            -Context 'Host admission borrowed units'
+        $pendingUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'pendingUnits') `
+            -Context 'Host admission pending units'
+        $withheldUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'withheldUnits') `
+            -Context 'Host admission withheld units'
+        if ($null -in @(
+                $reservedUnits,
+                $activeUnits,
+                $provisionalUnits,
+                $heldUnits,
+                $borrowedUnits)) {
+            throw 'Host admission accounting is incomplete.'
+        }
+        if ($heldUnits -ne $activeUnits + $provisionalUnits) {
+            throw 'Host admission held units are inconsistent.'
+        }
+        if ($borrowedUnits -ne
+            [Math]::Max($heldUnits - $reservedUnits, 0)) {
+            throw 'Host admission borrowed units are inconsistent.'
+        }
+        if (($null -eq $pendingUnits) -ne ($null -eq $withheldUnits) -or
+            ($null -ne $pendingUnits -and
+                $pendingUnits -ne $withheldUnits)) {
+            throw 'Host admission pending and withheld units are inconsistent.'
+        }
+        [PSCustomObject][ordered]@{
+            unitCost = $unitCost
+            reservedUnits = $reservedUnits
+            borrowable = $borrowable
+            profilePolicyFingerprint = $profilePolicyFingerprint
+            activeUnits = $activeUnits
+            provisionalUnits = $provisionalUnits
+            heldUnits = $heldUnits
+            borrowedUnits = $borrowedUnits
+            pendingUnits = $pendingUnits
+            withheldUnits = $withheldUnits
+        }
+    }
+
+    $lastDecisionValue = Get-PitCrewRemoteDiagnosticsProperty `
+        $Admission `
+        'lastDecision'
+    $lastDecision = if ($null -eq $lastDecisionValue) {
+        $null
+    } else {
+        Assert-PitCrewRemoteDiagnosticsProperties `
+            -Value $lastDecisionValue `
+            -Allowed @(
+                'sequence',
+                'command',
+                'granted',
+                'failureCategory',
+                'decidedAtUnixNano') `
+            -Context 'Host admission last decision'
+        $command = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $lastDecisionValue `
+                'command') `
+            -Context 'Host admission decision command' `
+            -MaximumLength 32
+        if ($command -notin @(
+                'acquire',
+                'renew',
+                'activate',
+                'release',
+                'reconcile')) {
+            throw 'Host admission decision command is invalid.'
+        }
+        $failureCategory = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $lastDecisionValue `
+                'failureCategory') `
+            -Context 'Host admission decision failure category' `
+            -MaximumLength 64
+        if ($null -ne $failureCategory -and
+            $failureCategory -notmatch '^[a-z][a-z0-9]*(-[a-z0-9]+)*$') {
+            throw 'Host admission decision failure category is invalid.'
+        }
+        $granted = ConvertTo-PitCrewRemoteDiagnosticsBoolean `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $lastDecisionValue `
+                'granted') `
+            -Context 'Host admission decision result'
+        if ($null -eq $granted) {
+            throw 'Host admission decision result is missing.'
+        }
+        $lastDecisionSequence =
+            ConvertTo-PitCrewRemoteDiagnosticsInteger `
+                -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                    $lastDecisionValue `
+                    'sequence') `
+                -Context 'Host admission decision sequence'
+        $lastDecisionTime = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $lastDecisionValue `
+                'decidedAtUnixNano') `
+            -Context 'Host admission decision time'
+        if ($null -eq $lastDecisionSequence -or
+            $null -eq $lastDecisionTime) {
+            throw 'Host admission last decision is incomplete.'
+        }
+        [PSCustomObject][ordered]@{
+            sequence = $lastDecisionSequence
+            command = $command
+            granted = $granted
+            failureCategory = $failureCategory
+            decidedAtUnixNano = $lastDecisionTime
+        }
+    }
+
+    $measured = @(
+        $epoch,
+        $decisionSequence,
+        $capacityUnits,
+        $safetyMarginUnits,
+        $effectiveTotalUnits,
+        $availableUnits,
+        $hostPolicyFingerprint,
+        $accounting,
+        $lastDecision)
+    if ($status -eq 'disabled' -and
+        ($null -ne $namespace -or
+            @($measured | Where-Object { $null -ne $_ }).Count -gt 0)) {
+        throw 'Disabled host admission contains measured values.'
+    }
+    if ($status -eq 'unavailable' -and
+        ($null -eq $namespace -or
+            @($measured | Where-Object { $null -ne $_ }).Count -gt 0)) {
+        throw 'Unavailable host admission has an invalid evidence shape.'
+    }
+    if ($status -in @('available', 'degraded') -and
+        ($null -in @(
+                $namespace,
+                $epoch,
+                $decisionSequence,
+                $effectiveTotalUnits,
+                $availableUnits))) {
+        throw 'Host admission coordination evidence is incomplete.'
+    }
+    if ($status -eq 'available') {
+        if ($null -in @(
+                $capacityUnits,
+                $safetyMarginUnits,
+                $hostPolicyFingerprint,
+                $accounting)) {
+            throw 'Available host admission evidence is incomplete.'
+        }
+        if ($null -eq $accounting.profilePolicyFingerprint -or
+            $null -eq $accounting.pendingUnits -or
+            $null -eq $accounting.withheldUnits) {
+            throw 'Available host admission accounting is incomplete.'
+        }
+    }
+
+    return [PSCustomObject][ordered]@{
+        status = $status
+        namespace = $namespace
+        epoch = $epoch
+        decisionSequence = $decisionSequence
+        capacityUnits = $capacityUnits
+        safetyMarginUnits = $safetyMarginUnits
+        effectiveTotalUnits = $effectiveTotalUnits
+        availableUnits = $availableUnits
+        hostPolicyFingerprint = $hostPolicyFingerprint
+        accounting = $accounting
+        lastDecision = $lastDecision
+    }
+}
+
+function ConvertTo-PitCrewRemoteDiagnosticsCapacityDeficit {
+    param(
+        [Parameter(Mandatory)][object]$Deficit,
+        [switch]$Target
+    )
+
+    $allowed = @(
+        'observedAt',
+        'freshness',
+        'targetSlots',
+        'activeWorkers',
+        'startingWorkers',
+        'drainingWorkers',
+        'cleanupPendingWorkers',
+        'eligibleWorkers',
+        'localDeficit',
+        'eligibilityDeficit',
+        'reason',
+        'evidence')
+    if ($Target) {
+        $allowed += @('key', 'keyHash', 'repository')
+    }
+    Assert-PitCrewRemoteDiagnosticsProperties `
+        -Value $Deficit `
+        -Allowed $allowed `
+        -Context 'Capacity-deficit evidence'
+    $freshness = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty $Deficit 'freshness') `
+        -Context 'Capacity-deficit freshness' `
+        -MaximumLength 32
+    if ($freshness -notin @('current', 'stale', 'unavailable')) {
+        throw 'Capacity-deficit freshness is invalid.'
+    }
+    $reason = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty $Deficit 'reason') `
+        -Context 'Capacity-deficit reason' `
+        -MaximumLength 64
+    if ($reason -notin @(
+            'none',
+            'admission-ceiling',
+            'host-admission-withheld',
+            'host-admission-degraded',
+            'host-admission-unavailable',
+            'launch-pending',
+            'docker-unavailable',
+            'docker-failed',
+            'jit-pending',
+            'jit-failed',
+            'listener-unavailable',
+            'session-unavailable',
+            'registration-cleanup-pending',
+            'worker-draining',
+            'invalid-desired-state',
+            'retry-backoff',
+            'unknown')) {
+        throw 'Capacity-deficit reason is invalid.'
+    }
+    $evidence = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty $Deficit 'evidence') `
+        -Context 'Capacity-deficit explanation' `
+        -MaximumLength 160
+    if ($null -ne $evidence -and
+        $evidence -notmatch "^[A-Za-z0-9][A-Za-z0-9 .,_()'-]*$") {
+        throw 'Capacity-deficit explanation is invalid.'
+    }
+    $result = [ordered]@{}
+    if ($Target) {
+        $reportedKeyHash = Get-PitCrewRemoteDiagnosticsProperty `
+            $Deficit `
+            'keyHash'
+        if ($null -ne $reportedKeyHash) {
+            $result.keyHash =
+                ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+                    -Value $reportedKeyHash `
+                    -Context 'Capacity-deficit target key hash' `
+                    -MaximumLength 64
+            if ($result.keyHash -notmatch '^[0-9a-f]{64}$') {
+                throw 'Capacity-deficit target key hash is invalid.'
+            }
+        } else {
+            $targetKey = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+                -Value (Get-PitCrewRemoteDiagnosticsProperty $Deficit 'key') `
+                -Context 'Capacity-deficit target key' `
+                -MaximumLength 128
+            if ([string]::IsNullOrWhiteSpace([string]$targetKey)) {
+                throw 'Capacity-deficit target key is missing.'
+            }
+            $result.keyHash =
+                Get-PitCrewRemoteDiagnosticsTextSha256 -Value $targetKey
+        }
+    }
+    $result.observedAt = ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
+        -Value (Get-PitCrewRemoteDiagnosticsProperty $Deficit 'observedAt') `
+        -Context 'Capacity-deficit observation time'
+    $result.freshness = $freshness
+    foreach ($field in @(
+            'targetSlots',
+            'activeWorkers',
+            'startingWorkers',
+            'drainingWorkers',
+            'cleanupPendingWorkers',
+            'eligibleWorkers',
+            'localDeficit',
+            'eligibilityDeficit')) {
+        $result[$field] = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty $Deficit $field) `
+            -Context "Capacity-deficit $field"
+    }
+    $result.reason = $reason
+    $result.evidence = $evidence
+    if ($null -in @(
+            $result.observedAt,
+            $result.targetSlots,
+            $result.activeWorkers,
+            $result.startingWorkers,
+            $result.drainingWorkers,
+            $result.cleanupPendingWorkers,
+            $result.localDeficit)) {
+        throw 'Capacity-deficit evidence is incomplete.'
+    }
+    if (($null -eq $result.eligibleWorkers) -ne
+        ($null -eq $result.eligibilityDeficit)) {
+        throw 'Capacity-deficit eligibility evidence is inconsistent.'
+    }
+    if ($result.localDeficit -gt 0 -and $reason -eq 'none') {
+        throw 'Capacity-deficit reason is missing for a positive deficit.'
+    }
+    if ($freshness -eq 'unavailable' -and
+        ($null -ne $result.eligibleWorkers -or
+            $reason -ne 'unknown')) {
+        throw 'Unavailable capacity-deficit evidence has an invalid shape.'
+    }
+    return [PSCustomObject]$result
+}
+
+function ConvertTo-PitCrewRemoteDiagnosticsCapacityEvidence {
+    param([AllowNull()][object]$CapacityEvidence)
+
+    if ($null -eq $CapacityEvidence) {
+        return $null
+    }
+    Assert-PitCrewRemoteDiagnosticsProperties `
+        -Value $CapacityEvidence `
+        -Allowed @('fixed', 'targets') `
+        -Context 'Capacity evidence'
+    $targets = @(
+        Get-PitCrewRemoteDiagnosticsProperty $CapacityEvidence 'targets' |
+            Where-Object { $null -ne $_ })
+    if ($targets.Count -gt 64) {
+        throw 'Capacity evidence exceeds its bounded target count.'
+    }
+    $fixed = Get-PitCrewRemoteDiagnosticsProperty $CapacityEvidence 'fixed'
+    return [PSCustomObject][ordered]@{
+        fixed = if ($null -eq $fixed) {
+            $null
+        } else {
+            ConvertTo-PitCrewRemoteDiagnosticsCapacityDeficit `
+                -Deficit $fixed
+        }
+        targets = @(
+            foreach ($target in $targets) {
+                ConvertTo-PitCrewRemoteDiagnosticsCapacityDeficit `
+                    -Deficit $target `
+                    -Target
+            })
+    }
+}
+
 function ConvertTo-PitCrewRemoteDiagnosticsTimestamp {
     param(
         [AllowNull()][object]$Value,
@@ -582,7 +1121,8 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
             'autoscaling',
             'update',
             'hostPressure',
-            'hostAdmission') `
+            'hostAdmission',
+            'capacityEvidence') `
         -Context 'Observed state'
     $connectorSnapshot = Get-PitCrewRemoteDiagnosticsProperty `
         (Get-PitCrewRemoteDiagnosticsProperty `
@@ -859,6 +1399,15 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
         $pitcrewVersion -notmatch '^[A-Za-z0-9._+/-]{1,128}$') {
         throw 'PitCrew version evidence is invalid.'
     }
+    $hostAdmission = ConvertTo-PitCrewRemoteDiagnosticsHostAdmission `
+        -Admission (Get-PitCrewRemoteDiagnosticsProperty `
+            $observed `
+            'hostAdmission')
+    $capacityEvidence =
+        ConvertTo-PitCrewRemoteDiagnosticsCapacityEvidence `
+            -CapacityEvidence (Get-PitCrewRemoteDiagnosticsProperty `
+                $observed `
+                'capacityEvidence')
     return [PSCustomObject][ordered]@{
         startedAt = ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
             -Value $Report.startedAt `
@@ -945,10 +1494,12 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
                     -MaximumLength 64
                 hostAdmissionStatus = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
                     -Value (Get-PitCrewRemoteDiagnosticsProperty `
-                        $observed.hostAdmission `
+                        $hostAdmission `
                         'status') `
                     -Context 'Host admission status' `
                     -MaximumLength 32
+                hostAdmission = $hostAdmission
+                capacityEvidence = $capacityEvidence
             }
             connectorHealth = $connectorSummary
             capacity = $capacity
@@ -1161,6 +1712,94 @@ function New-PitCrewRemoteDiagnosticsDiagnosis {
         -Report $Report
     $preflightSummary = ConvertTo-PitCrewRemoteDiagnosticsPreflightSummary `
         -Preflight $Preflight
+    $unavailableEvidence = [Collections.Generic.List[object]]::new()
+    $unavailableCategories =
+        [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::OrdinalIgnoreCase)
+    foreach ($item in @($reportSummary.unavailableEvidence)) {
+        $unavailableEvidence.Add($item)
+        $null = $unavailableCategories.Add([string]$item.category)
+    }
+    $state = $reportSummary.verifiedMeasurements.state
+    $managerContractVersion = $state.managerContractVersion
+    $admission = $state.hostAdmission
+    $admissionGap = $null
+    if ($null -eq $managerContractVersion) {
+        $admissionGap = [PSCustomObject][ordered]@{
+            category = 'host-admission-contract'
+            reason = 'Manager contract evidence was unavailable, so host admission support could not be classified.'
+            followUp = 'Collect a fresh observed-state sample before interpreting admission.'
+        }
+    } elseif ($managerContractVersion -lt 18) {
+        $admissionGap = [PSCustomObject][ordered]@{
+            category = 'host-admission-contract'
+            reason = 'This manager contract predates contract 18 and does not publish host admission evidence.'
+            followUp = 'Update through the supported profile setup path before evaluating admission.'
+        }
+    } elseif ($null -eq $admission) {
+        $admissionGap = [PSCustomObject][ordered]@{
+            category = 'host-admission'
+            reason = 'A contract-18 observation did not contain host admission evidence.'
+            followUp = 'Collect a fresh profile observation and preserve the missing field as unavailable.'
+        }
+    } elseif ($admission.status -eq 'unavailable') {
+        $admissionGap = [PSCustomObject][ordered]@{
+            category = 'host-admission'
+            reason = 'The coordinator was unavailable, so current admission measurements were not observed.'
+            followUp = 'Inspect read-only coordinator evidence before replaying the complete profile with Refresh.'
+        }
+    } elseif ($admission.status -eq 'degraded') {
+        $demandIncomplete =
+            $null -ne $admission.accounting -and
+            ($null -eq $admission.accounting.pendingUnits -or
+                $null -eq $admission.accounting.withheldUnits)
+        $admissionGap = if ($demandIncomplete) {
+            [PSCustomObject][ordered]@{
+                category = 'host-admission-demand'
+                reason = 'Host admission responded, but current demand accounting was incomplete.'
+                followUp = 'Take a fresh sample after demand is republished and compare policy identities.'
+            }
+        } else {
+            [PSCustomObject][ordered]@{
+                category = 'host-admission-policy'
+                reason = 'Host admission reported degraded policy identity or compatibility evidence.'
+                followUp = 'Compare the observed namespace and bounded policy fingerprints with the reviewed profile manifest.'
+            }
+        }
+    }
+    if ($null -ne $admissionGap -and
+        $unavailableCategories.Add([string]$admissionGap.category)) {
+        $unavailableEvidence.Add($admissionGap)
+    }
+
+    $capacityEvidence = $state.capacityEvidence
+    if ($null -ne $managerContractVersion -and
+        $managerContractVersion -ge 12 -and
+        $null -eq $capacityEvidence -and
+        $unavailableCategories.Add('capacity-deficit')) {
+        $unavailableEvidence.Add([PSCustomObject][ordered]@{
+            category = 'capacity-deficit'
+            reason = 'The manager contract supports capacity evidence, but no capacity-deficit projection was collected.'
+            followUp = 'Collect a fresh observed-state sample without inferring a zero deficit.'
+        })
+    } elseif ($null -ne $capacityEvidence) {
+        $deficitCandidates =
+            @($capacityEvidence.fixed) + @($capacityEvidence.targets)
+        $deficits = @(
+            $deficitCandidates |
+                Where-Object { $null -ne $_ })
+        if (@(
+                $deficits |
+                    Where-Object freshness -eq 'unavailable'
+            ).Count -gt 0 -and
+            $unavailableCategories.Add('capacity-deficit-freshness')) {
+            $unavailableEvidence.Add([PSCustomObject][ordered]@{
+                category = 'capacity-deficit-freshness'
+                reason = 'At least one capacity-deficit observation was unavailable.'
+                followUp = 'Collect a fresh sample and keep the missing source distinct from measured zero.'
+            })
+        }
+    }
     $preflightCapturedAt = if ($null -eq $preflightSummary) {
         $null
     } else {
@@ -1199,7 +1838,7 @@ function New-PitCrewRemoteDiagnosticsDiagnosis {
             preflight = $preflightSummary
             host = $reportSummary.verifiedMeasurements
         }
-        unavailableEvidence = @($reportSummary.unavailableEvidence)
+        unavailableEvidence = @($unavailableEvidence)
         hypotheses = @($reportSummary.hypotheses)
     }
 }
@@ -1225,6 +1864,35 @@ function New-PitCrewRemoteDiagnosticsDiagnosisMarkdown {
     $state = $Diagnosis.verifiedMeasurements.host.state
     $null = $builder.AppendLine("- Manager status: ``$($state.managerStatus)``")
     $null = $builder.AppendLine("- Observed-state freshness: ``$($state.freshnessSeconds)`` seconds")
+    $null = $builder.AppendLine()
+    $null = $builder.AppendLine('### Host admission')
+    $null = $builder.AppendLine()
+    if ($null -eq $state.hostAdmission) {
+        $null = $builder.AppendLine('- Host-admission evidence was unavailable.')
+    } else {
+        $admission = $state.hostAdmission
+        $null = $builder.AppendLine("- Status: ``$($admission.status)``")
+        $null = $builder.AppendLine("- Namespace / epoch / decision sequence: ``$($admission.namespace)`` / ``$($admission.epoch)`` / ``$($admission.decisionSequence)``")
+        $null = $builder.AppendLine("- Capacity / safety margin / effective / available units: ``$($admission.capacityUnits)`` / ``$($admission.safetyMarginUnits)`` / ``$($admission.effectiveTotalUnits)`` / ``$($admission.availableUnits)``")
+        if ($null -ne $admission.accounting) {
+            $null = $builder.AppendLine("- Unit cost / reservation / borrowable: ``$($admission.accounting.unitCost)`` / ``$($admission.accounting.reservedUnits)`` / ``$($admission.accounting.borrowable)``")
+            $null = $builder.AppendLine("- Active / provisional / held / borrowed / pending / withheld units: ``$($admission.accounting.activeUnits)`` / ``$($admission.accounting.provisionalUnits)`` / ``$($admission.accounting.heldUnits)`` / ``$($admission.accounting.borrowedUnits)`` / ``$($admission.accounting.pendingUnits)`` / ``$($admission.accounting.withheldUnits)``")
+        }
+    }
+    $null = $builder.AppendLine()
+    $null = $builder.AppendLine('### Capacity-deficit reasons')
+    $null = $builder.AppendLine()
+    if ($null -eq $state.capacityEvidence) {
+        $null = $builder.AppendLine('- Capacity-deficit evidence was unavailable.')
+    } else {
+        if ($null -ne $state.capacityEvidence.fixed) {
+            $fixed = $state.capacityEvidence.fixed
+            $null = $builder.AppendLine("- Fixed target: ``$($fixed.reason)``; freshness ``$($fixed.freshness)``; local deficit ``$($fixed.localDeficit)``")
+        }
+        foreach ($target in @($state.capacityEvidence.targets)) {
+            $null = $builder.AppendLine("- Target ``$($target.keyHash)``: ``$($target.reason)``; freshness ``$($target.freshness)``; local deficit ``$($target.localDeficit)``")
+        }
+    }
     $null = $builder.AppendLine()
     $null = $builder.AppendLine('## Unavailable evidence')
     $null = $builder.AppendLine()

@@ -89,11 +89,26 @@ The script:
 7. calculates count, median, p95, range, and timeout/cancellation rate;
 8. calculates same-node overlap with jobs mapped to other profiles;
 9. includes sanitized hardware and hardware changes;
-10. records partial telemetry, retention loss, truncation, missing timestamps,
+10. projects contract-18 host-admission fields and summarizes status,
+    epoch/decision progress, held/borrowed/pending/withheld units, and
+    admission-related deficit reasons by node and profile;
+11. records partial telemetry, retention loss, truncation, missing timestamps,
     unmatched hashes, and ambiguous hashes as unavailable evidence.
 
 Cross-profile overlap is an association, not proof of contention. Hardware
 differences are context, not benchmark rankings.
+
+Host-admission interpretation is also bounded:
+
+- `disabled` is a measured state; null status is unreported evidence.
+- `degraded` and `unavailable` do not establish a zero balance.
+- Positive withheld units show that new worker demand was gated, not how long
+  a GitHub job waited or why a running job took longer.
+- Policy units are measurement-derived abstractions, not CPU cores, memory,
+  worker counts, or universal workload weights.
+- GitHub queue eligibility and host admission are separate. The report covers
+  jobs GitHub started and cannot infer every job that remained queued without a
+  runner assignment.
 
 ## Report handoff
 
@@ -116,4 +131,7 @@ State explicitly:
 
 - correlation is not causation;
 - one paired sample is not a host benchmark;
+- host-admission units are abstract policy accounting, not resource
+  measurements or workload priority;
+- withheld admission is not proof of GitHub queue delay or job-duration cause;
 - the non-destructive repeat measurement that would confirm each hypothesis.

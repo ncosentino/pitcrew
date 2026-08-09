@@ -17,6 +17,9 @@ Use these guides after completing [Getting Started](../getting-started.md):
   through stable, profile-scoped Docker DNS without worker mounts or host
   ports.
 - [Routing Workloads](routing-workloads.md) - target the correct pool from GitHub Actions.
+- [Host-Local Admission](host-admission.md) - calibrate service classes,
+  coordinate host budget, diagnose withheld demand, and roll policy back
+  through supported setup paths.
 - [Demand-Driven Autoscaling](autoscaling.md) - shrink idle pools and
   automatically restore capacity for queued work.
 - [Rolling Updates](rolling-updates.md) - replace managers immediately, roll

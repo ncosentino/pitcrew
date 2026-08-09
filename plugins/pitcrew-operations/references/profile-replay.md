@@ -39,6 +39,8 @@ Use `static-profile.json.configuration` to preserve:
 - runner group
 - runner name prefix
 - autoscaling mode, minimum idle runners, and scale-down delay
+- host-admission namespace, host capacity, safety margin, worker cost,
+  reservation, and borrowing policy
 - operator-approved read-only external volume names and sources
 - the operator-approved external service-network source
 
@@ -64,6 +66,22 @@ external profile contract.
 
 Pass stored command-line overrides when they differ from the selected manifest.
 Do not change static settings during a capacity-only operation.
+
+Host admission is manifest-only static policy. Never reconstruct it from an
+environment file, edit generated desired policy or lease state, or start the
+coordinator with Docker commands. A profile-local policy change requires the
+reviewed manifest and complete setup command. A namespace change requires every
+participant to pause, drain, and leave the old namespace through
+`Setup-Runner.ps1 -Down`. A host-capacity or safety-margin change requires all
+other participants to drain and leave the old common policy before the
+remaining profile is updated, or a full namespace teardown when the operator
+prefers the simpler rollback boundary.
+
+Before disabling or rolling back host admission, require zero active,
+provisional, and held units for the profile. Existing workers survive
+coordinator failure, but new admission stops. `-RecoverManager` repairs only a
+manager; coordinator recovery uses the complete current profile command with
+`-Refresh`.
 
 ## Preserve desired capacity
 
