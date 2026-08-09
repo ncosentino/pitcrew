@@ -123,8 +123,52 @@ profiles declare no host-admission policy, and independent-profile behavior rema
 the default.
 
 This manifest contract only resolves and fingerprints policy. The dedicated
-coordinator, generated host state, manager enforcement, and observed-state projection
-are activated by later manager contracts.
+coordinator, generated host state, and manager enforcement activate starting at
+manager contract 18, once every fixed and autoscaled manager implements that
+contract. Disabled profiles (no `hostAdmission` manifest entry) remain
+behavior-compatible; they never touch the coordinator.
+
+#### Observed-state telemetry
+
+Once contract 18 is active, `observed-state.json` carries a root-level,
+credential-free `hostAdmission` object describing this profile's own admission
+state. Its `status` is one of:
+
+| Status | Meaning |
+|--------|---------|
+| `disabled` | This profile has no `hostAdmission` policy. Every other field is `null`. |
+| `available` | The coordinator responded with the expected namespace, complete policy identities, and current demand accounting for this profile. |
+| `degraded` | The coordinator responded, but its namespace or policy identity does not match, this profile is unknown, or demand has not yet been republished after coordinator restart or policy replacement. |
+| `unavailable` | The coordinator could not be reached or returned an unreadable response. Reading status is diagnostics-only and never affects worker lifecycle. |
+
+`unavailable` values are always `null`, never a fabricated zero, so a reader can
+never mistake "could not measure" for "measured as empty."
+
+Accounting is scoped to this profile only; the coordinator's full multi-profile
+ledger is never published. The published fields use these precise semantics:
+
+- `activeUnits` — units held by active leases. Ambiguous recovery may retain an
+  active lease until exact worker absence and release are proven.
+- `provisionalUnits` — units tentatively held for a worker still starting.
+- `heldUnits` — `activeUnits + provisionalUnits`.
+- `borrowedUnits` — `max(heldUnits - reservedUnits, 0)`: shared capacity this
+  profile is using beyond its own configured reservation.
+- `pendingUnits` — outstanding worker demand multiplied by this profile's unit
+  cost.
+- `withheldUnits` — the same outstanding units while host admission has not
+  granted them. Both values are `null` until demand is republished after
+  coordinator restart or policy replacement.
+
+Per-target capacity evidence keeps this host result separate from the existing
+profile ceiling. `host-admission-withheld` identifies a target currently denied
+by host budget or fairness; `host-admission-degraded` identifies incompatible
+policy or lease state; and `host-admission-unavailable` identifies a target whose
+new launch is blocked because the coordinator cannot be reached.
+
+`lastDecision` is a single bounded record of this profile's most recent
+admission decision (`sequence`, `command`, `granted`, `failureCategory`,
+`decidedAtUnixNano`) — never an exact slot identity, raw error message, host
+name, runner name, container ID, path, URL, or job output.
 
 ### Read-only external volumes
 
@@ -198,7 +242,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 17 managers. A profile that
+11 and remain supported by the active contract 18 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -528,7 +572,7 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 17 is active in this release. Both manager modes publish the
+Manager contract 18 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics. Setup fails closed before Docker, image, or generated
 state mutation if a contract ahead of both implementations is selected.
@@ -632,6 +676,25 @@ resume and every positive capacity change retain the normal token validation.
 For autoscaled profiles, the same values are configured maximums. GitHub's
 assigned-job statistics determine current activation between the minimum idle
 floor and each maximum.
+
+### Contract-18 host-local admission
+
+Contract 18 adds the root-level `hostAdmission` object described under
+[Host-local admission policy](#host-local-admission-policy) and allows the
+coordinator, generated host state, and manager enforcement to activate for
+profiles that opt into `hostAdmission`. Profiles without that manifest entry
+remain fully behavior-compatible: `hostAdmission.status` is `disabled` and no
+other field is ever populated.
+
+The fixed manager obtains coordinator status through the same CLI used for
+lease acquisition, activation, and release; the autoscaler samples the same
+coordinator directly through its status client. Both project an identical
+contract shape and distinguish coordinator outage (`unavailable`) from budget
+denial, profile-policy mismatch (`degraded`), and ordinary GitHub demand or
+Docker/JIT/listener failure, which remain reported through their existing,
+unrelated fields. Reading admission status is diagnostics-only: a coordinator
+that cannot be reached never blocks reconciliation, never fails a worker, and
+never changes desired or acknowledged state.
 
 ## Capacity reconciliation
 

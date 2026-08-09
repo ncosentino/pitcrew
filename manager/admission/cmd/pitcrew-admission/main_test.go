@@ -24,6 +24,16 @@ func TestExitCodeForError(t *testing.T) {
 			want: 4,
 		},
 		{
+			name: "profile policy mismatch",
+			err:  admission.ErrUnknownProfile,
+			want: 5,
+		},
+		{
+			name: "lease state mismatch",
+			err:  admission.ErrLeaseExpired,
+			want: 5,
+		},
+		{
 			name: "coordinator failure",
 			err:  errors.New("coordinator unavailable"),
 			want: 1,

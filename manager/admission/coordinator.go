@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -54,6 +55,7 @@ type Coordinator struct {
 	provisionalTTL time.Duration
 	state          durableState
 	demand         map[string]int
+	demandKnown    map[string]bool
 	rotation       int
 
 	// provisionalDeadlines is the sole authority this package trusts for
@@ -107,6 +109,7 @@ func Open(backing store, clock Clock, provisionalTTL time.Duration) (*Coordinato
 		provisionalTTL: provisionalTTL,
 		state:          state,
 		demand:         make(map[string]int),
+		demandKnown:    make(map[string]bool),
 		// Seeding rotation from the durable decision sequence, rather than
 		// always starting at zero, prevents a restart from always
 		// re-favoring the first sorted profile in a fairness tie: the
@@ -189,10 +192,12 @@ func (c *Coordinator) ApplyPolicy(policy HostPolicy) error {
 		return err
 	}
 	c.state = next
+	c.demand = make(map[string]int)
+	c.demandKnown = make(map[string]bool)
 	return nil
 }
 
-// SetDemand publishes one profile's current pending demand so the fair
+// SetDemand publishes one profile's current pending worker count so the fair
 // shared pool can be partitioned without waiting for that profile's own
 // Acquire call to arrive. It does not itself grant or consume any unit.
 //
@@ -213,6 +218,7 @@ func (c *Coordinator) SetDemand(profileID string, pending int) error {
 	if _, known := c.state.Policy.profile(profileID); !known {
 		return ErrUnknownProfile
 	}
+	c.demandKnown[profileID] = true
 	if pending == 0 {
 		delete(c.demand, profileID)
 		return nil
@@ -223,21 +229,25 @@ func (c *Coordinator) SetDemand(profileID string, pending int) error {
 
 // Acquire requests one provisional lease of exactly the requesting profile's
 // configured unit cost for one exact profile and slot. pendingDemand is the
-// caller's current total outstanding demand for this profile, including this
-// request, and is used only to partition the fair shared pool; it does not
-// change the size of the lease itself.
+// caller's current total outstanding worker count for this profile, including
+// this request. It is used only to partition the fair shared pool and is
+// converted to policy units only for status reporting.
 //
 // A duplicate call for a profile/slot pair that already holds a live lease
 // returns that lease unchanged alongside ErrDuplicateLease, so a safe retry
 // after an ambiguous response never double-counts budget.
-func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lease, error) {
-	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lease Lease, err error) {
+	if err = validateLeaseIdentity(profileID, slotKey); err != nil {
 		return Lease{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
-	if _, err := c.sweepExpiredLocked(now); err != nil {
+	defer func() {
+		granted := err == nil || errors.Is(err, ErrDuplicateLease)
+		c.recordDecisionLocked(CommandAcquire, profileID, granted, err, now)
+	}()
+	if _, err = c.sweepExpiredLocked(now); err != nil {
 		return Lease{}, err
 	}
 
@@ -253,6 +263,7 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 		pendingDemand = 1
 	}
 	c.demand[profileID] = pendingDemand
+	c.demandKnown[profileID] = true
 
 	unitCost := profilePolicy.UnitCost
 	held := c.heldUnitsByProfileLocked()
@@ -283,7 +294,7 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 
 	sequence := c.state.DecisionSequence + 1
 	deadline := now.Add(c.provisionalTTL)
-	lease := Lease{
+	granted := Lease{
 		ProfileID:         profileID,
 		SlotKey:           slotKey,
 		LeaseID:           fmt.Sprintf("%s#%d", key.String(), sequence),
@@ -297,32 +308,40 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 	// A slot's prior tombstone, if any, is superseded by this fresh grant:
 	// a lease and a tombstone must never coexist for the same key.
 	delete(next.Tombstones, key.String())
-	next.Leases[key.String()] = lease
-	if err := c.store.Save(next); err != nil {
+	next.Leases[key.String()] = granted
+	if err = c.store.Save(next); err != nil {
 		return Lease{}, err
 	}
 	c.state = next
 	c.provisionalDeadlines[key.String()] = deadline
+	if pendingDemand == 1 {
+		delete(c.demand, profileID)
+	} else {
+		c.demand[profileID] = pendingDemand - 1
+	}
 	// The rotation cursor advances only once this grant is durably saved:
 	// a save failure must never move fairness priority for a request that
 	// was not actually admitted.
 	if sharedPoolContenders > 0 {
 		c.advanceRotationLocked(sharedPoolContenders)
 	}
-	return lease, nil
+	return granted, nil
 }
 
 // Renew extends a provisional lease's monotonic expiry while bounded
 // pre-launch work continues. It fails closed with ErrLeaseExpired if the
 // lease already elapsed, and ErrLeaseNotProvisional if the lease was already
 // activated; only a provisional lease has an expiry to extend.
-func (c *Coordinator) Renew(profileID, slotKey string) (Lease, error) {
-	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+func (c *Coordinator) Renew(profileID, slotKey string) (lease Lease, err error) {
+	if err = validateLeaseIdentity(profileID, slotKey); err != nil {
 		return Lease{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
+	defer func() {
+		c.recordDecisionLocked(CommandRenew, profileID, err == nil, err, now)
+	}()
 	expired, err := c.sweepExpiredLocked(now)
 	if err != nil {
 		return Lease{}, err
@@ -331,37 +350,40 @@ func (c *Coordinator) Renew(profileID, slotKey string) (Lease, error) {
 	if expired[key] {
 		return Lease{}, ErrLeaseExpired
 	}
-	lease, exists := c.state.Leases[key]
+	existing, exists := c.state.Leases[key]
 	if !exists {
 		return Lease{}, ErrLeaseNotFound
 	}
-	if lease.Status != LeaseProvisional {
+	if existing.Status != LeaseProvisional {
 		return Lease{}, ErrLeaseNotProvisional
 	}
 	deadline := now.Add(c.provisionalTTL)
-	lease.ExpiresAtUnixNano = deadline.UnixNano()
+	existing.ExpiresAtUnixNano = deadline.UnixNano()
 	next := c.state.clone()
 	next.DecisionSequence++
-	next.Leases[key] = lease
-	if err := c.store.Save(next); err != nil {
+	next.Leases[key] = existing
+	if err = c.store.Save(next); err != nil {
 		return Lease{}, err
 	}
 	c.state = next
 	c.provisionalDeadlines[key] = deadline
-	return lease, nil
+	return existing, nil
 }
 
 // Activate promotes a provisional lease to active only if it has not
 // expired. Activation of an already-active lease is idempotent, so a
 // manager can safely retry after an ambiguous acknowledgement. A worker
 // process must never be started before Activate succeeds.
-func (c *Coordinator) Activate(profileID, slotKey string) (Lease, error) {
-	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+func (c *Coordinator) Activate(profileID, slotKey string) (lease Lease, err error) {
+	if err = validateLeaseIdentity(profileID, slotKey); err != nil {
 		return Lease{}, err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
+	defer func() {
+		c.recordDecisionLocked(CommandActivate, profileID, err == nil, err, now)
+	}()
 	expired, err := c.sweepExpiredLocked(now)
 	if err != nil {
 		return Lease{}, err
@@ -370,43 +392,47 @@ func (c *Coordinator) Activate(profileID, slotKey string) (Lease, error) {
 	if expired[key] {
 		return Lease{}, ErrLeaseExpired
 	}
-	lease, exists := c.state.Leases[key]
+	existing, exists := c.state.Leases[key]
 	if !exists {
 		return Lease{}, ErrLeaseNotFound
 	}
-	if lease.Status == LeaseActive {
-		return lease, nil
+	if existing.Status == LeaseActive {
+		return existing, nil
 	}
 	sequence := c.state.DecisionSequence + 1
-	lease.Status = LeaseActive
-	lease.ExpiresAtUnixNano = 0
-	lease.ActivatedAtSequence = sequence
+	existing.Status = LeaseActive
+	existing.ExpiresAtUnixNano = 0
+	existing.ActivatedAtSequence = sequence
 	next := c.state.clone()
 	next.DecisionSequence = sequence
-	next.Leases[key] = lease
-	if err := c.store.Save(next); err != nil {
+	next.Leases[key] = existing
+	if err = c.store.Save(next); err != nil {
 		return Lease{}, err
 	}
 	c.state = next
 	delete(c.provisionalDeadlines, key)
-	return lease, nil
+	return existing, nil
 }
 
 // Release performs an exact, durable release of one lease, whether
 // provisional or active, and records a tombstone. Releasing an
 // already-tombstoned slot is a safe idempotent no-op. Releasing a slot that
 // never existed and was never tombstoned returns ErrLeaseNotFound.
-func (c *Coordinator) Release(profileID, slotKey string) error {
-	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+func (c *Coordinator) Release(profileID, slotKey string) (err error) {
+	if err = validateLeaseIdentity(profileID, slotKey); err != nil {
 		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
-	if _, err := c.sweepExpiredLocked(now); err != nil {
+	defer func() {
+		c.recordDecisionLocked(CommandRelease, profileID, err == nil, err, now)
+	}()
+	if _, err = c.sweepExpiredLocked(now); err != nil {
 		return err
 	}
-	return c.tombstoneLocked(profileID, slotKey, TombstoneReleased, "")
+	err = c.tombstoneLocked(profileID, slotKey, TombstoneReleased, "")
+	return err
 }
 
 // sanitizeEvidence enforces the strict format Reconcile requires: a
@@ -444,8 +470,8 @@ func sanitizeEvidence(evidence string) (string, error) {
 // proved, through exact retained evidence, that the previous worker and
 // registration are absent may release a stranded active lease. Empty
 // evidence is rejected outright; time alone never releases an active lease.
-func (c *Coordinator) Reconcile(profileID, slotKey, evidence string) error {
-	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+func (c *Coordinator) Reconcile(profileID, slotKey, evidence string) (err error) {
+	if err = validateLeaseIdentity(profileID, slotKey); err != nil {
 		return err
 	}
 	sanitized, err := sanitizeEvidence(evidence)
@@ -455,10 +481,14 @@ func (c *Coordinator) Reconcile(profileID, slotKey, evidence string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	now := c.clock.Now()
-	if _, err := c.sweepExpiredLocked(now); err != nil {
+	defer func() {
+		c.recordDecisionLocked(CommandReconcile, profileID, err == nil, err, now)
+	}()
+	if _, err = c.sweepExpiredLocked(now); err != nil {
 		return err
 	}
-	return c.tombstoneLocked(profileID, slotKey, TombstoneReconciledAbsent, sanitized)
+	err = c.tombstoneLocked(profileID, slotKey, TombstoneReconciledAbsent, sanitized)
+	return err
 }
 
 func (c *Coordinator) tombstoneLocked(
@@ -495,25 +525,131 @@ func (c *Coordinator) tombstoneLocked(
 	return nil
 }
 
+// Decision is a bounded, sanitized record of the single most recent lease
+// admission decision (Acquire, Renew, Activate, Release, or Reconcile). It
+// carries only the validated profile identity and a closed failure-category
+// vocabulary drawn from ErrorCode. Exact slot identity stays in the private
+// lease ledger and is never duplicated into decision telemetry.
+// ApplyPolicy, SetDemand, and Status are not lease decisions and never
+// produce one.
+type Decision struct {
+	// Sequence is the durable decision sequence in effect when this
+	// decision was made: the new sequence for a granted request, or the
+	// unchanged current sequence for a denied one, so a rejection never
+	// perturbs the sequence used by every other durable mutation.
+	Sequence          int64     `json:"sequence"`
+	Command           Command   `json:"command"`
+	ProfileID         string    `json:"profileId,omitempty"`
+	Granted           bool      `json:"granted"`
+	FailureCategory   ErrorCode `json:"failureCategory,omitempty"`
+	DecidedAtUnixNano int64     `json:"decidedAtUnixNano"`
+}
+
+// recordDecisionLocked durably records the single most recent lease
+// decision. It is best-effort: a failure to persist this informational
+// record is swallowed rather than surfaced as the calling operation's own
+// error, since a successful Acquire/Renew/Activate/Release/Reconcile must
+// never be turned into a failure by a problem persisting only this
+// supplementary bookkeeping. The caller must already hold c.mu.
+func (c *Coordinator) recordDecisionLocked(
+	command Command,
+	profileID string,
+	granted bool,
+	err error,
+	now time.Time,
+) {
+	decision := Decision{
+		Sequence:          c.state.DecisionSequence,
+		Command:           command,
+		ProfileID:         profileID,
+		Granted:           granted,
+		DecidedAtUnixNano: now.UnixNano(),
+	}
+	if !granted && err != nil {
+		decision.FailureCategory = errorCodeForErr(err)
+	}
+	next := c.state.clone()
+	next.LastDecision = &decision
+	if saveErr := c.store.Save(next); saveErr != nil {
+		return
+	}
+	c.state = next
+}
+
 // Snapshot is a read-only, deterministically ordered view of the
 // coordinator's durable state, suitable for the CLI status subcommand and
 // for tests.
+//
+// Accounting semantics (see docs/adr/adr-0003-dedicated-host-admission-service.md
+// and docs/adr/adr-0002-workload-agnostic-service-classes.md):
+//   - ActiveUnits: units held by leases already promoted to LeaseActive.
+//   - ProvisionalUnits: units held by leases still LeaseProvisional.
+//   - HeldUnits: ActiveUnits+ProvisionalUnits, the profile's current total
+//     allocation regardless of lease lifecycle stage.
+//   - ReservedUnits: the profile's configured protected reservation (from
+//     policy, not measured).
+//   - BorrowedUnits: max(HeldUnits-ReservedUnits, 0) -- units this profile
+//     currently holds beyond its own reservation, drawn from the shared
+//     fair pool or another profile's borrowable headroom.
+//   - PendingUnits: the profile's last known outstanding worker demand
+//     converted to policy units. It is null after coordinator restart or
+//     policy replacement until that profile republishes demand.
+//   - WithheldUnits: the same outstanding unit demand while it remains
+//     ungranted. A successful Acquire consumes one worker from demand before
+//     status can report it.
+//   - AvailableUnits (host-wide): EffectiveTotalUnits minus every profile's
+//     HeldUnits, the leftover host budget no profile currently holds.
 type Snapshot struct {
-	Epoch            int64       `json:"epoch"`
-	DecisionSequence int64       `json:"decisionSequence"`
-	Policy           HostPolicy  `json:"policy"`
-	Leases           []Lease     `json:"leases"`
-	Tombstones       []Tombstone `json:"tombstones"`
+	Namespace             string              `json:"namespace,omitempty"`
+	Epoch                 int64               `json:"epoch"`
+	DecisionSequence      int64               `json:"decisionSequence"`
+	Policy                HostPolicy          `json:"policy"`
+	CapacityUnits         int                 `json:"capacityUnits,omitempty"`
+	SafetyMarginUnits     int                 `json:"safetyMarginUnits,omitempty"`
+	EffectiveTotalUnits   int                 `json:"effectiveTotalUnits"`
+	HostPolicyFingerprint string              `json:"hostPolicyFingerprint,omitempty"`
+	AvailableUnits        int                 `json:"availableUnits"`
+	Accounting            []ProfileAccounting `json:"accounting"`
+	Leases                []Lease             `json:"leases"`
+	Tombstones            []Tombstone         `json:"tombstones"`
+	LastDecision          *Decision           `json:"lastDecision,omitempty"`
+}
+
+// ProfileAccounting is the bounded, per-profile accounting view described on
+// Snapshot. It exists for exactly the profiles enumerated in the currently
+// applied policy, so its size is always bounded by the policy's own
+// (already-validated) profile count.
+type ProfileAccounting struct {
+	ProfileID                string `json:"profileId"`
+	UnitCost                 int    `json:"unitCost"`
+	ReservedUnits            int    `json:"reservedUnits"`
+	Borrowable               bool   `json:"borrowable"`
+	ProfilePolicyFingerprint string `json:"profilePolicyFingerprint,omitempty"`
+	ActiveUnits              int    `json:"activeUnits"`
+	ProvisionalUnits         int    `json:"provisionalUnits"`
+	HeldUnits                int    `json:"heldUnits"`
+	BorrowedUnits            int    `json:"borrowedUnits"`
+	PendingUnits             *int   `json:"pendingUnits"`
+	WithheldUnits            *int   `json:"withheldUnits"`
 }
 
 // Status returns a deterministic snapshot of the current durable state.
-func (c *Coordinator) Status() Snapshot {
+func (c *Coordinator) Status() (Snapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	if _, err := c.sweepExpiredLocked(c.clock.Now()); err != nil {
+		return Snapshot{}, err
+	}
+	policy := clonePolicy(c.state.Policy)
 	snapshot := Snapshot{
-		Epoch:            c.state.Epoch,
-		DecisionSequence: c.state.DecisionSequence,
-		Policy:           clonePolicy(c.state.Policy),
+		Namespace:             policy.Namespace,
+		Epoch:                 c.state.Epoch,
+		DecisionSequence:      c.state.DecisionSequence,
+		Policy:                policy,
+		CapacityUnits:         policy.CapacityUnits,
+		SafetyMarginUnits:     policy.SafetyMarginUnits,
+		EffectiveTotalUnits:   policy.EffectiveTotalUnits(),
+		HostPolicyFingerprint: policy.HostPolicyFingerprint,
 	}
 	for _, key := range sortedStateKeys(c.state.Leases) {
 		snapshot.Leases = append(snapshot.Leases, c.state.Leases[key])
@@ -521,7 +657,49 @@ func (c *Coordinator) Status() Snapshot {
 	for _, key := range sortedStateKeys(c.state.Tombstones) {
 		snapshot.Tombstones = append(snapshot.Tombstones, c.state.Tombstones[key])
 	}
-	return snapshot
+	if c.state.LastDecision != nil {
+		decision := *c.state.LastDecision
+		snapshot.LastDecision = &decision
+	}
+
+	activeHeld := make(map[string]int, len(policy.Profiles))
+	provisionalHeld := make(map[string]int, len(policy.Profiles))
+	for _, lease := range c.state.Leases {
+		switch lease.Status {
+		case LeaseActive:
+			activeHeld[lease.ProfileID] += lease.Units
+		case LeaseProvisional:
+			provisionalHeld[lease.ProfileID] += lease.Units
+		}
+	}
+	totalHeld := 0
+	for _, profileID := range policy.sortedProfileIDs() {
+		profilePolicy, _ := policy.profile(profileID)
+		active := activeHeld[profileID]
+		provisional := provisionalHeld[profileID]
+		held := active + provisional
+		totalHeld += held
+		accounting := ProfileAccounting{
+			ProfileID:                profileID,
+			UnitCost:                 profilePolicy.UnitCost,
+			ReservedUnits:            profilePolicy.ReservedUnits,
+			Borrowable:               profilePolicy.Borrowable,
+			ProfilePolicyFingerprint: profilePolicy.ProfilePolicyFingerprint,
+			ActiveUnits:              active,
+			ProvisionalUnits:         provisional,
+			HeldUnits:                held,
+			BorrowedUnits:            max(held-profilePolicy.ReservedUnits, 0),
+		}
+		if c.demandKnown[profileID] {
+			pendingUnits := c.demand[profileID] * profilePolicy.UnitCost
+			withheldUnits := pendingUnits
+			accounting.PendingUnits = &pendingUnits
+			accounting.WithheldUnits = &withheldUnits
+		}
+		snapshot.Accounting = append(snapshot.Accounting, accounting)
+	}
+	snapshot.AvailableUnits = max(snapshot.EffectiveTotalUnits-totalHeld, 0)
+	return snapshot, nil
 }
 
 // sweepExpiredLocked removes every provisional lease whose in-process
@@ -540,6 +718,7 @@ func (c *Coordinator) Status() Snapshot {
 // the lease as already expired rather than assuming it is still alive.
 func (c *Coordinator) sweepExpiredLocked(now time.Time) (map[string]bool, error) {
 	expired := make(map[string]bool)
+	expiredProfiles := make(map[string]bool)
 	next := c.state.clone()
 	changed := false
 	for key, lease := range next.Leases {
@@ -561,6 +740,7 @@ func (c *Coordinator) sweepExpiredLocked(now time.Time) (map[string]bool, error)
 			Sequence:  sequence,
 		}
 		expired[key] = true
+		expiredProfiles[lease.ProfileID] = true
 		changed = true
 	}
 	if !changed {
@@ -571,6 +751,10 @@ func (c *Coordinator) sweepExpiredLocked(now time.Time) (map[string]bool, error)
 		return nil, err
 	}
 	c.state = next
+	for profileID := range expiredProfiles {
+		delete(c.demand, profileID)
+		delete(c.demandKnown, profileID)
+	}
 	for key := range expired {
 		delete(c.provisionalDeadlines, key)
 	}

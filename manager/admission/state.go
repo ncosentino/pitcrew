@@ -32,6 +32,13 @@ type durableState struct {
 	Policy           HostPolicy           `json:"policy"`
 	Leases           map[string]Lease     `json:"leases"`
 	Tombstones       map[string]Tombstone `json:"tombstones"`
+	// LastDecision is the single most recent bounded, sanitized admission
+	// lease decision (Acquire, Renew, Activate, Release, or Reconcile),
+	// persisted so it survives a restart. It is nil until the first such
+	// decision is made; a document written before this field existed
+	// decodes it as nil, which this package treats identically to "no
+	// decision recorded yet" rather than a corrupt document.
+	LastDecision *Decision `json:"lastDecision,omitempty"`
 }
 
 func newDurableState() durableState {
@@ -56,6 +63,10 @@ func (s durableState) clone() durableState {
 	}
 	for key, tombstone := range s.Tombstones {
 		cloned.Tombstones[key] = tombstone
+	}
+	if s.LastDecision != nil {
+		decision := *s.LastDecision
+		cloned.LastDecision = &decision
 	}
 	return cloned
 }
@@ -119,6 +130,28 @@ func (s durableState) validate() error {
 				"%w: key %q has both a live lease and a tombstone",
 				ErrCorruptState,
 				key,
+			)
+		}
+	}
+	if decision := s.LastDecision; decision != nil {
+		if decision.Sequence < 0 {
+			return fmt.Errorf("%w: last decision sequence cannot be negative", ErrCorruptState)
+		}
+		if !decision.Command.isLeaseDecision() {
+			return fmt.Errorf(
+				"%w: last decision command %q is not a lease decision",
+				ErrCorruptState,
+				decision.Command,
+			)
+		}
+		if err := validateProfileID(decision.ProfileID); err != nil {
+			return fmt.Errorf("%w: last decision profile identity is invalid", ErrCorruptState)
+		}
+		if !decision.FailureCategory.valid() {
+			return fmt.Errorf(
+				"%w: last decision failure category %q is invalid",
+				ErrCorruptState,
+				decision.FailureCategory,
 			)
 		}
 	}

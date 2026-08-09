@@ -66,3 +66,55 @@ func validateLeaseIdentity(profileID, slotKey string) error {
 	}
 	return nil
 }
+
+// validateNamespace rejects a host-admission namespace that does not match
+// the same public identity syntax as a profile identity (see
+// RunnerProfiles.Functions.ps1's `^[a-z][a-z0-9-]{0,31}$` namespace
+// pattern), so Setup and this package always agree on one shape. An empty
+// namespace is valid here: it means the policy predates namespace
+// reporting (contract <=17) and this package assigns it no meaning beyond
+// "unset".
+func validateNamespace(namespace string) error {
+	if namespace == "" {
+		return nil
+	}
+	if !profileIDPattern.MatchString(namespace) {
+		return fmt.Errorf(
+			"%w: namespace %q must match %s",
+			ErrInvalidIdentity,
+			namespace,
+			profileIDPattern.String(),
+		)
+	}
+	return nil
+}
+
+// maxFingerprintBytes bounds a policy fingerprint to a short, opaque,
+// single-line token (for example a hex-encoded digest), never a
+// free-form or unbounded string.
+const maxFingerprintBytes = 128
+
+// fingerprintPattern accepts only the bounded, opaque alphanumeric-plus-dash
+// tokens Setup's SHA-256-based fingerprints produce. It intentionally
+// excludes whitespace, "/", and control characters, so a fingerprint can
+// never carry a path, URL, or embedded credential.
+var fingerprintPattern = regexp.MustCompile(`^[A-Za-z0-9_-]{1,128}$`)
+
+// validateFingerprint rejects a HostPolicyFingerprint or
+// ProfilePolicyFingerprint that is not a short, opaque, bounded token. An
+// empty fingerprint is valid: it means the publishing side predates
+// fingerprint reporting.
+func validateFingerprint(name, fingerprint string) error {
+	if fingerprint == "" {
+		return nil
+	}
+	if len(fingerprint) > maxFingerprintBytes || !fingerprintPattern.MatchString(fingerprint) {
+		return fmt.Errorf(
+			"%w: %s must be a bounded opaque token matching %s",
+			ErrInvalidPolicy,
+			name,
+			fingerprintPattern.String(),
+		)
+	}
+	return nil
+}

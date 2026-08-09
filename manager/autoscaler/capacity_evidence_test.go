@@ -188,6 +188,33 @@ func TestCapacityEvidenceReportsManagerBlockingReason(t *testing.T) {
 			},
 			expected: deficitAdmissionCeiling,
 		},
+		"host admission withheld": {
+			mutate: func(snapshot *scalerSnapshot) {
+				snapshot.blocking = capacityBlock{
+					reason:   deficitHostAdmissionWithheld,
+					evidence: "host admission coordinator denied worker activation",
+				}
+			},
+			expected: deficitHostAdmissionWithheld,
+		},
+		"host admission degraded": {
+			mutate: func(snapshot *scalerSnapshot) {
+				snapshot.blocking = capacityBlock{
+					reason:   deficitHostAdmissionDegraded,
+					evidence: "host admission policy or lease state is incompatible",
+				}
+			},
+			expected: deficitHostAdmissionDegraded,
+		},
+		"host admission unavailable": {
+			mutate: func(snapshot *scalerSnapshot) {
+				snapshot.blocking = capacityBlock{
+					reason:   deficitHostAdmissionUnavailable,
+					evidence: "host admission coordinator unavailable",
+				}
+			},
+			expected: deficitHostAdmissionUnavailable,
+		},
 		"jit failed": {
 			mutate: func(snapshot *scalerSnapshot) {
 				snapshot.blocking = capacityBlock{reason: deficitJITFailed}

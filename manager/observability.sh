@@ -166,6 +166,138 @@ observed_state_is_valid() {
                     )
                 end
             );
+        def valid_host_admission_accounting:
+            type == "object"
+            and (.unitCost | nonnegative_integer and . > 0)
+            and (.reservedUnits | nonnegative_integer)
+            and (.borrowable | type == "boolean")
+            and (
+                .profilePolicyFingerprint == null
+                or (
+                    .profilePolicyFingerprint
+                    | type == "string" and test("^[A-Za-z0-9_-]{1,128}$")
+                )
+            )
+            and (.activeUnits | nonnegative_integer)
+            and (.provisionalUnits | nonnegative_integer)
+            and (.heldUnits | nonnegative_integer)
+            and (.borrowedUnits | nonnegative_integer)
+            and (
+                (
+                    .pendingUnits == null
+                    and .withheldUnits == null
+                )
+                or (
+                    (.pendingUnits | nonnegative_integer)
+                    and (.withheldUnits | nonnegative_integer)
+                    and .withheldUnits == .pendingUnits
+                )
+            )
+            and (.heldUnits == (.activeUnits + .provisionalUnits))
+            and (.borrowedUnits == ([.heldUnits - .reservedUnits, 0] | max));
+        def valid_host_admission_decision:
+            type == "object"
+            and (.sequence | nonnegative_integer)
+            and (
+                .command == "acquire"
+                or .command == "renew"
+                or .command == "activate"
+                or .command == "release"
+                or .command == "reconcile"
+            )
+            and (.granted | type == "boolean")
+            and (
+                .failureCategory == null
+                or (
+                    .failureCategory
+                    | type == "string"
+                    and length > 0
+                    and length <= 64
+                    and test("^[a-z][a-z0-9]*(-[a-z0-9]+)*$")
+                )
+            )
+            and (.decidedAtUnixNano | nonnegative_integer);
+        # valid_host_admission enforces the closed hostAdmission.status
+        # vocabulary from ADR-0003: "disabled" and "unavailable" never carry
+        # a measured value (null, never a fabricated zero), while
+        # "available" and "degraded" always carry the host-wide budget
+        # fields. namespace is required whenever host admission is
+        # configured (every status except "disabled"), independent of
+        # whether the coordinator was reachable.
+        def valid_host_admission:
+            type == "object"
+            and (
+                .status == "disabled"
+                or .status == "available"
+                or .status == "degraded"
+                or .status == "unavailable"
+            )
+            and (
+                .namespace == null
+                or (.namespace | type == "string" and test("^[a-z][a-z0-9-]{0,31}$"))
+            )
+            and (.epoch == null or (.epoch | nonnegative_integer))
+            and (.decisionSequence == null or (.decisionSequence | nonnegative_integer))
+            and (.capacityUnits == null or (.capacityUnits | nonnegative_integer and . > 0))
+            and (.safetyMarginUnits == null or (.safetyMarginUnits | nonnegative_integer))
+            and (
+                .effectiveTotalUnits == null
+                or (.effectiveTotalUnits | nonnegative_integer and . > 0)
+            )
+            and (.availableUnits == null or (.availableUnits | nonnegative_integer))
+            and (
+                .hostPolicyFingerprint == null
+                or (
+                    .hostPolicyFingerprint
+                    | type == "string" and test("^[A-Za-z0-9_-]{1,128}$")
+                )
+            )
+            and (.accounting == null or (.accounting | valid_host_admission_accounting))
+            and (.lastDecision == null or (.lastDecision | valid_host_admission_decision))
+            and (
+                if .status == "disabled" then
+                    .namespace == null
+                    and .epoch == null
+                    and .decisionSequence == null
+                    and .capacityUnits == null
+                    and .safetyMarginUnits == null
+                    and .effectiveTotalUnits == null
+                    and .availableUnits == null
+                    and .hostPolicyFingerprint == null
+                    and .accounting == null
+                    and .lastDecision == null
+                elif .status == "unavailable" then
+                    .namespace != null
+                    and .epoch == null
+                    and .decisionSequence == null
+                    and .capacityUnits == null
+                    and .safetyMarginUnits == null
+                    and .effectiveTotalUnits == null
+                    and .availableUnits == null
+                    and .hostPolicyFingerprint == null
+                    and .accounting == null
+                    and .lastDecision == null
+                elif .status == "available" then
+                    .namespace != null
+                    and .epoch != null
+                    and .decisionSequence != null
+                    and .capacityUnits != null
+                    and .safetyMarginUnits != null
+                    and .effectiveTotalUnits != null
+                    and .availableUnits != null
+                    and .hostPolicyFingerprint != null
+                    and .accounting != null
+                    and .accounting.profilePolicyFingerprint != null
+                    and .accounting.pendingUnits != null
+                    and .accounting.withheldUnits != null
+                else
+                    .namespace != null
+                    and .epoch != null
+                    and .decisionSequence != null
+                    and .effectiveTotalUnits != null
+                    and .availableUnits != null
+                end
+            );
         def optional_nonnegative_number:
             . == null or (type == "number" and . >= 0);
         def optional_percentage:
@@ -464,7 +596,9 @@ observed_state_is_valid() {
             and (
                 .reason as $reason
                 | [
-                    "none", "admission-ceiling", "launch-pending", "docker-unavailable",
+                    "none", "admission-ceiling", "host-admission-withheld",
+                    "host-admission-degraded",
+                    "host-admission-unavailable", "launch-pending", "docker-unavailable",
                     "docker-failed", "jit-pending", "jit-failed", "listener-unavailable",
                     "session-unavailable", "registration-cleanup-pending", "worker-draining",
                     "invalid-desired-state", "retry-backoff", "unknown"
@@ -722,6 +856,18 @@ observed_state_is_valid() {
                 .resourceTelemetry != null
                 and (.resourceTelemetry | has("hostPressure"))
                 and (.resourceTelemetry.hostPressure | valid_host_pressure)
+            else
+                true
+            end
+        )
+        and (
+            .hostAdmission == null
+            or (.hostAdmission | valid_host_admission)
+        )
+        and (
+            if .managerContractVersion >= 18 then
+                has("hostAdmission")
+                and .hostAdmission != null
             else
                 true
             end
@@ -2047,13 +2193,15 @@ write_manager_observed_state() {
     target_image="${19:-}"
     target_image_id="${20:-}"
     host_hardware_path="${21:-}"
+    host_admission_path="${22:-}"
 
     observed_optional_snapshots=""
-    for optional_projection in operation_journal subsystem_health capacity_evidence; do
+    for optional_projection in operation_journal subsystem_health capacity_evidence host_admission; do
         case "${optional_projection}" in
             operation_journal) optional_path="${operation_journal_path}" ;;
             subsystem_health) optional_path="${subsystem_health_path}" ;;
-            *) optional_path="${capacity_evidence_path}" ;;
+            capacity_evidence) optional_path="${capacity_evidence_path}" ;;
+            *) optional_path="${host_admission_path}" ;;
         esac
         if [ -z "${optional_path}" ] || [ ! -f "${optional_path}" ]; then
             optional_path="${output_path%/*}/.${optional_projection}.$$.tmp"
@@ -2063,7 +2211,8 @@ write_manager_observed_state() {
         case "${optional_projection}" in
             operation_journal) operation_journal_path="${optional_path}" ;;
             subsystem_health) subsystem_health_path="${optional_path}" ;;
-            *) capacity_evidence_path="${optional_path}" ;;
+            capacity_evidence) capacity_evidence_path="${optional_path}" ;;
+            *) host_admission_path="${optional_path}" ;;
         esac
     done
 
@@ -2102,6 +2251,7 @@ write_manager_observed_state() {
         --slurpfile subsystemHealth "${subsystem_health_path}" \
         --slurpfile capacityEvidence "${capacity_evidence_path}" \
         --slurpfile hostHardware "${host_hardware_path}" \
+        --slurpfile hostAdmission "${host_admission_path}" \
         --arg workerRevision "${worker_revision}" \
         --arg targetImage "${target_image}" \
         --arg targetImageId "${target_image_id}" \
@@ -2135,6 +2285,7 @@ write_manager_observed_state() {
             operationJournal: $operationJournal[0],
             subsystemHealth: $subsystemHealth[0],
             capacityEvidence: $capacityEvidence[0],
+            hostAdmission: $hostAdmission[0],
             autoscaling: null,
             update: {
                 status: (if $staleWorkers > 0 then "rolling" else "current" end),

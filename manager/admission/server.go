@@ -269,7 +269,10 @@ func (s *Server) dispatch(request Request) Response {
 			return errorResponse(version, err)
 		}
 	case CommandStatus:
-		snapshot := s.coordinator.Status()
+		snapshot, err := s.coordinator.Status()
+		if err != nil {
+			return errorResponse(version, err)
+		}
 		response.Snapshot = &snapshot
 	default:
 		return errorResponse(version, fmt.Errorf("unsupported command %q", request.Command))

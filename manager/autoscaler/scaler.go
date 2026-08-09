@@ -586,7 +586,6 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 
 	if target > current {
 		missing := target - current
-		s.hostAdmission.setTargetDemand(s.target.key, missing)
 		if blocked := s.pendingRegistrationCount(); blocked > 0 {
 			if blocked > missing {
 				blocked = missing
@@ -623,17 +622,24 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		} else if admitted > 0 {
 			s.setBlocking(deficitLaunchPending, "admitted workers are still starting")
 		}
-		for ; admitted > 0; admitted-- {
+		s.hostAdmission.setTargetDemand(s.target.key, admitted)
+		for remaining := admitted; remaining > 0; remaining-- {
 			_, err := s.startRunner(ctx)
 			s.admission.settle(s.target.key, 1)
 			if err != nil {
-				s.admission.settle(s.target.key, admitted-1)
+				s.admission.settle(s.target.key, remaining-1)
+				if !errors.Is(err, errHostAdmissionWithheld) &&
+					!errors.Is(err, errHostAdmissionUnavailable) &&
+					!errors.Is(err, errHostAdmissionDegraded) {
+					s.hostAdmission.setTargetDemand(s.target.key, 0)
+				}
 				return s.capacityCount(), errors.Join(
 					errors.Join(operationErrors...),
 					fmt.Errorf("start missing runner: %w", err),
 				)
 			}
 		}
+		s.hostAdmission.setTargetDemand(s.target.key, 0)
 		s.onChange()
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
@@ -1324,16 +1330,10 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	var hostSlotKey string
 	if hostAdmissionEnabled {
 		hostSlotKey = requestedName
-		pendingDemand := s.hostAdmission.currentDemand()
-		_, outcome, err := s.hostAdmission.acquire(hostSlotKey, pendingDemand)
+		_, _, err := s.hostAdmission.acquire(s.target.key, hostSlotKey)
 		if err != nil {
-			reason := reasonCapacityCeiling
-			evidence := "host admission coordinator denied worker activation"
-			if outcome == hostAdmissionOutage {
-				reason = reasonUnknown
-				evidence = "host admission coordinator unavailable"
-			}
-			s.setBlocking(deficitAdmissionCeiling, evidence)
+			blockingReason, reason, evidence := hostAdmissionFailureDetails(err)
+			s.setBlocking(blockingReason, evidence)
 			s.recordLaunchFailure("", reason, evidence, launchStartedAt)
 			s.diagnostics.record(diagnosticsObservation{
 				subsystem: subsystemAdmission,
@@ -1446,6 +1446,16 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	var containerID string
 	if hostAdmissionEnabled {
 		if err := s.hostAdmission.renew(hostSlotKey); err != nil {
+			blockingReason, reason, evidence := hostAdmissionFailureDetails(err)
+			s.setBlocking(blockingReason, evidence)
+			s.diagnostics.record(diagnosticsObservation{
+				subsystem: subsystemAdmission,
+				operation: operationAdmissionReserve,
+				target:    s.target.key,
+				outcome:   outcomeFailed,
+				reason:    reason,
+				evidence:  evidence,
+			})
 			return abandonLaunch("", fmt.Errorf(
 				"renew host admission lease before container create: %w",
 				err,
@@ -1470,20 +1480,31 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 			return abandonLaunch("", err)
 		}
 		if err := s.hostAdmission.renew(hostSlotKey); err != nil {
+			blockingReason, reason, evidence := hostAdmissionFailureDetails(err)
+			s.setBlocking(blockingReason, evidence)
+			s.diagnostics.record(diagnosticsObservation{
+				subsystem: subsystemAdmission,
+				operation: operationAdmissionReserve,
+				target:    s.target.key,
+				outcome:   outcomeFailed,
+				reason:    reason,
+				evidence:  evidence,
+			})
 			return abandonLaunch(containerID, fmt.Errorf(
 				"renew host admission lease before activation: %w",
 				err,
 			))
 		}
 		if _, err := s.hostAdmission.activate(hostSlotKey); err != nil {
-			s.setBlocking(deficitAdmissionCeiling, "host admission activation failed")
+			blockingReason, reason, evidence := hostAdmissionFailureDetails(err)
+			s.setBlocking(blockingReason, evidence)
 			s.diagnostics.record(diagnosticsObservation{
 				subsystem: subsystemAdmission,
 				operation: operationAdmissionSettle,
 				target:    s.target.key,
 				outcome:   outcomeFailed,
-				reason:    reasonUnknown,
-				evidence:  "host admission activation failed",
+				reason:    reason,
+				evidence:  evidence,
 			})
 			return abandonLaunch(containerID, fmt.Errorf(
 				"activate host admission lease: %w",
@@ -1675,8 +1696,8 @@ func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 				errors.New("created container has no host admission lease"),
 			)
 		}
-		pendingDemand := s.hostAdmission.currentDemand()
-		if _, _, err := s.hostAdmission.acquire(container.hostSlotKey, pendingDemand); err != nil {
+		s.hostAdmission.setTargetDemand(s.target.key, 1)
+		if _, _, err := s.hostAdmission.acquire(s.target.key, container.hostSlotKey); err != nil {
 			return s.discardUnstartedContainer(
 				container,
 				container.hostSlotKey,

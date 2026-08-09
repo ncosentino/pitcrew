@@ -59,6 +59,7 @@ printf '%s|%s|%s|%s\n' "${command}" "${profile}" "${slot}" "${demand}" \
     >> "${PITCREW_TEST_ADMISSION_CALLS}"
 case "${command}:${PITCREW_TEST_ADMISSION_MODE:-success}" in
     acquire:withheld) exit 3 ;;
+    acquire:degraded|activate:degraded) exit 5 ;;
     acquire:error|release:error|reconcile:error) exit 1 ;;
     release:not-found|reconcile:not-found) exit 4 ;;
 esac
@@ -66,6 +67,13 @@ case "${command}" in
     acquire)
         printf '{"profileId":"%s","slotKey":"%s","leaseId":"lease-1","units":2,"status":"provisional"}\n' \
             "${profile}" "${slot}"
+        ;;
+    status)
+        if [ -n "${PITCREW_TEST_STATUS_SNAPSHOT:-}" ]; then
+            cat "${PITCREW_TEST_STATUS_SNAPSHOT}"
+        else
+            exit 1
+        fi
         ;;
     activate)
         printf '{"profileId":"%s","slotKey":"%s","leaseId":"lease-1","units":2,"status":"active"}\n' \
@@ -115,8 +123,8 @@ assert_true \
     "Recovered draining slots do not clear pending host demand before return." \
     grep -Fq 'host_admission_end_wait \' "${manager_source}"
 assert_true \
-    "Fixed admission implementation activated the manager contract before autoscaler parity." \
-    grep -Fq 'MANAGER_CONTRACT_VERSION=17' "${manager_source}"
+    "Fixed admission implementation did not activate manager contract eighteen." \
+    grep -Fq 'MANAGER_CONTRACT_VERSION=18' "${manager_source}"
 
 disabled_calls="${TEMP_DIRECTORY}/disabled-calls.log"
 : > "${disabled_calls}"
@@ -186,6 +194,10 @@ assert_equals \
 assert_true \
     "Withheld fixed slot lost its pending-demand marker." \
     test -f "${admission_slot}/${HOST_ADMISSION_WAIT_MARKER}"
+assert_equals \
+    "withheld" \
+    "$(host_admission_wait_state "${admission_slots}")" \
+    "Host budget denial did not retain a bounded withheld reason."
 
 PITCREW_TEST_ADMISSION_MODE="error"
 export PITCREW_TEST_ADMISSION_MODE
@@ -197,6 +209,25 @@ assert_equals \
     "1" \
     "${unavailable_status}" \
     "Coordinator failure did not return the fixed-manager unavailable status."
+assert_equals \
+    "unavailable" \
+    "$(host_admission_wait_state "${admission_slots}")" \
+    "Coordinator failure did not retain a bounded unavailable reason."
+
+PITCREW_TEST_ADMISSION_MODE="degraded"
+export PITCREW_TEST_ADMISSION_MODE
+set +e
+host_admission_acquire "${admission_slot}" "control-1" "${admission_slots}"
+degraded_status=$?
+set -e
+assert_equals \
+    "3" \
+    "${degraded_status}" \
+    "Policy mismatch did not return the fixed-manager degraded status."
+assert_equals \
+    "degraded" \
+    "$(host_admission_wait_state "${admission_slots}")" \
+    "Policy mismatch did not retain a bounded degraded reason."
 
 PITCREW_TEST_ADMISSION_MODE="not-found"
 export PITCREW_TEST_ADMISSION_MODE
@@ -227,5 +258,127 @@ host_admission_retry_releases
 assert_false \
     "Successful pending release retry did not remove its durable record." \
     test -f "${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY}/control-1.pending"
+
+status_snapshot="${TEMP_DIRECTORY}/status-snapshot.json"
+status_output="${TEMP_DIRECTORY}/status-output.json"
+cat > "${status_snapshot}" <<'EOF'
+{
+    "namespace": "primary",
+    "epoch": 3,
+    "decisionSequence": 9,
+    "capacityUnits": 10,
+    "safetyMarginUnits": 1,
+    "effectiveTotalUnits": 9,
+    "availableUnits": 5,
+    "hostPolicyFingerprint": "host-fingerprint-a",
+    "accounting": [
+        {
+            "profileId": "control",
+            "unitCost": 2,
+            "reservedUnits": 4,
+            "borrowable": false,
+            "profilePolicyFingerprint": "profile-fingerprint-a",
+            "activeUnits": 2,
+            "provisionalUnits": 0,
+            "heldUnits": 2,
+            "borrowedUnits": 0,
+            "pendingUnits": 0,
+            "withheldUnits": 0
+        }
+    ],
+    "lastDecision": {
+        "profileId": "control",
+        "sequence": 9,
+        "command": "acquire",
+        "granted": true,
+        "failureCategory": null,
+        "decidedAtUnixNano": 1700000000000000000
+    }
+}
+EOF
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${status_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-a"
+    PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT="profile-fingerprint-a"
+    export \
+        PITCREW_TEST_STATUS_SNAPSHOT \
+        PITCREW_HOST_ADMISSION_HOST_FINGERPRINT \
+        PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Matching host and profile policy fingerprints did not report an available status." \
+    jq -e '.status == "available" and .namespace == "primary" and .epoch == 3' \
+        "${status_output}" >/dev/null
+assert_true \
+    "Available host-admission status did not report this profile's own accounting." \
+    jq -e '.accounting.heldUnits == 2 and .accounting.borrowedUnits == 0' \
+        "${status_output}" >/dev/null
+assert_true \
+    "Available host-admission status did not report its own scoped last decision." \
+    jq -e '.lastDecision.command == "acquire" and .lastDecision.granted == true' \
+        "${status_output}" >/dev/null
+
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${status_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-mismatch"
+    export PITCREW_TEST_STATUS_SNAPSHOT PITCREW_HOST_ADMISSION_HOST_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "A mismatched host policy fingerprint did not report a degraded status." \
+    jq -e '.status == "degraded"' "${status_output}" >/dev/null
+
+missing_identity_snapshot="${TEMP_DIRECTORY}/status-missing-identity.json"
+jq 'del(.hostPolicyFingerprint)' "${status_snapshot}" > "${missing_identity_snapshot}"
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${missing_identity_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-a"
+    export PITCREW_TEST_STATUS_SNAPSHOT PITCREW_HOST_ADMISSION_HOST_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Missing coordinator identity was reported as available." \
+    jq -e '.status == "degraded"' "${status_output}" >/dev/null
+
+(
+    PITCREW_TEST_STATUS_SNAPSHOT=""
+    export PITCREW_TEST_STATUS_SNAPSHOT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Coordinator status-command failure did not report an unavailable status." \
+    jq -e '
+        .status == "unavailable"
+        and .namespace == "primary"
+        and .epoch == null
+        and .accounting == null
+        and .lastDecision == null
+    ' "${status_output}" >/dev/null
+
+(
+    unset \
+        PITCREW_HOST_ADMISSION_NAMESPACE \
+        PITCREW_HOST_ADMISSION_SOCKET
+    PROFILE_ID="default"
+    PITCREW_HOST_ADMISSION_CLI="${admission_cli}"
+    PITCREW_TEST_ADMISSION_CALLS="${disabled_calls}"
+    export PROFILE_ID PITCREW_HOST_ADMISSION_CLI PITCREW_TEST_ADMISSION_CALLS
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Disabled host admission did not report a fully null disabled status." \
+    jq -e '
+        .status == "disabled"
+        and .namespace == null
+        and .epoch == null
+        and .accounting == null
+        and .lastDecision == null
+    ' "${status_output}" >/dev/null
 
 echo "Host admission contracts passed: ${ASSERTIONS} assertions."

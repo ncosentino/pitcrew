@@ -779,6 +779,7 @@ render_fixed_capacity_evidence() {
     capacity_desired_status="$3"
     capacity_health_path="$4"
     capacity_output="$5"
+    capacity_host_admission_wait_state="${6:-none}"
     capacity_temporary="${capacity_output}.$$.tmp"
 
     case "${capacity_target_slots}" in
@@ -792,6 +793,7 @@ render_fixed_capacity_evidence() {
         --arg observedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
         --argjson targetSlots "${capacity_target_slots}" \
         --arg desiredStatus "${capacity_desired_status}" \
+        --arg hostAdmissionWaitState "${capacity_host_admission_wait_state}" \
         --slurpfile slots "${capacity_slots_path}" \
         --slurpfile health "${capacity_health_path}" \
         '
@@ -839,6 +841,21 @@ render_fixed_capacity_evidence() {
                     [
                         "invalid-desired-state",
                         "Desired capacity was rejected so the manager retained its accepted generation"
+                    ]
+                elif $localDeficit > 0 and $hostAdmissionWaitState == "unavailable" then
+                    [
+                        "host-admission-unavailable",
+                        "Host admission is unavailable for a waiting worker slot"
+                    ]
+                elif $localDeficit > 0 and $hostAdmissionWaitState == "withheld" then
+                    [
+                        "host-admission-withheld",
+                        "Host admission withheld a waiting worker slot"
+                    ]
+                elif $localDeficit > 0 and $hostAdmissionWaitState == "degraded" then
+                    [
+                        "host-admission-degraded",
+                        "Host admission policy or lease state is incompatible"
                     ]
                 elif ($health.docker.state // "unknown") == "unavailable" then
                     ["docker-unavailable", "Manager Docker operations are failing"]

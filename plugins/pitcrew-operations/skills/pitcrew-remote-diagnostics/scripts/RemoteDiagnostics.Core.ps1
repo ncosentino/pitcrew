@@ -581,7 +581,8 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
             'slots',
             'autoscaling',
             'update',
-            'hostPressure') `
+            'hostPressure',
+            'hostAdmission') `
         -Context 'Observed state'
     $connectorSnapshot = Get-PitCrewRemoteDiagnosticsProperty `
         (Get-PitCrewRemoteDiagnosticsProperty `
@@ -942,6 +943,12 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
                         'state') `
                     -Context 'Host pressure state' `
                     -MaximumLength 64
+                hostAdmissionStatus = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+                    -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                        $observed.hostAdmission `
+                        'status') `
+                    -Context 'Host admission status' `
+                    -MaximumLength 32
             }
             connectorHealth = $connectorSummary
             capacity = $capacity

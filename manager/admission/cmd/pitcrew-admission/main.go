@@ -75,6 +75,16 @@ func exitCodeForError(err error) int {
 	if errors.Is(err, admission.ErrLeaseNotFound) {
 		return 4
 	}
+	if errors.Is(err, admission.ErrUnknownProfile) ||
+		errors.Is(err, admission.ErrInvalidPolicy) ||
+		errors.Is(err, admission.ErrInvalidIdentity) ||
+		errors.Is(err, admission.ErrStalePolicy) ||
+		errors.Is(err, admission.ErrCorruptState) ||
+		errors.Is(err, admission.ErrProtocolMismatch) ||
+		errors.Is(err, admission.ErrLeaseExpired) ||
+		errors.Is(err, admission.ErrLeaseNotProvisional) {
+		return 5
+	}
 	return 1
 }
 
@@ -150,7 +160,7 @@ func runSetDemand(args []string) error {
 	flagSet := flag.NewFlagSet("set-demand", flag.ContinueOnError)
 	socketPath := flagSet.String("socket", "", "Unix domain socket path")
 	profileID := flagSet.String("profile", "", "profile identity")
-	demand := flagSet.Int("demand", 0, "current total pending demand for this profile")
+	demand := flagSet.Int("demand", 0, "current total pending worker count for this profile")
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}
@@ -166,7 +176,11 @@ func runAcquire(args []string) error {
 	socketPath := flagSet.String("socket", "", "Unix domain socket path")
 	profileID := flagSet.String("profile", "", "profile identity")
 	slotKey := flagSet.String("slot", "", "exact slot identity")
-	demand := flagSet.Int("demand", 1, "current total pending demand for this profile, including this request")
+	demand := flagSet.Int(
+		"demand",
+		1,
+		"current total pending worker count for this profile, including this request",
+	)
 	if err := flagSet.Parse(args); err != nil {
 		return err
 	}

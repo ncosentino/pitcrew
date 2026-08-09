@@ -60,6 +60,19 @@ const (
 	CommandStatus      Command = "status"
 )
 
+// isLeaseDecision reports whether Command identifies one of the five lease
+// operations Decision.Command records. ApplyPolicy, SetDemand, and Status
+// are policy/reporting operations, not lease admission decisions, and are
+// never recorded as a Decision.
+func (c Command) isLeaseDecision() bool {
+	switch c {
+	case CommandAcquire, CommandRenew, CommandActivate, CommandRelease, CommandReconcile:
+		return true
+	default:
+		return false
+	}
+}
+
 // Request is the exact, versioned wire envelope a client sends to the
 // admission service over the Unix domain socket. ProtocolVersions lists
 // every protocol version the client is willing to speak; the server picks
@@ -110,6 +123,30 @@ const (
 	ErrorCodeMalformedRequest    ErrorCode = "malformed-request"
 	ErrorCodeProtocolMismatch    ErrorCode = "protocol-mismatch"
 )
+
+func (c ErrorCode) valid() bool {
+	switch c {
+	case "",
+		ErrorCodeUnknownProfile,
+		ErrorCodeDuplicateLease,
+		ErrorCodeLeaseNotFound,
+		ErrorCodeLeaseExpired,
+		ErrorCodeLeaseNotProvisional,
+		ErrorCodeBudgetExceeded,
+		ErrorCodeEvidenceRequired,
+		ErrorCodeEvidenceInvalid,
+		ErrorCodeInvalidPolicy,
+		ErrorCodeInvalidIdentity,
+		ErrorCodeStalePolicy,
+		ErrorCodeCorruptState,
+		ErrorCodeRequestTooLarge,
+		ErrorCodeMalformedRequest,
+		ErrorCodeProtocolMismatch:
+		return true
+	default:
+		return false
+	}
+}
 
 // errorCodeForErr maps a coordinator sentinel error to its stable wire
 // code. It uses errors.Is so an error wrapped with additional detail (for

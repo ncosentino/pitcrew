@@ -89,7 +89,14 @@ canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
 Resource policy and the aggregate ceiling were introduced in manager contract
-11 and remain supported by the active contract 17 autoscaler.
+11 and remain supported by the active contract 18 autoscaler.
+
+Contract 18 keeps profile-ceiling and host-admission deficits distinct in
+per-target capacity evidence. `admission-ceiling` remains the in-process
+profile-wide limit, while `host-admission-withheld` and
+`host-admission-degraded` identify host-budget contention and incompatible
+policy or lease state respectively. `host-admission-unavailable` identifies
+coordinator outage.
 
 Autoscaled slots also publish bounded `currentJob` metadata from GitHub's
 scale-set lifecycle events. The projection is sufficient to identify and link

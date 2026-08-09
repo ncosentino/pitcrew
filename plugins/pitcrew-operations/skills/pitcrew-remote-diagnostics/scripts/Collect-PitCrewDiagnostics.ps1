@@ -681,6 +681,7 @@ function ConvertTo-PitCrewStateSummary {
                 }
             }
             hostPressure = Get-PitCrewProperty $resourceTelemetry 'hostPressure'
+            hostAdmission = Get-PitCrewProperty $Observed 'hostAdmission'
         }
     }
 }

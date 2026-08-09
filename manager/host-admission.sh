@@ -4,6 +4,8 @@ HOST_ADMISSION_NAMESPACE="${PITCREW_HOST_ADMISSION_NAMESPACE:-}"
 HOST_ADMISSION_SOCKET="${PITCREW_HOST_ADMISSION_SOCKET:-}"
 HOST_ADMISSION_CLI_TIMEOUT="${PITCREW_HOST_ADMISSION_CLI_TIMEOUT:-10}"
 HOST_ADMISSION_CLI="${PITCREW_HOST_ADMISSION_CLI:-/usr/local/bin/pitcrew-admission}"
+HOST_ADMISSION_HOST_FINGERPRINT="${PITCREW_HOST_ADMISSION_HOST_FINGERPRINT:-}"
+HOST_ADMISSION_PROFILE_FINGERPRINT="${PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT:-}"
 HOST_ADMISSION_WAIT_MARKER="host-admission-waiting"
 HOST_ADMISSION_LEASE_FILE="host-admission-lease.json"
 
@@ -33,26 +35,39 @@ host_admission_cli() {
         --socket "${HOST_ADMISSION_SOCKET}"
 }
 
-host_admission_publish_demand() {
+host_admission_pending_count() {
     slot_directory="$1"
-    host_admission_enabled || return 0
     pending=0
     for slot_state_path in "${slot_directory}"/*; do
         [ -d "${slot_state_path}" ] || continue
         [ -f "${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}" ] || continue
         pending=$((pending + 1))
     done
+    printf '%s\n' "${pending}"
+}
+
+host_admission_publish_demand() {
+    slot_directory="$1"
+    host_admission_enabled || return 0
+    pending=$(host_admission_pending_count "${slot_directory}") || return 1
     host_admission_cli \
         set-demand \
         --profile "${PROFILE_ID}" \
         --demand "${pending}" >/dev/null 2>&1
 }
 
+host_admission_mark_wait_reason() {
+    slot_state_path="$1"
+    wait_reason="$2"
+    printf '%s\n' "${wait_reason}" \
+        > "${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}"
+}
+
 host_admission_begin_wait() {
     slot_state_path="$1"
     slot_directory="$2"
     host_admission_enabled || return 0
-    : > "${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}"
+    host_admission_mark_wait_reason "${slot_state_path}" "pending" || return 1
     host_admission_publish_demand "${slot_directory}" || true
 }
 
@@ -65,7 +80,8 @@ host_admission_end_wait() {
 }
 
 # Returns 0 when a lease was acquired, 2 when host budget withheld the
-# request, and 1 when coordinator availability or protocol failed.
+# request, 3 for incompatible policy or lease state, and 1 when coordinator
+# availability or transport failed.
 host_admission_acquire() {
     slot_state_path="$1"
     slot_key="$2"
@@ -73,16 +89,23 @@ host_admission_acquire() {
     host_admission_enabled || return 0
 
     host_admission_begin_wait "${slot_state_path}" "${slot_directory}"
+    pending=$(host_admission_pending_count "${slot_directory}") || pending=1
     lease_temporary="${slot_state_path}/.${HOST_ADMISSION_LEASE_FILE}.$$"
     host_admission_cli \
         acquire \
         --profile "${PROFILE_ID}" \
         --slot "${slot_key}" \
-        --demand 1 > "${lease_temporary}" 2>"${lease_temporary}.error"
+        --demand "${pending}" > "${lease_temporary}" 2>"${lease_temporary}.error"
     acquire_status=$?
     if [ "${acquire_status}" -eq 3 ]; then
         rm -f "${lease_temporary}" "${lease_temporary}.error"
+        host_admission_mark_wait_reason "${slot_state_path}" "withheld" || true
         return 2
+    fi
+    if [ "${acquire_status}" -eq 4 ] || [ "${acquire_status}" -eq 5 ]; then
+        rm -f "${lease_temporary}" "${lease_temporary}.error"
+        host_admission_mark_wait_reason "${slot_state_path}" "degraded" || true
+        return 3
     fi
     if [ "${acquire_status}" -ne 0 ] ||
         ! jq -e \
@@ -96,6 +119,7 @@ host_admission_acquire() {
                 and (.leaseId | (type == "string" and length > 0))
             ' "${lease_temporary}" >/dev/null 2>&1; then
         rm -f "${lease_temporary}" "${lease_temporary}.error"
+        host_admission_mark_wait_reason "${slot_state_path}" "unavailable" || true
         return 1
     fi
     mv -f "${lease_temporary}" "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
@@ -104,17 +128,55 @@ host_admission_acquire() {
     return 0
 }
 
+host_admission_wait_state() {
+    slot_directory="$1"
+    state="none"
+    for slot_state_path in "${slot_directory}"/*; do
+        [ -d "${slot_state_path}" ] || continue
+        marker_path="${slot_state_path}/${HOST_ADMISSION_WAIT_MARKER}"
+        [ -f "${marker_path}" ] || continue
+        marker_state=""
+        IFS= read -r marker_state < "${marker_path}" || true
+        case "${marker_state}" in
+            unavailable)
+                printf '%s\n' "unavailable"
+                return 0
+                ;;
+            degraded)
+                state="degraded"
+                ;;
+            withheld)
+                [ "${state}" != "degraded" ] && state="withheld"
+                ;;
+            *)
+                [ "${state}" = "none" ] && state="pending"
+                ;;
+        esac
+    done
+    printf '%s\n' "${state}"
+}
+
 host_admission_activate() {
     slot_state_path="$1"
     slot_key="$2"
     host_admission_enabled || return 0
 
     lease_temporary="${slot_state_path}/.${HOST_ADMISSION_LEASE_FILE}.$$"
-    if ! host_admission_cli \
+    host_admission_cli \
         activate \
         --profile "${PROFILE_ID}" \
-        --slot "${slot_key}" > "${lease_temporary}" 2>/dev/null ||
-        ! jq -e \
+        --slot "${slot_key}" > "${lease_temporary}" 2>/dev/null
+    activation_status=$?
+    if [ "${activation_status}" -ne 0 ]; then
+        rm -f "${lease_temporary}"
+        if [ "${activation_status}" -eq 4 ] || [ "${activation_status}" -eq 5 ]; then
+            host_admission_mark_wait_reason "${slot_state_path}" "degraded" || true
+        else
+            host_admission_mark_wait_reason "${slot_state_path}" "unavailable" || true
+        fi
+        return 1
+    fi
+    if ! jq -e \
             --arg profile "${PROFILE_ID}" \
             --arg slot "${slot_key}" \
             '
@@ -123,6 +185,7 @@ host_admission_activate() {
                 and .status == "active"
             ' "${lease_temporary}" >/dev/null 2>&1; then
         rm -f "${lease_temporary}"
+        host_admission_mark_wait_reason "${slot_state_path}" "unavailable" || true
         return 1
     fi
     mv -f "${lease_temporary}" "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
@@ -209,4 +272,137 @@ host_admission_retry_releases() {
             rm -f "${pending_path}"
         fi
     done
+}
+
+_host_admission_write_closed_status() {
+    output_path="$1"
+    closed_status="$2"
+    namespace_argument="$3"
+    jq -n \
+        --arg status "${closed_status}" \
+        --arg namespace "${namespace_argument}" \
+        '{
+            status: $status,
+            namespace: (if $namespace == "" then null else $namespace end),
+            epoch: null,
+            decisionSequence: null,
+            capacityUnits: null,
+            safetyMarginUnits: null,
+            effectiveTotalUnits: null,
+            availableUnits: null,
+            hostPolicyFingerprint: null,
+            accounting: null,
+            lastDecision: null
+        }' > "${output_path}"
+}
+
+# host_admission_status writes this profile's scoped hostAdmission
+# observed-state object to "${output_path}". It never fails the caller:
+# reading the coordinator's status is diagnostics-only, so an unreachable
+# coordinator is reported as status "unavailable" (every measured field
+# null, never a fabricated zero) rather than surfaced as an error that
+# could influence lifecycle. This mirrors
+# hostAdmissionCoordinator.sampleObservedHostAdmission in the autoscaler:
+# only this profile's own accounting entry and (if it belongs to this
+# profile) last decision are ever reported, never another profile's
+# identity, even though `host_admission_cli status` itself returns the
+# full multi-profile ledger.
+host_admission_status() {
+    output_path="$1"
+    if ! host_admission_enabled; then
+        _host_admission_write_closed_status "${output_path}" "disabled" ""
+        return 0
+    fi
+
+    status_temporary="${output_path}.$$.tmp"
+    if ! host_admission_cli status > "${status_temporary}" 2>/dev/null ||
+        ! jq -e 'type == "object"' "${status_temporary}" >/dev/null 2>&1; then
+        rm -f "${status_temporary}"
+        _host_admission_write_closed_status \
+            "${output_path}" \
+            "unavailable" \
+            "${HOST_ADMISSION_NAMESPACE}"
+        return 0
+    fi
+
+    if jq \
+        --arg profile "${PROFILE_ID}" \
+        --arg namespace "${HOST_ADMISSION_NAMESPACE}" \
+        --arg hostFingerprint "${HOST_ADMISSION_HOST_FINGERPRINT}" \
+        --arg profileFingerprint "${HOST_ADMISSION_PROFILE_FINGERPRINT}" \
+        '
+            (.accounting // [] | map(select(.profileId == $profile)) | .[0]) as $own
+            | ($own != null) as $known
+            | (
+                (
+                    (.namespace // "") != $namespace
+                )
+                or (
+                    $hostFingerprint != ""
+                    and (.hostPolicyFingerprint // "") != $hostFingerprint
+                )
+                or (
+                    $known
+                    and $profileFingerprint != ""
+                    and ($own.profilePolicyFingerprint // "") != $profileFingerprint
+                )
+                or ((.capacityUnits // 0) <= 0)
+                or (.safetyMarginUnits == null)
+                or ($known and ($own.pendingUnits == null or $own.withheldUnits == null))
+                or ($known | not)
+            ) as $degraded
+            | (.lastDecision // null) as $decision
+            | (
+                if $decision != null and $decision.profileId == $profile then
+                    {
+                        sequence: $decision.sequence,
+                        command: $decision.command,
+                        granted: $decision.granted,
+                        failureCategory: ($decision.failureCategory // null),
+                        decidedAtUnixNano: $decision.decidedAtUnixNano
+                    }
+                else
+                    null
+                end
+            ) as $ownDecision
+            | {
+                status: (if $degraded then "degraded" else "available" end),
+                namespace: (if $namespace == "" then null else $namespace end),
+                epoch: .epoch,
+                decisionSequence: .decisionSequence,
+                capacityUnits: (
+                    if (.capacityUnits // 0) > 0 then .capacityUnits else null end
+                ),
+                safetyMarginUnits: (
+                    if (.capacityUnits // 0) > 0 then (.safetyMarginUnits // null) else null end
+                ),
+                effectiveTotalUnits: .effectiveTotalUnits,
+                availableUnits: .availableUnits,
+                hostPolicyFingerprint: (.hostPolicyFingerprint // null),
+                accounting: (
+                    if $known then {
+                        unitCost: $own.unitCost,
+                        reservedUnits: $own.reservedUnits,
+                        borrowable: $own.borrowable,
+                        profilePolicyFingerprint: ($own.profilePolicyFingerprint // null),
+                        activeUnits: $own.activeUnits,
+                        provisionalUnits: $own.provisionalUnits,
+                        heldUnits: $own.heldUnits,
+                        borrowedUnits: $own.borrowedUnits,
+                        pendingUnits: $own.pendingUnits,
+                        withheldUnits: $own.withheldUnits
+                    } else null end
+                ),
+                lastDecision: $ownDecision
+            }
+        ' "${status_temporary}" > "${output_path}"; then
+        rm -f "${status_temporary}"
+        return 0
+    fi
+    rm -f "${status_temporary}"
+    _host_admission_write_closed_status \
+        "${output_path}" \
+        "unavailable" \
+        "${HOST_ADMISSION_NAMESPACE}"
+    return 0
 }
