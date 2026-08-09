@@ -1,8 +1,6 @@
 package admission
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -112,6 +110,15 @@ func (s durableState) validate() error {
 				ErrCorruptState,
 				key,
 				expected,
+			)
+		}
+	}
+	for key := range s.Leases {
+		if _, tombstoned := s.Tombstones[key]; tombstoned {
+			return fmt.Errorf(
+				"%w: key %q has both a live lease and a tombstone",
+				ErrCorruptState,
+				key,
 			)
 		}
 	}
@@ -266,10 +273,34 @@ func sortedStateKeys[V any](values map[string]V) []string {
 	return keys
 }
 
-// digestHex is used only for compact, deterministic identifiers in generated
-// artifacts (for example CLI-facing lease IDs); it carries no security
-// meaning here.
-func digestHex(value string) string {
-	sum := sha256.Sum256([]byte(value))
-	return hex.EncodeToString(sum[:8])
+// maxTombstones bounds the durable tombstone ledger so an unbounded stream
+// of releases, expirations, and reconciliations can never grow the durable
+// state document without limit. Compaction always keeps the newest entries
+// by decision sequence: a newer tombstone is strictly more relevant to
+// idempotent release and fenced recovery than an older one.
+const maxTombstones = 4096
+
+// compactTombstones trims state.Tombstones to at most maxTombstones entries,
+// keeping the newest by Sequence. It is a no-op at or below the bound.
+func compactTombstones(state durableState) durableState {
+	if len(state.Tombstones) <= maxTombstones {
+		return state
+	}
+	type tombstoneEntry struct {
+		key       string
+		tombstone Tombstone
+	}
+	entries := make([]tombstoneEntry, 0, len(state.Tombstones))
+	for key, tombstone := range state.Tombstones {
+		entries = append(entries, tombstoneEntry{key: key, tombstone: tombstone})
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].tombstone.Sequence > entries[j].tombstone.Sequence
+	})
+	trimmed := make(map[string]Tombstone, maxTombstones)
+	for i := 0; i < maxTombstones; i++ {
+		trimmed[entries[i].key] = entries[i].tombstone
+	}
+	state.Tombstones = trimmed
+	return state
 }

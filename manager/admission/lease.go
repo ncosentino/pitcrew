@@ -40,6 +40,13 @@ var ErrBudgetExceeded = errors.New("admission: unit budget exceeded")
 // recovery never releases an active lease on ambiguous or missing evidence.
 var ErrEvidenceRequired = errors.New("admission: reconciliation evidence required")
 
+// ErrEvidenceInvalid reports Reconcile evidence that fails the strict
+// sanitized format this package requires: no more than maxEvidenceBytes
+// UTF-8 bytes after trimming surrounding whitespace, and no control
+// characters or newlines. Evidence is a durable, operator-visible audit
+// trail, not free-form text.
+var ErrEvidenceInvalid = errors.New("admission: reconciliation evidence is invalid")
+
 // LeaseStatus is the lifecycle state of one granted lease.
 type LeaseStatus string
 
@@ -61,9 +68,18 @@ type Lease struct {
 	LeaseID   string      `json:"leaseId"`
 	Units     int         `json:"units"`
 	Status    LeaseStatus `json:"status"`
-	// ExpiresAtUnixNano is the service monotonic expiry for a provisional
-	// lease. It is zero for an active lease, which never expires from time
-	// alone.
+	// ExpiresAtUnixNano is a bounded, serialized snapshot of the provisional
+	// expiry last computed by the coordinator process that granted or
+	// renewed this lease, for protocol and status reporting only. It is
+	// zero for an active lease, which never expires from time alone. The
+	// coordinator never compares against this durable value to decide
+	// whether a provisional lease has expired; that decision always uses
+	// the in-process Coordinator.provisionalDeadlines entry for the
+	// lease, which is the only monotonic deadline this package trusts
+	// within one running process (see ADR-0003, service-owned monotonic
+	// expiry). A restored provisional lease's deadline cannot be trusted
+	// across a restart and is discarded before the coordinator serves any
+	// request; see Coordinator.Open.
 	ExpiresAtUnixNano int64 `json:"expiresAtUnixNano,omitempty"`
 	// GrantedAtSequence and ActivatedAtSequence record the durable decision
 	// sequence at which this lease reached its current milestones.
@@ -97,6 +113,15 @@ const (
 	// replacement manager proved, with retained evidence, that the previous
 	// worker and registration are absent.
 	TombstoneReconciledAbsent TombstoneReason = "reconciled-absent"
+	// TombstoneRestartDiscarded marks a provisional lease this coordinator
+	// build found still on disk when it opened durable state. A
+	// provisional lease's monotonic expiry is tracked only in the process
+	// memory of the coordinator instance that granted or last renewed it;
+	// a restored provisional has no trustworthy in-process deadline, so
+	// ADR-0003's service-owned monotonic expiry requirement means it is
+	// never carried forward across a restart. Only active leases, which
+	// never expire from time alone, survive a restart.
+	TombstoneRestartDiscarded TombstoneReason = "restart-discarded"
 )
 
 // Tombstone is a durable record of a permanently released lease. Tombstones

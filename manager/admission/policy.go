@@ -89,8 +89,8 @@ func (h HostPolicy) validate() error {
 	if h.Generation < 1 {
 		return fmt.Errorf("%w: generation must be a positive integer", ErrInvalidPolicy)
 	}
-	if h.TotalUnits < 0 {
-		return fmt.Errorf("%w: total units cannot be negative", ErrInvalidPolicy)
+	if h.TotalUnits < 1 {
+		return fmt.Errorf("%w: total units must be a positive integer", ErrInvalidPolicy)
 	}
 	seen := make(map[string]struct{}, len(h.Profiles))
 	reserved := 0
@@ -106,6 +106,24 @@ func (h HostPolicy) validate() error {
 			)
 		}
 		seen[profile.ProfileID] = struct{}{}
+		if profile.UnitCost > h.TotalUnits {
+			return fmt.Errorf(
+				"%w: profile %q unit cost %d exceeds total units %d",
+				ErrInvalidPolicy,
+				profile.ProfileID,
+				profile.UnitCost,
+				h.TotalUnits,
+			)
+		}
+		if profile.ReservedUnits > h.TotalUnits {
+			return fmt.Errorf(
+				"%w: profile %q reserved units %d exceed total units %d",
+				ErrInvalidPolicy,
+				profile.ProfileID,
+				profile.ReservedUnits,
+				h.TotalUnits,
+			)
+		}
 		reserved += profile.ReservedUnits
 	}
 	if reserved > h.TotalUnits {

@@ -1,6 +1,9 @@
 package admission
 
-import "sort"
+import (
+	"errors"
+	"sort"
+)
 
 // CurrentProtocolVersion is the exact wire protocol version this build
 // speaks by default. ADR-0003 requires the service to keep serving the
@@ -77,8 +80,104 @@ type Response struct {
 	ProtocolVersion int       `json:"protocolVersion"`
 	Status          string    `json:"status"`
 	Error           string    `json:"error,omitempty"`
+	ErrorCode       ErrorCode `json:"errorCode,omitempty"`
 	Lease           *Lease    `json:"lease,omitempty"`
 	Snapshot        *Snapshot `json:"snapshot,omitempty"`
+}
+
+// ErrorCode is a stable, wire-safe identifier for a known coordinator or
+// transport error. Response.Error remains the free-form, human-readable
+// message for logs and CLI output; ErrorCode is what a client uses to
+// reconstruct the exact package sentinel error so errors.Is keeps working
+// across the wire, even though the human message may change over time or
+// carry request-specific detail.
+type ErrorCode string
+
+const (
+	ErrorCodeUnknownProfile      ErrorCode = "unknown-profile"
+	ErrorCodeDuplicateLease      ErrorCode = "duplicate-lease"
+	ErrorCodeLeaseNotFound       ErrorCode = "lease-not-found"
+	ErrorCodeLeaseExpired        ErrorCode = "lease-expired"
+	ErrorCodeLeaseNotProvisional ErrorCode = "lease-not-provisional"
+	ErrorCodeBudgetExceeded      ErrorCode = "budget-exceeded"
+	ErrorCodeEvidenceRequired    ErrorCode = "evidence-required"
+	ErrorCodeEvidenceInvalid     ErrorCode = "evidence-invalid"
+	ErrorCodeInvalidPolicy       ErrorCode = "invalid-policy"
+	ErrorCodeStalePolicy         ErrorCode = "stale-policy"
+	ErrorCodeCorruptState        ErrorCode = "corrupt-state"
+	ErrorCodeRequestTooLarge     ErrorCode = "request-too-large"
+	ErrorCodeMalformedRequest    ErrorCode = "malformed-request"
+	ErrorCodeProtocolMismatch    ErrorCode = "protocol-mismatch"
+)
+
+// errorCodeForErr maps a coordinator sentinel error to its stable wire
+// code. It uses errors.Is so an error wrapped with additional detail (for
+// example "%w: profile %q ...") still maps to the correct code. An error
+// this package does not recognize maps to the empty code, and the client
+// falls back to the free-form message.
+func errorCodeForErr(err error) ErrorCode {
+	switch {
+	case errors.Is(err, ErrDuplicateLease):
+		return ErrorCodeDuplicateLease
+	case errors.Is(err, ErrUnknownProfile):
+		return ErrorCodeUnknownProfile
+	case errors.Is(err, ErrLeaseNotFound):
+		return ErrorCodeLeaseNotFound
+	case errors.Is(err, ErrLeaseExpired):
+		return ErrorCodeLeaseExpired
+	case errors.Is(err, ErrLeaseNotProvisional):
+		return ErrorCodeLeaseNotProvisional
+	case errors.Is(err, ErrBudgetExceeded):
+		return ErrorCodeBudgetExceeded
+	case errors.Is(err, ErrEvidenceInvalid):
+		return ErrorCodeEvidenceInvalid
+	case errors.Is(err, ErrEvidenceRequired):
+		return ErrorCodeEvidenceRequired
+	case errors.Is(err, ErrStalePolicy):
+		return ErrorCodeStalePolicy
+	case errors.Is(err, ErrInvalidPolicy):
+		return ErrorCodeInvalidPolicy
+	case errors.Is(err, ErrCorruptState):
+		return ErrorCodeCorruptState
+	default:
+		return ""
+	}
+}
+
+// errForErrorCode is the client-side inverse of errorCodeForErr: it
+// reconstructs the package sentinel error for a known code so
+// errors.Is(err, admission.ErrX) succeeds for a caller that only observed
+// the wire response. An unrecognized or empty code returns nil, and the
+// caller falls back to the free-form message.
+func errForErrorCode(code ErrorCode) error {
+	switch code {
+	case ErrorCodeDuplicateLease:
+		return ErrDuplicateLease
+	case ErrorCodeUnknownProfile:
+		return ErrUnknownProfile
+	case ErrorCodeLeaseNotFound:
+		return ErrLeaseNotFound
+	case ErrorCodeLeaseExpired:
+		return ErrLeaseExpired
+	case ErrorCodeLeaseNotProvisional:
+		return ErrLeaseNotProvisional
+	case ErrorCodeBudgetExceeded:
+		return ErrBudgetExceeded
+	case ErrorCodeEvidenceInvalid:
+		return ErrEvidenceInvalid
+	case ErrorCodeEvidenceRequired:
+		return ErrEvidenceRequired
+	case ErrorCodeStalePolicy:
+		return ErrStalePolicy
+	case ErrorCodeInvalidPolicy:
+		return ErrInvalidPolicy
+	case ErrorCodeCorruptState:
+		return ErrCorruptState
+	case ErrorCodeProtocolMismatch:
+		return ErrProtocolMismatch
+	default:
+		return nil
+	}
 }
 
 const (

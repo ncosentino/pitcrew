@@ -1,10 +1,14 @@
 package admission
 
 import (
+	"bufio"
 	"context"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"sync"
 	"testing"
 	"time"
@@ -144,5 +148,169 @@ func TestServerSerializesConcurrentClientsWithinBudget(t *testing.T) {
 	}
 	if count != 4 {
 		t.Fatalf("expected exactly 4 grants across concurrent clients, got %d", count)
+	}
+}
+
+// --- Server hardening ---------------------------------------------------------
+
+func TestNewServerRejectsPreExistingNonSocketPath(t *testing.T) {
+	directory := shortSocketDir(t)
+	socketPath := filepath.Join(directory, "a.sock")
+	if err := os.WriteFile(socketPath, []byte("not a socket"), 0o600); err != nil {
+		t.Fatalf("seed a regular file at the socket path: %v", err)
+	}
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	if _, err := NewServer(coordinator, socketPath, nil); err == nil {
+		t.Fatal("expected NewServer to reject a pre-existing regular file at the socket path")
+	}
+}
+
+func TestNewServerReplacesStaleSocketFile(t *testing.T) {
+	directory := shortSocketDir(t)
+	socketPath := filepath.Join(directory, "a.sock")
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+
+	first, err := NewServer(coordinator, socketPath, nil)
+	if err != nil {
+		t.Fatalf("first NewServer: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close first server: %v", err)
+	}
+	// The socket file is left behind by Close (only the listener is
+	// closed, matching a crash that leaves a stale socket file on disk); a
+	// fresh NewServer at the same path must still succeed by replacing it.
+	second, err := NewServer(coordinator, socketPath, nil)
+	if err != nil {
+		t.Fatalf("expected NewServer to replace a stale socket file, got %v", err)
+	}
+	_ = second.Close()
+}
+
+func TestNewServerSocketHasOwnerOnlyPermissions(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("POSIX file mode bits are not meaningfully enforced on Windows")
+	}
+	directory := shortSocketDir(t)
+	socketPath := filepath.Join(directory, "a.sock")
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	server, err := NewServer(coordinator, socketPath, nil)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	defer func() { _ = server.Close() }()
+
+	info, err := os.Stat(socketPath)
+	if err != nil {
+		t.Fatalf("stat socket: %v", err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("expected socket permissions 0600, got %o", got)
+	}
+}
+
+func TestServerRejectsOversizedRequest(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 1, 0, false))
+	_, socketPath := startTestServer(t, coordinator)
+
+	connection, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+	if err := connection.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatalf("set deadline: %v", err)
+	}
+
+	oversized := make([]byte, maxRequestBytes+1024)
+	for i := range oversized {
+		oversized[i] = 'a'
+	}
+	if _, err := connection.Write(oversized); err != nil {
+		t.Fatalf("write oversized payload: %v", err)
+	}
+	if _, err := connection.Write([]byte("\n")); err != nil {
+		t.Fatalf("write trailing newline: %v", err)
+	}
+
+	reader := bufio.NewReader(connection)
+	line, err := reader.ReadBytes('\n')
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	var response Response
+	if err := json.Unmarshal(line, &response); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if response.ErrorCode != ErrorCodeRequestTooLarge {
+		t.Fatalf("expected ErrorCodeRequestTooLarge, got %+v", response)
+	}
+}
+
+func TestServerEnforcesConnectionDeadlineOnStalledClient(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 1, 0, false))
+
+	socketPath := filepath.Join(shortSocketDir(t), "a.sock")
+	server, err := NewServer(coordinator, socketPath, nil)
+	if err != nil {
+		t.Fatalf("new server: %v", err)
+	}
+	server.connectionDeadline = 100 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = server.Serve(ctx)
+	}()
+	t.Cleanup(func() {
+		cancel()
+		_ = server.Close()
+		<-done
+	})
+
+	connection, err := net.Dial("unix", socketPath)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer func() { _ = connection.Close() }()
+	// Never write a complete (newline-terminated) request: the server must
+	// give up after its own connection deadline rather than hang forever.
+	if _, err := connection.Write([]byte("{\"incomplete")); err != nil {
+		t.Fatalf("write partial request: %v", err)
+	}
+	if err := connection.SetReadDeadline(time.Now().Add(5 * time.Second)); err != nil {
+		t.Fatalf("set read deadline: %v", err)
+	}
+	buffer := make([]byte, 1)
+	_, readErr := connection.Read(buffer)
+	if readErr == nil {
+		t.Fatal("expected the server to close the stalled connection after its deadline")
+	}
+}
+
+func TestClientReconstructsDuplicateLeaseSentinelFromWireErrorCode(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 1, 0, false))
+	_, socketPath := startTestServer(t, coordinator)
+
+	client := NewClient(socketPath)
+	first, err := client.Acquire("alpha", "slot-a", 1)
+	if err != nil {
+		t.Fatalf("first acquire: %v", err)
+	}
+	second, err := client.Acquire("alpha", "slot-a", 1)
+	if !errors.Is(err, ErrDuplicateLease) {
+		t.Fatalf("expected errors.Is(err, ErrDuplicateLease) over the wire, got %v", err)
+	}
+	if second.LeaseID != first.LeaseID {
+		t.Fatalf("expected the duplicate acquire to still return the existing lease over the wire")
 	}
 }

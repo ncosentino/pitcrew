@@ -20,14 +20,20 @@ var ErrProtocolMismatch = errors.New("admission: no overlapping protocol version
 type Client struct {
 	socketPath        string
 	dialTimeout       time.Duration
+	requestTimeout    time.Duration
 	supportedVersions []int
 }
 
-// NewClient builds a client that dials socketPath for every call.
+// NewClient builds a client that dials socketPath for every call. Every
+// call sets a total connection deadline immediately after dialing, so a
+// server that never responds (or that stalls mid-response) can never hang
+// a caller indefinitely; the connection is closed and the call fails once
+// the deadline elapses.
 func NewClient(socketPath string) *Client {
 	return &Client{
 		socketPath:        socketPath,
 		dialTimeout:       5 * time.Second,
+		requestTimeout:    10 * time.Second,
 		supportedVersions: ClientSupportedVersions(),
 	}
 }
@@ -50,6 +56,9 @@ func (c *Client) call(request Request) (Response, error) {
 	defer func() {
 		_ = connection.Close()
 	}()
+	if err := connection.SetDeadline(time.Now().Add(c.requestTimeout)); err != nil {
+		return Response{}, fmt.Errorf("set admission connection deadline: %w", err)
+	}
 
 	encoded, err := json.Marshal(request)
 	if err != nil {
@@ -69,7 +78,7 @@ func (c *Client) call(request Request) (Response, error) {
 	if err := json.Unmarshal(line, &response); err != nil {
 		return Response{}, fmt.Errorf("decode admission response: %w", err)
 	}
-	if response.Status == responseStatusError && response.Error == "no overlapping protocol version" {
+	if response.ErrorCode == ErrorCodeProtocolMismatch {
 		return response, ErrProtocolMismatch
 	}
 	return response, nil
@@ -97,7 +106,10 @@ func (c *Client) SetDemand(profileID string, pending int) error {
 	return responseErr(response)
 }
 
-// Acquire requests one provisional lease for profileID/slotKey.
+// Acquire requests one provisional lease for profileID/slotKey. A duplicate
+// request against a profile/slot pair that already holds a live lease
+// returns that lease alongside an error satisfying errors.Is(err,
+// ErrDuplicateLease), matching Coordinator.Acquire's local contract.
 func (c *Client) Acquire(profileID, slotKey string, pendingDemand int) (Lease, error) {
 	response, err := c.call(Request{
 		Command:       CommandAcquire,
@@ -108,13 +120,14 @@ func (c *Client) Acquire(profileID, slotKey string, pendingDemand int) (Lease, e
 	if err != nil {
 		return Lease{}, err
 	}
-	if err := responseErr(response); err != nil && response.Lease == nil {
-		return Lease{}, err
-	}
+	result := responseErr(response)
 	if response.Lease == nil {
+		if result != nil {
+			return Lease{}, result
+		}
 		return Lease{}, fmt.Errorf("admission: acquire response missing lease")
 	}
-	return *response.Lease, responseErr(response)
+	return *response.Lease, result
 }
 
 // Renew extends a provisional lease's expiry.
@@ -187,8 +200,26 @@ func (c *Client) Status() (Snapshot, error) {
 	return *response.Snapshot, nil
 }
 
+// responseErr reconstructs an error from a wire Response. When the response
+// carries a recognized ErrorCode, the returned error satisfies
+// errors.Is(err, <the matching package sentinel>), regardless of whether
+// Status is "error" (a duplicate Acquire response reports Status "ok" plus
+// an ErrorCode alongside a still-usable Lease). The human-readable message
+// is preserved by wrapping it around the sentinel when it carries extra
+// detail; otherwise the sentinel is returned unwrapped.
 func responseErr(response Response) error {
+	if response.ErrorCode != "" {
+		if sentinel := errForErrorCode(response.ErrorCode); sentinel != nil {
+			if response.Error != "" && response.Error != sentinel.Error() {
+				return fmt.Errorf("%w: %s", sentinel, response.Error)
+			}
+			return sentinel
+		}
+	}
 	if response.Status == responseStatusError {
+		if response.Error == "" {
+			return errors.New("admission: unknown error")
+		}
 		return errors.New(response.Error)
 	}
 	return nil

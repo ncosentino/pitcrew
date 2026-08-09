@@ -6,6 +6,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // Clock supplies the coordinator's monotonic notion of time. Production
@@ -28,6 +30,11 @@ func (SystemClock) Now() time.Time { return time.Now() }
 // constant as a measured host default.
 const DefaultProvisionalLeaseTTL = 30 * time.Second
 
+// maxEvidenceBytes bounds Reconcile evidence to a strict, sanitized format:
+// a short, single-line, UTF-8 operator audit note rather than free-form or
+// arbitrarily large text.
+const maxEvidenceBytes = 512
+
 // Coordinator is the single, mutex-serialized owner of atomic allocation,
 // per-profile reservations, borrowing, fairness, the durable decision
 // sequence, and durable epochs for one Docker daemon's admission namespace.
@@ -41,12 +48,33 @@ type Coordinator struct {
 	state          durableState
 	demand         map[string]int
 	rotation       int
+
+	// provisionalDeadlines is the sole authority this package trusts for
+	// deciding whether a provisional lease has expired. ADR-0003 requires
+	// service-owned monotonic expiry; a durable, restartable timestamp
+	// alone is not a monotonic clock reading from this process, so every
+	// live provisional lease's deadline is tracked here, keyed by lease
+	// key, and is populated only by Acquire and Renew in this process. It
+	// is intentionally never persisted: Open discards every restored
+	// provisional lease before serving any request (see
+	// discardRestoredProvisionals), so a live provisional lease always has
+	// an entry here for as long as it exists in c.state.Leases.
+	provisionalDeadlines map[string]time.Time
 }
 
 // Open restores the coordinator from durable state, failing closed on any
 // corrupt or unsupported document. A missing document is a legitimate fresh
 // start with no policy and no leases; ApplyPolicy must be called before any
 // Acquire will succeed.
+//
+// Every provisional lease found in a restored document is tombstoned before
+// Open returns: a provisional lease's monotonic expiry lives only in the
+// process memory of the coordinator that granted or last renewed it, so a
+// restored provisional cannot be trusted across a restart and is discarded
+// rather than assumed alive or silently re-timed. Only active leases, which
+// never expire from time alone, survive a restart. The discard is persisted
+// atomically before Open returns, so a crash immediately after restart can
+// never re-introduce a stale provisional lease.
 func Open(backing store, clock Clock, provisionalTTL time.Duration) (*Coordinator, error) {
 	if clock == nil {
 		clock = SystemClock{}
@@ -60,14 +88,50 @@ func Open(backing store, clock Clock, provisionalTTL time.Duration) (*Coordinato
 	}
 	if !exists {
 		state = newDurableState()
+	} else if pruned, changed := discardRestoredProvisionals(state); changed {
+		if err := backing.Save(pruned); err != nil {
+			return nil, fmt.Errorf("persist restart-discarded provisional leases: %w", err)
+		}
+		state = pruned
 	}
 	return &Coordinator{
-		store:          backing,
-		clock:          clock,
-		provisionalTTL: provisionalTTL,
-		state:          state,
-		demand:         make(map[string]int),
+		store:                backing,
+		clock:                clock,
+		provisionalTTL:       provisionalTTL,
+		state:                state,
+		demand:               make(map[string]int),
+		provisionalDeadlines: make(map[string]time.Time),
 	}, nil
+}
+
+// discardRestoredProvisionals tombstones every provisional lease found in a
+// freshly loaded document, bounding the resulting tombstone set the same
+// way any other tombstoning operation does. It reports whether anything
+// changed so Open can skip a redundant persist for a document with no
+// restored provisional leases.
+func discardRestoredProvisionals(state durableState) (durableState, bool) {
+	next := state.clone()
+	changed := false
+	for key, lease := range next.Leases {
+		if lease.Status != LeaseProvisional {
+			continue
+		}
+		sequence := next.DecisionSequence + 1
+		next.DecisionSequence = sequence
+		delete(next.Leases, key)
+		next.Tombstones[key] = Tombstone{
+			ProfileID: lease.ProfileID,
+			SlotKey:   lease.SlotKey,
+			LeaseID:   lease.LeaseID,
+			Reason:    TombstoneRestartDiscarded,
+			Sequence:  sequence,
+		}
+		changed = true
+	}
+	if changed {
+		next = compactTombstones(next)
+	}
+	return next, changed
 }
 
 // OpenFile restores or creates a coordinator backed by a durable JSON
@@ -182,22 +246,27 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (Lea
 	}
 
 	sequence := c.state.DecisionSequence + 1
+	deadline := now.Add(c.provisionalTTL)
 	lease := Lease{
 		ProfileID:         profileID,
 		SlotKey:           slotKey,
 		LeaseID:           fmt.Sprintf("%s#%d", key.String(), sequence),
 		Units:             unitCost,
 		Status:            LeaseProvisional,
-		ExpiresAtUnixNano: now.Add(c.provisionalTTL).UnixNano(),
+		ExpiresAtUnixNano: deadline.UnixNano(),
 		GrantedAtSequence: sequence,
 	}
 	next := c.state.clone()
 	next.DecisionSequence = sequence
+	// A slot's prior tombstone, if any, is superseded by this fresh grant:
+	// a lease and a tombstone must never coexist for the same key.
+	delete(next.Tombstones, key.String())
 	next.Leases[key.String()] = lease
 	if err := c.store.Save(next); err != nil {
 		return Lease{}, err
 	}
 	c.state = next
+	c.provisionalDeadlines[key.String()] = deadline
 	return lease, nil
 }
 
@@ -224,7 +293,8 @@ func (c *Coordinator) Renew(profileID, slotKey string) (Lease, error) {
 	if lease.Status != LeaseProvisional {
 		return Lease{}, ErrLeaseNotProvisional
 	}
-	lease.ExpiresAtUnixNano = now.Add(c.provisionalTTL).UnixNano()
+	deadline := now.Add(c.provisionalTTL)
+	lease.ExpiresAtUnixNano = deadline.UnixNano()
 	next := c.state.clone()
 	next.DecisionSequence++
 	next.Leases[key] = lease
@@ -232,6 +302,7 @@ func (c *Coordinator) Renew(profileID, slotKey string) (Lease, error) {
 		return Lease{}, err
 	}
 	c.state = next
+	c.provisionalDeadlines[key] = deadline
 	return lease, nil
 }
 
@@ -269,6 +340,7 @@ func (c *Coordinator) Activate(profileID, slotKey string) (Lease, error) {
 		return Lease{}, err
 	}
 	c.state = next
+	delete(c.provisionalDeadlines, key)
 	return lease, nil
 }
 
@@ -286,13 +358,45 @@ func (c *Coordinator) Release(profileID, slotKey string) error {
 	return c.tombstoneLocked(profileID, slotKey, TombstoneReleased, "")
 }
 
+// sanitizeEvidence enforces the strict format Reconcile requires: a
+// trimmed, non-empty, single-line UTF-8 string no longer than
+// maxEvidenceBytes. Evidence is a durable, operator-visible audit record,
+// not free-form text, so this package rejects anything that cannot be
+// stored and displayed unambiguously.
+func sanitizeEvidence(evidence string) (string, error) {
+	trimmed := strings.TrimSpace(evidence)
+	if trimmed == "" {
+		return "", ErrEvidenceRequired
+	}
+	if len(trimmed) > maxEvidenceBytes {
+		return "", fmt.Errorf(
+			"%w: evidence exceeds %d bytes",
+			ErrEvidenceInvalid,
+			maxEvidenceBytes,
+		)
+	}
+	if !utf8.ValidString(trimmed) {
+		return "", fmt.Errorf("%w: evidence must be valid UTF-8", ErrEvidenceInvalid)
+	}
+	for _, r := range trimmed {
+		if r == '\n' || r == '\r' || unicode.IsControl(r) {
+			return "", fmt.Errorf(
+				"%w: evidence must not contain control characters or newlines",
+				ErrEvidenceInvalid,
+			)
+		}
+	}
+	return trimmed, nil
+}
+
 // Reconcile is the fenced recovery path: a replacement manager that has
 // proved, through exact retained evidence, that the previous worker and
 // registration are absent may release a stranded active lease. Empty
 // evidence is rejected outright; time alone never releases an active lease.
 func (c *Coordinator) Reconcile(profileID, slotKey, evidence string) error {
-	if strings.TrimSpace(evidence) == "" {
-		return ErrEvidenceRequired
+	sanitized, err := sanitizeEvidence(evidence)
+	if err != nil {
+		return err
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -300,7 +404,7 @@ func (c *Coordinator) Reconcile(profileID, slotKey, evidence string) error {
 	if _, err := c.sweepExpiredLocked(now); err != nil {
 		return err
 	}
-	return c.tombstoneLocked(profileID, slotKey, TombstoneReconciledAbsent, evidence)
+	return c.tombstoneLocked(profileID, slotKey, TombstoneReconciledAbsent, sanitized)
 }
 
 func (c *Coordinator) tombstoneLocked(
@@ -328,10 +432,12 @@ func (c *Coordinator) tombstoneLocked(
 		Evidence:  evidence,
 		Sequence:  sequence,
 	}
+	next = compactTombstones(next)
 	if err := c.store.Save(next); err != nil {
 		return err
 	}
 	c.state = next
+	delete(c.provisionalDeadlines, key)
 	return nil
 }
 
@@ -339,11 +445,11 @@ func (c *Coordinator) tombstoneLocked(
 // coordinator's durable state, suitable for the CLI status subcommand and
 // for tests.
 type Snapshot struct {
-	Epoch            int64
-	DecisionSequence int64
-	Policy           HostPolicy
-	Leases           []Lease
-	Tombstones       []Tombstone
+	Epoch            int64       `json:"epoch"`
+	DecisionSequence int64       `json:"decisionSequence"`
+	Policy           HostPolicy  `json:"policy"`
+	Leases           []Lease     `json:"leases"`
+	Tombstones       []Tombstone `json:"tombstones"`
 }
 
 // Status returns a deterministic snapshot of the current durable state.
@@ -364,21 +470,30 @@ func (c *Coordinator) Status() Snapshot {
 	return snapshot
 }
 
-// sweepExpiredLocked removes every provisional lease whose monotonic expiry
-// has elapsed as of now, tombstones each as expired, and persists the result
-// if anything changed. It returns the set of lease keys expired by this
-// exact call so callers can distinguish "just expired" from "never existed"
-// when reporting ErrLeaseExpired.
+// sweepExpiredLocked removes every provisional lease whose in-process
+// monotonic deadline has elapsed as of now, tombstones each as expired, and
+// persists the result if anything changed. It returns the set of lease keys
+// expired by this exact call so callers can distinguish "just expired" from
+// "never existed" when reporting ErrLeaseExpired.
+//
+// Expiry is decided solely from c.provisionalDeadlines, the in-process
+// monotonic deadline set by Acquire or Renew; the durable
+// Lease.ExpiresAtUnixNano field is never consulted here. A provisional
+// lease with no tracked deadline is an invariant violation this package
+// does not expect to occur (every live provisional lease's deadline is
+// populated when the lease is granted or renewed, and restored provisional
+// leases are discarded before Open returns), so it fails closed by treating
+// the lease as already expired rather than assuming it is still alive.
 func (c *Coordinator) sweepExpiredLocked(now time.Time) (map[string]bool, error) {
 	expired := make(map[string]bool)
 	next := c.state.clone()
-	nowNano := now.UnixNano()
 	changed := false
 	for key, lease := range next.Leases {
-		if lease.Status != LeaseProvisional || lease.ExpiresAtUnixNano == 0 {
+		if lease.Status != LeaseProvisional {
 			continue
 		}
-		if lease.ExpiresAtUnixNano > nowNano {
+		deadline, tracked := c.provisionalDeadlines[key]
+		if tracked && now.Before(deadline) {
 			continue
 		}
 		sequence := next.DecisionSequence + 1
@@ -397,10 +512,14 @@ func (c *Coordinator) sweepExpiredLocked(now time.Time) (map[string]bool, error)
 	if !changed {
 		return expired, nil
 	}
+	next = compactTombstones(next)
 	if err := c.store.Save(next); err != nil {
 		return nil, err
 	}
 	c.state = next
+	for key := range expired {
+		delete(c.provisionalDeadlines, key)
+	}
 	return expired, nil
 }
 
@@ -430,11 +549,12 @@ func (c *Coordinator) protectedNonBorrowableLocked(requester string, held map[st
 // fairTurnLocked decides whether profileID wins this round of access to the
 // available shared-pool units. Available is first partitioned into an equal,
 // rotating guaranteed share among every profile with registered pending
-// demand; a profile under its guarantee is admitted immediately, and a
-// profile at or over its guarantee is admitted only if capacity remains
-// after every other demanding profile's own guarantee is protected. The
-// rotation cursor advances on every shared-pool grant so repeated contention
-// cannot always favor the same profile.
+// demand; a profile whose shared-pool holdings plus this exact request
+// still fit within its guarantee is admitted immediately, and a profile that
+// would exceed its guarantee is admitted only if capacity remains after
+// every other demanding profile's own guarantee is protected. The rotation
+// cursor advances on every shared-pool grant so repeated contention cannot
+// always favor the same profile.
 func (c *Coordinator) fairTurnLocked(
 	profileID string,
 	held map[string]int,
@@ -452,7 +572,7 @@ func (c *Coordinator) fairTurnLocked(
 	if isContender {
 		guarantee := c.guaranteedShareLocked(contenders, index, available)
 		sharedHeld := max(held[profileID]-c.reservedUnitsLocked(profileID), 0)
-		if sharedHeld < guarantee {
+		if sharedHeld+unitCost <= guarantee {
 			c.advanceRotationLocked(count)
 			return true
 		}

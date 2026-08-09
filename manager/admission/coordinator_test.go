@@ -1,7 +1,9 @@
 package admission
 
 import (
+	"errors"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -294,6 +296,86 @@ func TestFairnessGuaranteesShareWhenBothProfilesContendSimultaneously(t *testing
 	}
 }
 
+// TestFairTurnLockedAccountsForRequestedUnitCostNotJustHeldUnits directly
+// exercises fairTurnLocked with a synthetic held map that a real sequence of
+// Acquire calls cannot easily reproduce (available shrinks in lockstep with
+// held units for exact-multiple unit costs, masking the bug). It proves a
+// profile whose shared-pool holdings are individually below its guarantee
+// must still be rejected when its next request's unit cost would push it
+// over that guarantee: the correct comparison is
+// sharedHeld+unitCost<=guarantee, not sharedHeld<guarantee.
+func TestFairTurnLockedAccountsForRequestedUnitCostNotJustHeldUnits(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 4,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 3},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	})
+	coordinator.SetDemand("alpha", 1)
+	coordinator.SetDemand("beta", 1)
+
+	coordinator.mu.Lock()
+	held := map[string]int{"alpha": 1}
+	// available=4 with two equal contenders yields guarantee=2 each; alpha
+	// already holds 1 shared unit and requests 3 more, which must be
+	// rejected because 1+3=4 > 2, even though 1 < 2 would have incorrectly
+	// fast-tracked it under the old, cost-blind comparison.
+	got := coordinator.fairTurnLocked("alpha", held, 4, 3)
+	coordinator.mu.Unlock()
+
+	if got {
+		t.Fatalf(
+			"expected fairTurnLocked to reject a request whose cost would exceed the requester's guarantee",
+		)
+	}
+}
+
+// TestFairnessWithHeterogeneousUnitCostsAvoidsStarvation exercises the same
+// starvation property as TestFairnessAvoidsStarvationAcrossRepeatedDecisions
+// but with unequal unit costs across profiles and repeated contention with
+// both profiles registered as pending demand simultaneously, so the
+// cost-aware guarantee check governs every round rather than only the
+// no-borrowable-headroom path.
+func TestFairnessWithHeterogeneousUnitCostsAvoidsStarvation(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 6,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "heavy", UnitCost: 3},
+			{ProfileID: "light", UnitCost: 1},
+		},
+	})
+	coordinator.SetDemand("heavy", 1)
+	coordinator.SetDemand("light", 1)
+
+	grants := map[string]int{"heavy": 0, "light": 0}
+	for round := 0; round < 30; round++ {
+		heavySlot := "heavy-" + itoa(round)
+		if _, err := coordinator.Acquire("heavy", heavySlot, 1); err == nil {
+			grants["heavy"]++
+			if err := coordinator.Release("heavy", heavySlot); err != nil {
+				t.Fatalf("release heavy: %v", err)
+			}
+		}
+		lightSlot := "light-" + itoa(round)
+		if _, err := coordinator.Acquire("light", lightSlot, 1); err == nil {
+			grants["light"]++
+			if err := coordinator.Release("light", lightSlot); err != nil {
+				t.Fatalf("release light: %v", err)
+			}
+		}
+	}
+	if grants["heavy"] == 0 || grants["light"] == 0 {
+		t.Fatalf("expected both profiles to be admitted at least once despite unequal unit costs, got %#v", grants)
+	}
+}
+
 // --- Provisional lifecycle ---------------------------------------------------
 
 func TestProvisionalExpiryAndRenewal(t *testing.T) {
@@ -417,6 +499,118 @@ func TestActiveLeasePersistsAcrossRestart(t *testing.T) {
 	}
 }
 
+func TestRestartDiscardsProvisionalLeasesButPreservesActiveLeases(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+		},
+	})
+	if _, err := coordinator.Acquire("alpha", "provisional-slot", 1); err != nil {
+		t.Fatalf("acquire provisional: %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "active-slot", 1); err != nil {
+		t.Fatalf("acquire active: %v", err)
+	}
+	if _, err := coordinator.Activate("alpha", "active-slot"); err != nil {
+		t.Fatalf("activate: %v", err)
+	}
+
+	// Restart immediately: the provisional lease's monotonic deadline lived
+	// only in the crashed process's memory and can never be trusted again,
+	// so ADR-0003's service-owned monotonic expiry requires it be discarded
+	// even though no wall-clock time has passed.
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("reopen after restart: %v", err)
+	}
+	snapshot := restarted.Status()
+	if len(snapshot.Leases) != 1 || snapshot.Leases[0].SlotKey != "active-slot" {
+		t.Fatalf("expected only the active lease to survive restart, got %+v", snapshot.Leases)
+	}
+
+	foundTombstone := false
+	for _, tombstone := range snapshot.Tombstones {
+		if tombstone.SlotKey == "provisional-slot" {
+			foundTombstone = true
+			if tombstone.Reason != TombstoneRestartDiscarded {
+				t.Fatalf("expected restart-discarded reason, got %q", tombstone.Reason)
+			}
+		}
+	}
+	if !foundTombstone {
+		t.Fatalf("expected a restart-discarded tombstone for the provisional slot, got %+v", snapshot.Tombstones)
+	}
+
+	sequenceAfterFirstRestart := snapshot.DecisionSequence
+
+	// Capture the pruned document as it stood immediately after the first
+	// restart-discard, before this process's further mutations, so the
+	// second-restart no-op check below is not confounded by new state.
+	seedState, exists, err := newFileStore(directory).Load()
+	if err != nil || !exists {
+		t.Fatalf("reload pruned document for reseeding: exists=%v err=%v", exists, err)
+	}
+
+	// The provisional unit was reclaimed: a fresh acquisition succeeds.
+	if _, err := restarted.Acquire("alpha", "new-slot", 1); err != nil {
+		t.Fatalf("expected provisional unit to be reclaimed after restart: %v", err)
+	}
+	// The active unit is still held: budget is now exactly exhausted again
+	// (active-slot + new-slot == TotalUnits).
+	if _, err := restarted.Acquire("alpha", "third-slot", 1); err != ErrBudgetExceeded {
+		t.Fatalf("expected budget to be exhausted by active + reclaimed slots, got %v", err)
+	}
+
+	// A second, independent restart of the state as it stood immediately
+	// after the first restart-discard must be a no-op: no new tombstones,
+	// no change to the surviving active lease, and an unchanged decision
+	// sequence.
+	secondDirectory := t.TempDir()
+	if err := newFileStore(secondDirectory).Save(seedState); err != nil {
+		t.Fatalf("seed second directory: %v", err)
+	}
+	restartedAgain, err := OpenFile(secondDirectory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("reopen an already-pruned document: %v", err)
+	}
+	secondSnapshot := restartedAgain.Status()
+	if secondSnapshot.DecisionSequence != sequenceAfterFirstRestart {
+		t.Fatalf(
+			"expected no-op restart to leave decision sequence unchanged, before=%d after=%d",
+			sequenceAfterFirstRestart, secondSnapshot.DecisionSequence,
+		)
+	}
+}
+
+func TestRestartDiscardDoesNotTouchAnEmptyOrLeaselessDocument(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	snapshot := restarted.Status()
+	if len(snapshot.Leases) != 0 || len(snapshot.Tombstones) != 0 {
+		t.Fatalf("expected a leaseless document to be untouched by restart discard, got %+v", snapshot)
+	}
+}
+
 // --- Release and tombstones --------------------------------------------------
 
 func TestExactReleaseProducesDurableTombstone(t *testing.T) {
@@ -489,6 +683,179 @@ func TestReconcileRequiresEvidenceAndProducesTombstone(t *testing.T) {
 	// Capacity is now free again.
 	if _, err := coordinator.Acquire("alpha", "slot-b", 1); err != nil {
 		t.Fatalf("expected reconciled unit to be reclaimed: %v", err)
+	}
+}
+
+// --- Reconcile evidence sanitization ------------------------------------------
+
+func TestReconcileEvidenceSanitization(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+
+	setup := func(t *testing.T) {
+		t.Helper()
+		if _, err := coordinator.Acquire("alpha", "slot-a", 1); err != nil {
+			t.Fatalf("acquire: %v", err)
+		}
+		if _, err := coordinator.Activate("alpha", "slot-a"); err != nil {
+			t.Fatalf("activate: %v", err)
+		}
+	}
+	teardown := func(t *testing.T) {
+		t.Helper()
+		if err := coordinator.Release("alpha", "slot-a"); err != nil {
+			t.Fatalf("release: %v", err)
+		}
+	}
+
+	t.Run("whitespace only is rejected as required, not invalid", func(t *testing.T) {
+		setup(t)
+		defer teardown(t)
+		if err := coordinator.Reconcile("alpha", "slot-a", "   \t  "); err != ErrEvidenceRequired {
+			t.Fatalf("expected whitespace-only evidence to be rejected as required, got %v", err)
+		}
+	})
+
+	t.Run("oversized evidence is rejected", func(t *testing.T) {
+		setup(t)
+		defer teardown(t)
+		oversized := strings.Repeat("a", maxEvidenceBytes+1)
+		if err := coordinator.Reconcile("alpha", "slot-a", oversized); !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("expected oversized evidence to be rejected as invalid, got %v", err)
+		}
+	})
+
+	t.Run("embedded newline is rejected", func(t *testing.T) {
+		setup(t)
+		defer teardown(t)
+		if err := coordinator.Reconcile("alpha", "slot-a", "line one\nline two"); !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("expected embedded newline to be rejected as invalid, got %v", err)
+		}
+	})
+
+	t.Run("embedded control character is rejected", func(t *testing.T) {
+		setup(t)
+		defer teardown(t)
+		if err := coordinator.Reconcile("alpha", "slot-a", "evidence\x00tail"); !errors.Is(err, ErrEvidenceInvalid) {
+			t.Fatalf("expected embedded control character to be rejected as invalid, got %v", err)
+		}
+	})
+
+	t.Run("valid evidence is trimmed and accepted", func(t *testing.T) {
+		setup(t)
+		defer func() {
+			// Reconcile releases the lease itself on success; no teardown.
+		}()
+		if err := coordinator.Reconcile("alpha", "slot-a", "  container absent  "); err != nil {
+			t.Fatalf("expected valid evidence with surrounding whitespace to be accepted: %v", err)
+		}
+		snapshot := coordinator.Status()
+		found := false
+		for _, tombstone := range snapshot.Tombstones {
+			if tombstone.SlotKey == "slot-a" && tombstone.Reason == TombstoneReconciledAbsent {
+				found = true
+				if tombstone.Evidence != "container absent" {
+					t.Fatalf("expected trimmed evidence, got %q", tombstone.Evidence)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("expected a fenced-recovery tombstone with sanitized evidence")
+		}
+	})
+}
+
+// --- Tombstone reuse and compaction -------------------------------------------
+
+func TestTombstoneIsSupersededByAFreshLeaseForTheSameSlot(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+
+	if _, err := coordinator.Acquire("alpha", "slot-a", 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := coordinator.Release("alpha", "slot-a"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+	snapshot := coordinator.Status()
+	if len(snapshot.Tombstones) != 1 {
+		t.Fatalf("expected exactly one tombstone after release, got %d", len(snapshot.Tombstones))
+	}
+
+	if _, err := coordinator.Acquire("alpha", "slot-a", 1); err != nil {
+		t.Fatalf("expected reacquisition of a tombstoned slot to succeed: %v", err)
+	}
+	snapshot = coordinator.Status()
+	if len(snapshot.Tombstones) != 0 {
+		t.Fatalf("expected the prior tombstone to be superseded by the fresh lease, got %+v", snapshot.Tombstones)
+	}
+	if len(snapshot.Leases) != 1 {
+		t.Fatalf("expected exactly one live lease after reacquisition, got %d", len(snapshot.Leases))
+	}
+}
+
+func TestTombstoneCompactionKeepsNewestBySequence(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+
+	const total = maxTombstones + 10
+	for i := 0; i < total; i++ {
+		slot := "slot-" + itoa(i)
+		if _, err := coordinator.Acquire("alpha", slot, 1); err != nil {
+			t.Fatalf("acquire %s: %v", slot, err)
+		}
+		if err := coordinator.Release("alpha", slot); err != nil {
+			t.Fatalf("release %s: %v", slot, err)
+		}
+	}
+	snapshot := coordinator.Status()
+	if len(snapshot.Tombstones) != maxTombstones {
+		t.Fatalf("expected tombstones to be bounded at %d, got %d", maxTombstones, len(snapshot.Tombstones))
+	}
+
+	// The oldest 10 releases (slot-0..slot-9) must have been evicted; the
+	// newest maxTombstones releases must all be retained.
+	present := make(map[string]bool, len(snapshot.Tombstones))
+	for _, tombstone := range snapshot.Tombstones {
+		present[tombstone.SlotKey] = true
+	}
+	for i := 0; i < total-maxTombstones; i++ {
+		if present["slot-"+itoa(i)] {
+			t.Fatalf("expected oldest tombstone slot-%d to be evicted by compaction", i)
+		}
+	}
+	for i := total - maxTombstones; i < total; i++ {
+		if !present["slot-"+itoa(i)] {
+			t.Fatalf("expected newest tombstone slot-%d to be retained by compaction", i)
+		}
+	}
+}
+
+// --- Durable state internal consistency ---------------------------------------
+
+func TestDurableStateValidationRejectsSimultaneousLeaseAndTombstoneForSameKey(t *testing.T) {
+	key := leaseKey{profileID: "alpha", slotKey: "slot-a"}.String()
+	state := newDurableState()
+	state.SchemaVersion = stateSchemaVersion
+	state.Leases[key] = Lease{
+		ProfileID: "alpha",
+		SlotKey:   "slot-a",
+		LeaseID:   "alpha/slot-a#1",
+		Units:     1,
+		Status:    LeaseActive,
+	}
+	state.Tombstones[key] = Tombstone{
+		ProfileID: "alpha",
+		SlotKey:   "slot-a",
+		LeaseID:   "alpha/slot-a#1",
+		Reason:    TombstoneReleased,
+		Sequence:  1,
+	}
+	if err := state.validate(); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("expected a lease/tombstone key collision to fail validation as corrupt state, got %v", err)
 	}
 }
 
@@ -678,5 +1045,86 @@ func TestAcquireRejectsUnknownProfile(t *testing.T) {
 	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
 	if _, err := coordinator.Acquire("ghost", "slot-a", 1); err != ErrUnknownProfile {
 		t.Fatalf("expected ErrUnknownProfile, got %v", err)
+	}
+}
+
+// --- Policy validation bounds -------------------------------------------------
+
+func TestPolicyValidationRejectsZeroOrNegativeTotalUnits(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	zero := singleProfilePolicy("alpha", 0, 1, 0, false)
+	if err := coordinator.ApplyPolicy(zero); err == nil {
+		t.Fatal("expected a zero total-unit budget to be rejected once a policy is applied")
+	}
+}
+
+func TestPolicyValidationRejectsUnitCostExceedingTotalUnits(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	policy := HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 3},
+		},
+	}
+	if err := coordinator.ApplyPolicy(policy); err == nil {
+		t.Fatal("expected a unit cost exceeding total units to be rejected")
+	}
+}
+
+func TestPolicyValidationRejectsReservedUnitsExceedingTotalUnits(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	policy := HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1, ReservedUnits: 3},
+		},
+	}
+	if err := coordinator.ApplyPolicy(policy); err == nil {
+		t.Fatal("expected a single profile's reserved units exceeding total units to be rejected")
+	}
+}
+
+// TestPolicyValidationAllowsPartialReservationsAcrossProfiles confirms
+// partial, per-profile reservations remain fully supported: each profile's
+// own ReservedUnits/UnitCost individually fits within TotalUnits, and the
+// aggregate reservation legitimately leaves shared headroom for
+// unreserved, fair-pool acquisition. Held units are always subtracted from
+// the total budget, so partial reservations combined with shared units
+// never oversubscribe; a request is only ever admitted while
+// held+requested<=TotalUnits.
+func TestPolicyValidationAllowsPartialReservationsAcrossProfiles(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	policy := HostPolicy{
+		Generation: 1,
+		TotalUnits: 10,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 2, ReservedUnits: 4, Borrowable: false},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	}
+	if err := coordinator.ApplyPolicy(policy); err != nil {
+		t.Fatalf("expected partial per-profile reservations to be accepted: %v", err)
+	}
+	// alpha's reservation (4) plus beta's full claim on the remaining
+	// shared pool (6) together exactly exhaust TotalUnits (10), proving no
+	// oversubscription: held is always subtracted from the budget.
+	for i := 0; i < 6; i++ {
+		if _, err := coordinator.Acquire("beta", slotName(i), 1); err != nil {
+			t.Fatalf("expected shared-pool unit %d to be admitted: %v", i, err)
+		}
+	}
+	if _, err := coordinator.Acquire("beta", slotName(99), 1); err != ErrBudgetExceeded {
+		t.Fatalf("expected the shared pool to be exhausted once alpha's reservation is protected, got %v", err)
+	}
+	for i := 0; i < 2; i++ {
+		if _, err := coordinator.Acquire("alpha", "alpha-"+slotName(i), 1); err != nil {
+			t.Fatalf("expected alpha to still claim its own reservation: %v", err)
+		}
 	}
 }
