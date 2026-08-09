@@ -69,6 +69,7 @@ Named profiles conform to
 | `disableDefaultLabels` | No | Omit GitHub's broad default labels. Named profiles default to `true`. |
 | `runnerGroup` | No | Organization or enterprise runner group. |
 | `autoscaling` | No | Scale-set mode, minimum idle runners, scale-down stabilization delay, and optional aggregate admission ceiling. |
+| `hostAdmission` | No | Opt-in host-local admission namespace, capacity, safety margin, per-worker cost, reservation, and borrowing policy. |
 | `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
 | `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned profile services. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
@@ -87,6 +88,43 @@ Named profiles conform to
 `minimumIdle` and prewarming can reduce cold-start exposure, but they are
 operational mitigations rather than proof of any host, network, or package-feed
 root cause.
+
+### Host-local admission policy
+
+`hostAdmission` opts one profile into the workload-agnostic host-local admission
+contract:
+
+```json
+{
+  "hostAdmission": {
+    "namespace": "primary",
+    "capacityUnits": 12,
+    "safetyMarginUnits": 2,
+    "workerCostUnits": 2,
+    "reservationUnits": 4,
+    "borrowable": false
+  }
+}
+```
+
+`capacityUnits` and `safetyMarginUnits` are host-wide values and must match every
+participating profile in the namespace. The effective admission budget is capacity
+minus safety margin.
+
+`workerCostUnits`, `reservationUnits`, and `borrowable` are profile policy.
+Reservations are expressed in the same abstract units as worker cost and may provide
+partial progress toward a later worker admission. A non-borrowable reservation
+preserves headroom for that profile. A borrowable reservation may be used by another
+eligible profile but never preempts an active worker when the owner later has demand.
+
+Units are abstract positive integers derived from controlled measurement. They are not
+CPU cores, memory bytes, worker counts, or inferred hardware capacity. Built-in
+profiles declare no host-admission policy, and independent-profile behavior remains
+the default.
+
+This manifest contract only resolves and fingerprints policy. The dedicated
+coordinator, generated host state, manager enforcement, and observed-state projection
+are activated by later manager contracts.
 
 ### Read-only external volumes
 

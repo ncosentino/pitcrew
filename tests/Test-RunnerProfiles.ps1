@@ -328,10 +328,39 @@ $autoscalingManifest | Add-Member -NotePropertyName resources -NotePropertyValue
     cpus = '2.5'
     pids = 256
 })
+$autoscalingManifest | Add-Member -NotePropertyName hostAdmission -NotePropertyValue ([PSCustomObject]@{
+    namespace = 'primary'
+    capacityUnits = 12
+    safetyMarginUnits = 2
+    workerCostUnits = 2
+    reservationUnits = 4
+    borrowable = $false
+})
 Add-Check (
     ($autoscalingManifest | ConvertTo-Json -Depth 20) |
         Test-Json -SchemaFile $schemaPath
-) 'The profile schema rejects a valid scale-set autoscaling policy.'
+) 'The profile schema rejects valid autoscaling, resource, or host-admission policy.'
+$missingBorrowableManifest = (
+    $autoscalingManifest |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$missingBorrowableManifest.hostAdmission.PSObject.Properties.Remove('borrowable')
+Add-Check (-not (
+    ($missingBorrowableManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+)) 'The profile schema accepts a host-admission reservation without explicit borrowability.'
+$unknownAdmissionFieldManifest = (
+    $autoscalingManifest |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unknownAdmissionFieldManifest.hostAdmission |
+    Add-Member -NotePropertyName workflowPriority -NotePropertyValue 'urgent'
+Add-Check (-not (
+    ($unknownAdmissionFieldManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+)) 'The profile schema accepts workflow-specific host-admission policy.'
 $invalidResourceManifest = (
     $autoscalingManifest |
         ConvertTo-Json -Depth 20 |
@@ -1806,6 +1835,7 @@ Add-Check ($defaultProfile.ComposeProjectName -eq 'self-hosted-runner') 'The def
 Add-Check ($defaultProfile.LabelsValue -eq 'general-purpose') 'The default profile must carry the general-purpose routing label.'
 Add-Check (-not $defaultProfile.DisableDefaultLabels) 'The default profile must retain GitHub default labels for backward compatibility.'
 Add-Check $defaultProfile.PullImage 'The default profile must retain pre-pull behavior for its remote base image.'
+Add-Check ($null -eq $defaultProfile.HostAdmission) 'The default profile unexpectedly enabled host-local admission.'
 
 $localDefaultProfile = Resolve-RunnerProfile `
     -RootPath $runnerRoot `
@@ -2483,6 +2513,14 @@ try {
         serviceNetwork = @{
             source = 'pitcrew-browser-services-v1'
         }
+        hostAdmission = @{
+            namespace = 'primary'
+            capacityUnits = 12
+            safetyMarginUnits = 2
+            workerCostUnits = 2
+            reservationUnits = 4
+            borrowable = $false
+        }
         verificationCommands = @('browser --version')
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $externalManifestPath -Encoding UTF8
 
@@ -2506,6 +2544,19 @@ try {
     Add-Check (
         $externalProfile.ServiceNetworkValue -eq 'pitcrew-browser-services-v1'
     ) 'External profile service network was not serialized canonically.'
+    Add-Check (
+        $externalProfile.HostAdmission.Namespace -ceq 'primary' -and
+        $externalProfile.HostAdmission.CapacityUnits -eq 12 -and
+        $externalProfile.HostAdmission.SafetyMarginUnits -eq 2 -and
+        $externalProfile.HostAdmission.EffectiveBudgetUnits -eq 10 -and
+        $externalProfile.HostAdmission.WorkerCostUnits -eq 2 -and
+        $externalProfile.HostAdmission.ReservationUnits -eq 4 -and
+        -not $externalProfile.HostAdmission.Borrowable
+    ) 'External profile host-admission policy was not canonicalized.'
+    Add-Check (
+        $externalProfile.HostAdmission.HostPolicyFingerprint -match '^[0-9a-f]{64}$' -and
+        $externalProfile.HostAdmission.ProfilePolicyFingerprint -match '^[0-9a-f]{64}$'
+    ) 'External profile host-admission policy was not fingerprinted.'
     Add-Check ($externalProfile.ManifestKind -eq 'external') 'An external profile did not retain its manifest source kind.'
     Add-Check (
         $externalProfile.ManifestSha256 -match '^[0-9a-f]{64}$'
@@ -2533,6 +2584,12 @@ try {
         $externalStaticProfile.configuration.serviceNetwork.source -eq
             'pitcrew-browser-services-v1'
     ) 'Static profile state did not retain the external service network.'
+    Add-Check (
+        $externalStaticProfile.configuration.hostAdmission.namespace -ceq 'primary' -and
+        -not $externalStaticProfile.configuration.hostAdmission.PSObject.Properties[
+            'capacityUnits'
+        ]
+    ) 'Static profile state did not isolate host-admission topology from mutable policy.'
     $externalEnvironment = New-RunnerEnvironmentContent `
         -Profile $externalProfile `
         -AccessToken 'test-registration-token' `
@@ -2548,6 +2605,180 @@ try {
         $externalEnvironment -match
             '(?m)^PITCREW_SERVICE_NETWORK=pitcrew-browser-services-v1$'
     ) 'External profile environment omitted its service network contract.'
+
+    $changedAdmissionManifestPath = Join-Path $externalDirectory 'changed-admission-profile.json'
+    $changedAdmissionManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $changedAdmissionManifest.hostAdmission.capacityUnits = 14
+    $changedAdmissionManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $changedAdmissionManifestPath -Encoding UTF8
+    $changedAdmissionProfile = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $changedAdmissionManifestPath `
+        -HostName 'test-host'
+    Add-Check (
+        $changedAdmissionProfile.HostAdmission.HostPolicyFingerprint -cne
+            $externalProfile.HostAdmission.HostPolicyFingerprint -and
+        $changedAdmissionProfile.HostAdmission.ProfilePolicyFingerprint -ceq
+            $externalProfile.HostAdmission.ProfilePolicyFingerprint
+    ) 'Host-wide admission changes did not isolate the host-policy fingerprint.'
+    $externalStaticForAdmissionComparison = New-RunnerStaticProfileState `
+        -Profile $externalProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    $changedAdmissionStatic = New-RunnerStaticProfileState `
+        -Profile $changedAdmissionProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $changedAdmissionStatic.fingerprint -ceq
+            $externalStaticForAdmissionComparison.fingerprint -and
+        $changedAdmissionStatic.workerRevision -ceq
+            $externalStaticForAdmissionComparison.workerRevision
+    ) 'Mutable host-admission tuning changed manager topology or worker revision.'
+
+    $changedProfilePolicyManifestPath = Join-Path $externalDirectory 'changed-admission-profile-policy.json'
+    $changedProfilePolicyManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $changedProfilePolicyManifest.hostAdmission.reservationUnits = 6
+    $changedProfilePolicyManifest.hostAdmission.borrowable = $true
+    $changedProfilePolicyManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $changedProfilePolicyManifestPath -Encoding UTF8
+    $changedProfilePolicy = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $changedProfilePolicyManifestPath `
+        -HostName 'test-host'
+    Add-Check (
+        $changedProfilePolicy.HostAdmission.HostPolicyFingerprint -ceq
+            $externalProfile.HostAdmission.HostPolicyFingerprint -and
+        $changedProfilePolicy.HostAdmission.ProfilePolicyFingerprint -cne
+            $externalProfile.HostAdmission.ProfilePolicyFingerprint
+    ) 'Per-profile admission changes did not isolate the profile-policy fingerprint.'
+    $externalStaticForProfilePolicyComparison = New-RunnerStaticProfileState `
+        -Profile $externalProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    $changedProfilePolicyStatic = New-RunnerStaticProfileState `
+        -Profile $changedProfilePolicy `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $changedProfilePolicyStatic.fingerprint -ceq
+            $externalStaticForProfilePolicyComparison.fingerprint -and
+        $changedProfilePolicyStatic.workerRevision -ceq
+            $externalStaticForProfilePolicyComparison.workerRevision
+    ) 'Per-profile admission tuning changed manager topology or worker revision.'
+
+    $changedNamespaceManifestPath = Join-Path $externalDirectory 'changed-admission-namespace-profile.json'
+    $changedNamespaceManifest = Get-Content `
+        -LiteralPath $externalManifestPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 10
+    $changedNamespaceManifest.hostAdmission.namespace = 'secondary'
+    $changedNamespaceManifest |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $changedNamespaceManifestPath -Encoding UTF8
+    $changedNamespaceProfile = Resolve-RunnerProfile `
+        -RootPath $runnerRoot `
+        -ProfilePath $changedNamespaceManifestPath `
+        -HostName 'test-host'
+    $externalStaticForNamespaceComparison = New-RunnerStaticProfileState `
+        -Profile $externalProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    $changedNamespaceStatic = New-RunnerStaticProfileState `
+        -Profile $changedNamespaceProfile `
+        -Scope repo `
+        -OrgName '' `
+        -EnterpriseName '' `
+        -ResolvedImageId $testWorkerImageId
+    Add-Check (
+        $changedNamespaceStatic.fingerprint -cne
+            $externalStaticForNamespaceComparison.fingerprint -and
+        $changedNamespaceStatic.workerRevision -ceq
+            $externalStaticForNamespaceComparison.workerRevision -and
+        (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration `
+                    -Configuration $changedNamespaceStatic.configuration
+            )
+        ) -ceq (
+            Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration `
+                    -Configuration $externalStaticForNamespaceComparison.configuration
+            )
+        )
+    ) 'Host-admission namespace changes did not affect manager identity independently of workers.'
+
+    foreach ($invalidAdmissionCase in @(
+        [PSCustomObject]@{
+            Name = 'invalid-admission-margin-profile.json'
+            Mutate = {
+                param($document)
+                $document.hostAdmission.safetyMarginUnits =
+                    $document.hostAdmission.capacityUnits
+            }
+            Message = 'safety-margin units must be non-negative and lower than capacity units'
+            Failure = 'A host-admission policy accepted a safety margin that consumed the full capacity.'
+        },
+        [PSCustomObject]@{
+            Name = 'invalid-admission-cost-profile.json'
+            Mutate = {
+                param($document)
+                $document.hostAdmission.workerCostUnits = 11
+            }
+            Message = 'worker-cost units must be positive and no greater than the effective host budget'
+            Failure = 'A host-admission policy accepted a worker cost above the effective budget.'
+        },
+        [PSCustomObject]@{
+            Name = 'invalid-admission-reservation-profile.json'
+            Mutate = {
+                param($document)
+                $document.hostAdmission.reservationUnits = 11
+            }
+            Message = 'reservation units must be non-negative and no greater than the effective host budget'
+            Failure = 'A host-admission policy accepted a reservation above the effective host budget.'
+        }
+    )) {
+        $invalidAdmissionManifestPath = Join-Path $externalDirectory $invalidAdmissionCase.Name
+        $invalidAdmissionManifest = Get-Content `
+            -LiteralPath $externalManifestPath `
+            -Raw `
+            -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        & $invalidAdmissionCase.Mutate $invalidAdmissionManifest
+        $invalidAdmissionManifest |
+            ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath $invalidAdmissionManifestPath -Encoding UTF8
+        Add-ThrowsCheck `
+            -Action {
+                Resolve-RunnerProfile `
+                    -RootPath $runnerRoot `
+                    -ProfilePath $invalidAdmissionManifestPath `
+                    -HostName 'test-host'
+            } `
+            -ExpectedMessage $invalidAdmissionCase.Message `
+            -Failure $invalidAdmissionCase.Failure
+    }
 
     $changedVolumeManifestPath = Join-Path $externalDirectory 'changed-volume-profile.json'
     $changedVolumeManifest = Get-Content `

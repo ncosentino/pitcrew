@@ -166,6 +166,94 @@ function ConvertTo-RunnerCpuLimit {
 
 <#
 .SYNOPSIS
+    Validates and canonicalizes one profile's host-local admission policy.
+
+.DESCRIPTION
+    Keeps host-wide capacity inputs separate from profile cost and reservation
+    inputs while deriving stable fingerprints for later host-policy publication.
+
+.PARAMETER Policy
+    Manifest hostAdmission object.
+
+.PARAMETER ProfileName
+    Canonical profile identity used in the profile-policy fingerprint.
+
+.OUTPUTS
+    Canonical host-local admission policy with derived effective budget and
+    fingerprints.
+#>
+function ConvertTo-RunnerHostAdmissionPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Policy,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')]
+        [string]$ProfileName
+    )
+
+    $namespace = ([string]$Policy.namespace).Trim().ToLowerInvariant()
+    if ($namespace -notmatch '^[a-z][a-z0-9-]{0,31}$') {
+        throw "Host admission namespace '$($Policy.namespace)' must match ^[a-z][a-z0-9-]{0,31}$."
+    }
+
+    $capacityUnits = [long]$Policy.capacityUnits
+    $safetyMarginUnits = [long]$Policy.safetyMarginUnits
+    $workerCostUnits = [long]$Policy.workerCostUnits
+    $reservationUnits = [long]$Policy.reservationUnits
+    $borrowable = [bool]$Policy.borrowable
+
+    if ($capacityUnits -lt 1 -or $capacityUnits -gt [int]::MaxValue) {
+        throw 'Host admission capacity units must be between 1 and 2147483647.'
+    }
+    if (
+        $safetyMarginUnits -lt 0 -or
+        $safetyMarginUnits -ge $capacityUnits
+    ) {
+        throw 'Host admission safety-margin units must be non-negative and lower than capacity units.'
+    }
+
+    $effectiveBudgetUnits = $capacityUnits - $safetyMarginUnits
+    if ($workerCostUnits -lt 1 -or $workerCostUnits -gt $effectiveBudgetUnits) {
+        throw 'Host admission worker-cost units must be positive and no greater than the effective host budget.'
+    }
+    if ($reservationUnits -lt 0 -or $reservationUnits -gt $effectiveBudgetUnits) {
+        throw 'Host admission reservation units must be non-negative and no greater than the effective host budget.'
+    }
+
+    $hostPolicy = [PSCustomObject][ordered]@{
+        schemaVersion = 1
+        namespace = $namespace
+        capacityUnits = [int]$capacityUnits
+        safetyMarginUnits = [int]$safetyMarginUnits
+        effectiveBudgetUnits = [int]$effectiveBudgetUnits
+    }
+    $profilePolicy = [PSCustomObject][ordered]@{
+        schemaVersion = 1
+        namespace = $namespace
+        profile = $ProfileName
+        workerCostUnits = [int]$workerCostUnits
+        reservationUnits = [int]$reservationUnits
+        borrowable = $borrowable
+    }
+
+    return [PSCustomObject][ordered]@{
+        SchemaVersion = 1
+        Namespace = $namespace
+        CapacityUnits = [int]$capacityUnits
+        SafetyMarginUnits = [int]$safetyMarginUnits
+        EffectiveBudgetUnits = [int]$effectiveBudgetUnits
+        WorkerCostUnits = [int]$workerCostUnits
+        ReservationUnits = [int]$reservationUnits
+        Borrowable = $borrowable
+        HostPolicyFingerprint = Get-RunnerObjectFingerprint -Value $hostPolicy
+        ProfilePolicyFingerprint = Get-RunnerObjectFingerprint -Value $profilePolicy
+    }
+}
+
+<#
+.SYNOPSIS
     Resolves the effective configuration for one self-hosted runner profile.
 
 .DESCRIPTION
@@ -288,6 +376,7 @@ function Resolve-RunnerProfile {
     $effectiveServiceNetwork = $null
     $build = $null
     $effectiveAutoscaling = $null
+    $effectiveHostAdmission = $null
     $effectiveResources = [ordered]@{
         Memory = $null
         MemorySwap = $null
@@ -399,6 +488,11 @@ function Resolve-RunnerProfile {
             if ($manifest.resources.PSObject.Properties['pids']) {
                 $effectiveResources.Pids = [long]$manifest.resources.pids
             }
+        }
+        if ($manifest.PSObject.Properties['hostAdmission']) {
+            $effectiveHostAdmission = ConvertTo-RunnerHostAdmissionPolicy `
+                -Policy $manifest.hostAdmission `
+                -ProfileName $profileName
         }
 
         if ($manifest.PSObject.Properties['build']) {
@@ -643,6 +737,7 @@ function Resolve-RunnerProfile {
         DisableDefaultLabels = $disableDefaultLabels
         RunnerGroup = $effectiveRunnerGroup
         Autoscaling = $effectiveAutoscaling
+        HostAdmission = $effectiveHostAdmission
         Resources = $resourcePolicy
         ReadOnlyVolumes = @($effectiveReadOnlyVolumes)
         ReadOnlyVolumesValue = @(
@@ -1272,6 +1367,13 @@ function New-RunnerStaticProfileState {
                 } else {
                     [int]$Profile.Autoscaling.MaximumActiveWorkers
                 }
+            }
+        } else {
+            $null
+        }
+        hostAdmission = if ($Profile.HostAdmission) {
+            [PSCustomObject][ordered]@{
+                namespace = [string]$Profile.HostAdmission.Namespace
             }
         } else {
             $null
