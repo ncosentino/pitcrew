@@ -184,7 +184,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="17" \
+        PITCREW_MANAGER_CONTRACT_VERSION="18" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -355,6 +355,14 @@ done
 }
 [ "$(jq -r '.resourcePolicy.pids' "${LEGACY_OBSERVED_STATE}")" -eq 512 ] || {
     echo "Observed state did not publish the configured PID policy." >&2
+    exit 1
+}
+[ "$(jq -r '.managerContractVersion' "${LEGACY_OBSERVED_STATE}")" -eq 18 ] || {
+    echo "Direct Compose observed state did not report manager contract version eighteen." >&2
+    exit 1
+}
+[ "$(jq -r '.hostAdmission.status' "${LEGACY_OBSERVED_STATE}")" = "disabled" ] || {
+    echo "Direct Compose observed state did not publish disabled host admission." >&2
     exit 1
 }
 
