@@ -107,8 +107,8 @@ try {
     $result = & $validator -ProjectRoot $root
     Add-Check ($result.instructions -eq 8) (
         'The repository guidance contract did not discover eight instructions.')
-    Add-Check ($result.adrs -eq 2) (
-        'The repository guidance contract did not discover both ADRs.')
+    Add-Check ($result.adrs -eq 3) (
+        'The repository guidance contract did not discover all three ADRs.')
     $inventory = & $inventoryScript -ProjectRoot $root
     Add-Check (
         @(
