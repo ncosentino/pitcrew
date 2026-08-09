@@ -1920,8 +1920,36 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 		}
 
 		s.mu.Lock()
+		currentRunner := s.runners[candidate.key]
+		var hostSlotKey string
+		released := false
+		var pendingRecord hostLeaseCleanupRecord
+		var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
+		if currentRunner != nil {
+			hostSlotKey = currentRunner.hostSlotKey
+			released = s.markHostLeaseReleaseLocked(currentRunner)
+			if released {
+				pendingRecord, evictedLeases, pendingLeaseRecords =
+					s.beginPendingHostLeaseReleaseLocked(
+						candidate.key,
+						hostSlotKey,
+						s.clock.now().UTC(),
+					)
+			}
+		}
 		delete(s.runners, candidate.key)
 		s.mu.Unlock()
+		if released {
+			s.reportEvictedHostLeaseReleases(evictedLeases)
+			s.persistPendingHostLeaseReleases(pendingLeaseRecords)
+			if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
+				operationErrors = append(operationErrors, fmt.Errorf(
+					"release host admission lease %s after stale-worker retirement: %w",
+					hostSlotKey,
+					err,
+				))
+			}
+		}
 		s.onChange()
 	}
 	return errors.Join(operationErrors...)

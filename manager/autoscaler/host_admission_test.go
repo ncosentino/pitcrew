@@ -846,6 +846,53 @@ func TestHostAdmissionRetirementReleasesLeaseThroughScaleDown(t *testing.T) {
 	}
 }
 
+func TestHostAdmissionStaleWorkerRetirementReleasesLease(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, _, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+
+	const hostSlotKey = "stale-host-slot"
+	if _, err := client.Acquire("profile-a", hostSlotKey, 1); err != nil {
+		t.Fatalf("seed host lease: %v", err)
+	}
+	if _, err := client.Activate("profile-a", hostSlotKey); err != nil {
+		t.Fatalf("activate host lease: %v", err)
+	}
+	now := scaler.clock.now().UTC()
+	scaler.mu.Lock()
+	scaler.runners["stale-slot"] = &runnerRecord{
+		key:         "stale-slot",
+		targetKey:   scaler.target.key,
+		repository:  scaler.target.repository,
+		runnerName:  "stale-runner",
+		runnerID:    77,
+		containerID: "stale-container",
+		container:   "stale-container",
+		state:       runnerIdle,
+		revision:    "stale-revision",
+		stale:       true,
+		startedAt:   now.Add(-time.Minute),
+		updatedAt:   now,
+		idleSince:   timePointer(now.Add(-time.Minute)),
+		hostSlotKey: hostSlotKey,
+	}
+	scaler.mu.Unlock()
+
+	if err := scaler.retireStaleRunners(context.Background()); err != nil {
+		t.Fatalf("retire stale runner: %v", err)
+	}
+	client.mu.Lock()
+	releases := append([]string(nil), client.releaseCalls...)
+	_, stillHeld := client.leases[leaseSlotKey("profile-a", hostSlotKey)]
+	client.mu.Unlock()
+	if !reflect.DeepEqual(releases, []string{leaseSlotKey("profile-a", hostSlotKey)}) {
+		t.Fatalf("stale retirement did not release the exact host lease: %#v", releases)
+	}
+	if stillHeld {
+		t.Fatal("stale retirement left the host lease allocated")
+	}
+}
+
 // TestHostAdmissionNoReleaseForBusyWorkerDuringShutdown proves a busy worker
 // surviving shutdown never has its lease released, since shutdown's busy
 // loop only stops the container and never touches registrations or leases.
