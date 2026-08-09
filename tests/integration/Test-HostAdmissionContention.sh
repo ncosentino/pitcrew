@@ -79,7 +79,7 @@ stop_coordinator() {
     docker rm -f "${COORDINATOR}" >/dev/null 2>&1 || true
     deadline=$((SECONDS + 10))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
-        if ! docker inspect "${COORDINATOR}" >/dev/null 2>&1; then
+        if ! docker container inspect "${COORDINATOR}" >/dev/null 2>&1; then
             return
         fi
         sleep 1
