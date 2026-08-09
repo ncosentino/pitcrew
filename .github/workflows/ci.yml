@@ -126,13 +126,18 @@ jobs:
           sh -n manager/observability.sh
           sh -n manager/registration.sh
           sh -n manager/diagnostics.sh
+          sh -n manager/host-admission.sh
           sh -n manager/reconciliation.sh
           sh -n tests/Test-ManagerReconciliation.sh
+          sh -n tests/Test-HostAdmission.sh
           sh -n tests/integration/fake-runner/fake-runner.sh
           bash -n tests/integration/Test-CapacityReconciliation.sh
 
       - name: Run manager reconciliation contracts
         run: sh ./tests/Test-ManagerReconciliation.sh
+
+      - name: Run host admission contracts
+        run: sh ./tests/Test-HostAdmission.sh
 
       - name: Validate Docker Compose configuration
         run: docker compose --file docker-compose.yml config --quiet

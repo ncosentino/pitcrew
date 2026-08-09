@@ -9,6 +9,7 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/observability.sh"
 . "${SCRIPT_DIRECTORY}/registration.sh"
 . "${SCRIPT_DIRECTORY}/diagnostics.sh"
+. "${SCRIPT_DIRECTORY}/host-admission.sh"
 
 MANAGER_CONTRACT_VERSION=17
 EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-17}"
@@ -30,6 +31,8 @@ SERVICE_NETWORK="${PITCREW_SERVICE_NETWORK:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
+PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY="${STATE_DIRECTORY}/host-admission-releases"
+export PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY
 DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
@@ -60,6 +63,9 @@ MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"
 MANAGER_LABEL="ephemeral-runner-manager-profile=${PROFILE_ID}"
 SLOT_LABEL_KEY="ephemeral-managed-runner-slot"
 WORKER_REVISION_LABEL_KEY="pitcrew-worker-revision"
+HOST_ADMISSION_NAMESPACE_LABEL_KEY="pitcrew-host-admission-namespace"
+HOST_ADMISSION_PROFILE_LABEL_KEY="pitcrew-host-admission-profile"
+HOST_ADMISSION_SLOT_LABEL_KEY="pitcrew-host-admission-slot"
 
 read_only_volumes_are_valid() (
     configured_volumes="$1"
@@ -168,6 +174,10 @@ esac
     echo "[manager:${PROFILE_ID}] PITCREW_WORKER_REVISION must be a lowercase SHA-256 digest." >&2
     exit 1
 }
+if ! host_admission_configuration_is_valid; then
+    echo "[manager:${PROFILE_ID}] host-admission environment is incomplete or invalid." >&2
+    exit 1
+fi
 case "${ASSUME_UNVERSIONED_CURRENT}" in
     0|1) ;;
     *)
@@ -814,6 +824,7 @@ run_slot() {
     if [ -f "${slot_state_path}/recovered-container-id" ]; then
         recovered_id=$(cat "${slot_state_path}/recovered-container-id")
         recovered_name=$(cat "${slot_state_path}/recovered-container-name")
+        recovered_status=$(cat "${slot_state_path}/recovered-container-status")
         consume_slot_connect_marker "${slot_state_path}"
         printf '%s\n' "${recovered_id}" > "${slot_state_path}/container-id"
         printf '%s\n' "${recovered_name}" > "${slot_state_path}/container-name"
@@ -834,29 +845,115 @@ run_slot() {
             "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
             > "${slot_state_path}/registration-grace-until"
         if docker inspect "${recovered_id}" >/dev/null 2>&1; then
+            if host_admission_enabled; then
+                if [ "${recovered_status}" = "created" ]; then
+                    while [ ! -f "${slot_state_path}/drain" ]; do
+                        host_admission_acquire \
+                            "${slot_state_path}" \
+                            "${slot_key}" \
+                            "${SLOT_DIRECTORY}"
+                        admission_status=$?
+                        if [ "${admission_status}" -eq 0 ] &&
+                            host_admission_activate \
+                                "${slot_state_path}" \
+                                "${slot_key}" &&
+                            docker start "${recovered_id}" >/dev/null 2>&1; then
+                            recovered_status="running"
+                            break
+                        fi
+                        if [ "${admission_status}" -eq 0 ]; then
+                            host_admission_release_or_queue \
+                                "${slot_state_path}" \
+                                "${slot_key}" || true
+                        fi
+                        sleep 2
+                    done
+                    if [ "${recovered_status}" != "running" ]; then
+                        docker rm --force "${recovered_id}" >/dev/null 2>&1 || true
+                        host_admission_reconcile_absent \
+                            "${slot_state_path}" \
+                            "${slot_key}" || true
+                    fi
+                else
+                    host_admission_acquire \
+                        "${slot_state_path}" \
+                        "${slot_key}" \
+                        "${SLOT_DIRECTORY}" >/dev/null 2>&1 || true
+                    host_admission_activate \
+                        "${slot_state_path}" \
+                        "${slot_key}" >/dev/null 2>&1 || true
+                fi
+            fi
             record_container_image_identity "${slot_state_path}" "${recovered_id}"
             # Docker's --since boundary is inclusive. Skip the current second so
             # a pre-handoff connect marker cannot be replayed as fresh evidence.
             recovered_logs_since=$(( $(date +%s) + 1 ))
-            monitor_runner_container \
-                "${slot_state_path}" \
-                "${recovered_name}" \
-                "${recovered_id}" \
-                "${log_path}" \
-                "${recovered_logs_since}" || true
+            if [ "${recovered_status}" = "running" ]; then
+                monitor_runner_container \
+                    "${slot_state_path}" \
+                    "${recovered_name}" \
+                    "${recovered_id}" \
+                    "${log_path}" \
+                    "${recovered_logs_since}" || true
+                if host_admission_enabled; then
+                    while ! host_admission_release \
+                        "${slot_state_path}" \
+                        "${slot_key}"; do
+                        host_admission_queue_release "${slot_key}" || true
+                        if [ -f "${slot_state_path}/drain" ]; then
+                            echo "[slot ${slot_key}] coordinator unavailable during drain; active lease remains fenced" >&2
+                            break
+                        fi
+                        sleep 2
+                    done
+                fi
+            fi
         fi
         rm -f \
             "${slot_state_path}/recovered-container-id" \
             "${slot_state_path}/recovered-container-name" \
+            "${slot_state_path}/recovered-container-status" \
             "${slot_state_path}/stale"
         if [ -f "${slot_state_path}/drain" ]; then
             echo "[slot ${slot_key}] recovered runner exited; drained slot will not respawn"
+            host_admission_end_wait \
+                "${slot_state_path}" \
+                "${SLOT_DIRECTORY}"
             rm -f "${log_path}"
             return
         fi
     fi
 
     while [ ! -f "${slot_state_path}/drain" ]; do
+        if host_admission_enabled; then
+            host_admission_acquire \
+                "${slot_state_path}" \
+                "${slot_key}" \
+                "${SLOT_DIRECTORY}"
+            admission_status=$?
+            if [ "${admission_status}" -ne 0 ]; then
+                if [ "${admission_status}" -eq 2 ]; then
+                    echo "[slot ${slot_key}] host admission withheld worker launch"
+                else
+                    echo "[slot ${slot_key}] host admission unavailable; preserving current pool" >&2
+                fi
+                write_slot_runtime_state \
+                    "${slot_state_path}" \
+                    "${OBSERVED_STATE_DIRTY}" \
+                    "backoff" \
+                    "" \
+                    "${failures}" \
+                    2 || true
+                sleep 2
+                continue
+            fi
+            if [ -f "${slot_state_path}/drain" ]; then
+                host_admission_release_or_queue \
+                    "${slot_state_path}" \
+                    "${slot_key}" || true
+                break
+            fi
+        fi
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
         echo "[slot ${slot_key}] starting fresh ephemeral runner: ${name} -> ${repo:-<scope>}"
         : > "${log_path}"
@@ -877,7 +974,12 @@ run_slot() {
         printf '%s\n' \
             "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
             > "${slot_state_path}/registration-grace-until"
-        set -- docker run --rm --detach \
+        if host_admission_enabled; then
+            set -- docker create --rm
+        else
+            set -- docker run --rm --detach
+        fi
+        set -- "$@" \
             --label "${MANAGED_LABEL}" \
             --label "${SLOT_LABEL_KEY}=${slot_key}" \
             --label "${WORKER_REVISION_LABEL_KEY}=${WORKER_REVISION}" \
@@ -893,6 +995,12 @@ run_slot() {
             -e UNSET_CONFIG_VARS=false \
             -e DISABLE_AUTOMATIC_DEREGISTRATION=false \
             -e LABELS="${LABELS}"
+        if host_admission_enabled; then
+            set -- "$@" \
+                --label "${HOST_ADMISSION_NAMESPACE_LABEL_KEY}=${HOST_ADMISSION_NAMESPACE}" \
+                --label "${HOST_ADMISSION_PROFILE_LABEL_KEY}=${PROFILE_ID}" \
+                --label "${HOST_ADMISSION_SLOT_LABEL_KEY}=${slot_key}"
+        fi
         if [ "${RUNNER_NO_DEFAULT_LABELS:-}" = "1" ]; then
             set -- "$@" -e NO_DEFAULT_LABELS=1
         fi
@@ -921,6 +1029,28 @@ run_slot() {
         launch_output=$("$@" 2>&1)
         launch_status=$?
         if [ "${launch_status}" -eq 0 ] && [ -n "${launch_output}" ]; then
+            container_id=$(printf '%s\n' "${launch_output}" | tail -n 1)
+            if host_admission_enabled; then
+                if ! host_admission_activate \
+                    "${slot_state_path}" \
+                    "${slot_key}"; then
+                    docker rm --force "${container_id}" >/dev/null 2>&1 || true
+                    host_admission_release_or_queue \
+                        "${slot_state_path}" \
+                        "${slot_key}" || true
+                    launch_status=1
+                    launch_output='Host admission lease could not be activated'
+                elif ! docker start "${container_id}" >/dev/null 2>&1; then
+                    docker rm --force "${container_id}" >/dev/null 2>&1 || true
+                    host_admission_release_or_queue \
+                        "${slot_state_path}" \
+                        "${slot_key}" || true
+                    launch_status=1
+                    launch_output='Created worker container could not be started'
+                fi
+            fi
+        fi
+        if [ "${launch_status}" -eq 0 ] && [ -n "${launch_output}" ]; then
             record_manager_diagnostic \
                 worker-launch \
                 worker-launch \
@@ -929,7 +1059,6 @@ run_slot() {
                 "$(elapsed_milliseconds "${launch_started_epoch}")" \
                 none \
                 ""
-            container_id=$(printf '%s\n' "${launch_output}" | tail -n 1)
             printf '%s\n' "${container_id}" > "${slot_state_path}/container-id"
             printf '%s\n' "${name}" > "${slot_state_path}/container-name"
             printf '%s\n' "${WORKER_REVISION}" > "${slot_state_path}/worker-revision"
@@ -940,7 +1069,24 @@ run_slot() {
                 "${container_id}" \
                 "${log_path}" \
                 "" || true
+            if host_admission_enabled; then
+                while ! host_admission_release \
+                    "${slot_state_path}" \
+                    "${slot_key}"; do
+                    host_admission_queue_release "${slot_key}" || true
+                    if [ -f "${slot_state_path}/drain" ]; then
+                        echo "[slot ${slot_key}] coordinator unavailable during drain; active lease remains fenced" >&2
+                        break
+                    fi
+                    sleep 2
+                done
+            fi
         else
+            if host_admission_enabled; then
+                host_admission_release_or_queue \
+                    "${slot_state_path}" \
+                    "${slot_key}" || true
+            fi
             record_manager_diagnostic \
                 worker-launch \
                 worker-launch \
@@ -1008,6 +1154,7 @@ run_slot() {
         done
     done
 
+    host_admission_end_wait "${slot_state_path}" "${SLOT_DIRECTORY}"
     rm -f "${log_path}"
 }
 
@@ -1264,6 +1411,7 @@ start_recovered_slot() {
     recovered_name="$5"
     recovered_revision="$6"
     recovered_desired="$7"
+    recovered_status="$8"
     recovered_path=$(slot_path "${recovered_key}")
 
     if [ -d "${recovered_path}" ]; then
@@ -1275,6 +1423,7 @@ start_recovered_slot() {
     printf '%s\n' "${recovered_tag}" > "${recovered_path}/tag"
     printf '%s\n' "${recovered_id}" > "${recovered_path}/recovered-container-id"
     printf '%s\n' "${recovered_name}" > "${recovered_path}/recovered-container-name"
+    printf '%s\n' "${recovered_status}" > "${recovered_path}/recovered-container-status"
     effective_revision="${recovered_revision}"
     if [ -z "${effective_revision}" ] && [ "${ASSUME_UNVERSIONED_CURRENT}" = "1" ]; then
         effective_revision="${WORKER_REVISION}"
@@ -1291,7 +1440,7 @@ start_recovered_slot() {
 }
 
 restore_managed_slots() {
-    recovered_ids=$(docker ps -q --filter "label=${MANAGED_LABEL}") || return 1
+    recovered_ids=$(docker ps -aq --filter "label=${MANAGED_LABEL}") || return 1
     [ -n "${recovered_ids}" ] || return 0
 
     recovered_inventory="/tmp/pitcrew-recovered.$$"
@@ -1303,13 +1452,14 @@ restore_managed_slots() {
             --arg revisionLabel "${WORKER_REVISION_LABEL_KEY}" \
             '
                 .[]
-                | select(.State.Running == true)
+                | select(.State.Running == true or .State.Status == "created")
                 | select(.Config.Labels[$managedLabel] == $profile)
                 | [
                     .Id,
                     (.Name | ltrimstr("/")),
                     (.Config.Labels[$slotLabel] // ""),
                     (.Config.Labels[$revisionLabel] // ""),
+                    .State.Status,
                     (
                         [
                             .Config.Env[]
@@ -1325,7 +1475,7 @@ restore_managed_slots() {
     fi
 
     tab=$(printf '\t')
-    while IFS="${tab}" read -r recovered_id recovered_name recovered_key recovered_revision recovered_repo; do
+    while IFS="${tab}" read -r recovered_id recovered_name recovered_key recovered_revision recovered_status recovered_repo; do
         [ -n "${recovered_id}" ] || continue
         if [ -z "${recovered_key}" ]; then
             echo "[manager:${PROFILE_ID}] recovered container ${recovered_id} has no slot label" >&2
@@ -1352,7 +1502,8 @@ restore_managed_slots() {
             "${recovered_id}" \
             "${recovered_name}" \
             "${recovered_revision}" \
-            "${recovered_desired}"; then
+            "${recovered_desired}" \
+            "${recovered_status}"; then
             rm -f "${recovered_inventory}"
             return 1
         fi
@@ -1773,6 +1924,7 @@ reconcile_runner_registrations
 publish_observed_state 1
 
 while [ "${STOPPING}" -eq 0 ]; do
+    host_admission_retry_releases || true
     process_desired_state
     if [ -f "${PENDING_ACKNOWLEDGEMENT}" ]; then
         publish_pending_acknowledgement || true

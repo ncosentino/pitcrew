@@ -64,8 +64,18 @@ func main() {
 	}
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pitcrew-admission %s: %v\n", command, err)
-		os.Exit(1)
+		os.Exit(exitCodeForError(err))
 	}
+}
+
+func exitCodeForError(err error) int {
+	if errors.Is(err, admission.ErrBudgetExceeded) {
+		return 3
+	}
+	if errors.Is(err, admission.ErrLeaseNotFound) {
+		return 4
+	}
+	return 1
 }
 
 func usage() string {
@@ -165,7 +175,7 @@ func runAcquire(args []string) error {
 	}
 	client := admission.NewClient(*socketPath)
 	lease, err := client.Acquire(*profileID, *slotKey, *demand)
-	if err != nil {
+	if err != nil && !errors.Is(err, admission.ErrDuplicateLease) {
 		return err
 	}
 	return printJSON(lease)
