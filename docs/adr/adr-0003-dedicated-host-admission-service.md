@@ -149,6 +149,11 @@ lease expires or renewal/activation is rejected, the manager removes the exact
 not-yet-started container and aborts admission. A worker process never starts against
 an expired or provisional lease.
 
+Manager recovery includes exact containers in Docker's `created` state rather than
+scanning only running workers. A created container with a valid active lease may be
+started; one with an expired, missing, or rejected lease is removed exactly and never
+passed to log-follow or wait operations.
+
 An active lease is durable and is not reclaimed solely because a manager heartbeat
 stops. The worker may still be running while its previous manager is unavailable.
 
@@ -285,7 +290,7 @@ The decision is confirmed when:
 - fixed and autoscaled clients pass the same protocol conformance fixtures;
 - concurrent acquisition never exceeds a synthetic host budget;
 - provisional expiry, active-lease persistence, manager handoff, stale-owner
-  reconciliation, and exact release are deterministic;
+  reconciliation, created-container recovery, and exact release are deterministic;
 - coordinator restart restores the last valid policy, leases, epochs, and decision
   sequence;
 - unavailable or corrupt state blocks admission without stopping workers;
