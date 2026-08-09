@@ -142,6 +142,10 @@ host_admission_release() {
         return 1
     fi
     rm -f "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
+    if [ -n "${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY:-}" ]; then
+        rm -f \
+            "${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY}/${slot_key}.pending"
+    fi
 }
 
 host_admission_reconcile_absent() {
@@ -159,4 +163,50 @@ host_admission_reconcile_absent() {
         return 1
     fi
     rm -f "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
+}
+
+host_admission_queue_release() {
+    slot_key="$1"
+    host_admission_enabled || return 0
+    release_directory="${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY:-}"
+    [ -n "${release_directory}" ] || return 1
+    mkdir -p "${release_directory}"
+    release_temporary="${release_directory}/.${slot_key}.$$.tmp"
+    printf '%s\n' "${slot_key}" > "${release_temporary}" || {
+        rm -f "${release_temporary}"
+        return 1
+    }
+    mv -f \
+        "${release_temporary}" \
+        "${release_directory}/${slot_key}.pending"
+}
+
+host_admission_release_or_queue() {
+    slot_state_path="$1"
+    slot_key="$2"
+    if host_admission_release "${slot_state_path}" "${slot_key}"; then
+        return 0
+    fi
+    host_admission_queue_release "${slot_key}" || true
+    return 1
+}
+
+host_admission_retry_releases() {
+    release_directory="${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY:-}"
+    host_admission_enabled || return 0
+    [ -n "${release_directory}" ] || return 1
+    [ -d "${release_directory}" ] || return 0
+    for pending_path in "${release_directory}"/*.pending; do
+        [ -f "${pending_path}" ] || continue
+        pending_slot=${pending_path##*/}
+        pending_slot=${pending_slot%.pending}
+        host_admission_cli \
+            release \
+            --profile "${PROFILE_ID}" \
+            --slot "${pending_slot}" >/dev/null 2>&1
+        release_status=$?
+        if [ "${release_status}" -eq 0 ] || [ "${release_status}" -eq 4 ]; then
+            rm -f "${pending_path}"
+        fi
+    done
 }

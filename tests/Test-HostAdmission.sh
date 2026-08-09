@@ -59,7 +59,7 @@ printf '%s|%s|%s|%s\n' "${command}" "${profile}" "${slot}" "${demand}" \
     >> "${PITCREW_TEST_ADMISSION_CALLS}"
 case "${command}:${PITCREW_TEST_ADMISSION_MODE:-success}" in
     acquire:withheld) exit 3 ;;
-    acquire:error) exit 1 ;;
+    acquire:error|release:error|reconcile:error) exit 1 ;;
     release:not-found|reconcile:not-found) exit 4 ;;
 esac
 case "${command}" in
@@ -80,6 +80,7 @@ PITCREW_HOST_ADMISSION_NAMESPACE="primary"
 PITCREW_HOST_ADMISSION_SOCKET="/var/lib/pitcrew-admission/coordinator.sock"
 PITCREW_HOST_ADMISSION_CLI="${admission_cli}"
 PITCREW_HOST_ADMISSION_CLI_TIMEOUT=2
+PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY="${TEMP_DIRECTORY}/pending-releases"
 PITCREW_TEST_ADMISSION_CALLS="${admission_calls}"
 export \
     PROFILE_ID \
@@ -87,6 +88,7 @@ export \
     PITCREW_HOST_ADMISSION_SOCKET \
     PITCREW_HOST_ADMISSION_CLI \
     PITCREW_HOST_ADMISSION_CLI_TIMEOUT \
+    PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY \
     PITCREW_TEST_ADMISSION_CALLS
 . "${ROOT}/manager/host-admission.sh"
 
@@ -204,5 +206,26 @@ assert_true \
 assert_true \
     "Missing lease was not treated as already reconciled." \
     host_admission_reconcile_absent "${admission_slot}" "control-1"
+
+PITCREW_TEST_ADMISSION_MODE="error"
+export PITCREW_TEST_ADMISSION_MODE
+set +e
+host_admission_release_or_queue "${admission_slot}" "control-1"
+queued_status=$?
+set -e
+assert_equals \
+    "1" \
+    "${queued_status}" \
+    "Coordinator release failure did not report a pending cleanup."
+assert_true \
+    "Coordinator release failure did not persist the exact slot key." \
+    test -f "${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY}/control-1.pending"
+
+PITCREW_TEST_ADMISSION_MODE="success"
+export PITCREW_TEST_ADMISSION_MODE
+host_admission_retry_releases
+assert_false \
+    "Successful pending release retry did not remove its durable record." \
+    test -f "${PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY}/control-1.pending"
 
 echo "Host admission contracts passed: ${ASSERTIONS} assertions."

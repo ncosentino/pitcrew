@@ -31,6 +31,8 @@ SERVICE_NETWORK="${PITCREW_SERVICE_NETWORK:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
+PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY="${STATE_DIRECTORY}/host-admission-releases"
+export PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY
 DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
@@ -860,7 +862,7 @@ run_slot() {
                             break
                         fi
                         if [ "${admission_status}" -eq 0 ]; then
-                            host_admission_release \
+                            host_admission_release_or_queue \
                                 "${slot_state_path}" \
                                 "${slot_key}" || true
                         fi
@@ -897,6 +899,7 @@ run_slot() {
                     while ! host_admission_release \
                         "${slot_state_path}" \
                         "${slot_key}"; do
+                        host_admission_queue_release "${slot_key}" || true
                         if [ -f "${slot_state_path}/drain" ]; then
                             echo "[slot ${slot_key}] coordinator unavailable during drain; active lease remains fenced" >&2
                             break
@@ -945,7 +948,7 @@ run_slot() {
                 continue
             fi
             if [ -f "${slot_state_path}/drain" ]; then
-                host_admission_release \
+                host_admission_release_or_queue \
                     "${slot_state_path}" \
                     "${slot_key}" || true
                 break
@@ -1032,14 +1035,14 @@ run_slot() {
                     "${slot_state_path}" \
                     "${slot_key}"; then
                     docker rm --force "${container_id}" >/dev/null 2>&1 || true
-                    host_admission_release \
+                    host_admission_release_or_queue \
                         "${slot_state_path}" \
                         "${slot_key}" || true
                     launch_status=1
                     launch_output='Host admission lease could not be activated'
                 elif ! docker start "${container_id}" >/dev/null 2>&1; then
                     docker rm --force "${container_id}" >/dev/null 2>&1 || true
-                    host_admission_release \
+                    host_admission_release_or_queue \
                         "${slot_state_path}" \
                         "${slot_key}" || true
                     launch_status=1
@@ -1070,6 +1073,7 @@ run_slot() {
                 while ! host_admission_release \
                     "${slot_state_path}" \
                     "${slot_key}"; do
+                    host_admission_queue_release "${slot_key}" || true
                     if [ -f "${slot_state_path}/drain" ]; then
                         echo "[slot ${slot_key}] coordinator unavailable during drain; active lease remains fenced" >&2
                         break
@@ -1079,7 +1083,7 @@ run_slot() {
             fi
         else
             if host_admission_enabled; then
-                host_admission_release \
+                host_admission_release_or_queue \
                     "${slot_state_path}" \
                     "${slot_key}" || true
             fi
@@ -1920,6 +1924,7 @@ reconcile_runner_registrations
 publish_observed_state 1
 
 while [ "${STOPPING}" -eq 0 ]; do
+    host_admission_retry_releases || true
     process_desired_state
     if [ -f "${PENDING_ACKNOWLEDGEMENT}" ]; then
         publish_pending_acknowledgement || true
