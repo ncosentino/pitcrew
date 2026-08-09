@@ -3,8 +3,10 @@ Set-StrictMode -Version Latest
 
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
+$script:RunnerHostAdmissionPolicySchemaVersion = 1
 $script:RunnerManagerContractVersion = 17
 $script:RunnerDefinedManagerContractVersion = 11
+$script:RunnerDefinedHostAdmissionContractVersion = 18
 $script:RunnerDefinedDiagnosticsContractVersion = 17
 $script:RunnerWorkerRuntimeContractVersion = 2
 $script:RunnerManagerJournalMaximumEvents = 64
@@ -249,6 +251,39 @@ function ConvertTo-RunnerHostAdmissionPolicy {
         Borrowable = $borrowable
         HostPolicyFingerprint = Get-RunnerObjectFingerprint -Value $hostPolicy
         ProfilePolicyFingerprint = Get-RunnerObjectFingerprint -Value $profilePolicy
+    }
+}
+
+<#
+.SYNOPSIS
+    Derives stable host-side and container-side admission identities.
+#>
+function New-RunnerHostAdmissionContext {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [string]$RootPath,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')]
+        [string]$Namespace
+    )
+
+    $resolvedRoot = [IO.Path]::GetFullPath($RootPath)
+    $directory = Join-Path `
+        (Join-Path $resolvedRoot '.pitcrew-state' 'host-admission') `
+        $Namespace
+    return [PSCustomObject][ordered]@{
+        Namespace = $Namespace
+        Directory = $directory
+        DesiredPolicyPath = Join-Path $directory 'desired-policy.json'
+        AcknowledgementPath = Join-Path $directory 'acknowledged-policy.json'
+        LockPath = Join-Path $directory 'setup.lock'
+        EnvironmentPath = Join-Path $resolvedRoot ".env.host-admission-$Namespace"
+        ComposeProjectName = "pitcrew-host-admission-$Namespace"
+        VolumeName = "pitcrew-host-admission-$Namespace"
+        SocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+        ProtocolVersion = 1
     }
 }
 
@@ -705,6 +740,13 @@ function Resolve-RunnerProfile {
     }
     $stateDirectory = Join-Path $resolvedRoot '.pitcrew-state' $profileName
     $stateVolumePath = ".pitcrew-state/$profileName"
+    $hostAdmissionContext = if ($effectiveHostAdmission) {
+        New-RunnerHostAdmissionContext `
+            -RootPath $resolvedRoot `
+            -Namespace $effectiveHostAdmission.Namespace
+    } else {
+        $null
+    }
 
     return [PSCustomObject]@{
         RootPath = $resolvedRoot
@@ -725,10 +767,57 @@ function Resolve-RunnerProfile {
         ShutdownRequestPath = Join-Path $stateDirectory 'manager-shutdown.json'
         SessionOwnerPath = Join-Path $stateDirectory 'manager-session-owner.txt'
         LockPath = Join-Path $stateDirectory 'setup.lock'
+        HostAdmissionDirectory = if ($hostAdmissionContext) {
+            $hostAdmissionContext.Directory
+        } else {
+            $null
+        }
+        HostAdmissionDesiredPolicyPath = if ($hostAdmissionContext) {
+            $hostAdmissionContext.DesiredPolicyPath
+        } else {
+            $null
+        }
+        HostAdmissionAcknowledgementPath = if ($hostAdmissionContext) {
+            $hostAdmissionContext.AcknowledgementPath
+        } else {
+            $null
+        }
+        HostAdmissionLockPath = if ($hostAdmissionContext) {
+            $hostAdmissionContext.LockPath
+        } else {
+            $null
+        }
+        HostAdmissionEnvironmentPath = if ($hostAdmissionContext) {
+            $hostAdmissionContext.EnvironmentPath
+        } else {
+            $null
+        }
+        HostAdmissionComposeProjectName = if ($hostAdmissionContext) {
+            $hostAdmissionContext.ComposeProjectName
+        } else {
+            ''
+        }
+        HostAdmissionVolumeName = if ($hostAdmissionContext) {
+            $hostAdmissionContext.VolumeName
+        } else {
+            ''
+        }
+        HostAdmissionSocketPath = if ($hostAdmissionContext) {
+            $hostAdmissionContext.SocketPath
+        } else {
+            ''
+        }
+        HostAdmissionProtocolVersion = if ($hostAdmissionContext) {
+            $hostAdmissionContext.ProtocolVersion
+        } else {
+            0
+        }
         ComposeProjectName = $composeProjectName
         ManagedRunnerLabel = "ephemeral-managed-runner-profile=$profileName"
         ManagerContractVersion = $script:RunnerManagerContractVersion
         DefinedManagerContractVersion = $script:RunnerDefinedManagerContractVersion
+        DefinedHostAdmissionContractVersion =
+            $script:RunnerDefinedHostAdmissionContractVersion
         DefinedDiagnosticsContractVersion = $script:RunnerDefinedDiagnosticsContractVersion
         Image = $effectiveImage
         Replicas = $effectiveReplicas
@@ -993,6 +1082,18 @@ function Assert-RunnerResilienceContractActivation {
             "$($Profile.DefinedManagerContractVersion), but this release activates contract " +
             "$($Profile.ManagerContractVersion). Upgrade after both manager implementations support contract " +
             "$($Profile.DefinedManagerContractVersion); the requested policy was not applied."
+        )
+    }
+    if (
+        $Profile.HostAdmission -and
+        $Profile.ManagerContractVersion -lt
+            $Profile.DefinedHostAdmissionContractVersion
+    ) {
+        throw (
+            "Host-local admission requires manager contract " +
+            "$($Profile.DefinedHostAdmissionContractVersion), but this release activates contract " +
+            "$($Profile.ManagerContractVersion). Upgrade after both manager implementations support contract " +
+            "$($Profile.DefinedHostAdmissionContractVersion); no Docker, image, or generated state was changed."
         )
     }
 }
@@ -1263,6 +1364,304 @@ function Get-RunnerDesiredCapacitySignature {
         ) `
         -Replicas $(if ($null -eq $State.replicas) { $null } else { [Nullable[int]][int]$State.replicas })
     return $normalized | ConvertTo-Json -Depth 10 -Compress
+}
+
+<#
+.SYNOPSIS
+    Creates one versioned desired host-admission policy document.
+
+.DESCRIPTION
+    Canonicalizes host-wide capacity and profile-specific policy into the
+    non-secret state later consumed by the dedicated admission service.
+
+.PARAMETER Generation
+    Monotonically increasing host-policy generation.
+
+.PARAMETER Namespace
+    Single active admission namespace on the Docker daemon.
+
+.PARAMETER CapacityUnits
+    Measured abstract host capacity before safety margin.
+
+.PARAMETER SafetyMarginUnits
+    Units withheld from the effective admission budget.
+
+.PARAMETER ProfilePolicies
+    Profile policy objects exposing Profile, WorkerCostUnits,
+    ReservationUnits, and Borrowable.
+#>
+function New-RunnerHostAdmissionDesiredPolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$Generation,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')]
+        [string]$Namespace,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$CapacityUnits,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(0, [int]::MaxValue)]
+        [int]$SafetyMarginUnits,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$ProfilePolicies
+    )
+
+    $normalizedProfiles = @(
+        foreach ($profilePolicy in $ProfilePolicies) {
+            $profileName = ([string]$profilePolicy.Profile).Trim().ToLowerInvariant()
+            if ($profileName -notmatch '^[a-z][a-z0-9-]{0,31}$') {
+                throw "Host admission profile '$($profilePolicy.Profile)' must match ^[a-z][a-z0-9-]{0,31}$."
+            }
+            $canonical = ConvertTo-RunnerHostAdmissionPolicy `
+                -Policy ([PSCustomObject]@{
+                    namespace = $Namespace
+                    capacityUnits = $CapacityUnits
+                    safetyMarginUnits = $SafetyMarginUnits
+                    workerCostUnits = [int]$profilePolicy.WorkerCostUnits
+                    reservationUnits = [int]$profilePolicy.ReservationUnits
+                    borrowable = [bool]$profilePolicy.Borrowable
+                }) `
+                -ProfileName $profileName
+            [PSCustomObject][ordered]@{
+                profile = $profileName
+                workerCostUnits = $canonical.WorkerCostUnits
+                reservationUnits = $canonical.ReservationUnits
+                borrowable = $canonical.Borrowable
+                profilePolicyFingerprint = $canonical.ProfilePolicyFingerprint
+            }
+        }
+    )
+    $normalizedProfiles = @($normalizedProfiles | Sort-Object profile)
+    $duplicateProfiles = @(
+        $normalizedProfiles |
+            Group-Object profile |
+            Where-Object Count -gt 1
+    )
+    if ($duplicateProfiles.Count -gt 0) {
+        throw "Host admission policy contains duplicate profile '$($duplicateProfiles[0].Name)'."
+    }
+
+    $hostPolicy = ConvertTo-RunnerHostAdmissionPolicy `
+        -Policy ([PSCustomObject]@{
+            namespace = $Namespace
+            capacityUnits = $CapacityUnits
+            safetyMarginUnits = $SafetyMarginUnits
+            workerCostUnits = 1
+            reservationUnits = 0
+            borrowable = $true
+        }) `
+        -ProfileName 'host-policy'
+
+    return [PSCustomObject][ordered]@{
+        schemaVersion = $script:RunnerHostAdmissionPolicySchemaVersion
+        generation = $Generation
+        namespace = $hostPolicy.Namespace
+        capacityUnits = $hostPolicy.CapacityUnits
+        safetyMarginUnits = $hostPolicy.SafetyMarginUnits
+        effectiveBudgetUnits = $hostPolicy.EffectiveBudgetUnits
+        hostPolicyFingerprint = $hostPolicy.HostPolicyFingerprint
+        profiles = @($normalizedProfiles)
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the generation-independent host-admission policy identity.
+#>
+function Get-RunnerHostAdmissionPolicySignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Policy
+    )
+
+    $normalized = New-RunnerHostAdmissionDesiredPolicy `
+        -Generation 1 `
+        -Namespace ([string]$Policy.namespace) `
+        -CapacityUnits ([int]$Policy.capacityUnits) `
+        -SafetyMarginUnits ([int]$Policy.safetyMarginUnits) `
+        -ProfilePolicies @(
+            @($Policy.profiles) |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        Profile = [string]$_.profile
+                        WorkerCostUnits = [int]$_.workerCostUnits
+                        ReservationUnits = [int]$_.reservationUnits
+                        Borrowable = [bool]$_.borrowable
+                    }
+                }
+        )
+    return $normalized | ConvertTo-Json -Depth 10 -Compress
+}
+
+<#
+.SYNOPSIS
+    Updates one selected profile in an existing desired host policy.
+
+.DESCRIPTION
+    Preserves every unrelated profile and rejects host-wide policy drift while
+    another profile remains enrolled. A profile with no HostAdmission policy is
+    removed from the next generation.
+#>
+function Update-RunnerHostAdmissionDesiredPolicy {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [PSCustomObject]$CurrentPolicy,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile,
+
+        [Parameter(Mandatory)]
+        [ValidateRange(1, [int]::MaxValue)]
+        [int]$Generation
+    )
+
+    if ($null -eq $CurrentPolicy) {
+        if ($null -eq $Profile.HostAdmission) {
+            return $null
+        }
+        return New-RunnerHostAdmissionDesiredPolicy `
+            -Generation $Generation `
+            -Namespace $Profile.HostAdmission.Namespace `
+            -CapacityUnits $Profile.HostAdmission.CapacityUnits `
+            -SafetyMarginUnits $Profile.HostAdmission.SafetyMarginUnits `
+            -ProfilePolicies @(
+                [PSCustomObject]@{
+                    Profile = $Profile.Name
+                    WorkerCostUnits = $Profile.HostAdmission.WorkerCostUnits
+                    ReservationUnits = $Profile.HostAdmission.ReservationUnits
+                    Borrowable = $Profile.HostAdmission.Borrowable
+                }
+            )
+    }
+
+    if (
+        -not $CurrentPolicy.PSObject.Properties['schemaVersion'] -or
+        [int]$CurrentPolicy.schemaVersion -ne $script:RunnerHostAdmissionPolicySchemaVersion
+    ) {
+        throw "Unsupported host-admission policy schema version '$($CurrentPolicy.schemaVersion)'."
+    }
+
+    $unrelatedProfiles = @(
+        @($CurrentPolicy.profiles) |
+            Where-Object { [string]$_.profile -cne [string]$Profile.Name }
+    )
+    $namespace = [string]$CurrentPolicy.namespace
+    $capacityUnits = [int]$CurrentPolicy.capacityUnits
+    $safetyMarginUnits = [int]$CurrentPolicy.safetyMarginUnits
+    $nextProfiles = @($unrelatedProfiles)
+
+    if ($Profile.HostAdmission) {
+        if ($unrelatedProfiles.Count -gt 0) {
+            if (
+                [string]$Profile.HostAdmission.Namespace -cne $namespace -or
+                [string]$Profile.HostAdmission.HostPolicyFingerprint -cne
+                    [string]$CurrentPolicy.hostPolicyFingerprint
+            ) {
+                throw "Profile '$($Profile.Name)' host-wide admission policy conflicts with other participating profiles."
+            }
+        } else {
+            $namespace = [string]$Profile.HostAdmission.Namespace
+            $capacityUnits = [int]$Profile.HostAdmission.CapacityUnits
+            $safetyMarginUnits = [int]$Profile.HostAdmission.SafetyMarginUnits
+        }
+        $nextProfiles += [PSCustomObject]@{
+            Profile = $Profile.Name
+            WorkerCostUnits = $Profile.HostAdmission.WorkerCostUnits
+            ReservationUnits = $Profile.HostAdmission.ReservationUnits
+            Borrowable = $Profile.HostAdmission.Borrowable
+        }
+    }
+
+    return New-RunnerHostAdmissionDesiredPolicy `
+        -Generation $Generation `
+        -Namespace $namespace `
+        -CapacityUnits $capacityUnits `
+        -SafetyMarginUnits $safetyMarginUnits `
+        -ProfilePolicies $nextProfiles
+}
+
+<#
+.SYNOPSIS
+    Projects desired host policy into the coordinator wire contract.
+#>
+function ConvertTo-RunnerHostAdmissionServicePolicy {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Policy
+    )
+
+    $normalized = New-RunnerHostAdmissionDesiredPolicy `
+        -Generation ([int]$Policy.generation) `
+        -Namespace ([string]$Policy.namespace) `
+        -CapacityUnits ([int]$Policy.capacityUnits) `
+        -SafetyMarginUnits ([int]$Policy.safetyMarginUnits) `
+        -ProfilePolicies @(
+            @($Policy.profiles) |
+                ForEach-Object {
+                    [PSCustomObject]@{
+                        Profile = [string]$_.profile
+                        WorkerCostUnits = [int]$_.workerCostUnits
+                        ReservationUnits = [int]$_.reservationUnits
+                        Borrowable = [bool]$_.borrowable
+                    }
+                }
+        )
+    return [PSCustomObject][ordered]@{
+        generation = [int]$normalized.generation
+        totalUnits = [int]$normalized.effectiveBudgetUnits
+        profiles = @(
+            $normalized.profiles |
+                ForEach-Object {
+                    [PSCustomObject][ordered]@{
+                        profileId = [string]$_.profile
+                        unitCost = [int]$_.workerCostUnits
+                        reservedUnits = [int]$_.reservationUnits
+                        borrowable = [bool]$_.borrowable
+                    }
+                }
+        )
+    }
+}
+
+<#
+.SYNOPSIS
+    Returns the canonical identity of a coordinator service policy.
+#>
+function Get-RunnerHostAdmissionServicePolicySignature {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [object]$Policy
+    )
+
+    $normalized = [PSCustomObject][ordered]@{
+        generation = [int]$Policy.generation
+        totalUnits = [int]$Policy.totalUnits
+        profiles = @(
+            @($Policy.profiles) |
+                ForEach-Object {
+                    [PSCustomObject][ordered]@{
+                        profileId = [string]$_.profileId
+                        unitCost = [int]$_.unitCost
+                        reservedUnits = [int]$_.reservedUnits
+                        borrowable = [bool]$_.borrowable
+                    }
+                } |
+                Sort-Object profileId
+        )
+    }
+    return Get-RunnerObjectFingerprint -Value $normalized
 }
 
 <#
@@ -1717,6 +2116,27 @@ function Enter-RunnerProfileLock {
 
 <#
 .SYNOPSIS
+    Creates the non-secret Compose environment for one admission service.
+#>
+function New-RunnerHostAdmissionEnvironmentContent {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile
+    )
+
+    if ($null -eq $Profile.HostAdmission) {
+        throw "Profile '$($Profile.Name)' does not define host-local admission."
+    }
+    return @(
+        "PITCREW_HOST_ADMISSION_NAMESPACE=$($Profile.HostAdmission.Namespace)"
+        "PITCREW_HOST_ADMISSION_VOLUME=$($Profile.HostAdmissionVolumeName)"
+        "PITCREW_HOST_ADMISSION_PROTOCOL_VERSION=$($Profile.HostAdmissionProtocolVersion)"
+    ) -join "`n"
+}
+
+<#
+.SYNOPSIS
     Creates the Docker Compose environment content for a resolved runner profile.
 
 .PARAMETER Profile
@@ -1784,6 +2204,8 @@ function New-RunnerEnvironmentContent {
         $Profile.RunnerGroup,
         $Profile.ReadOnlyVolumesValue,
         $Profile.ServiceNetworkValue,
+        $Profile.HostAdmissionVolumeName,
+        $Profile.HostAdmissionSocketPath,
         $WorkerRevision,
         $SessionOwner,
         $ResolvedImageId
@@ -1834,6 +2256,21 @@ function New-RunnerEnvironmentContent {
     }
     $readOnlyVolumes = [string]$Profile.ReadOnlyVolumesValue
     $serviceNetwork = [string]$Profile.ServiceNetworkValue
+    $hostAdmissionNamespace = if ($Profile.HostAdmission) {
+        [string]$Profile.HostAdmission.Namespace
+    } else {
+        ''
+    }
+    $hostAdmissionHostFingerprint = if ($Profile.HostAdmission) {
+        [string]$Profile.HostAdmission.HostPolicyFingerprint
+    } else {
+        ''
+    }
+    $hostAdmissionProfileFingerprint = if ($Profile.HostAdmission) {
+        [string]$Profile.HostAdmission.ProfilePolicyFingerprint
+    } else {
+        ''
+    }
     return @(
         "ACCESS_TOKEN=$AccessToken"
         "RUNNER_SCOPE=$Scope"
@@ -1860,6 +2297,11 @@ function New-RunnerEnvironmentContent {
         "PITCREW_AUTOSCALING_MIN_IDLE=$minimumIdle"
         "PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$scaleDownDelay"
         "PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$maximumActiveWorkers"
+        "PITCREW_HOST_ADMISSION_NAMESPACE=$hostAdmissionNamespace"
+        "PITCREW_HOST_ADMISSION_VOLUME=$($Profile.HostAdmissionVolumeName)"
+        "PITCREW_HOST_ADMISSION_SOCKET=$($Profile.HostAdmissionSocketPath)"
+        "PITCREW_HOST_ADMISSION_HOST_FINGERPRINT=$hostAdmissionHostFingerprint"
+        "PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT=$hostAdmissionProfileFingerprint"
         "PITCREW_STATE_DIR=$($Profile.StateVolumePath)"
         "PITCREW_MANAGER_CONTRACT_VERSION=$($Profile.ManagerContractVersion)"
     ) -join "`n"

@@ -247,9 +247,86 @@ foreach ($parameterName in @(
     }
 }
 $profileConfig = Resolve-RunnerProfile @resolveArguments
+$storedHostAdmissionNamespace = ''
+if (Test-Path -LiteralPath $profileConfig.StaticProfilePath -PathType Leaf) {
+    try {
+        $storedProfileForAdmission = Read-RunnerJsonFile `
+            -Path $profileConfig.StaticProfilePath
+        if (
+            $storedProfileForAdmission.PSObject.Properties['configuration'] -and
+            $storedProfileForAdmission.configuration.PSObject.Properties[
+                'hostAdmission'
+            ] -and
+            $storedProfileForAdmission.configuration.hostAdmission
+        ) {
+            $storedHostAdmissionNamespace =
+                [string]$storedProfileForAdmission.configuration.hostAdmission.namespace
+        }
+    } catch {
+        throw "Cannot resolve existing host-admission identity for profile '$($profileConfig.Name)': $($_.Exception.Message)"
+    }
+}
+$effectiveHostAdmissionNamespace = if ($profileConfig.HostAdmission) {
+    [string]$profileConfig.HostAdmission.Namespace
+} else {
+    $storedHostAdmissionNamespace
+}
+if (
+    $storedHostAdmissionNamespace -and
+    $profileConfig.HostAdmission -and
+    [string]$profileConfig.HostAdmission.Namespace -cne
+        $storedHostAdmissionNamespace
+) {
+    throw (
+        "Profile '$($profileConfig.Name)' cannot change host-admission namespace " +
+        "from '$storedHostAdmissionNamespace' to '$($profileConfig.HostAdmission.Namespace)' in place. " +
+        'Disable and drain the existing namespace before enabling another.'
+    )
+}
+$hostAdmissionContext = if ($effectiveHostAdmissionNamespace) {
+    New-RunnerHostAdmissionContext `
+        -RootPath $here `
+        -Namespace $effectiveHostAdmissionNamespace
+} else {
+    $null
+}
+$admissionServiceConfig = if ($hostAdmissionContext) {
+    $serviceConfig = $profileConfig.PSObject.Copy()
+    $serviceConfig.HostAdmission = [PSCustomObject]@{
+        Namespace = $hostAdmissionContext.Namespace
+    }
+    $serviceConfig.HostAdmissionDirectory = $hostAdmissionContext.Directory
+    $serviceConfig.HostAdmissionDesiredPolicyPath =
+        $hostAdmissionContext.DesiredPolicyPath
+    $serviceConfig.HostAdmissionAcknowledgementPath =
+        $hostAdmissionContext.AcknowledgementPath
+    $serviceConfig.HostAdmissionLockPath = $hostAdmissionContext.LockPath
+    $serviceConfig.HostAdmissionEnvironmentPath =
+        $hostAdmissionContext.EnvironmentPath
+    $serviceConfig.HostAdmissionComposeProjectName =
+        $hostAdmissionContext.ComposeProjectName
+    $serviceConfig.HostAdmissionVolumeName = $hostAdmissionContext.VolumeName
+    $serviceConfig.HostAdmissionSocketPath = $hostAdmissionContext.SocketPath
+    $serviceConfig.HostAdmissionProtocolVersion =
+        $hostAdmissionContext.ProtocolVersion
+    $serviceConfig
+} else {
+    $null
+}
 if (-not $Down -and -not $RecoverManager) {
     Assert-RunnerManagerContractActivation -Profile $profileConfig
     Assert-RunnerResilienceContractActivation -Profile $profileConfig
+    if (
+        $hostAdmissionContext -and
+        $profileConfig.ManagerContractVersion -lt
+            $profileConfig.DefinedHostAdmissionContractVersion
+    ) {
+        throw (
+            "Existing host-local admission requires manager contract " +
+            "$($profileConfig.DefinedHostAdmissionContractVersion), but this release activates contract " +
+            "$($profileConfig.ManagerContractVersion). No Docker, image, or generated state was changed."
+        )
+    }
 }
 
 if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
@@ -258,6 +335,13 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 
 $legacyLabels = @('ephemeral-managed-runner')
 $composePath = Join-Path $here 'docker-compose.yml'
+$hostAdmissionComposePath = Join-Path $here 'host-admission.compose.yml'
+$hostAdmissionManagerComposePath = Join-Path $here 'host-admission.manager.compose.yml'
+$hostAdmissionComposeEnvironmentNames = @(
+    'PITCREW_HOST_ADMISSION_NAMESPACE',
+    'PITCREW_HOST_ADMISSION_VOLUME',
+    'PITCREW_HOST_ADMISSION_PROTOCOL_VERSION'
+)
 $composeEnvironmentNames = @(
     'ACCESS_TOKEN',
     'REPO_URLS',
@@ -287,6 +371,12 @@ $composeEnvironmentNames = @(
     'PITCREW_AUTOSCALING_MIN_IDLE',
     'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
     'PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS',
+    'PITCREW_HOST_ADMISSION_NAMESPACE',
+    'PITCREW_HOST_ADMISSION_VOLUME',
+    'PITCREW_HOST_ADMISSION_SOCKET',
+    'PITCREW_HOST_ADMISSION_HOST_FINGERPRINT',
+    'PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT',
+    'PITCREW_HOST_ADMISSION_PROTOCOL_VERSION',
     'PITCREW_STATE_DIR',
     'PITCREW_MANAGER_CONTRACT_VERSION'
 )
@@ -316,9 +406,12 @@ function Invoke-RunnerCompose {
     try {
         $composeArguments = @(
             'compose',
-            '--file', $composePath,
-            '--project-name', $ProfileConfig.ComposeProjectName
+            '--file', $composePath
         )
+        if ($ProfileConfig.HostAdmission) {
+            $composeArguments += @('--file', $hostAdmissionManagerComposePath)
+        }
+        $composeArguments += @('--project-name', $ProfileConfig.ComposeProjectName)
         if (Test-Path -LiteralPath $ProfileConfig.EnvironmentPath) {
             $composeArguments += @('--env-file', $ProfileConfig.EnvironmentPath)
         }
@@ -344,6 +437,298 @@ function Invoke-RunnerCompose {
     if ($exitCode -ne 0) {
         Write-Error "docker compose $($CommandArguments[0]) failed for profile '$($ProfileConfig.Name)'."
     }
+}
+
+function Invoke-RunnerHostAdmissionCompose {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [string[]]$CommandArguments,
+
+        [switch]$DiscardOutput
+    )
+
+    if ($null -eq $ProfileConfig.HostAdmission) {
+        throw "Profile '$($ProfileConfig.Name)' does not define host-local admission."
+    }
+    $savedEnvironment = @{}
+    foreach ($name in $hostAdmissionComposeEnvironmentNames) {
+        $item = Get-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+        $savedEnvironment[$name] = [PSCustomObject]@{
+            Exists = $null -ne $item
+            Value = if ($item) { $item.Value } else { $null }
+        }
+        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
+    }
+    $exitCode = 1
+    try {
+        $composeArguments = @(
+            'compose',
+            '--file', $hostAdmissionComposePath,
+            '--project-name', $ProfileConfig.HostAdmissionComposeProjectName,
+            '--env-file', $ProfileConfig.HostAdmissionEnvironmentPath
+        ) + $CommandArguments
+        if ($DiscardOutput) {
+            & docker @composeArguments 2>&1 | Out-Null
+        } else {
+            & docker @composeArguments
+        }
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        foreach ($name in $hostAdmissionComposeEnvironmentNames) {
+            if ($savedEnvironment[$name].Exists) {
+                Set-Item `
+                    -LiteralPath "Env:$name" `
+                    -Value $savedEnvironment[$name].Value
+            } else {
+                Remove-Item `
+                    -LiteralPath "Env:$name" `
+                    -ErrorAction SilentlyContinue
+            }
+        }
+    }
+    if ($exitCode -ne 0) {
+        Write-Error "docker compose $($CommandArguments[0]) failed for host-admission namespace '$($ProfileConfig.HostAdmission.Namespace)'."
+    }
+}
+
+function Invoke-RunnerHostAdmissionClient {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig,
+
+        [Parameter(Mandatory)]
+        [string[]]$ClientArguments,
+
+        [AllowNull()]
+        [object]$InputObject
+    )
+
+    $composeArguments = @(
+        'compose',
+        '--file', $hostAdmissionComposePath,
+        '--project-name', $AdmissionConfig.HostAdmissionComposeProjectName,
+        '--env-file', $AdmissionConfig.HostAdmissionEnvironmentPath,
+        'exec',
+        '-T',
+        'admission-coordinator',
+        '/usr/local/bin/pitcrew-admission'
+    ) + $ClientArguments
+    $output = if ($null -eq $InputObject) {
+        & docker @composeArguments 2>&1
+    } else {
+        $InputObject |
+            ConvertTo-Json -Depth 20 -Compress |
+            & docker @composeArguments 2>&1
+    }
+    if ($LASTEXITCODE -ne 0) {
+        throw "Host-admission client command '$($ClientArguments[0])' failed for namespace '$($AdmissionConfig.HostAdmission.Namespace)': $($output -join [Environment]::NewLine)"
+    }
+    return ($output -join [Environment]::NewLine).Trim()
+}
+
+function Wait-RunnerHostAdmissionReady {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig,
+
+        [ValidateRange(1, 300)]
+        [int]$TimeoutSeconds = 30
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $lastError = ''
+    do {
+        try {
+            $status = Invoke-RunnerHostAdmissionClient `
+                -AdmissionConfig $AdmissionConfig `
+                -ClientArguments @(
+                    'status',
+                    '--socket',
+                    $AdmissionConfig.HostAdmissionSocketPath
+                ) `
+                -InputObject $null
+            return $status | ConvertFrom-Json -Depth 20 -ErrorAction Stop
+        } catch {
+            $lastError = $_.Exception.Message
+            Start-Sleep -Milliseconds 250
+        }
+    } while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
+
+    throw "Host-admission namespace '$($AdmissionConfig.HostAdmission.Namespace)' did not become ready within $TimeoutSeconds seconds. $lastError"
+}
+
+function Assert-RunnerHostAdmissionProfileDrained {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig,
+
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $status = Wait-RunnerHostAdmissionReady -AdmissionConfig $AdmissionConfig
+    $remaining = @(
+        @($status.leases) |
+            Where-Object { [string]$_.profileId -ceq $ProfileName }
+    )
+    if ($remaining.Count -gt 0) {
+        throw (
+            "Profile '$ProfileName' still owns $($remaining.Count) host-admission " +
+            'lease(s). Pause or drain the profile and retry after exact lease release.'
+        )
+    }
+}
+
+function Assert-RunnerSingleHostAdmissionNamespace {
+    param(
+        [Parameter(Mandatory)]
+        [string]$Namespace
+    )
+
+    $labelKey = 'pitcrew-host-admission-namespace'
+    $containerNamespaces = @(
+        & docker ps `
+            --all `
+            --filter "label=$labelKey" `
+            --format "{{.Label `"$labelKey`"}}" 2>$null |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker could not inspect existing host-admission containers.'
+    }
+    $volumeNamespaces = @(
+        & docker volume ls `
+            --filter "label=$labelKey" `
+            --format "{{.Label `"$labelKey`"}}" 2>$null |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object { $_ } |
+            Sort-Object -Unique
+    )
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Docker could not inspect existing host-admission volumes.'
+    }
+    $existingNamespaces = @(
+        @($containerNamespaces) + @($volumeNamespaces) |
+            Sort-Object -Unique
+    )
+    $conflicts = @(
+        $existingNamespaces |
+            Where-Object { $_ -cne $Namespace }
+    )
+    if ($conflicts.Count -gt 0) {
+        throw (
+            "Docker daemon already has host-admission namespace " +
+            "'$($conflicts -join ',')'; '$Namespace' cannot start concurrently."
+        )
+    }
+}
+
+function Start-RunnerHostAdmissionService {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig
+    )
+
+    Assert-RunnerSingleHostAdmissionNamespace `
+        -Namespace $AdmissionConfig.HostAdmission.Namespace
+    $environmentContent = New-RunnerHostAdmissionEnvironmentContent `
+        -Profile $AdmissionConfig
+    $environmentTemporary = New-RunnerTextStagingFile `
+        -Path $AdmissionConfig.HostAdmissionEnvironmentPath `
+        -Value "$environmentContent`n"
+    Complete-RunnerStagedFile `
+        -TemporaryPath $environmentTemporary `
+        -Path $AdmissionConfig.HostAdmissionEnvironmentPath
+
+    Invoke-RunnerHostAdmissionCompose `
+        -ProfileConfig $AdmissionConfig `
+        -CommandArguments @('build', 'admission-coordinator')
+    Invoke-RunnerHostAdmissionCompose `
+        -ProfileConfig $AdmissionConfig `
+        -CommandArguments @(
+            'up',
+            '-d',
+            '--no-deps',
+            'admission-coordinator'
+        )
+    return Wait-RunnerHostAdmissionReady -AdmissionConfig $AdmissionConfig
+}
+
+function Publish-RunnerHostAdmissionPolicy {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig,
+
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Policy
+    )
+
+    Write-RunnerJsonAtomically `
+        -Path $AdmissionConfig.HostAdmissionDesiredPolicyPath `
+        -Value $Policy
+
+    $servicePolicy = ConvertTo-RunnerHostAdmissionServicePolicy -Policy $Policy
+    $servicePolicySignature =
+        Get-RunnerHostAdmissionServicePolicySignature -Policy $servicePolicy
+    $status = Wait-RunnerHostAdmissionReady -AdmissionConfig $AdmissionConfig
+    $currentGeneration = if (
+        $status.PSObject.Properties['policy'] -and
+        $status.policy
+    ) {
+        [int]$status.policy.generation
+    } else {
+        0
+    }
+    if ($currentGeneration -gt [int]$Policy.generation) {
+        throw "Host-admission service already accepted generation $currentGeneration, newer than requested generation $($Policy.generation)."
+    }
+    if ($currentGeneration -eq [int]$Policy.generation) {
+        $currentSignature =
+            Get-RunnerHostAdmissionServicePolicySignature -Policy $status.policy
+        if ($currentSignature -cne $servicePolicySignature) {
+            throw "Host-admission generation $currentGeneration conflicts with the requested policy."
+        }
+    } else {
+        Invoke-RunnerHostAdmissionClient `
+            -AdmissionConfig $AdmissionConfig `
+            -ClientArguments @(
+                'apply-policy',
+                '--socket',
+                $AdmissionConfig.HostAdmissionSocketPath,
+                '--policy-file',
+                '-'
+            ) `
+            -InputObject $servicePolicy | Out-Null
+        $status = Wait-RunnerHostAdmissionReady -AdmissionConfig $AdmissionConfig
+        if (
+            -not $status.PSObject.Properties['policy'] -or
+            [int]$status.policy.generation -ne [int]$Policy.generation -or
+            (Get-RunnerHostAdmissionServicePolicySignature -Policy $status.policy) -cne
+                $servicePolicySignature
+        ) {
+            throw "Host-admission service did not acknowledge generation $($Policy.generation)."
+        }
+    }
+
+    $acknowledgement = [PSCustomObject][ordered]@{
+        schemaVersion = 1
+        status = 'accepted'
+        generation = [int]$Policy.generation
+        namespace = [string]$Policy.namespace
+        hostPolicyFingerprint = [string]$Policy.hostPolicyFingerprint
+        servicePolicyFingerprint = $servicePolicySignature
+        protocolVersion = [int]$AdmissionConfig.HostAdmissionProtocolVersion
+    }
+    Write-RunnerJsonAtomically `
+        -Path $AdmissionConfig.HostAdmissionAcknowledgementPath `
+        -Value $acknowledgement
+    return $acknowledgement
 }
 
 function Stop-RunnerProfile {
@@ -1301,7 +1686,17 @@ function Get-RunnerRegistrationAccessValidation {
 
 Push-Location $here
 $profileLock = $null
+$hostAdmissionLock = $null
 try {
+    if ($hostAdmissionContext) {
+        New-Item `
+            -ItemType Directory `
+            -Path $hostAdmissionContext.Directory `
+            -Force | Out-Null
+        $hostAdmissionLock = Enter-RunnerProfileLock `
+            -Path $hostAdmissionContext.LockPath `
+            -TimeoutSeconds 30
+    }
     New-Item -ItemType Directory -Path $profileConfig.StateDirectory -Force | Out-Null
     $profileLock = Enter-RunnerProfileLock -Path $profileConfig.LockPath -TimeoutSeconds 30
 
@@ -1377,6 +1772,51 @@ try {
         }
         Write-Host "[stop] Stopping profile '$($profileConfig.Name)'"
         Stop-RunnerProfile -ProfileConfig $profileConfig
+        if (
+            $hostAdmissionContext -and
+            (
+                Test-Path `
+                    -LiteralPath $hostAdmissionContext.DesiredPolicyPath `
+                    -PathType Leaf
+            )
+        ) {
+            Start-RunnerHostAdmissionService `
+                -AdmissionConfig $admissionServiceConfig | Out-Null
+            Assert-RunnerHostAdmissionProfileDrained `
+                -AdmissionConfig $admissionServiceConfig `
+                -ProfileName $profileConfig.Name
+            $currentPolicy = Read-RunnerJsonFile `
+                -Path $hostAdmissionContext.DesiredPolicyPath
+            $currentAckGeneration = 0
+            if (
+                Test-Path `
+                    -LiteralPath $hostAdmissionContext.AcknowledgementPath `
+                    -PathType Leaf
+            ) {
+                $currentAck = Read-RunnerJsonFile `
+                    -Path $hostAdmissionContext.AcknowledgementPath
+                $currentAckGeneration = [int]$currentAck.generation
+            }
+            $disabledProfile = $profileConfig.PSObject.Copy()
+            $disabledProfile.HostAdmission = $null
+            $removalPolicy = Update-RunnerHostAdmissionDesiredPolicy `
+                -CurrentPolicy $currentPolicy `
+                -Profile $disabledProfile `
+                -Generation (
+                    [math]::Max(
+                        [int]$currentPolicy.generation,
+                        $currentAckGeneration
+                    ) + 1
+                )
+            Publish-RunnerHostAdmissionPolicy `
+                -AdmissionConfig $admissionServiceConfig `
+                -Policy $removalPolicy | Out-Null
+            if (@($removalPolicy.profiles).Count -eq 0) {
+                Invoke-RunnerHostAdmissionCompose `
+                    -ProfileConfig $admissionServiceConfig `
+                    -CommandArguments @('down', '--remove-orphans')
+            }
+        }
         Write-Host "[done] Profile '$($profileConfig.Name)' stopped. Other profiles were not changed."
         return
     }
@@ -1659,6 +2099,65 @@ try {
         -Scope $Scope `
         -Repositories $desiredRepositories `
         -Replicas $desiredReplicas
+
+    $currentHostAdmissionPolicy = $null
+    $currentHostAdmissionAcknowledgement = $null
+    $nextHostAdmissionPolicy = $null
+    $hostAdmissionPolicyChanged = $false
+    if ($hostAdmissionContext) {
+        if (
+            Test-Path `
+                -LiteralPath $hostAdmissionContext.DesiredPolicyPath `
+                -PathType Leaf
+        ) {
+            $currentHostAdmissionPolicy = Read-RunnerJsonFile `
+                -Path $hostAdmissionContext.DesiredPolicyPath
+        }
+        if (
+            Test-Path `
+                -LiteralPath $hostAdmissionContext.AcknowledgementPath `
+                -PathType Leaf
+        ) {
+            $currentHostAdmissionAcknowledgement = Read-RunnerJsonFile `
+                -Path $hostAdmissionContext.AcknowledgementPath
+        }
+        $hostGenerationBase = @(
+            0
+            if ($currentHostAdmissionPolicy) {
+                [int]$currentHostAdmissionPolicy.generation
+            }
+            if ($currentHostAdmissionAcknowledgement) {
+                [int]$currentHostAdmissionAcknowledgement.generation
+            }
+        ) | Measure-Object -Maximum | Select-Object -ExpandProperty Maximum
+        $candidateHostAdmissionPolicy =
+            Update-RunnerHostAdmissionDesiredPolicy `
+                -CurrentPolicy $currentHostAdmissionPolicy `
+                -Profile $profileConfig `
+                -Generation ([int]$hostGenerationBase + 1)
+        if ($candidateHostAdmissionPolicy) {
+            $hostAdmissionPolicyChanged = (
+                -not $currentHostAdmissionPolicy -or
+                (
+                    Get-RunnerHostAdmissionPolicySignature `
+                        -Policy $candidateHostAdmissionPolicy
+                ) -cne (
+                    Get-RunnerHostAdmissionPolicySignature `
+                        -Policy $currentHostAdmissionPolicy
+                ) -or
+                -not $currentHostAdmissionAcknowledgement -or
+                [string]$currentHostAdmissionAcknowledgement.status -cne
+                    'accepted' -or
+                [int]$currentHostAdmissionAcknowledgement.generation -ne
+                    [int]$currentHostAdmissionPolicy.generation
+            )
+            $nextHostAdmissionPolicy = if ($hostAdmissionPolicyChanged) {
+                $candidateHostAdmissionPolicy
+            } else {
+                $currentHostAdmissionPolicy
+            }
+        }
+    }
 
     $resolvedImageId = Get-RunnerResolvedImageId `
         -Image $profileConfig.Image `
@@ -2012,6 +2511,60 @@ try {
         }
     }
 
+    $hostAdmissionPolicyApplied = $false
+    $hostAdmissionRollbackPolicy = $null
+    if ($hostAdmissionContext) {
+        if (-not $nextHostAdmissionPolicy) {
+            throw "Existing host-admission namespace '$($hostAdmissionContext.Namespace)' has no readable desired policy."
+        }
+        Write-Host (
+            "[admission] Starting host-local coordinator for namespace " +
+            "'$($hostAdmissionContext.Namespace)'"
+        )
+        Start-RunnerHostAdmissionService `
+            -AdmissionConfig $admissionServiceConfig | Out-Null
+        if (-not $profileConfig.HostAdmission) {
+            Assert-RunnerHostAdmissionProfileDrained `
+                -AdmissionConfig $admissionServiceConfig `
+                -ProfileName $profileConfig.Name
+        }
+        $rollbackSource = if ($currentHostAdmissionPolicy) {
+            $currentHostAdmissionPolicy
+        } else {
+            New-RunnerHostAdmissionDesiredPolicy `
+                -Generation 1 `
+                -Namespace $nextHostAdmissionPolicy.namespace `
+                -CapacityUnits $nextHostAdmissionPolicy.capacityUnits `
+                -SafetyMarginUnits $nextHostAdmissionPolicy.safetyMarginUnits `
+                -ProfilePolicies @()
+        }
+        $hostAdmissionRollbackPolicy =
+            New-RunnerHostAdmissionDesiredPolicy `
+                -Generation ([int]$nextHostAdmissionPolicy.generation + 1) `
+                -Namespace $rollbackSource.namespace `
+                -CapacityUnits $rollbackSource.capacityUnits `
+                -SafetyMarginUnits $rollbackSource.safetyMarginUnits `
+                -ProfilePolicies @(
+                    @($rollbackSource.profiles) |
+                        ForEach-Object {
+                            [PSCustomObject]@{
+                                Profile = [string]$_.profile
+                                WorkerCostUnits = [int]$_.workerCostUnits
+                                ReservationUnits = [int]$_.reservationUnits
+                                Borrowable = [bool]$_.borrowable
+                            }
+                        }
+                )
+        Write-Host (
+            "[admission] Publishing host policy generation " +
+            "$($nextHostAdmissionPolicy.generation)"
+        )
+        Publish-RunnerHostAdmissionPolicy `
+            -AdmissionConfig $admissionServiceConfig `
+            -Policy $nextHostAdmissionPolicy | Out-Null
+        $hostAdmissionPolicyApplied = $true
+    }
+
     Write-Host "[state] Staging static profile and desired capacity (workers=$total, scope=$Scope)"
     $stagedFiles = [System.Collections.Generic.List[object]]::new()
     $rollbackFiles = [System.Collections.Generic.List[object]]::new()
@@ -2134,13 +2687,32 @@ try {
     }
     catch {
         $updateError = $_
+        $hostAdmissionRollbackError = ''
+        if ($hostAdmissionPolicyApplied -and $hostAdmissionRollbackPolicy) {
+            try {
+                Write-Host (
+                    "[admission] Rolling back host policy with generation " +
+                    "$($hostAdmissionRollbackPolicy.generation)"
+                )
+                Publish-RunnerHostAdmissionPolicy `
+                    -AdmissionConfig $admissionServiceConfig `
+                    -Policy $hostAdmissionRollbackPolicy | Out-Null
+            } catch {
+                $hostAdmissionRollbackError = $_.Exception.Message
+            }
+        }
+        $hostAdmissionRollbackSuffix = if ($hostAdmissionRollbackError) {
+            " Host-admission rollback also failed: $hostAdmissionRollbackError"
+        } else {
+            ''
+        }
         if ($previousWorkerImageId -and -not $managerStoppedForHandoff) {
             try {
                 Restore-RunnerImageTag `
                     -ImageId $previousWorkerImageId `
                     -Image $previousWorkerImage
             } catch {
-                throw "Manager update failed before handoff: $($updateError.Exception.Message) Worker image rollback also failed: $($_.Exception.Message)"
+                throw "Manager update failed before handoff: $($updateError.Exception.Message) Worker image rollback also failed: $($_.Exception.Message)$hostAdmissionRollbackSuffix"
             }
         }
         if ($managerRunning -and $managerStoppedForHandoff) {
@@ -2189,7 +2761,7 @@ try {
                     $rollbackError = $_.Exception.Message
                 }
                 if ($rollbackError) {
-                    throw "Manager update failed: $($updateError.Exception.Message) Rollback also failed: $rollbackError"
+                    throw "Manager update failed: $($updateError.Exception.Message) Rollback also failed: $rollbackError$hostAdmissionRollbackSuffix"
                 }
             } else {
                 if ($previousWorkerImageId) {
@@ -2198,11 +2770,14 @@ try {
                             -ImageId $previousWorkerImageId `
                             -Image $previousWorkerImage
                     } catch {
-                        throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, and worker image rollback also failed: $($_.Exception.Message)"
+                        throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, and worker image rollback also failed: $($_.Exception.Message)$hostAdmissionRollbackSuffix"
                     }
                 }
-                throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, but the legacy manager was not restarted because its startup cleanup would remove them."
+                throw "Manager update failed after the legacy manager was removed: $($updateError.Exception.Message) Existing workers were preserved, but the legacy manager was not restarted because its startup cleanup would remove them.$hostAdmissionRollbackSuffix"
             }
+        }
+        if ($hostAdmissionRollbackError) {
+            throw "Manager update failed: $($updateError.Exception.Message)$hostAdmissionRollbackSuffix"
         }
         throw
     }
@@ -2215,6 +2790,21 @@ try {
                     -ErrorAction SilentlyContinue
             }
         }
+    }
+
+    if (
+        $hostAdmissionContext -and
+        -not $profileConfig.HostAdmission -and
+        $nextHostAdmissionPolicy -and
+        @($nextHostAdmissionPolicy.profiles).Count -eq 0
+    ) {
+        Write-Host (
+            "[admission] Stopping empty host-admission namespace " +
+            "'$($hostAdmissionContext.Namespace)'"
+        )
+        Invoke-RunnerHostAdmissionCompose `
+            -ProfileConfig $admissionServiceConfig `
+            -CommandArguments @('down', '--remove-orphans')
     }
 
     if ($profileConfig.Autoscaling) {
@@ -2244,6 +2834,9 @@ try {
 finally {
     if ($profileLock) {
         $profileLock.Dispose()
+    }
+    if ($hostAdmissionLock) {
+        $hostAdmissionLock.Dispose()
     }
     Pop-Location
 }
