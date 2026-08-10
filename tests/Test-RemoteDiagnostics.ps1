@@ -757,7 +757,8 @@ if ($CommandArguments[0] -eq '-Pi') {
     ) 'The collector fabricated registration reconciliation when contract-17 evidence was absent.'
     $legacySummary =
         ConvertTo-PitCrewRemoteDiagnosticsReportSummary -Report $legacyReport
-    $legacySummaryCapacity = @($legacySummary.capacity)[0]
+    $legacySummaryCapacity = @(
+        $legacySummary.verifiedMeasurements.capacity)[0]
     Add-Check (
         $null -eq $legacySummaryCapacity.registeredWorkers -and
         $null -eq $legacySummaryCapacity.mismatch
