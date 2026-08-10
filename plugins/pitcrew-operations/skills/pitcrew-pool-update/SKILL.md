@@ -41,8 +41,9 @@ Read these shared references before running commands:
    - Never let a changed source manifest silently combine an image rollout with
      a PitCrew release update.
 4. Record each manager container ID, observed manager contract, desired
-   generation, and worker update state. Do not use GitHub's classic runner
-   `busy` field as an admission fence.
+   generation, worker update state, `managerInstanceId`, and observed-state
+   timestamp. Do not use GitHub's classic runner `busy` field as an admission
+   fence.
 
 ## Update
 
@@ -61,20 +62,37 @@ Read these shared references before running commands:
 5. Update one profile at a time. Setup builds the replacement manager first,
    stops only the exact manager container, preserves sibling workers, and starts
    the new manager against the same state directory.
-6. Never wait for every worker to become idle:
+6. For each profile, record the handoff start time and old
+   `managerInstanceId` immediately before invoking setup.
+7. Never wait for every worker to become idle:
    - Scale-set profiles atomically deregister stale idle JIT runners through
      GitHub's scale-set service, replace them immediately, and retain assigned
      runners until their one job finishes.
    - Fixed profiles preserve existing classic runners and apply a changed worker
      image as those ephemeral runners naturally turn over. GitHub's classic
      runner deletion API is forceful, so it is not used as an idle fence.
-7. If the user requested the complete PitCrew deployment update, run the
+8. If the user requested the complete PitCrew deployment update, run the
    `pitcrew-dashboard-update` workflow independently. A pending worker rollout
    must never block the dashboard and connector update.
 
 ## Verification
 
-For every refreshed profile, verify:
+After setup succeeds, poll read-only every two seconds for at most 120 seconds
+for the replacement manager's first post-handoff observation. A publication is
+post-handoff only when:
+
+- `observedAt` is later than the recorded handoff start
+- `managerInstanceId` no longer identifies the old manager and corresponds to
+  the exact replacement manager
+
+An older publication that still identifies the stopped manager is stale
+handoff evidence; continue the bounded wait instead of treating it as the
+replacement result. Stop immediately when fresh post-handoff evidence is
+degraded, rejected, or mismatched. Failure to publish qualifying evidence
+within 120 seconds is a rollout failure; do not restart or rerun the profile
+merely because publication is delayed.
+
+For every refreshed profile's qualifying post-handoff observation, verify:
 
 - the checkout commit matches the selected release tag
 - the manager container was replaced and is running

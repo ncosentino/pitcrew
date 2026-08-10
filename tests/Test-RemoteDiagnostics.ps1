@@ -687,6 +687,83 @@ if ($CommandArguments[0] -eq '-Pi') {
         Test-HashMapsEqual -Expected $beforeHashes -Actual $afterHashes
     ) 'The collector mutated the PitCrew fixture or secret sentinels.'
 
+    Write-Host 'Remote diagnostics test: contract-17 missing registration evidence'
+    $legacyFixtureRoot = Join-Path $tempRoot 'pitcrew-contract17'
+    Copy-Item `
+        -LiteralPath $fixtureRoot `
+        -Destination $legacyFixtureRoot `
+        -Recurse
+    $legacyProfileRoot = Join-Path `
+        $legacyFixtureRoot `
+        '.pitcrew-state' `
+        'default'
+    $legacyAcknowledgedPath = Join-Path `
+        $legacyProfileRoot `
+        'acknowledged-capacity.json'
+    $legacyAcknowledged = Get-Content `
+        -LiteralPath $legacyAcknowledgedPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 30
+    $legacyAcknowledged.managerContractVersion = 17
+    Write-Utf8 `
+        -Path $legacyAcknowledgedPath `
+        -Content ($legacyAcknowledged | ConvertTo-Json -Depth 30)
+    $legacyStaticPath = Join-Path $legacyProfileRoot 'static-profile.json'
+    $legacyStatic = Get-Content `
+        -LiteralPath $legacyStaticPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 30
+    $legacyStatic.configuration.managerContractVersion = 17
+    Write-Utf8 `
+        -Path $legacyStaticPath `
+        -Content ($legacyStatic | ConvertTo-Json -Depth 30)
+    $legacyObservedPath = Join-Path $legacyProfileRoot 'observed-state.json'
+    $legacyObserved = Get-Content `
+        -LiteralPath $legacyObservedPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 50
+    $legacyObserved.managerContractVersion = 17
+    $legacyObserved.slots[0].PSObject.Properties.Remove(
+        'registrationStatus')
+    $legacyObserved.PSObject.Properties.Remove('hostAdmission')
+    $legacyObserved.PSObject.Properties.Remove('capacityEvidence')
+    Write-Utf8 `
+        -Path $legacyObservedPath `
+        -Content ($legacyObserved | ConvertTo-Json -Depth 50)
+    $legacyPackageId = '33333333333333333333333333333333'
+    $env:PITCREW_TEST_SESSION_ID = $legacyPackageId
+    $legacyOutput = Join-Path $outputRoot 'contract17'
+    $legacyArtifacts = & $collector `
+        -PitCrewRoot $legacyFixtureRoot `
+        -Profile default `
+        -DiagnosticMode CapacityMismatch `
+        -Platform Windows `
+        -PackageId $legacyPackageId `
+        -OutputDirectory $legacyOutput
+    $legacyReport = Get-Content `
+        -LiteralPath $legacyArtifacts.jsonPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 100
+    $legacyCapacity = @(
+        $legacyReport.verifiedMeasurements.capacity)[0]
+    Add-Check (
+        $legacyCapacity.observedSlots -eq 1 -and
+        $null -eq $legacyCapacity.registeredWorkers -and
+        $null -eq $legacyCapacity.mismatch
+    ) 'The collector fabricated registration reconciliation when contract-17 evidence was absent.'
+    $legacySummary =
+        ConvertTo-PitCrewRemoteDiagnosticsReportSummary -Report $legacyReport
+    $legacySummaryCapacity = @(
+        $legacySummary.verifiedMeasurements.capacity)[0]
+    Add-Check (
+        $null -eq $legacySummaryCapacity.registeredWorkers -and
+        $null -eq $legacySummaryCapacity.mismatch
+    ) 'The strict remote-diagnostics projection converted unavailable registration evidence to zero or false.'
+
     Write-Host 'Remote diagnostics test: explicit transport envelopes'
     . $coreScript
     . $transportScript
