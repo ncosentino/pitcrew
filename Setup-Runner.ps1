@@ -1425,6 +1425,18 @@ function Restore-RunnerImageTag {
         [string]$Image
     )
 
+    if ($Image -match '@sha256:[0-9a-f]{64}$') {
+        $expectedImageId = $ImageId.Trim().ToLowerInvariant()
+        $resolvedImageId = Get-RunnerResolvedImageId -Image $Image -AllowMissing
+        if (-not $resolvedImageId) {
+            throw "Immutable worker image rollback for '$Image' cannot be satisfied because the reference is not available locally; expected image ID '$expectedImageId'."
+        }
+        if ($resolvedImageId -cne $expectedImageId) {
+            throw "Immutable worker image rollback for '$Image' cannot be satisfied because the reference resolves to '$resolvedImageId' instead of '$expectedImageId'."
+        }
+        return
+    }
+
     & docker tag $ImageId $Image
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to restore worker image '$Image' to '$ImageId'."

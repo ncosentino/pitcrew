@@ -39,6 +39,7 @@ $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
 $activeManagerContractVersion = 18
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
+$digestWorkerImage = 'ghcr.io/example/runner@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
 $errors = [System.Collections.Generic.List[string]]::new()
 $checks = 0
@@ -2856,6 +2857,21 @@ try {
         verificationCommands = @('browser --version')
     } | ConvertTo-Json -Depth 10 | Set-Content -LiteralPath $externalManifestPath -Encoding UTF8
 
+    $digestManifestPath = Join-Path $externalDirectory 'digest-default-profile.json'
+    @{
+        schemaVersion = 1
+        name = 'default'
+        description = 'Digest-qualified image rollback contract test.'
+        image = $digestWorkerImage
+        labels = @('general-purpose')
+        replicas = 1
+        pullImage = $true
+        disableDefaultLabels = $false
+        verificationCommands = @('verify-digest-image')
+    } |
+        ConvertTo-Json -Depth 10 |
+        Set-Content -LiteralPath $digestManifestPath -Encoding UTF8
+
     $externalProfile = Resolve-RunnerProfile `
         -RootPath $runnerRoot `
         -ProfilePath $externalManifestPath `
@@ -3686,9 +3702,23 @@ try {
             return
         }
         if (
+            $dockerArguments[0] -eq 'run' -and
+            $env:PITCREW_TEST_IMAGE_RUN_FAILURE -eq '1'
+        ) {
+            $env:PITCREW_TEST_IMAGE_RUN_FAILURE_USED = '1'
+            $global:LASTEXITCODE = 1
+            return
+        }
+        if (
             $dockerArguments[0] -eq 'image' -and
             $dockerArguments[1] -eq 'inspect' -and
-            $env:PITCREW_TEST_IMAGE_MISSING -eq '1'
+            (
+                $env:PITCREW_TEST_IMAGE_MISSING -eq '1' -or
+                (
+                    $env:PITCREW_TEST_IMAGE_RUN_FAILURE_USED -eq '1' -and
+                    $env:PITCREW_TEST_IMAGE_ROLLBACK_MISSING -eq '1'
+                )
+            )
         ) {
             $global:LASTEXITCODE = 1
             return
@@ -3698,7 +3728,12 @@ try {
             $dockerArguments[1] -eq 'inspect' -and
             $dockerArguments -contains '{{.Id}}'
         ) {
-            Write-Output $(if ($env:PITCREW_TEST_WORKER_IMAGE_ID) {
+            Write-Output $(if (
+                $env:PITCREW_TEST_IMAGE_RUN_FAILURE_USED -eq '1' -and
+                $env:PITCREW_TEST_IMAGE_ROLLBACK_ID
+            ) {
+                $env:PITCREW_TEST_IMAGE_ROLLBACK_ID
+            } elseif ($env:PITCREW_TEST_WORKER_IMAGE_ID) {
                 $env:PITCREW_TEST_WORKER_IMAGE_ID
             } else {
                 $testWorkerImageId
@@ -4373,6 +4408,147 @@ try {
             $preRollbackDesired
         ) 'A failed manager start did not restore desired capacity.'
 
+        $preDigestStatic = Get-Content `
+            -LiteralPath $defaultStaticProfilePath `
+            -Raw `
+            -Encoding UTF8
+        $digestProfile = Resolve-RunnerProfile `
+            -RootPath $fixtureRoot `
+            -ProfilePath $digestManifestPath `
+            -HostName ([Environment]::MachineName)
+        $digestStatic = New-RunnerStaticProfileState `
+            -Profile $digestProfile `
+            -Scope repo `
+            -OrgName '' `
+            -EnterpriseName '' `
+            -ResolvedImageId $testWorkerImageId
+        try {
+            $digestStatic |
+                ConvertTo-Json -Depth 20 |
+                Set-Content `
+                    -LiteralPath $defaultStaticProfilePath `
+                    -Encoding UTF8
+
+            $env:PITCREW_TEST_IMAGE_RUN_FAILURE = '1'
+            Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+            Add-ThrowsCheck `
+                -Action {
+                    & $fixtureSetup `
+                        -ProfilePath $digestManifestPath `
+                        -Token 'test-registration-token' `
+                        -Repos 'https://github.com/example/project=1'
+                } `
+                -ExpectedMessage 'Runner image verification failed.*verify-digest-image' `
+                -Failure 'An unchanged digest-qualified image obscured its preparation failure.'
+            $digestPreparationCommands = @(
+                Get-Content -LiteralPath $dockerLog -Encoding UTF8
+            )
+            Add-Check (
+                -not ($digestPreparationCommands -match '^tag\t')
+            ) 'An unchanged digest-qualified image attempted an invalid tag rollback.'
+            Add-Check (
+                -not ($digestPreparationCommands -match '^stop\t|compose.*\tup(\t|$)')
+            ) 'A digest-qualified image verification failure reached manager handoff.'
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_RUN_FAILURE_USED `
+                -ErrorAction SilentlyContinue
+
+            $env:PITCREW_TEST_IMAGE_ROLLBACK_ID = $changedWorkerImageId
+            Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+            Add-ThrowsCheck `
+                -Action {
+                    & $fixtureSetup `
+                        -ProfilePath $digestManifestPath `
+                        -Token 'test-registration-token' `
+                        -Repos 'https://github.com/example/project=1'
+                } `
+                -ExpectedMessage 'Immutable worker image rollback.*resolves to.*instead of' `
+                -Failure 'A mismatched digest-qualified image did not fail explicitly.'
+            $digestMismatchCommands = @(
+                Get-Content -LiteralPath $dockerLog -Encoding UTF8
+            )
+            Add-Check (
+                -not ($digestMismatchCommands -match '^tag\t')
+            ) 'A mismatched digest-qualified image attempted an invalid tag rollback.'
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_RUN_FAILURE_USED `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_ROLLBACK_ID `
+                -ErrorAction SilentlyContinue
+
+            $env:PITCREW_TEST_IMAGE_ROLLBACK_MISSING = '1'
+            Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+            Add-ThrowsCheck `
+                -Action {
+                    & $fixtureSetup `
+                        -ProfilePath $digestManifestPath `
+                        -Token 'test-registration-token' `
+                        -Repos 'https://github.com/example/project=1'
+                } `
+                -ExpectedMessage 'Immutable worker image rollback.*not available locally' `
+                -Failure 'A missing digest-qualified image did not fail explicitly.'
+            $digestMissingCommands = @(
+                Get-Content -LiteralPath $dockerLog -Encoding UTF8
+            )
+            Add-Check (
+                -not ($digestMissingCommands -match '^tag\t')
+            ) 'A missing digest-qualified image attempted an invalid tag rollback.'
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_RUN_FAILURE `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_RUN_FAILURE_USED `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_ROLLBACK_MISSING `
+                -ErrorAction SilentlyContinue
+
+            $env:PITCREW_TEST_MANAGER_BUILD_FAILURE = '1'
+            Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+            Add-ThrowsCheck `
+                -Action {
+                    & $fixtureSetup `
+                        -ProfilePath $digestManifestPath `
+                        -Token 'test-registration-token' `
+                        -Refresh `
+                        -Repos 'https://github.com/example/project=1'
+                } `
+                -ExpectedMessage 'docker compose build failed' `
+                -Failure 'A shared manager-update rollback rejected an unchanged digest-qualified image.'
+            $digestManagerFailureCommands = @(
+                Get-Content -LiteralPath $dockerLog -Encoding UTF8
+            )
+            Add-Check (
+                -not ($digestManagerFailureCommands -match '^tag\t')
+            ) 'A manager-update failure attempted to tag an immutable worker image.'
+            Add-Check (
+                -not ($digestManagerFailureCommands -match '^stop\t')
+            ) 'A pre-handoff manager failure stopped the live manager for a digest-qualified image.'
+        }
+        finally {
+            Set-Content `
+                -LiteralPath $defaultStaticProfilePath `
+                -Value $preDigestStatic `
+                -NoNewline `
+                -Encoding UTF8
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_RUN_FAILURE `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_RUN_FAILURE_USED `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_ROLLBACK_ID `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_IMAGE_ROLLBACK_MISSING `
+                -ErrorAction SilentlyContinue
+            Remove-Item `
+                Env:\PITCREW_TEST_MANAGER_BUILD_FAILURE `
+                -ErrorAction SilentlyContinue
+        }
+
         if (-not $IsWindows) {
             $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
             & chmod 0555 $defaultStateDirectory
@@ -4963,6 +5139,10 @@ try {
         Remove-Item Env:\PITCREW_TEST_MANAGER_RUNNING -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_REJECT_TOKEN -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_IMAGE_MISSING -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_IMAGE_RUN_FAILURE -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_IMAGE_RUN_FAILURE_USED -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_IMAGE_ROLLBACK_ID -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_IMAGE_ROLLBACK_MISSING -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_WORKER_IDS -ErrorAction SilentlyContinue
