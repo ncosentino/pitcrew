@@ -659,7 +659,7 @@ if ($CommandArguments[0] -eq '-Pi') {
     $adoptSummary =
         ConvertTo-PitCrewRemoteDiagnosticsReportSummary -Report $adoptReport
     Add-Check (
-        $adoptSummary.verifiedMeasurements.state.observed.hostAdmission.lastDecision.command -eq
+        $adoptSummary.verifiedMeasurements.state.hostAdmission.lastDecision.command -eq
             'adopt'
     ) 'The strict remote-diagnostics projection rejected an existing-worker adoption decision.'
     $privateTarget = 'repo:acme/private-repository'
