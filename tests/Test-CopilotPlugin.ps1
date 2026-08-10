@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.11.3') 'The operations plugin patch version was not advanced for host-admission operations.'
+Add-Check ($plugin.version -eq '1.11.4') 'The operations plugin patch version was not advanced for rollout compatibility fixes.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -264,6 +264,23 @@ Add-Check (
     $hostDiagnosticsSkill -match 'Never run `docker system prune`' -and
     $hostDiagnosticsSkill -match 'Never enter a running worker with `docker exec`'
 ) 'The host diagnostics skill does not forbid destructive host operations.'
+
+$poolUpdateSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-pool-update' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $poolUpdateSkill -match 'handoff start time' -and
+    $poolUpdateSkill -match '`managerInstanceId`' -and
+    $poolUpdateSkill -match '`observedAt` is later than' -and
+    $poolUpdateSkill -match 'every two seconds' -and
+    $poolUpdateSkill -match 'at most 120 seconds' -and
+    $poolUpdateSkill -match 'stale handoff evidence'
+) 'The pool update skill does not fence verification to the replacement manager publication.'
+Add-Check (
+    $poolUpdateSkill -match 'Stop immediately when fresh post-handoff evidence is\s+degraded, rejected, or mismatched' -and
+    $poolUpdateSkill -match 'do not restart or rerun the profile'
+) 'The pool update freshness wait can hide a real replacement-manager failure.'
 
 $remoteDiagnosticsRoot = Join-Path $skillsRoot 'pitcrew-remote-diagnostics'
 $remoteDiagnosticsSkill = Get-Content `

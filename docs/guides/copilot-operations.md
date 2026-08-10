@@ -69,6 +69,10 @@ changes registration topology.
 
 `pitcrew-pool-update` updates a deployment checkout to a published PitCrew
 release and invokes `Setup-Runner.ps1 -Refresh` for each configured profile.
+After each manager handoff, it waits boundedly for an observation whose
+timestamp and manager instance prove that the replacement manager published
+the state. The stopped manager's final publication is treated as stale handoff
+evidence, not as the replacement result.
 
 ```text
 Use the pitcrew-pool-update skill to update this host to the latest published

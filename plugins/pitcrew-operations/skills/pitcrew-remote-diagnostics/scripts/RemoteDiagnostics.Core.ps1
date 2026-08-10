@@ -1246,7 +1246,10 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
                     ConvertTo-PitCrewRemoteDiagnosticsInteger `
                         -Value $item.registeredWorkers `
                         -Context 'Registered workers'
-                mismatch = [bool]$item.mismatch
+                mismatch =
+                    ConvertTo-PitCrewRemoteDiagnosticsBoolean `
+                        -Value $item.mismatch `
+                        -Context 'Capacity mismatch'
             }
         })
     $containers = $verified.containers

@@ -1639,11 +1639,21 @@ function Get-PitCrewCapacityComparison {
     return @(
         foreach ($key in $keys) {
             $group = @($observedGroups[$key])
-            $registered = @(
+            $registrationStatuses = @(
                 $group |
-                    Where-Object {
-                        $_.registrationStatus -eq 'connected'
-                    }).Count
+                    ForEach-Object {
+                        Get-PitCrewProperty $_ 'registrationStatus'
+                    })
+            $registrationComplete = @(
+                $registrationStatuses |
+                    Where-Object { $null -eq $_ }).Count -eq 0
+            $registered = if ($registrationComplete) {
+                @(
+                    $registrationStatuses |
+                        Where-Object { $_ -eq 'connected' }).Count
+            } else {
+                $null
+            }
             $live = [int](
                 Get-PitCrewProperty $liveByRepository $key 0)
             [PSCustomObject][ordered]@{
@@ -1656,6 +1666,8 @@ function Get-PitCrewCapacityComparison {
                 scaleSet = Get-PitCrewProperty $targetMap $key
                 mismatch = if ($group.Count -eq 0) {
                     $live -gt 0
+                } elseif (-not $registrationComplete) {
+                    $null
                 } else {
                     $live -ne $registered
                 }
