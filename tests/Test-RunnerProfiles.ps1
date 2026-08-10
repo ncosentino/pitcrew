@@ -2097,13 +2097,19 @@ Add-Check (-not (
 )) 'A hostAdmission lastDecision accepted an unsupported command.'
 
 $adoptDecisionV18 = (
-    $availableHostAdmissionStateV18 |
+    $availableHostAdmissionV18 |
         ConvertTo-Json -Depth 20 |
         ConvertFrom-Json -Depth 20
 )
 $adoptDecisionV18.lastDecision.command = 'adopt'
 Add-Check (
-    ($adoptDecisionV18 | ConvertTo-Json -Depth 20) |
+    (
+        (
+            New-RunnerHostAdmissionSchemaFixture `
+                -ManagerContractVersion 18 `
+                -HostAdmission $adoptDecisionV18
+        ) | ConvertTo-Json -Depth 20
+    ) |
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'A hostAdmission lastDecision rejected the supported adopt command.'
 
