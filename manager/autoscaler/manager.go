@@ -16,16 +16,17 @@ import (
 const managerShutdownTimeout = 50 * time.Second
 
 type autoscalerManager struct {
-	cfg           config
-	paths         statePaths
-	factory       scaleSetServiceFactory
-	docker        dockerClient
-	clock         clock
-	logger        *slog.Logger
-	instanceID    string
-	admission     *admissionController
-	hostAdmission *hostAdmissionCoordinator
-	diagnostics   *diagnosticsRecorder
+	cfg                          config
+	paths                        statePaths
+	factory                      scaleSetServiceFactory
+	docker                       dockerClient
+	clock                        clock
+	logger                       *slog.Logger
+	instanceID                   string
+	admission                    *admissionController
+	hostAdmission                *hostAdmissionCoordinator
+	hostAdmissionAdoptionPending bool
+	diagnostics                  *diagnosticsRecorder
 
 	controllers          map[string]*targetController
 	retiring             map[string]*targetController
@@ -131,11 +132,18 @@ func (m *autoscalerManager) run(ctx context.Context) error {
 		reason:    reasonNone,
 		evidence:  "manager instance started and resumed durable state",
 	})
+	if err := m.hostAdmission.beginAdoption(); err != nil {
+		return fmt.Errorf("establish host admission recovery fence: %w", err)
+	}
+	m.hostAdmissionAdoptionPending = m.hostAdmission.enabled()
 	if _, err := bootstrapLegacyDesiredState(m.cfg, m.paths); err != nil {
 		return err
 	}
 	if err := m.scanRecovered(ctx); err != nil {
 		return err
+	}
+	if err := m.completeHostAdmissionAdoptionIfReady(); err != nil {
+		return fmt.Errorf("complete empty host admission recovery pass: %w", err)
 	}
 	if err := m.restoreLastValid(); err != nil {
 		return err
@@ -196,6 +204,10 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 			m.recordCycleError("Retiring target reconciliation failed", err)
 		}
 	}
+	if err := m.completeHostAdmissionAdoptionIfReady(); err != nil {
+		cycleSucceeded = false
+		m.recordCycleError("Host admission recovery fence completion failed", err)
+	}
 	if m.processListenerFailures() {
 		cycleSucceeded = false
 	}
@@ -226,6 +238,30 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 		m.lastError = nil
 	}
 	m.tryPublishObserved()
+}
+
+func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady() error {
+	if !m.hostAdmissionAdoptionPending {
+		return nil
+	}
+	if len(m.recovered) > 0 {
+		return nil
+	}
+	for _, controller := range m.controllers {
+		if !controller.scaler.hostLeasesAdopted() {
+			return nil
+		}
+	}
+	for _, controller := range m.retiring {
+		if !controller.scaler.hostLeasesAdopted() {
+			return nil
+		}
+	}
+	if err := m.hostAdmission.completeAdoption(); err != nil {
+		return err
+	}
+	m.hostAdmissionAdoptionPending = false
+	return nil
 }
 
 func (m *autoscalerManager) recordCycleError(message string, err error) {

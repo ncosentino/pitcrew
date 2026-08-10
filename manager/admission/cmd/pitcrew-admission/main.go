@@ -2,10 +2,11 @@
 // admission coordinator described by
 // docs/adr/adr-0003-dedicated-host-admission-service.md. It serves the
 // coordinator over a Unix domain socket ("serve") and offers CLI
-// subcommands that speak the same client protocol ("acquire", "renew",
-// "activate", "release", "reconcile", "apply-policy", "status") so a POSIX
-// shell manager can drive admission without a separate Go program, while a
-// Go manager may instead import the admission package's Client directly.
+// subcommands that speak the same client protocol ("acquire", "adopt",
+// "begin-adoption", "complete-adoption", "renew", "activate", "release",
+// "reconcile", "apply-policy", "status") so a POSIX shell manager can drive
+// admission without a separate Go program, while a Go manager may instead
+// import the admission package's Client directly.
 //
 // Wiring this binary into the manager Compose topology, entrypoint, or
 // Setup-Runner.ps1 is out of scope here; that belongs to the setup and
@@ -45,6 +46,12 @@ func main() {
 		err = runSetDemand(args)
 	case "acquire":
 		err = runAcquire(args)
+	case "adopt":
+		err = runAdopt(args)
+	case "begin-adoption":
+		err = runBeginAdoption(args)
+	case "complete-adoption":
+		err = runCompleteAdoption(args)
 	case "renew":
 		err = runRenew(args)
 	case "activate":
@@ -69,7 +76,8 @@ func main() {
 }
 
 func exitCodeForError(err error) int {
-	if errors.Is(err, admission.ErrBudgetExceeded) {
+	if errors.Is(err, admission.ErrBudgetExceeded) ||
+		errors.Is(err, admission.ErrAdoptionPending) {
 		return 3
 	}
 	if errors.Is(err, admission.ErrLeaseNotFound) {
@@ -96,6 +104,9 @@ Usage:
   pitcrew-admission apply-policy --socket PATH --policy-file FILE|-
   pitcrew-admission set-demand --socket PATH --profile ID --demand N
   pitcrew-admission acquire --socket PATH --profile ID --slot KEY [--demand N]
+  pitcrew-admission adopt --socket PATH --profile ID --slot KEY
+  pitcrew-admission begin-adoption --socket PATH --profile ID
+  pitcrew-admission complete-adoption --socket PATH --profile ID
   pitcrew-admission renew --socket PATH --profile ID --slot KEY
   pitcrew-admission activate --socket PATH --profile ID --slot KEY
   pitcrew-admission release --socket PATH --profile ID --slot KEY
@@ -195,6 +206,34 @@ func runAcquire(args []string) error {
 	return printJSON(lease)
 }
 
+func runAdopt(args []string) error {
+	profileID, slotKey, client, err := parseSlotArgs("adopt", args)
+	if err != nil {
+		return err
+	}
+	lease, err := client.Adopt(profileID, slotKey)
+	if err != nil {
+		return err
+	}
+	return printJSON(lease)
+}
+
+func runBeginAdoption(args []string) error {
+	profileID, client, err := parseProfileArgs("begin-adoption", args)
+	if err != nil {
+		return err
+	}
+	return client.BeginAdoption(profileID)
+}
+
+func runCompleteAdoption(args []string) error {
+	profileID, client, err := parseProfileArgs("complete-adoption", args)
+	if err != nil {
+		return err
+	}
+	return client.CompleteAdoption(profileID)
+}
+
 func runRenew(args []string) error {
 	profileID, slotKey, client, err := parseSlotArgs("renew", args)
 	if err != nil {
@@ -272,6 +311,19 @@ func parseSlotArgs(name string, args []string) (string, string, *admission.Clien
 		return "", "", nil, errors.New("--socket, --profile, and --slot are required")
 	}
 	return *profileID, *slotKey, admission.NewClient(*socketPath), nil
+}
+
+func parseProfileArgs(name string, args []string) (string, *admission.Client, error) {
+	flagSet := flag.NewFlagSet(name, flag.ContinueOnError)
+	socketPath := flagSet.String("socket", "", "Unix domain socket path")
+	profileID := flagSet.String("profile", "", "profile identity")
+	if err := flagSet.Parse(args); err != nil {
+		return "", nil, err
+	}
+	if *socketPath == "" || *profileID == "" {
+		return "", nil, errors.New("--socket and --profile are required")
+	}
+	return *profileID, admission.NewClient(*socketPath), nil
 }
 
 func readAll(path string) ([]byte, error) {

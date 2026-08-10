@@ -1,7 +1,7 @@
 {
   "name": "pitcrew-operations",
   "description": "Safely manage PitCrew capacity and autoscaling, roll operator-approved worker images, update PitCrew or its dashboard, collect local or remote diagnostics, correlate job performance, and recover a degraded manager.",
-  "version": "1.11.4",
+  "version": "1.11.5",
   "author": {
     "name": "Nick Cosentino",
     "url": "https://www.devleader.ca"

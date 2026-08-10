@@ -647,6 +647,21 @@ if ($CommandArguments[0] -eq '-Pi') {
         $linuxReport.verifiedMeasurements.state.observed.capacityEvidence.targets[0].reason -eq
             'host-admission-withheld'
     ) 'The collector omitted admission-specific capacity-deficit evidence.'
+    $adoptReport = $linuxReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $adoptReport.verifiedMeasurements.state.observed.hostAdmission.lastDecision.command =
+        'adopt'
+    $adoptReport.verifiedMeasurements.state.observed.hostAdmission.lastDecision.granted =
+        $true
+    $adoptReport.verifiedMeasurements.state.observed.hostAdmission.lastDecision.failureCategory =
+        $null
+    $adoptSummary =
+        ConvertTo-PitCrewRemoteDiagnosticsReportSummary -Report $adoptReport
+    Add-Check (
+        $adoptSummary.verifiedMeasurements.state.observed.hostAdmission.lastDecision.command -eq
+            'adopt'
+    ) 'The strict remote-diagnostics projection rejected an existing-worker adoption decision.'
     $privateTarget = 'repo:acme/private-repository'
     $privateRepositoryUrl =
         'https://github.com/acme/private-repository'

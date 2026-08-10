@@ -128,6 +128,24 @@ coordinator through `Setup-Runner.ps1`, and enforces leases for both fixed and
 autoscaled managers. Disabled profiles (no `hostAdmission` manifest entry)
 remain behavior-compatible; they never touch the coordinator.
 
+When policy is enabled for a profile that already has running workers, both
+manager modes adopt those workers as durable active leases without stopping or
+recreating them. Adoption reflects usage that already exists and is therefore
+not denied by the configured budget. If retained usage exceeds the effective
+budget, `availableUnits` remains zero and ordinary acquisition stays withheld
+until workers exit and release their leases naturally.
+
+Setup establishes a durable coordinator fence before replacing a participating
+manager. The fence blocks ordinary acquisition for every profile in the
+namespace until that manager completes its recovered-running-worker adoption
+pass. Fences from multiple profile replacements compose and survive coordinator
+restart; completing one profile does not clear another profile's fence.
+
+Protocol 2 adds adoption and recovery-fence operations. Protocol 2 clients and
+servers continue to negotiate protocol 1 for ordinary lease and status commands
+during coordinator-first rolling replacement. Adoption and fence operations
+require protocol 2 and fail closed against a protocol 1 service.
+
 Labels, runner groups, and scale sets control GitHub queue eligibility.
 Host-local admission separately controls whether a participating manager may
 start a new worker. It does not constrain non-participating profiles or other
@@ -189,6 +207,8 @@ new launch is blocked because the coordinator cannot be reached.
 admission decision (`sequence`, `command`, `granted`, `failureCategory`,
 `decidedAtUnixNano`) — never an exact slot identity, raw error message, host
 name, runner name, container ID, path, URL, or job output.
+The closed command vocabulary includes `adopt` for existing-worker recovery in
+addition to ordinary acquire, renew, activate, release, and reconcile decisions.
 
 Shared-pool fairness rotates equal unit opportunity among profiles with
 registered pending demand after own reservations and unused non-borrowable

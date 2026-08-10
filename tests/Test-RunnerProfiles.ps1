@@ -2096,6 +2096,17 @@ Add-Check (-not (
     ) | Test-Json -SchemaFile $observedStateSchemaPath -ErrorAction SilentlyContinue
 )) 'A hostAdmission lastDecision accepted an unsupported command.'
 
+$adoptDecisionV18 = (
+    $availableHostAdmissionStateV18 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$adoptDecisionV18.lastDecision.command = 'adopt'
+Add-Check (
+    ($adoptDecisionV18 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'A hostAdmission lastDecision rejected the supported adopt command.'
+
 $unsafeDecisionFailureV18 = (
     $availableHostAdmissionV18 |
         ConvertTo-Json -Depth 20 |
@@ -2918,6 +2929,7 @@ try {
         ) -and
         $admissionProfile.HostAdmissionVolumeName -ceq 'pitcrew-host-admission-primary' -and
         $admissionProfile.HostAdmissionComposeProjectName -ceq 'pitcrew-host-admission-primary' -and
+        $admissionProfile.HostAdmissionProtocolVersion -eq 2 -and
         $admissionProfile.HostAdmissionSocketPath -ceq
             '/var/lib/pitcrew-admission/coordinator.sock'
     ) 'External profile did not derive stable host-admission state and runtime identities.'
@@ -5053,6 +5065,10 @@ Add-Check (
     $setupSource -match
         [regex]::Escape('Get-RunnerHostAdmissionServicePolicySignature -Policy $status.policy')
 ) 'Host-admission Compose or acknowledgement handling is vulnerable to ambient environment or raw JSON ordering.'
+Add-Check (
+    $setupSource -match
+        '(?s)Publish-RunnerHostAdmissionPolicy.*?begin-adoption.*?Stop-RunnerManagerForHandoff'
+) 'Setup does not establish the durable host-wide adoption fence before manager handoff.'
 Add-Check ($manager -match [regex]::Escape('diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}"')) 'The fixed manager does not restore its durable operation journal.'
 Add-Check ($manager -match [regex]::Escape('record_manager_diagnostic')) 'The fixed manager does not record operation evidence.'
 Add-Check ($manager -match [regex]::Escape('render_fixed_capacity_evidence')) 'The fixed manager does not publish capacity-deficit evidence.'

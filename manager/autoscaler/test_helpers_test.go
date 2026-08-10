@@ -213,6 +213,7 @@ type fakeDockerClient struct {
 	created          map[string]bool
 	starts           []string
 	stopRemoveErrors map[string][]error
+	stopErrors       map[string][]error
 	waitResults      map[string][]fakeWaitResult
 	waitObserved     chan string
 	running          map[string]bool
@@ -323,6 +324,7 @@ func newFakeDockerClient(events *eventRecorder) *fakeDockerClient {
 		readLogErrors:    make(map[string]error),
 		followLines:      make(map[string][]string),
 		stopRemoveErrors: make(map[string][]error),
+		stopErrors:       make(map[string][]error),
 		waitResults:      make(map[string][]fakeWaitResult),
 		running:          make(map[string]bool),
 		created:          make(map[string]bool),
@@ -517,6 +519,11 @@ func (d *fakeDockerClient) stop(_ context.Context, containerID string) error {
 	d.stops = append(d.stops, containerID)
 	started := d.stopStarted
 	continued := d.stopContinue
+	var err error
+	if candidates := d.stopErrors[containerID]; len(candidates) > 0 {
+		err = candidates[0]
+		d.stopErrors[containerID] = candidates[1:]
+	}
 	d.mu.Unlock()
 	if started != nil {
 		started <- containerID
@@ -525,9 +532,11 @@ func (d *fakeDockerClient) stop(_ context.Context, containerID string) error {
 		<-continued
 	}
 	d.mu.Lock()
-	d.running[containerID] = false
+	if err == nil {
+		d.running[containerID] = false
+	}
 	d.mu.Unlock()
-	return nil
+	return err
 }
 
 func (d *fakeDockerClient) listManaged(

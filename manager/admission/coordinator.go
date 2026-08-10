@@ -188,6 +188,11 @@ func (c *Coordinator) ApplyPolicy(policy HostPolicy) error {
 	next := c.state.clone()
 	next.Policy = clonePolicy(policy)
 	next.Epoch++
+	for profileID := range next.AdoptionFences {
+		if _, retained := policy.profile(profileID); !retained {
+			delete(next.AdoptionFences, profileID)
+		}
+	}
 	if err := c.store.Save(next); err != nil {
 		return err
 	}
@@ -227,6 +232,53 @@ func (c *Coordinator) SetDemand(profileID string, pending int) error {
 	return nil
 }
 
+// BeginAdoption durably fences ordinary host admission while one profile
+// manager reconciles workers left running by its predecessor. The operation
+// is idempotent so Setup and the replacement manager can both establish the
+// same fence before recovery begins.
+func (c *Coordinator) BeginAdoption(profileID string) error {
+	if err := validateProfileID(profileID); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, known := c.state.Policy.profile(profileID); !known {
+		return ErrUnknownProfile
+	}
+	if _, exists := c.state.AdoptionFences[profileID]; exists {
+		return nil
+	}
+	next := c.state.clone()
+	next.Epoch++
+	next.AdoptionFences[profileID] = AdoptionFence{ProfileID: profileID}
+	if err := c.store.Save(next); err != nil {
+		return err
+	}
+	c.state = next
+	return nil
+}
+
+// CompleteAdoption clears one profile manager's recovery fence. It is
+// idempotent because a manager may retry after an ambiguous acknowledgement.
+func (c *Coordinator) CompleteAdoption(profileID string) error {
+	if err := validateProfileID(profileID); err != nil {
+		return err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, exists := c.state.AdoptionFences[profileID]; !exists {
+		return nil
+	}
+	next := c.state.clone()
+	next.Epoch++
+	delete(next.AdoptionFences, profileID)
+	if err := c.store.Save(next); err != nil {
+		return err
+	}
+	c.state = next
+	return nil
+}
+
 // Acquire requests one provisional lease of exactly the requesting profile's
 // configured unit cost for one exact profile and slot. pendingDemand is the
 // caller's current total outstanding worker count for this profile, including
@@ -249,6 +301,9 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 	}()
 	if _, err = c.sweepExpiredLocked(now); err != nil {
 		return Lease{}, err
+	}
+	if len(c.state.AdoptionFences) > 0 {
+		return Lease{}, ErrAdoptionPending
 	}
 
 	key := leaseKey{profileID: profileID, slotKey: slotKey}
@@ -326,6 +381,63 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 		c.advanceRotationLocked(sharedPoolContenders)
 	}
 	return granted, nil
+}
+
+// Adopt records an already-running worker as an active lease. Unlike Acquire,
+// it never rejects the worker for lack of budget because that host usage
+// already exists. Existing active leases are returned unchanged, while an
+// existing provisional lease is promoted because the exact worker is running.
+func (c *Coordinator) Adopt(profileID, slotKey string) (lease Lease, err error) {
+	if err = validateLeaseIdentity(profileID, slotKey); err != nil {
+		return Lease{}, err
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	now := c.clock.Now()
+	defer func() {
+		c.recordDecisionLocked(CommandAdopt, profileID, err == nil, err, now)
+	}()
+	if _, err = c.sweepExpiredLocked(now); err != nil {
+		return Lease{}, err
+	}
+
+	profilePolicy, known := c.state.Policy.profile(profileID)
+	if !known {
+		return Lease{}, ErrUnknownProfile
+	}
+	key := leaseKey{profileID: profileID, slotKey: slotKey}
+	existing, exists := c.state.Leases[key.String()]
+	if exists && existing.Status == LeaseActive {
+		return existing, nil
+	}
+
+	sequence := c.state.DecisionSequence + 1
+	if exists {
+		existing.Status = LeaseActive
+		existing.ExpiresAtUnixNano = 0
+		existing.ActivatedAtSequence = sequence
+		lease = existing
+	} else {
+		lease = Lease{
+			ProfileID:           profileID,
+			SlotKey:             slotKey,
+			LeaseID:             fmt.Sprintf("%s#%d", key.String(), sequence),
+			Units:               profilePolicy.UnitCost,
+			Status:              LeaseActive,
+			GrantedAtSequence:   sequence,
+			ActivatedAtSequence: sequence,
+		}
+	}
+	next := c.state.clone()
+	next.DecisionSequence = sequence
+	delete(next.Tombstones, key.String())
+	next.Leases[key.String()] = lease
+	if err = c.store.Save(next); err != nil {
+		return Lease{}, err
+	}
+	c.state = next
+	delete(c.provisionalDeadlines, key.String())
+	return lease, nil
 }
 
 // Renew extends a provisional lease's monotonic expiry while bounded
@@ -526,7 +638,7 @@ func (c *Coordinator) tombstoneLocked(
 }
 
 // Decision is a bounded, sanitized record of the single most recent lease
-// admission decision (Acquire, Renew, Activate, Release, or Reconcile). It
+// admission decision (Acquire, Adopt, Renew, Activate, Release, or Reconcile). It
 // carries only the validated profile identity and a closed failure-category
 // vocabulary drawn from ErrorCode. Exact slot identity stays in the private
 // lease ledger and is never duplicated into decision telemetry.
@@ -548,7 +660,7 @@ type Decision struct {
 // recordDecisionLocked durably records the single most recent lease
 // decision. It is best-effort: a failure to persist this informational
 // record is swallowed rather than surfaced as the calling operation's own
-// error, since a successful Acquire/Renew/Activate/Release/Reconcile must
+// error, since a successful Acquire/Adopt/Renew/Activate/Release/Reconcile must
 // never be turned into a failure by a problem persisting only this
 // supplementary bookkeeping. The caller must already hold c.mu.
 func (c *Coordinator) recordDecisionLocked(
@@ -612,6 +724,7 @@ type Snapshot struct {
 	Accounting            []ProfileAccounting `json:"accounting"`
 	Leases                []Lease             `json:"leases"`
 	Tombstones            []Tombstone         `json:"tombstones"`
+	AdoptionFences        []AdoptionFence     `json:"adoptionFences,omitempty"`
 	LastDecision          *Decision           `json:"lastDecision,omitempty"`
 }
 
@@ -656,6 +769,9 @@ func (c *Coordinator) Status() (Snapshot, error) {
 	}
 	for _, key := range sortedStateKeys(c.state.Tombstones) {
 		snapshot.Tombstones = append(snapshot.Tombstones, c.state.Tombstones[key])
+	}
+	for _, key := range sortedStateKeys(c.state.AdoptionFences) {
+		snapshot.AdoptionFences = append(snapshot.AdoptionFences, c.state.AdoptionFences[key])
 	}
 	if c.state.LastDecision != nil {
 		decision := *c.state.LastDecision

@@ -48,7 +48,13 @@ func (c *Client) WithSupportedVersions(versions []int) *Client {
 }
 
 func (c *Client) call(request Request) (Response, error) {
-	request.ProtocolVersions = sortedInts(c.supportedVersions)
+	supportedVersions := make([]int, 0, len(c.supportedVersions))
+	for _, version := range c.supportedVersions {
+		if version >= request.Command.minimumProtocolVersion() {
+			supportedVersions = append(supportedVersions, version)
+		}
+	}
+	request.ProtocolVersions = sortedInts(supportedVersions)
 	connection, err := net.DialTimeout("unix", c.socketPath, c.dialTimeout)
 	if err != nil {
 		return Response{}, fmt.Errorf("dial admission socket %s: %w", c.socketPath, err)
@@ -128,6 +134,55 @@ func (c *Client) Acquire(profileID, slotKey string, pendingDemand int) (Lease, e
 		return Lease{}, fmt.Errorf("admission: acquire response missing lease")
 	}
 	return *response.Lease, result
+}
+
+// Adopt records an already-running worker as an active lease without applying
+// ordinary Acquire budget enforcement. It is idempotent for an existing
+// profile/slot lease so manager recovery can safely retry after ambiguous
+// coordinator responses.
+func (c *Client) Adopt(profileID, slotKey string) (Lease, error) {
+	response, err := c.call(Request{
+		Command:   CommandAdopt,
+		ProfileID: profileID,
+		SlotKey:   slotKey,
+	})
+	if err != nil {
+		return Lease{}, err
+	}
+	if err := responseErr(response); err != nil {
+		return Lease{}, err
+	}
+	if response.Lease == nil {
+		return Lease{}, fmt.Errorf("admission: adopt response missing lease")
+	}
+	return *response.Lease, nil
+}
+
+// BeginAdoption establishes this profile manager's durable host-wide recovery
+// fence. While any profile has an incomplete adoption pass, ordinary Acquire
+// calls are denied across the namespace.
+func (c *Client) BeginAdoption(profileID string) error {
+	response, err := c.call(Request{
+		Command:   CommandBeginAdoption,
+		ProfileID: profileID,
+	})
+	if err != nil {
+		return err
+	}
+	return responseErr(response)
+}
+
+// CompleteAdoption clears this profile manager's durable recovery fence after
+// every recovered running worker has either been adopted or observed exited.
+func (c *Client) CompleteAdoption(profileID string) error {
+	response, err := c.call(Request{
+		Command:   CommandCompleteAdoption,
+		ProfileID: profileID,
+	})
+	if err != nil {
+		return err
+	}
+	return responseErr(response)
 }
 
 // Renew extends a provisional lease's expiry.

@@ -79,7 +79,47 @@ host_admission_end_wait() {
     host_admission_publish_demand "${slot_directory}" || true
 }
 
-# Returns 0 when a lease was acquired, 2 when host budget withheld the
+host_admission_begin_adoption() {
+    host_admission_enabled || return 0
+    host_admission_cli \
+        begin-adoption \
+        --profile "${PROFILE_ID}" >/dev/null 2>&1
+}
+
+host_admission_complete_adoption() {
+    host_admission_enabled || return 0
+    host_admission_cli \
+        complete-adoption \
+        --profile "${PROFILE_ID}" >/dev/null 2>&1
+}
+
+host_admission_track_adoption() {
+    slot_key="$1"
+    adoption_directory="${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY:-}"
+    host_admission_enabled || return 0
+    [ -n "${adoption_directory}" ] || return 1
+    mkdir -p "${adoption_directory}" || return 1
+    : > "${adoption_directory}/${slot_key}.pending"
+}
+
+host_admission_finish_tracked_adoption() {
+    slot_key="$1"
+    adoption_directory="${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY:-}"
+    [ -n "${adoption_directory}" ] || return 0
+    rm -f "${adoption_directory}/${slot_key}.pending"
+}
+
+host_admission_adoption_pending() {
+    adoption_directory="${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY:-}"
+    [ -n "${adoption_directory}" ] || return 1
+    [ -d "${adoption_directory}" ] || return 1
+    for pending_path in "${adoption_directory}"/*.pending; do
+        [ -f "${pending_path}" ] && return 0
+    done
+    return 1
+}
+
+# Returns 0 when a lease was acquired, 2 when host admission withheld the
 # request, 3 for incompatible policy or lease state, and 1 when coordinator
 # availability or transport failed.
 host_admission_acquire() {
@@ -189,6 +229,56 @@ host_admission_activate() {
         return 1
     fi
     mv -f "${lease_temporary}" "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
+}
+
+host_admission_adopt() {
+    slot_state_path="$1"
+    slot_key="$2"
+    host_admission_enabled || return 0
+
+    lease_temporary="${slot_state_path}/.${HOST_ADMISSION_LEASE_FILE}.$$"
+    host_admission_cli \
+        adopt \
+        --profile "${PROFILE_ID}" \
+        --slot "${slot_key}" > "${lease_temporary}" 2>/dev/null
+    adoption_status=$?
+    if [ "${adoption_status}" -ne 0 ]; then
+        rm -f "${lease_temporary}"
+        return 1
+    fi
+    if ! jq -e \
+            --arg profile "${PROFILE_ID}" \
+            --arg slot "${slot_key}" \
+            '
+                .profileId == $profile
+                and .slotKey == $slot
+                and .status == "active"
+            ' "${lease_temporary}" >/dev/null 2>&1; then
+        rm -f "${lease_temporary}"
+        return 1
+    fi
+    mv -f "${lease_temporary}" "${slot_state_path}/${HOST_ADMISSION_LEASE_FILE}"
+}
+
+host_admission_adopt_running() {
+    slot_state_path="$1"
+    slot_key="$2"
+    container_id="$3"
+    retry_delay="${4:-2}"
+    host_admission_enabled || return 0
+
+    while docker inspect \
+        --format '{{.State.Running}}' \
+        "${container_id}" 2>/dev/null |
+        grep -qx 'true'; do
+        if host_admission_adopt "${slot_state_path}" "${slot_key}"; then
+            host_admission_finish_tracked_adoption "${slot_key}"
+            return 0
+        fi
+        sleep "${retry_delay}"
+    done
+    host_admission_finish_tracked_adoption "${slot_key}"
+    return 1
 }
 
 host_admission_release() {
@@ -346,6 +436,7 @@ host_admission_status() {
                     and $profileFingerprint != ""
                     and ($own.profilePolicyFingerprint // "") != $profileFingerprint
                 )
+                or (((.adoptionFences // []) | length) > 0)
                 or ((.capacityUnits // 0) <= 0)
                 or (.safetyMarginUnits == null)
                 or ($known and ($own.pendingUnits == null or $own.withheldUnits == null))

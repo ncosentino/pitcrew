@@ -2645,6 +2645,19 @@ try {
             -ProfileConfig $buildProfileConfig `
             -CommandArguments @('build', 'runner-manager')
 
+        if ($profileConfig.HostAdmission) {
+            Invoke-RunnerHostAdmissionClient `
+                -AdmissionConfig $admissionServiceConfig `
+                -ClientArguments @(
+                    'begin-adoption',
+                    '--socket',
+                    $admissionServiceConfig.HostAdmissionSocketPath,
+                    '--profile',
+                    $profileConfig.Name
+                ) `
+                -InputObject $null | Out-Null
+        }
+
         if ($managerRunning) {
             Stop-RunnerManagerForHandoff `
                 -ProfileConfig $profileConfig `

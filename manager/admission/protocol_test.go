@@ -19,6 +19,7 @@ func TestErrorCodeRoundTripsForKnownSentinels(t *testing.T) {
 		ErrLeaseExpired,
 		ErrLeaseNotProvisional,
 		ErrBudgetExceeded,
+		ErrAdoptionPending,
 		ErrEvidenceInvalid,
 		ErrEvidenceRequired,
 		ErrStalePolicy,
@@ -56,6 +57,33 @@ func TestErrForErrorCodeIsNilForUnrecognizedOrEmptyCode(t *testing.T) {
 	}
 	if err := errForErrorCode(ErrorCode("not-a-real-code")); err != nil {
 		t.Fatalf("expected an unrecognized code to map to a nil error, got %v", err)
+	}
+}
+
+func TestProtocolVersionWindow(t *testing.T) {
+	server := ServerSupportedVersions()
+	if len(server) != 2 || server[0] != CurrentProtocolVersion ||
+		server[1] != previousProtocolVersion {
+		t.Fatalf("unexpected server protocol window: %#v", server)
+	}
+	client := ClientSupportedVersions()
+	if len(client) != 2 || client[0] != CurrentProtocolVersion ||
+		client[1] != previousProtocolVersion {
+		t.Fatalf("unexpected client protocol versions: %#v", client)
+	}
+	if CommandAdopt.supportedBy(previousProtocolVersion) {
+		t.Fatal("protocol one unexpectedly supports adoption")
+	}
+	if !CommandAdopt.supportedBy(CurrentProtocolVersion) {
+		t.Fatal("current protocol does not support adoption")
+	}
+	for _, command := range []Command{CommandBeginAdoption, CommandCompleteAdoption} {
+		if command.supportedBy(previousProtocolVersion) {
+			t.Fatalf("protocol one unexpectedly supports %q", command)
+		}
+		if !command.supportedBy(CurrentProtocolVersion) {
+			t.Fatalf("current protocol does not support %q", command)
+		}
 	}
 }
 

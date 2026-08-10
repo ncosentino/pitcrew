@@ -10,10 +10,12 @@ import (
 	"sort"
 )
 
-// stateSchemaVersion is the exact durable-state schema this coordinator
-// build understands. A restart that finds any other value fails closed
-// rather than guessing forward or backward compatibility.
-const stateSchemaVersion = 1
+// stateSchemaVersion is the durable-state schema this coordinator writes.
+// Load upgrades the immediately previous schema; every other version fails
+// closed rather than guessing compatibility.
+const stateSchemaVersion = 2
+
+const previousStateSchemaVersion = 1
 
 // ErrCorruptState reports durable state that cannot be safely trusted:
 // invalid JSON, an unsupported schema version, or an internally
@@ -26,14 +28,15 @@ var ErrCorruptState = errors.New("admission: corrupt or unsupported durable stat
 // tombstone, plus the monotonic epoch and decision sequence that make
 // restart and reconciliation exact.
 type durableState struct {
-	SchemaVersion    int                  `json:"schemaVersion"`
-	Epoch            int64                `json:"epoch"`
-	DecisionSequence int64                `json:"decisionSequence"`
-	Policy           HostPolicy           `json:"policy"`
-	Leases           map[string]Lease     `json:"leases"`
-	Tombstones       map[string]Tombstone `json:"tombstones"`
+	SchemaVersion    int                      `json:"schemaVersion"`
+	Epoch            int64                    `json:"epoch"`
+	DecisionSequence int64                    `json:"decisionSequence"`
+	Policy           HostPolicy               `json:"policy"`
+	Leases           map[string]Lease         `json:"leases"`
+	Tombstones       map[string]Tombstone     `json:"tombstones"`
+	AdoptionFences   map[string]AdoptionFence `json:"adoptionFences"`
 	// LastDecision is the single most recent bounded, sanitized admission
-	// lease decision (Acquire, Renew, Activate, Release, or Reconcile),
+	// lease decision (Acquire, Adopt, Renew, Activate, Release, or Reconcile),
 	// persisted so it survives a restart. It is nil until the first such
 	// decision is made; a document written before this field existed
 	// decodes it as nil, which this package treats identically to "no
@@ -43,9 +46,10 @@ type durableState struct {
 
 func newDurableState() durableState {
 	return durableState{
-		SchemaVersion: stateSchemaVersion,
-		Leases:        make(map[string]Lease),
-		Tombstones:    make(map[string]Tombstone),
+		SchemaVersion:  stateSchemaVersion,
+		Leases:         make(map[string]Lease),
+		Tombstones:     make(map[string]Tombstone),
+		AdoptionFences: make(map[string]AdoptionFence),
 	}
 }
 
@@ -57,12 +61,16 @@ func (s durableState) clone() durableState {
 		Policy:           clonePolicy(s.Policy),
 		Leases:           make(map[string]Lease, len(s.Leases)),
 		Tombstones:       make(map[string]Tombstone, len(s.Tombstones)),
+		AdoptionFences:   make(map[string]AdoptionFence, len(s.AdoptionFences)),
 	}
 	for key, lease := range s.Leases {
 		cloned.Leases[key] = lease
 	}
 	for key, tombstone := range s.Tombstones {
 		cloned.Tombstones[key] = tombstone
+	}
+	for key, fence := range s.AdoptionFences {
+		cloned.AdoptionFences[key] = fence
 	}
 	if s.LastDecision != nil {
 		decision := *s.LastDecision
@@ -121,6 +129,26 @@ func (s durableState) validate() error {
 				ErrCorruptState,
 				key,
 				expected,
+			)
+		}
+	}
+	for profileID, fence := range s.AdoptionFences {
+		if profileID != fence.ProfileID {
+			return fmt.Errorf(
+				"%w: adoption fence key %q does not match profile identity %q",
+				ErrCorruptState,
+				profileID,
+				fence.ProfileID,
+			)
+		}
+		if err := validateProfileID(profileID); err != nil {
+			return fmt.Errorf("%w: adoption fence profile identity is invalid", ErrCorruptState)
+		}
+		if _, known := s.Policy.profile(profileID); !known {
+			return fmt.Errorf(
+				"%w: adoption fence profile %q is not present in policy",
+				ErrCorruptState,
+				profileID,
 			)
 		}
 	}
@@ -217,11 +245,17 @@ func (f *fileStore) Load() (durableState, bool, error) {
 	if err := json.Unmarshal(data, &state); err != nil {
 		return durableState{}, false, fmt.Errorf("%w: %v", ErrCorruptState, err)
 	}
+	if state.SchemaVersion == previousStateSchemaVersion {
+		state.SchemaVersion = stateSchemaVersion
+	}
 	if state.Leases == nil {
 		state.Leases = make(map[string]Lease)
 	}
 	if state.Tombstones == nil {
 		state.Tombstones = make(map[string]Tombstone)
+	}
+	if state.AdoptionFences == nil {
+		state.AdoptionFences = make(map[string]AdoptionFence)
 	}
 	if err := state.validate(); err != nil {
 		return durableState{}, false, err

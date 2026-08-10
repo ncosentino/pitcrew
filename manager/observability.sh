@@ -200,6 +200,7 @@ observed_state_is_valid() {
             and (.sequence | nonnegative_integer)
             and (
                 .command == "acquire"
+                or .command == "adopt"
                 or .command == "renew"
                 or .command == "activate"
                 or .command == "release"

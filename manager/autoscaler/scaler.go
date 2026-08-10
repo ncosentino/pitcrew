@@ -15,6 +15,7 @@ import (
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
+	"github.com/ncosentino/pitcrew/manager/admission"
 )
 
 type clock interface {
@@ -62,14 +63,16 @@ type runnerRecord struct {
 	registrationRemoved bool
 	// hostSlotKey is the host-admission lease slot key acquired before this
 	// worker's JIT config was generated (see host_admission.go). It is empty
-	// when host admission is disabled, or when a recovered running
-	// container's lease could not be confirmed (busy-worker survival never
-	// destroys the worker, but this manager instance then has no lease it
-	// can prove is still its own to release).
+	// when host admission is disabled. Recovery preserves or derives this
+	// identity even when coordinator confirmation must be retried.
 	hostSlotKey string
 	// hostLeaseReleased guards exactly-once release. It must only be set
 	// with s.mu held, by markHostLeaseReleaseLocked.
 	hostLeaseReleased bool
+	// hostLeaseAdopted distinguishes recovered workers whose active lease
+	// has been confirmed by this manager from workers still awaiting a
+	// retry after coordinator failure.
+	hostLeaseAdopted bool
 }
 
 type scalerStatistics struct {
@@ -109,8 +112,9 @@ type scalerSnapshot struct {
 }
 
 type runnerScaler struct {
-	operationGate chan struct{}
-	mu            sync.Mutex
+	operationGate         chan struct{}
+	mu                    sync.Mutex
+	hostLeaseSettlementMu sync.Mutex
 
 	lifecycleContext  context.Context
 	profileID         string
@@ -559,6 +563,10 @@ func (s *runnerScaler) tick(ctx context.Context) error {
 
 func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	var operationErrors []error
+	hostLeasesAdopted, adoptionErr := s.retryPendingHostLeaseAdoptions()
+	if adoptionErr != nil {
+		operationErrors = append(operationErrors, adoptionErr)
+	}
 	if err := s.retryPendingHostLeaseReleases(); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
@@ -585,6 +593,11 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	s.mu.Unlock()
 
 	if target > current {
+		if !hostLeasesAdopted {
+			blockingReason, _, evidence := hostAdmissionFailureDetails(adoptionErr)
+			s.setBlocking(blockingReason, evidence)
+			return current, errors.Join(operationErrors...)
+		}
 		missing := target - current
 		if blocked := s.pendingRegistrationCount(); blocked > 0 {
 			if blocked > missing {
@@ -1563,18 +1576,19 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 
 	now := s.clock.now().UTC()
 	runner := &runnerRecord{
-		key:         slotKey,
-		targetKey:   s.target.key,
-		repository:  s.target.repository,
-		runnerName:  jit.runnerName,
-		runnerID:    jit.runnerID,
-		containerID: containerID,
-		container:   containerName,
-		state:       runnerStarting,
-		revision:    s.workerRevision,
-		startedAt:   now,
-		updatedAt:   now,
-		hostSlotKey: hostSlotKey,
+		key:              slotKey,
+		targetKey:        s.target.key,
+		repository:       s.target.repository,
+		runnerName:       jit.runnerName,
+		runnerID:         jit.runnerID,
+		containerID:      containerID,
+		container:        containerName,
+		state:            runnerStarting,
+		revision:         s.workerRevision,
+		startedAt:        now,
+		updatedAt:        now,
+		hostSlotKey:      hostSlotKey,
+		hostLeaseAdopted: hostAdmissionEnabled,
 	}
 	s.mu.Lock()
 	if s.shuttingDown {
@@ -1719,27 +1733,124 @@ func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 			fmt.Errorf("start recovered created container: %w", err),
 		)
 	}
-	return s.insertRecoveredRunner(container, false)
+	return s.insertRecoveredRunner(container, false, hostAdmissionEnabled)
 }
 
 // recoverRunning handles a container already running when this manager
-// process started. When host admission is enabled it re-confirms the
-// recorded lease is still active for this manager instance; a failure here
-// never destroys the worker (busy-worker survival) and never clears the
-// lease identity: a coordinator outage must not erase which exact lease
-// this running worker holds, since that identity is exactly what a later
-// exit, scale-down, or shutdown needs to retry the release durably.
+// process started. When host admission is enabled it adopts the worker using
+// its recorded lease key or the original runner name used by pre-policy
+// containers. Failure never destroys the worker or clears that identity.
 func (s *runnerScaler) recoverRunning(container recoveredContainer) error {
-	if s.hostAdmission.enabled() && container.hostSlotKey != "" {
-		if _, err := s.hostAdmission.activate(container.hostSlotKey); err != nil {
+	hostLeaseAdopted := false
+	if s.hostAdmission.enabled() {
+		if container.hostSlotKey == "" {
+			container.hostSlotKey = container.runnerName
+		}
+		if _, err := s.hostAdmission.adopt(container.hostSlotKey); err != nil {
 			s.onError(fmt.Errorf(
-				"re-confirm host admission lease for running container %s: %w",
+				"adopt host admission lease for running container %s: %w",
 				container.containerID,
 				err,
 			))
+		} else {
+			hostLeaseAdopted = true
 		}
 	}
-	return s.insertRecoveredRunner(container, true)
+	return s.insertRecoveredRunner(container, true, hostLeaseAdopted)
+}
+
+func (s *runnerScaler) retryPendingHostLeaseAdoptions() (bool, error) {
+	if !s.hostAdmission.enabled() {
+		return true, nil
+	}
+	type pendingAdoption struct {
+		runnerKey   string
+		hostSlotKey string
+	}
+	s.mu.Lock()
+	pending := make([]pendingAdoption, 0)
+	for _, runner := range s.runners {
+		if runner.hostLeaseReleased || runner.hostLeaseAdopted {
+			continue
+		}
+		pending = append(pending, pendingAdoption{
+			runnerKey:   runner.key,
+			hostSlotKey: runner.hostSlotKey,
+		})
+	}
+	s.mu.Unlock()
+	sort.Slice(pending, func(i, j int) bool {
+		return pending[i].runnerKey < pending[j].runnerKey
+	})
+
+	var adoptionErrors []error
+	for _, candidate := range pending {
+		if candidate.hostSlotKey == "" {
+			adoptionErrors = append(adoptionErrors, fmt.Errorf(
+				"adopt recovered host admission lease for runner %s: %w",
+				candidate.runnerKey,
+				admission.ErrInvalidIdentity,
+			))
+			continue
+		}
+		_, attempted, err := s.hostAdmission.adoptIf(
+			candidate.hostSlotKey,
+			func() bool {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				runner := s.runners[candidate.runnerKey]
+				return runner != nil &&
+					runner.hostSlotKey == candidate.hostSlotKey &&
+					!runner.hostLeaseReleased &&
+					!runner.hostLeaseAdopted
+			},
+		)
+		if err != nil {
+			adoptionErrors = append(adoptionErrors, fmt.Errorf(
+				"adopt recovered host admission lease %s: %w",
+				candidate.hostSlotKey,
+				err,
+			))
+			continue
+		}
+		if !attempted {
+			continue
+		}
+		s.mu.Lock()
+		if runner := s.runners[candidate.runnerKey]; runner != nil &&
+			runner.hostSlotKey == candidate.hostSlotKey &&
+			!runner.hostLeaseReleased {
+			runner.hostLeaseAdopted = true
+			runner.updatedAt = s.clock.now().UTC()
+		}
+		s.mu.Unlock()
+		s.onChange()
+	}
+
+	s.mu.Lock()
+	allAdopted := true
+	for _, runner := range s.runners {
+		if !runner.hostLeaseReleased && !runner.hostLeaseAdopted {
+			allAdopted = false
+			break
+		}
+	}
+	s.mu.Unlock()
+	return allAdopted, errors.Join(adoptionErrors...)
+}
+
+func (s *runnerScaler) hostLeasesAdopted() bool {
+	if !s.hostAdmission.enabled() {
+		return true
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, runner := range s.runners {
+		if !runner.hostLeaseReleased && !runner.hostLeaseAdopted {
+			return false
+		}
+	}
+	return true
 }
 
 // discardUnstartedContainer removes a created-but-unstarted container that
@@ -1798,6 +1909,7 @@ func (s *runnerScaler) discardUnstartedContainer(
 func (s *runnerScaler) insertRecoveredRunner(
 	container recoveredContainer,
 	replayLogs bool,
+	hostLeaseAdopted bool,
 ) error {
 	startedAt := container.createdAt.UTC()
 	if startedAt.IsZero() {
@@ -1815,11 +1927,12 @@ func (s *runnerScaler) insertRecoveredRunner(
 		revision:    container.revision,
 		stale: container.revision != s.workerRevision &&
 			!(container.revision == "" && s.assumeUnversioned),
-		startedAt:   startedAt,
-		updatedAt:   s.clock.now().UTC(),
-		recovered:   true,
-		protected:   true,
-		hostSlotKey: container.hostSlotKey,
+		startedAt:        startedAt,
+		updatedAt:        s.clock.now().UTC(),
+		recovered:        true,
+		protected:        true,
+		hostSlotKey:      container.hostSlotKey,
+		hostLeaseAdopted: hostLeaseAdopted,
 	}
 
 	s.mu.Lock()
@@ -2249,34 +2362,7 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 			if err := s.docker.stopAndRemove(ctx, runner.containerID); err != nil {
 				return err
 			}
-			s.mu.Lock()
-			var hostSlotKey string
-			released := false
-			var pendingRecord hostLeaseCleanupRecord
-			var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
-			if current := s.runners[runner.key]; current != nil {
-				hostSlotKey = current.hostSlotKey
-				released = s.markHostLeaseReleaseLocked(current)
-				if released {
-					pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
-						runner.key, hostSlotKey, s.clock.now().UTC(),
-					)
-				}
-			}
-			delete(s.runners, runner.key)
-			s.mu.Unlock()
-			if released {
-				s.reportEvictedHostLeaseReleases(evictedLeases)
-				s.persistPendingHostLeaseReleases(pendingLeaseRecords)
-				if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
-					return fmt.Errorf(
-						"release host admission lease %s during shutdown: %w",
-						hostSlotKey,
-						err,
-					)
-				}
-			}
-			return nil
+			return s.settleStoppedRunner(runner)
 		})...,
 	)
 
@@ -2292,15 +2378,69 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 	shutdownErrors = append(
 		shutdownErrors,
 		runRunnerOperations(remaining, func(runner runnerRecord) error {
-			return s.docker.stop(ctx, runner.containerID)
+			if err := s.docker.stop(ctx, runner.containerID); err != nil {
+				return err
+			}
+			return s.settleStoppedRunner(runner)
 		})...,
 	)
-	s.mu.Lock()
-	clear(s.runners)
-	s.mu.Unlock()
 	s.admission.leave(s.target.key)
 	s.onChange()
 	return errors.Join(shutdownErrors...)
+}
+
+func (s *runnerScaler) settleStoppedRunner(runner runnerRecord) error {
+	s.hostLeaseSettlementMu.Lock()
+	defer s.hostLeaseSettlementMu.Unlock()
+
+	s.mu.Lock()
+	current := s.runners[runner.key]
+	if current == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	hostSlotKey := current.hostSlotKey
+	if hostSlotKey == "" || current.hostLeaseReleased {
+		delete(s.runners, runner.key)
+		s.mu.Unlock()
+		return nil
+	}
+	pendingRecord, evicted, records := s.beginPendingHostLeaseReleaseLocked(
+		runner.key,
+		hostSlotKey,
+		s.clock.now().UTC(),
+	)
+	s.mu.Unlock()
+	s.reportEvictedHostLeaseReleases(evicted)
+	if err := s.hostLeaseCleanupStore.save(records); err != nil {
+		s.onError(fmt.Errorf(
+			"persist pending host lease release for %s: %w",
+			s.target.key,
+			err,
+		))
+		return fmt.Errorf(
+			"durably queue host admission lease %s during shutdown: %w",
+			hostSlotKey,
+			err,
+		)
+	}
+
+	s.mu.Lock()
+	if current = s.runners[runner.key]; current != nil &&
+		current.hostSlotKey == hostSlotKey &&
+		!current.hostLeaseReleased {
+		current.hostLeaseReleased = true
+		delete(s.runners, runner.key)
+	}
+	s.mu.Unlock()
+	if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
+		return fmt.Errorf(
+			"release host admission lease %s during shutdown: %w",
+			hostSlotKey,
+			err,
+		)
+	}
+	return nil
 }
 
 func runRunnerOperations(

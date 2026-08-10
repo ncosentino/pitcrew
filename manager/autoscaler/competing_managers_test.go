@@ -25,6 +25,18 @@ func (c coordinatorLeaseClient) Acquire(
 	return c.coordinator.Acquire(profileID, slotKey, pendingDemand)
 }
 
+func (c coordinatorLeaseClient) Adopt(profileID, slotKey string) (admission.Lease, error) {
+	return c.coordinator.Adopt(profileID, slotKey)
+}
+
+func (c coordinatorLeaseClient) BeginAdoption(profileID string) error {
+	return c.coordinator.BeginAdoption(profileID)
+}
+
+func (c coordinatorLeaseClient) CompleteAdoption(profileID string) error {
+	return c.coordinator.CompleteAdoption(profileID)
+}
+
 func (c coordinatorLeaseClient) Renew(profileID, slotKey string) (admission.Lease, error) {
 	return c.coordinator.Renew(profileID, slotKey)
 }
@@ -134,6 +146,56 @@ func newCompetingManagerActor(
 		}
 	default:
 		panic("unsupported competing-manager mode " + mode)
+	}
+}
+
+func TestHostWideAdoptionFenceBlocksOtherManagersUntilEveryPassCompletes(t *testing.T) {
+	coordinator := admission.OpenMemory(admission.SystemClock{}, time.Minute)
+	if err := coordinator.ApplyPolicy(admission.HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []admission.ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	alpha := newHostAdmissionCoordinatorWithClient(
+		coordinatorLeaseClient{coordinator: coordinator},
+		"alpha",
+	)
+	beta := newHostAdmissionCoordinatorWithClient(
+		coordinatorLeaseClient{coordinator: coordinator},
+		"beta",
+	)
+	if err := alpha.beginAdoption(); err != nil {
+		t.Fatal(err)
+	}
+	if err := beta.beginAdoption(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Adopt("alpha", "target-one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := coordinator.Adopt("alpha", "target-two"); err != nil {
+		t.Fatal(err)
+	}
+	beta.setTargetDemand("beta-target", 1)
+	if _, _, err := beta.acquire("beta-target", "new-beta"); !errors.Is(err, errHostAdmissionWithheld) {
+		t.Fatalf("another manager acquired while adoption was incomplete: %v", err)
+	}
+	if err := alpha.completeAdoption(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := beta.acquire("beta-target", "new-beta"); !errors.Is(err, errHostAdmissionWithheld) {
+		t.Fatalf("one manager completion cleared another manager's fence: %v", err)
+	}
+	if err := beta.completeAdoption(); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := beta.acquire("beta-target", "new-beta"); !errors.Is(err, errHostAdmissionWithheld) {
+		t.Fatalf("above-budget adopted workers did not preserve ordinary budget enforcement: %v", err)
 	}
 }
 

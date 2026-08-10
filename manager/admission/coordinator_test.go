@@ -1028,6 +1028,244 @@ func TestReducedBudgetDrainsNaturallyWithoutRevokingActiveLeases(t *testing.T) {
 	}
 }
 
+func TestAdoptAccountsExistingWorkersWithinAndAboveBudget(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 2, 0, false))
+
+	first, err := coordinator.Adopt("alpha", "legacy-a")
+	if err != nil {
+		t.Fatalf("adopt within budget: %v", err)
+	}
+	second, err := coordinator.Adopt("alpha", "legacy-b")
+	if err != nil {
+		t.Fatalf("adopt above budget: %v", err)
+	}
+	if first.Status != LeaseActive || second.Status != LeaseActive {
+		t.Fatalf("adopted leases were not active: first=%+v second=%+v", first, second)
+	}
+
+	snapshot := mustStatus(t, coordinator)
+	if snapshot.AvailableUnits != 0 {
+		t.Fatalf("expected overcommitted available units to clamp to zero, got %d", snapshot.AvailableUnits)
+	}
+	accounting := snapshot.Accounting[0]
+	if accounting.ActiveUnits != 4 || accounting.HeldUnits != 4 {
+		t.Fatalf("expected both existing workers in active accounting, got %+v", accounting)
+	}
+	if _, err := coordinator.Acquire("alpha", "new-demand", 1); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected new demand to remain withheld above budget, got %v", err)
+	}
+}
+
+func TestAdoptIsIdempotentAcrossRestartAndReleasesNaturally(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+
+	first, err := coordinator.Adopt("alpha", "legacy-a")
+	if err != nil {
+		t.Fatalf("first adopt: %v", err)
+	}
+	sequence := mustStatus(t, coordinator).DecisionSequence
+	duplicate, err := coordinator.Adopt("alpha", "legacy-a")
+	if err != nil {
+		t.Fatalf("duplicate adopt: %v", err)
+	}
+	if duplicate.LeaseID != first.LeaseID {
+		t.Fatalf("duplicate adopt changed lease identity: first=%+v duplicate=%+v", first, duplicate)
+	}
+	if got := mustStatus(t, coordinator).DecisionSequence; got != sequence {
+		t.Fatalf("duplicate adopt advanced the durable sequence: got %d want %d", got, sequence)
+	}
+
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if decision := mustStatus(t, restarted).LastDecision; decision == nil ||
+		decision.Command != CommandAdopt || !decision.Granted {
+		t.Fatalf("persisted adoption decision was not restored: %#v", decision)
+	}
+	reconfirmed, err := restarted.Adopt("alpha", "legacy-a")
+	if err != nil {
+		t.Fatalf("restart adopt: %v", err)
+	}
+	if reconfirmed.LeaseID != first.LeaseID {
+		t.Fatalf("restart adopt changed lease identity: first=%+v restart=%+v", first, reconfirmed)
+	}
+	if err := restarted.Release("alpha", "legacy-a"); err != nil {
+		t.Fatalf("natural release: %v", err)
+	}
+	snapshot := mustStatus(t, restarted)
+	if len(snapshot.Leases) != 0 || snapshot.AvailableUnits != 1 {
+		t.Fatalf("natural release did not free adopted usage: %+v", snapshot)
+	}
+}
+
+func TestAdoptPromotesExistingProvisionalLease(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	provisional, err := coordinator.Acquire("alpha", "slot-a", 1)
+	if err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	active, err := coordinator.Adopt("alpha", "slot-a")
+	if err != nil {
+		t.Fatalf("adopt provisional: %v", err)
+	}
+	if active.LeaseID != provisional.LeaseID || active.Status != LeaseActive {
+		t.Fatalf("adopt did not promote the existing lease exactly: provisional=%+v active=%+v", provisional, active)
+	}
+}
+
+func TestAdoptionFenceSpansProfilesTargetsAndRestart(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	})
+	if err := coordinator.BeginAdoption("alpha"); err != nil {
+		t.Fatalf("begin alpha adoption: %v", err)
+	}
+	if err := coordinator.BeginAdoption("beta"); err != nil {
+		t.Fatalf("begin beta adoption: %v", err)
+	}
+	if _, err := coordinator.Adopt("alpha", "target-one-slot"); err != nil {
+		t.Fatalf("adopt first target: %v", err)
+	}
+	if _, err := coordinator.Adopt("alpha", "target-two-slot"); err != nil {
+		t.Fatalf("adopt second target: %v", err)
+	}
+	if _, err := coordinator.Adopt("beta", "target-three-slot"); err != nil {
+		t.Fatalf("adopt above budget: %v", err)
+	}
+	if _, err := coordinator.Acquire("beta", "new-slot", 1); !errors.Is(err, ErrAdoptionPending) {
+		t.Fatalf("expected host-wide fence to block another profile, got %v", err)
+	}
+
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	if fences := mustStatus(t, restarted).AdoptionFences; len(fences) != 2 {
+		t.Fatalf("expected both manager fences after restart, got %+v", fences)
+	}
+	if err := restarted.CompleteAdoption("alpha"); err != nil {
+		t.Fatalf("complete alpha adoption: %v", err)
+	}
+	if _, err := restarted.Acquire("beta", "new-slot", 1); !errors.Is(err, ErrAdoptionPending) {
+		t.Fatalf("expected beta's incomplete pass to keep the host fenced, got %v", err)
+	}
+	if err := restarted.CompleteAdoption("beta"); err != nil {
+		t.Fatalf("complete beta adoption: %v", err)
+	}
+	if _, err := restarted.Acquire("beta", "new-slot", 1); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected above-budget adopted workers to preserve ordinary budget enforcement, got %v", err)
+	}
+	for _, slotKey := range []string{"target-one-slot", "target-two-slot", "target-three-slot"} {
+		profileID := "alpha"
+		if slotKey == "target-three-slot" {
+			profileID = "beta"
+		}
+		if err := restarted.Release(profileID, slotKey); err != nil {
+			t.Fatalf("release %s/%s: %v", profileID, slotKey, err)
+		}
+	}
+	if _, err := restarted.Acquire("beta", "new-slot", 1); err != nil {
+		t.Fatalf("ordinary admission did not resume after adoption and natural drain: %v", err)
+	}
+}
+
+func TestApplyPolicyRemovesAdoptionFencesForRemovedProfiles(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	})
+	if err := coordinator.BeginAdoption("beta"); err != nil {
+		t.Fatalf("begin beta adoption: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 2,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+		},
+	})
+	if fences := mustStatus(t, coordinator).AdoptionFences; len(fences) != 0 {
+		t.Fatalf("removed profile left a host-wide adoption fence: %+v", fences)
+	}
+	if _, err := coordinator.Acquire("alpha", "new-slot", 1); err != nil {
+		t.Fatalf("removed profile fence still blocked admission: %v", err)
+	}
+}
+
+func TestAdoptReplacesRestartDiscardTombstoneAndReleasesNaturally(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 1, 0, false))
+	provisional, err := coordinator.Acquire("alpha", "slot-a", 1)
+	if err != nil {
+		t.Fatalf("acquire provisional: %v", err)
+	}
+
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("restart: %v", err)
+	}
+	discarded := mustStatus(t, restarted)
+	if len(discarded.Leases) != 0 || len(discarded.Tombstones) != 1 ||
+		discarded.Tombstones[0].Reason != TombstoneRestartDiscarded {
+		t.Fatalf("restart did not discard the provisional lease exactly: %+v", discarded)
+	}
+
+	active, err := restarted.Adopt("alpha", "slot-a")
+	if err != nil {
+		t.Fatalf("adopt discarded slot: %v", err)
+	}
+	if active.Status != LeaseActive || active.LeaseID == provisional.LeaseID {
+		t.Fatalf("adopt did not create a fresh active lease: provisional=%+v active=%+v", provisional, active)
+	}
+	adopted := mustStatus(t, restarted)
+	if len(adopted.Leases) != 1 || len(adopted.Tombstones) != 0 ||
+		adopted.Accounting[0].ActiveUnits != 1 ||
+		adopted.Accounting[0].ProvisionalUnits != 0 {
+		t.Fatalf("adopt did not replace the tombstone with correct accounting: %+v", adopted)
+	}
+	if err := restarted.Release("alpha", "slot-a"); err != nil {
+		t.Fatalf("natural release: %v", err)
+	}
+	released := mustStatus(t, restarted)
+	if len(released.Leases) != 0 || len(released.Tombstones) != 1 ||
+		released.Tombstones[0].Reason != TombstoneReleased ||
+		released.AvailableUnits != 2 {
+		t.Fatalf("natural release did not settle the adopted lease: %+v", released)
+	}
+}
+
 // --- Stale and invalid policy -------------------------------------------------
 
 func TestApplyPolicyRejectsStaleGenerationAndInvalidReservations(t *testing.T) {
@@ -1722,7 +1960,7 @@ func TestLastDecisionRecordsRelease(t *testing.T) {
 
 // TestLastDecisionNeverRecordedForNonLeaseCommands proves ApplyPolicy,
 // SetDemand, and Status never produce a Decision: only Acquire, Renew,
-// Activate, Release, and Reconcile are lease decisions.
+// Adopt, Activate, Release, and Reconcile are lease decisions.
 func TestLastDecisionNeverRecordedForNonLeaseCommands(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
@@ -1740,6 +1978,7 @@ func TestLastDecisionNeverRecordedForNonLeaseCommands(t *testing.T) {
 func TestCommandIsLeaseDecisionClosedVocabulary(t *testing.T) {
 	cases := map[Command]bool{
 		CommandAcquire:     true,
+		CommandAdopt:       true,
 		CommandRenew:       true,
 		CommandActivate:    true,
 		CommandRelease:     true,

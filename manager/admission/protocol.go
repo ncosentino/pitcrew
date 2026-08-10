@@ -10,20 +10,20 @@ import (
 // current and immediately previous client protocol during a rolling
 // manager upgrade; ServerSupportedVersions expresses that compatibility
 // window explicitly rather than leaving it implicit in a single constant.
-const CurrentProtocolVersion = 1
+const CurrentProtocolVersion = 2
+
+const previousProtocolVersion = 1
 
 // ServerSupportedVersions returns the protocol versions this build's server
-// accepts, newest first. There is no previous version yet: once a second
-// version ships, this slice grows to include it, and the server keeps
-// speaking both until every participating manager has been replaced.
+// accepts, newest first.
 func ServerSupportedVersions() []int {
-	return []int{CurrentProtocolVersion}
+	return []int{CurrentProtocolVersion, previousProtocolVersion}
 }
 
 // ClientSupportedVersions returns the protocol versions this build's client
 // can speak, newest first.
 func ClientSupportedVersions() []int {
-	return []int{CurrentProtocolVersion}
+	return []int{CurrentProtocolVersion, previousProtocolVersion}
 }
 
 // NegotiateProtocolVersion picks the highest protocol version both the
@@ -50,27 +50,55 @@ func NegotiateProtocolVersion(serverVersions, clientVersions []int) (int, bool) 
 type Command string
 
 const (
-	CommandApplyPolicy Command = "apply-policy"
-	CommandSetDemand   Command = "set-demand"
-	CommandAcquire     Command = "acquire"
-	CommandRenew       Command = "renew"
-	CommandActivate    Command = "activate"
-	CommandRelease     Command = "release"
-	CommandReconcile   Command = "reconcile"
-	CommandStatus      Command = "status"
+	CommandApplyPolicy      Command = "apply-policy"
+	CommandSetDemand        Command = "set-demand"
+	CommandAcquire          Command = "acquire"
+	CommandAdopt            Command = "adopt"
+	CommandBeginAdoption    Command = "begin-adoption"
+	CommandCompleteAdoption Command = "complete-adoption"
+	CommandRenew            Command = "renew"
+	CommandActivate         Command = "activate"
+	CommandRelease          Command = "release"
+	CommandReconcile        Command = "reconcile"
+	CommandStatus           Command = "status"
 )
 
-// isLeaseDecision reports whether Command identifies one of the five lease
-// operations Decision.Command records. ApplyPolicy, SetDemand, and Status
+// isLeaseDecision reports whether Command identifies a lease operation
+// Decision.Command records. ApplyPolicy, SetDemand, and Status
 // are policy/reporting operations, not lease admission decisions, and are
 // never recorded as a Decision.
 func (c Command) isLeaseDecision() bool {
 	switch c {
-	case CommandAcquire, CommandRenew, CommandActivate, CommandRelease, CommandReconcile:
+	case CommandAcquire, CommandAdopt, CommandRenew, CommandActivate, CommandRelease, CommandReconcile:
 		return true
 	default:
 		return false
 	}
+}
+
+func (c Command) supportedBy(version int) bool {
+	switch c {
+	case CommandAdopt, CommandBeginAdoption, CommandCompleteAdoption:
+		return version >= 2
+	case CommandApplyPolicy,
+		CommandSetDemand,
+		CommandAcquire,
+		CommandRenew,
+		CommandActivate,
+		CommandRelease,
+		CommandReconcile,
+		CommandStatus:
+		return version >= 1
+	default:
+		return false
+	}
+}
+
+func (c Command) minimumProtocolVersion() int {
+	if c.supportedBy(previousProtocolVersion) {
+		return previousProtocolVersion
+	}
+	return CurrentProtocolVersion
 }
 
 // Request is the exact, versioned wire envelope a client sends to the
@@ -113,6 +141,7 @@ const (
 	ErrorCodeLeaseExpired        ErrorCode = "lease-expired"
 	ErrorCodeLeaseNotProvisional ErrorCode = "lease-not-provisional"
 	ErrorCodeBudgetExceeded      ErrorCode = "budget-exceeded"
+	ErrorCodeAdoptionPending     ErrorCode = "adoption-pending"
 	ErrorCodeEvidenceRequired    ErrorCode = "evidence-required"
 	ErrorCodeEvidenceInvalid     ErrorCode = "evidence-invalid"
 	ErrorCodeInvalidPolicy       ErrorCode = "invalid-policy"
@@ -133,6 +162,7 @@ func (c ErrorCode) valid() bool {
 		ErrorCodeLeaseExpired,
 		ErrorCodeLeaseNotProvisional,
 		ErrorCodeBudgetExceeded,
+		ErrorCodeAdoptionPending,
 		ErrorCodeEvidenceRequired,
 		ErrorCodeEvidenceInvalid,
 		ErrorCodeInvalidPolicy,
@@ -167,6 +197,8 @@ func errorCodeForErr(err error) ErrorCode {
 		return ErrorCodeLeaseNotProvisional
 	case errors.Is(err, ErrBudgetExceeded):
 		return ErrorCodeBudgetExceeded
+	case errors.Is(err, ErrAdoptionPending):
+		return ErrorCodeAdoptionPending
 	case errors.Is(err, ErrEvidenceInvalid):
 		return ErrorCodeEvidenceInvalid
 	case errors.Is(err, ErrEvidenceRequired):
@@ -203,6 +235,8 @@ func errForErrorCode(code ErrorCode) error {
 		return ErrLeaseNotProvisional
 	case ErrorCodeBudgetExceeded:
 		return ErrBudgetExceeded
+	case ErrorCodeAdoptionPending:
+		return ErrAdoptionPending
 	case ErrorCodeEvidenceInvalid:
 		return ErrEvidenceInvalid
 	case ErrorCodeEvidenceRequired:

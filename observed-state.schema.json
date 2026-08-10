@@ -912,7 +912,7 @@
           "minimum": 0
         },
         "command": {
-          "enum": ["acquire", "renew", "activate", "release", "reconcile"]
+          "enum": ["acquire", "adopt", "renew", "activate", "release", "reconcile"]
         },
         "granted": {
           "type": "boolean"
