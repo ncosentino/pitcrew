@@ -19,6 +19,11 @@ func TestExitCodeForError(t *testing.T) {
 			want: 3,
 		},
 		{
+			name: "adoption pending",
+			err:  admission.ErrAdoptionPending,
+			want: 3,
+		},
+		{
 			name: "lease already absent",
 			err:  admission.ErrLeaseNotFound,
 			want: 4,

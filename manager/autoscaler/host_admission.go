@@ -14,6 +14,9 @@ import (
 type hostAdmissionLeaseClient interface {
 	SetDemand(profileID string, pending int) error
 	Acquire(profileID, slotKey string, pendingDemand int) (admission.Lease, error)
+	Adopt(profileID, slotKey string) (admission.Lease, error)
+	BeginAdoption(profileID string) error
+	CompleteAdoption(profileID string) error
 	Renew(profileID, slotKey string) (admission.Lease, error)
 	Activate(profileID, slotKey string) (admission.Lease, error)
 	Release(profileID, slotKey string) error
@@ -196,6 +199,55 @@ func (h *hostAdmissionCoordinator) acquire(
 	return admission.Lease{}, outcome, classified
 }
 
+func (h *hostAdmissionCoordinator) adopt(slotKey string) (admission.Lease, error) {
+	lease, _, err := h.adoptIf(slotKey, func() bool { return true })
+	return lease, err
+}
+
+func (h *hostAdmissionCoordinator) beginAdoption() error {
+	if !h.enabled() {
+		return nil
+	}
+	if err := h.client.BeginAdoption(h.profileID); err != nil {
+		_, classified := classifyHostAdmissionFailure(err)
+		return classified
+	}
+	return nil
+}
+
+func (h *hostAdmissionCoordinator) completeAdoption() error {
+	if !h.enabled() {
+		return nil
+	}
+	if err := h.client.CompleteAdoption(h.profileID); err != nil {
+		_, classified := classifyHostAdmissionFailure(err)
+		return classified
+	}
+	return nil
+}
+
+// The current check shares the RPC lock with release so an exit cannot
+// complete a not-found release before a stale retry recreates the lease.
+func (h *hostAdmissionCoordinator) adoptIf(
+	slotKey string,
+	current func() bool,
+) (admission.Lease, bool, error) {
+	if !h.enabled() {
+		return admission.Lease{}, false, nil
+	}
+	h.rpcMu.Lock()
+	defer h.rpcMu.Unlock()
+	if !current() {
+		return admission.Lease{}, false, nil
+	}
+	lease, err := h.client.Adopt(h.profileID, slotKey)
+	if err == nil {
+		return lease, true, nil
+	}
+	_, classified := classifyHostAdmissionFailure(err)
+	return admission.Lease{}, true, classified
+}
+
 // renew extends a provisional lease during bounded pre-launch work (JIT
 // generation, container create). A renewal failure is treated the same as
 // an acquire failure by the caller: the launch attempt is abandoned and the
@@ -230,7 +282,8 @@ func (h *hostAdmissionCoordinator) activate(slotKey string) (admission.Lease, er
 
 func classifyHostAdmissionFailure(err error) (hostAdmissionOutcome, error) {
 	switch {
-	case errors.Is(err, admission.ErrBudgetExceeded):
+	case errors.Is(err, admission.ErrBudgetExceeded),
+		errors.Is(err, admission.ErrAdoptionPending):
 		return hostAdmissionBudgetDenied, fmt.Errorf("%w: %w", errHostAdmissionWithheld, err)
 	case errors.Is(err, admission.ErrUnknownProfile),
 		errors.Is(err, admission.ErrInvalidPolicy),
@@ -275,6 +328,8 @@ func (h *hostAdmissionCoordinator) release(slotKey string) error {
 	if !h.enabled() || slotKey == "" {
 		return nil
 	}
+	h.rpcMu.Lock()
+	defer h.rpcMu.Unlock()
 	err := h.client.Release(h.profileID, slotKey)
 	if errors.Is(err, admission.ErrLeaseNotFound) {
 		return nil
@@ -332,6 +387,9 @@ func (h *hostAdmissionCoordinator) sampleObservedHostAdmission() observedHostAdm
 		degraded = true
 	}
 	if snapshot.CapacityUnits <= 0 {
+		degraded = true
+	}
+	if len(snapshot.AdoptionFences) > 0 {
 		degraded = true
 	}
 	status := hostAdmissionStatusAvailable

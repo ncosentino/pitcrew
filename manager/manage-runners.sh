@@ -32,7 +32,10 @@ ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
 STATE_DIRECTORY="${PITCREW_STATE_DIRECTORY:-/var/lib/pitcrew}"
 PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY="${STATE_DIRECTORY}/host-admission-releases"
-export PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY
+PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY="${STATE_DIRECTORY}/host-admission-adoptions"
+export \
+    PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY \
+    PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY
 DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
@@ -851,6 +854,7 @@ run_slot() {
             "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
             > "${slot_state_path}/registration-grace-until"
         if docker inspect "${recovered_id}" >/dev/null 2>&1; then
+            recovered_adoption_pid=""
             if host_admission_enabled; then
                 if [ "${recovered_status}" = "created" ]; then
                     while [ ! -f "${slot_state_path}/drain" ]; do
@@ -881,13 +885,11 @@ run_slot() {
                             "${slot_key}" || true
                     fi
                 else
-                    host_admission_acquire \
+                    host_admission_adopt_running \
                         "${slot_state_path}" \
                         "${slot_key}" \
-                        "${SLOT_DIRECTORY}" >/dev/null 2>&1 || true
-                    host_admission_activate \
-                        "${slot_state_path}" \
-                        "${slot_key}" >/dev/null 2>&1 || true
+                        "${recovered_id}" &
+                    recovered_adoption_pid=$!
                 fi
             fi
             record_container_image_identity "${slot_state_path}" "${recovered_id}"
@@ -902,6 +904,9 @@ run_slot() {
                     "${log_path}" \
                     "${recovered_logs_since}" || true
                 if host_admission_enabled; then
+                    if [ -n "${recovered_adoption_pid}" ]; then
+                        wait "${recovered_adoption_pid}" || true
+                    fi
                     while ! host_admission_release \
                         "${slot_state_path}" \
                         "${slot_key}"; do
@@ -915,6 +920,7 @@ run_slot() {
                 fi
             fi
         fi
+        host_admission_finish_tracked_adoption "${slot_key}"
         rm -f \
             "${slot_state_path}/recovered-container-id" \
             "${slot_state_path}/recovered-container-name" \
@@ -1443,6 +1449,9 @@ start_recovered_slot() {
     if [ "${recovered_desired}" != "1" ]; then
         : > "${recovered_path}/drain"
     fi
+    if [ "${recovered_status}" = "running" ]; then
+        host_admission_track_adoption "${recovered_key}" || return 1
+    fi
     run_slot "${recovered_key}" "${recovered_repo}" "${recovered_tag}" &
     printf '%s\n' "$!" > "${recovered_path}/pid"
 }
@@ -1847,6 +1856,8 @@ diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}" "${MANAGER_INSTANCE_ID}" ||
     echo "[manager:${PROFILE_ID}] operation diagnostics could not be initialized" >&2
 rm -rf "${SLOT_DIRECTORY}"
 mkdir -p "${SLOT_DIRECTORY}"
+rm -rf "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}"
+mkdir -p "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}"
 : > "${CURRENT_DESIRED_SLOTS}"
 rm -f "${OBSERVED_STATE_DIRTY}" "${RESOURCE_TELEMETRY_PATH}"
 if ! write_worker_resource_policy \
@@ -1871,6 +1882,10 @@ fi
 bootstrap_legacy_desired_state
 load_accepted_state
 echo "[manager:${PROFILE_ID}] adopting any managed runners left by the previous manager"
+if ! host_admission_begin_adoption; then
+    echo "[manager:${PROFILE_ID}] could not establish the recovery admission barrier" >&2
+    exit 1
+fi
 if ! restore_managed_slots; then
     echo "[manager:${PROFILE_ID}] managed runner recovery failed; preserving containers and stopping" >&2
     record_manager_diagnostic \
@@ -1881,6 +1896,13 @@ if ! restore_managed_slots; then
         "" \
         docker-unavailable \
         "Managed worker discovery failed during manager adoption"
+    exit 1
+fi
+while host_admission_adoption_pending; do
+    sleep 1
+done
+if ! host_admission_complete_adoption; then
+    echo "[manager:${PROFILE_ID}] could not clear the recovery admission barrier" >&2
     exit 1
 fi
 adopted_slot_count=0

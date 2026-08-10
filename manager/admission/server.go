@@ -226,6 +226,18 @@ func (s *Server) dispatch(request Request) Response {
 		}
 	}
 	response := Response{ProtocolVersion: version, Status: responseStatusOK}
+	if !request.Command.supportedBy(version) {
+		return Response{
+			ProtocolVersion: version,
+			Status:          responseStatusError,
+			Error: fmt.Sprintf(
+				"command %q is not supported by protocol version %d",
+				request.Command,
+				version,
+			),
+			ErrorCode: ErrorCodeProtocolMismatch,
+		}
+	}
 	switch request.Command {
 	case CommandApplyPolicy:
 		if request.Policy == nil {
@@ -247,6 +259,20 @@ func (s *Server) dispatch(request Request) Response {
 		if errors.Is(err, ErrDuplicateLease) {
 			response.Error = err.Error()
 			response.ErrorCode = ErrorCodeDuplicateLease
+		}
+	case CommandAdopt:
+		lease, err := s.coordinator.Adopt(request.ProfileID, request.SlotKey)
+		if err != nil {
+			return errorResponse(version, err)
+		}
+		response.Lease = &lease
+	case CommandBeginAdoption:
+		if err := s.coordinator.BeginAdoption(request.ProfileID); err != nil {
+			return errorResponse(version, err)
+		}
+	case CommandCompleteAdoption:
+		if err := s.coordinator.CompleteAdoption(request.ProfileID); err != nil {
+			return errorResponse(version, err)
 		}
 	case CommandRenew:
 		lease, err := s.coordinator.Renew(request.ProfileID, request.SlotKey)

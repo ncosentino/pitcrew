@@ -283,7 +283,7 @@ function New-RunnerHostAdmissionContext {
         ComposeProjectName = "pitcrew-host-admission-$Namespace"
         VolumeName = "pitcrew-host-admission-$Namespace"
         SocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
-        ProtocolVersion = 1
+        ProtocolVersion = 2
     }
 }
 

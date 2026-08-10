@@ -1788,6 +1788,11 @@ jq '
 assert_true \
     "Contract-eighteen observed state with available host admission was rejected." \
     observed_state_is_valid "${contract_eighteen_available_state}"
+jq '.hostAdmission.lastDecision.command = "adopt"' \
+    "${contract_eighteen_available_state}" > "${invalid_contract_eighteen_state}"
+assert_true \
+    "Contract-eighteen observed state rejected an adoption decision." \
+    observed_state_is_valid "${invalid_contract_eighteen_state}"
 
 contract_eighteen_degraded_state="${TEMP_DIRECTORY}/contract-eighteen-degraded-state.json"
 jq '.hostAdmission.status = "degraded" | .hostAdmission.accounting = null | .hostAdmission.lastDecision = null' \

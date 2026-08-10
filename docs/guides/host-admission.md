@@ -124,6 +124,24 @@ publishes the combined policy, and hands the selected manager its generated
 policy identity. Do not start a coordinator container manually, edit generated
 host state, or use broad Docker cleanup.
 
+Already-running fixed and autoscaled workers are adopted into durable active
+accounting during manager recovery. Adoption never stops, recreates, or denies
+those workers, including when their retained usage exceeds the effective
+budget. In that case `availableUnits` clamps to zero and new acquisitions remain
+withheld until natural worker exit releases enough usage. A transient
+coordinator outage delays accounting but does not mutate the worker; recovery
+retries the same deterministic lease identity. Both manager modes withhold new
+launches host-wide while any participating profile manager still has an
+incomplete adoption pass. Setup establishes that durable fence before manager
+handoff; multiple profile fences compose, survive coordinator restart, and
+clear independently only after the corresponding manager finishes recovery.
+Withheld attempts during that fence carry the bounded `adoption-pending`
+failure category rather than being reported as ordinary budget exhaustion.
+Protocol 1 remains available for ordinary commands during a coordinator-first
+rolling replacement, but adoption and fence operations require protocol 2. A
+new manager connected to a protocol 1 service therefore fails closed before
+starting new workers.
+
 There is an unavoidable partial-enrollment interval while multiple live
 profiles are applied one at a time. During that interval, do not describe the
 host as protected. Validate every participating profile before relying on the
@@ -174,6 +192,8 @@ evidence.
 Accounting is profile-scoped:
 
 - `activeUnits` are held by active worker leases.
+- Existing workers adopted when policy is enabled contribute to `activeUnits`
+  exactly like newly activated workers.
 - `provisionalUnits` are held while a worker is being prepared.
 - `heldUnits` is active plus provisional units.
 - `borrowedUnits` is held capacity beyond this profile's reservation.
@@ -307,6 +327,11 @@ last decision may carry `failureCategory: budget-exceeded`.
 Reduce demand, wait for an existing worker lease to release, or apply a
 reviewed policy update. Do not translate the unit shortfall into CPU or memory
 without a separate measurement.
+
+Retained workers adopted during policy enablement may make `heldUnits` exceed
+`effectiveTotalUnits`. This is truthful overcommit accounting, not coordinator
+corruption: `availableUnits` remains zero and new acquisition stays blocked
+until the adopted leases drain naturally.
 
 ### Invalid or incompatible policy
 

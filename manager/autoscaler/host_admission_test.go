@@ -21,6 +21,7 @@ import (
 type fakeHostAdmissionClient struct {
 	mu sync.Mutex
 
+	capacity    int
 	budget      int
 	leases      map[string]admission.Lease
 	nextLeaseID int
@@ -29,17 +30,25 @@ type fakeHostAdmissionClient struct {
 	// already hold a lease for its slot, regardless of budget. It models a
 	// coordinator/socket outage distinct from a budget deny.
 	acquireErr error
+	adoptErr   error
 
-	activateErrs map[string]error
-	renewErrs    map[string]error
-	releaseErrs  map[string]error
+	activateErrs        map[string]error
+	adoptErrs           map[string]error
+	renewErrs           map[string]error
+	releaseErrs         map[string]error
+	beginAdoptionErr    error
+	completeAdoptionErr error
+	adoptionFences      map[string]bool
 
-	setDemandCalls []int
-	setDemandHook  func(int)
-	acquireCalls   []string
-	renewCalls     []string
-	activateCalls  []string
-	releaseCalls   []string
+	setDemandCalls        []int
+	setDemandHook         func(int)
+	acquireCalls          []string
+	adoptCalls            []string
+	renewCalls            []string
+	activateCalls         []string
+	releaseCalls          []string
+	beginAdoptionCalls    []string
+	completeAdoptionCalls []string
 
 	// statusErr, when set, is returned by every Status call, simulating a
 	// coordinator/socket outage. statusNamespace, statusEpoch,
@@ -58,11 +67,14 @@ type fakeHostAdmissionClient struct {
 
 func newFakeHostAdmissionClient(budget int) *fakeHostAdmissionClient {
 	return &fakeHostAdmissionClient{
-		budget:       budget,
-		leases:       make(map[string]admission.Lease),
-		activateErrs: make(map[string]error),
-		renewErrs:    make(map[string]error),
-		releaseErrs:  make(map[string]error),
+		capacity:       budget,
+		budget:         budget,
+		leases:         make(map[string]admission.Lease),
+		activateErrs:   make(map[string]error),
+		adoptErrs:      make(map[string]error),
+		renewErrs:      make(map[string]error),
+		releaseErrs:    make(map[string]error),
+		adoptionFences: make(map[string]bool),
 	}
 }
 
@@ -94,6 +106,9 @@ func (c *fakeHostAdmissionClient) Acquire(
 	if c.acquireErr != nil {
 		return admission.Lease{}, c.acquireErr
 	}
+	if len(c.adoptionFences) > 0 {
+		return admission.Lease{}, admission.ErrAdoptionPending
+	}
 	if c.budget <= 0 {
 		return admission.Lease{}, admission.ErrBudgetExceeded
 	}
@@ -105,6 +120,62 @@ func (c *fakeHostAdmissionClient) Acquire(
 		LeaseID:   fmt.Sprintf("lease-%d", c.nextLeaseID),
 		Units:     1,
 		Status:    admission.LeaseProvisional,
+	}
+	c.leases[key] = lease
+	return lease, nil
+}
+
+func (c *fakeHostAdmissionClient) BeginAdoption(profileID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.beginAdoptionCalls = append(c.beginAdoptionCalls, profileID)
+	if c.beginAdoptionErr != nil {
+		return c.beginAdoptionErr
+	}
+	c.adoptionFences[profileID] = true
+	return nil
+}
+
+func (c *fakeHostAdmissionClient) CompleteAdoption(profileID string) error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.completeAdoptionCalls = append(c.completeAdoptionCalls, profileID)
+	if c.completeAdoptionErr != nil {
+		return c.completeAdoptionErr
+	}
+	delete(c.adoptionFences, profileID)
+	return nil
+}
+
+func (c *fakeHostAdmissionClient) Adopt(
+	profileID, slotKey string,
+) (admission.Lease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := leaseSlotKey(profileID, slotKey)
+	c.adoptCalls = append(c.adoptCalls, key)
+	if c.adoptErr != nil {
+		return admission.Lease{}, c.adoptErr
+	}
+	if err, ok := c.adoptErrs[key]; ok {
+		delete(c.adoptErrs, key)
+		if err != nil {
+			return admission.Lease{}, err
+		}
+	}
+	if existing, ok := c.leases[key]; ok {
+		existing.Status = admission.LeaseActive
+		c.leases[key] = existing
+		return existing, nil
+	}
+	c.budget--
+	c.nextLeaseID++
+	lease := admission.Lease{
+		ProfileID: profileID,
+		SlotKey:   slotKey,
+		LeaseID:   fmt.Sprintf("lease-%d", c.nextLeaseID),
+		Units:     1,
+		Status:    admission.LeaseActive,
 	}
 	c.leases[key] = lease
 	return lease, nil
@@ -185,10 +256,16 @@ func (c *fakeHostAdmissionClient) Status() (admission.Snapshot, error) {
 		Namespace:             c.statusNamespace,
 		Epoch:                 c.statusEpoch,
 		DecisionSequence:      c.statusDecisionSequence,
-		CapacityUnits:         c.budget + len(c.leases),
-		EffectiveTotalUnits:   c.budget + len(c.leases),
+		CapacityUnits:         c.capacity,
+		EffectiveTotalUnits:   c.capacity,
 		HostPolicyFingerprint: c.statusHostFingerprint,
 		LastDecision:          c.statusLastDecision,
+	}
+	for profileID := range c.adoptionFences {
+		snapshot.AdoptionFences = append(
+			snapshot.AdoptionFences,
+			admission.AdoptionFence{ProfileID: profileID},
+		)
 	}
 	held := make(map[string]int)
 	for _, lease := range c.leases {
@@ -405,6 +482,9 @@ func TestHostAdmissionDisabledCoordinatorIsExactNoOp(t *testing.T) {
 	}
 	if _, err := disabled.activate("slot"); err != nil {
 		t.Fatalf("disabled coordinator activate failed: %v", err)
+	}
+	if _, err := disabled.adopt("slot"); err != nil {
+		t.Fatalf("disabled coordinator adopt failed: %v", err)
 	}
 	if err := disabled.release("slot"); err != nil {
 		t.Fatalf("disabled coordinator release failed: %v", err)
@@ -820,13 +900,13 @@ func TestHostAdmissionActiveLeaseRestartAdoption(t *testing.T) {
 		t.Fatalf("adopted runner lost its lease identity: %+v", snapshot.runners)
 	}
 	found := false
-	for _, key := range client.activateCalls {
+	for _, key := range client.adoptCalls {
 		if key == "profile-a/slot-running" {
 			found = true
 		}
 	}
 	if !found {
-		t.Fatal("restart adoption did not re-confirm the lease via activate")
+		t.Fatal("restart adoption did not re-confirm the lease via adopt")
 	}
 }
 
@@ -840,7 +920,8 @@ func TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy(t *testing
 	client := newFakeHostAdmissionClient(1)
 	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
-	// No lease pre-granted: activation of "slot-unconfirmed" fails.
+	client.adoptErrs["profile-a/slot-unconfirmed"] =
+		errors.New("dial unix: connection refused")
 
 	container := recoveredContainer{
 		containerID: "container-unconfirmed",
@@ -865,6 +946,114 @@ func TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy(t *testing
 	}
 	if snapshot.runners[0].hostSlotKey != "slot-unconfirmed" {
 		t.Fatalf("unconfirmed lease identity was incorrectly cleared: %+v", snapshot.runners[0])
+	}
+}
+
+func TestHostAdmissionPrePolicyRunningWorkerIsAdoptedAndReleased(t *testing.T) {
+	client := newFakeHostAdmissionClient(0)
+	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 2, client)
+	defer cancel()
+
+	container := recoveredContainer{
+		containerID: "container-legacy",
+		name:        "runner-legacy",
+		runnerName:  "pitcrew-runner-repo-1234-legacy01",
+		runnerID:    105,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-105",
+		revision:    testWorkerRevision,
+		createdAt:   time.Now().Add(-time.Minute),
+	}
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("pre-policy running worker recovery failed: %v", err)
+	}
+	runner := findRunner(t, scaler)
+	if runner.hostSlotKey != container.runnerName || !runner.hostLeaseAdopted {
+		t.Fatalf("legacy runner did not derive and adopt its runner-name lease: %+v", runner)
+	}
+	if client.leaseCount() != 1 || client.remainingBudget() != -1 {
+		t.Fatalf("above-budget adoption was not retained: leases=%d budget=%d",
+			client.leaseCount(), client.remainingBudget())
+	}
+	if len(docker.stopRemove) != 0 {
+		t.Fatal("pre-policy running worker was mutated during adoption")
+	}
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 2); !errors.Is(err, errHostAdmissionWithheld) {
+		t.Fatalf("expected new demand to be withheld by adopted usage, got %v", err)
+	}
+	if len(docker.launches) != 0 {
+		t.Fatal("new worker creation proceeded while adopted usage exceeded budget")
+	}
+
+	cancel()
+	restarted, _, restartedDocker, _, _, restartedCancel :=
+		newHostAdmissionTestScaler(t, 2, client)
+	defer restartedCancel()
+	if err := restarted.recover(container); err != nil {
+		t.Fatalf("pre-policy worker restart recovery failed: %v", err)
+	}
+	restartedRunner := findRunner(t, restarted)
+	if restartedRunner.hostSlotKey != container.runnerName ||
+		!restartedRunner.hostLeaseAdopted ||
+		client.leaseCount() != 1 {
+		t.Fatalf(
+			"restart did not re-derive and idempotently re-confirm the legacy lease: runner=%+v leases=%d",
+			restartedRunner,
+			client.leaseCount(),
+		)
+	}
+	if len(restartedDocker.stopRemove) != 0 {
+		t.Fatal("restart adoption mutated the pre-policy running worker")
+	}
+
+	restarted.handleContainerExit(restartedRunner.containerID, exitStatus(0))
+	if client.leaseCount() != 0 || len(client.releaseCalls) != 1 {
+		t.Fatalf("natural exit did not release the adopted lease exactly: leases=%d releases=%#v",
+			client.leaseCount(), client.releaseCalls)
+	}
+}
+
+func TestHostAdmissionRunningAdoptionRetriesAfterCoordinatorOutage(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	client.adoptErr = errors.New("dial unix: connection refused")
+	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 2, client)
+	defer cancel()
+
+	container := recoveredContainer{
+		containerID: "container-retry",
+		name:        "runner-retry",
+		runnerName:  "runner-retry",
+		runnerID:    106,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-106",
+		revision:    testWorkerRevision,
+		createdAt:   time.Now().Add(-time.Minute),
+	}
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("running worker recovery must survive coordinator outage: %v", err)
+	}
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 2); err == nil {
+		t.Fatal("expected unresolved adoption to block new demand")
+	}
+	if len(client.acquireCalls) != 0 || len(docker.stopRemove) != 0 {
+		t.Fatalf("outage caused acquisition or worker mutation: acquires=%#v removals=%#v",
+			client.acquireCalls, docker.stopRemove)
+	}
+
+	client.adoptErr = nil
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatalf("adoption retry after coordinator recovery failed: %v", err)
+	}
+	runner := findRunner(t, scaler)
+	if !runner.hostLeaseAdopted || runner.hostSlotKey != container.runnerName {
+		t.Fatalf("recovered coordinator did not confirm the derived lease: %+v", runner)
+	}
+	if len(client.adoptCalls) < 3 {
+		t.Fatalf("expected initial and reconciliation adoption retries, got %#v", client.adoptCalls)
+	}
+	if len(docker.stopRemove) != 0 {
+		t.Fatal("coordinator recovery mutated the running worker")
 	}
 }
 
@@ -1008,10 +1197,7 @@ func TestHostAdmissionStaleWorkerRetirementReleasesLease(t *testing.T) {
 	}
 }
 
-// TestHostAdmissionNoReleaseForBusyWorkerDuringShutdown proves a busy worker
-// surviving shutdown never has its lease released, since shutdown's busy
-// loop only stops the container and never touches registrations or leases.
-func TestHostAdmissionNoReleaseForBusyWorkerDuringShutdown(t *testing.T) {
+func TestHostAdmissionBusyWorkerShutdownQueuesAndReleasesLeaseAfterStop(t *testing.T) {
 	client := newFakeHostAdmissionClient(1)
 	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
@@ -1030,11 +1216,17 @@ func TestHostAdmissionNoReleaseForBusyWorkerDuringShutdown(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(client.releaseCalls) != 0 {
-		t.Fatalf("busy worker's lease was released during shutdown: %d calls", len(client.releaseCalls))
+	if len(client.releaseCalls) != 1 {
+		t.Fatalf("busy worker's lease was not released after a successful stop: %d calls", len(client.releaseCalls))
 	}
-	if client.leaseCount() != 1 {
-		t.Fatalf("busy worker's lease is no longer tracked as outstanding: %d", client.leaseCount())
+	if client.leaseCount() != 0 {
+		t.Fatalf("busy worker's lease remained outstanding after shutdown: %d", client.leaseCount())
+	}
+	if scaler.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("successful release left a pending record: %d", scaler.pendingHostLeaseReleaseCount())
+	}
+	if len(scaler.snapshot().runners) != 0 {
+		t.Fatal("successfully stopped runner was not cleared")
 	}
 	found := false
 	for _, id := range docker.stops {
@@ -1042,6 +1234,7 @@ func TestHostAdmissionNoReleaseForBusyWorkerDuringShutdown(t *testing.T) {
 			found = true
 		}
 	}
+
 	if !found {
 		t.Fatal("busy worker container was not stopped during shutdown")
 	}
@@ -1049,6 +1242,34 @@ func TestHostAdmissionNoReleaseForBusyWorkerDuringShutdown(t *testing.T) {
 		if id == runner.containerID {
 			t.Fatal("busy worker container was removed instead of only stopped")
 		}
+	}
+}
+
+func TestHostAdmissionShutdownStopFailureRetainsRunnerAndLease(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	if err := scaler.HandleJobStarted(context.Background(), &scaleset.JobStarted{
+		RunnerID:   int(runner.runnerID),
+		RunnerName: runner.runnerName,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	docker.stopErrors[runner.containerID] = []error{errors.New("stop failed")}
+
+	if err := scaler.shutdown(context.Background()); err == nil {
+		t.Fatal("expected shutdown to surface the stop failure")
+	}
+	if len(client.releaseCalls) != 0 || client.leaseCount() != 1 {
+		t.Fatalf("failed stop changed the lease: calls=%v leases=%d", client.releaseCalls, client.leaseCount())
+	}
+	snapshot := scaler.snapshot()
+	if len(snapshot.runners) != 1 || snapshot.runners[0].containerID != runner.containerID {
+		t.Fatalf("failed stop did not retain the runner record: %+v", snapshot.runners)
 	}
 }
 
@@ -1136,6 +1357,13 @@ func TestHostAdmissionFailureClassifierSeparatesPolicyAndTransport(t *testing.T)
 		{
 			name:    "budget",
 			err:     admission.ErrBudgetExceeded,
+			outcome: hostAdmissionBudgetDenied,
+			marker:  errHostAdmissionWithheld,
+			deficit: deficitHostAdmissionWithheld,
+		},
+		{
+			name:    "adoption pending",
+			err:     admission.ErrAdoptionPending,
 			outcome: hostAdmissionBudgetDenied,
 			marker:  errHostAdmissionWithheld,
 			deficit: deficitHostAdmissionWithheld,
@@ -1427,8 +1655,14 @@ func TestHostAdmissionReleaseFailureOnDelayedCleanupIsRetried(t *testing.T) {
 // (independent of shutdown) resolves it exactly without needing to remove
 // or stop any additional worker.
 func TestHostAdmissionReleaseFailureOnShutdownIsRetried(t *testing.T) {
+	stateDirectory := t.TempDir()
 	client := newFakeHostAdmissionClient(1)
-	scaler, _, _, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	scaler, _, _, _, _, cancel := newHostAdmissionTestScalerInDirectory(
+		t,
+		1,
+		client,
+		stateDirectory,
+	)
 	defer cancel()
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
 		t.Fatal(err)
@@ -1448,12 +1682,18 @@ func TestHostAdmissionReleaseFailureOnShutdownIsRetried(t *testing.T) {
 		t.Fatalf("lease was released despite a failed release call: %d outstanding", client.leaseCount())
 	}
 
-	clock.advance(hostLeaseReleaseRetryDelay)
-	if err := scaler.retryPendingHostLeaseReleases(); err != nil {
+	restarted, _, _, restartedClock, _, restartedCancel :=
+		newHostAdmissionTestScalerInDirectory(t, 1, client, stateDirectory)
+	defer restartedCancel()
+	if restarted.pendingHostLeaseReleaseCount() != 1 {
+		t.Fatalf("restart did not restore the pending release: %d", restarted.pendingHostLeaseReleaseCount())
+	}
+	restartedClock.advance(hostLeaseReleaseRetryDelay)
+	if err := restarted.retryPendingHostLeaseReleases(); err != nil {
 		t.Fatal(err)
 	}
-	if scaler.pendingHostLeaseReleaseCount() != 0 {
-		t.Fatalf("pending release record was not resolved by the retry, got %d", scaler.pendingHostLeaseReleaseCount())
+	if restarted.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatalf("pending release record was not resolved by the retry, got %d", restarted.pendingHostLeaseReleaseCount())
 	}
 	if client.leaseCount() != 0 {
 		t.Fatalf("lease was not eventually released, %d outstanding", client.leaseCount())
@@ -1561,7 +1801,7 @@ func TestHostAdmissionPendingReleaseRetrySurvivesManagerRestart(t *testing.T) {
 }
 
 // TestHostAdmissionRunningRecoveryOutagePreservesKeyForLaterRelease proves
-// that when recoverRunning cannot re-confirm a lease across a restart
+// that when recoverRunning cannot adopt a lease across a restart
 // (coordinator outage), the worker's exact lease identity is preserved
 // rather than cleared, so a later natural exit can still durably release
 // (or enqueue) it.
@@ -1569,8 +1809,8 @@ func TestHostAdmissionRunningRecoveryOutagePreservesKeyForLaterRelease(t *testin
 	client := newFakeHostAdmissionClient(1)
 	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
-	// No lease pre-granted: activation of "slot-outage" fails, simulating a
-	// coordinator outage across a manager restart.
+	client.adoptErrs["profile-a/slot-outage"] =
+		errors.New("dial unix: connection refused")
 
 	container := recoveredContainer{
 		containerID: "container-outage",
@@ -1778,6 +2018,40 @@ func TestSampleObservedHostAdmissionAvailable(t *testing.T) {
 	if observed.LastDecision == nil || observed.LastDecision.Sequence != 7 ||
 		!observed.LastDecision.Granted {
 		t.Fatalf("expected this profile's last decision to be published, got %#v", observed.LastDecision)
+	}
+}
+
+func TestSampleObservedHostAdmissionDegradedDuringHostWideAdoption(t *testing.T) {
+	pendingUnits := 0
+	withheldUnits := 0
+	client := newFakeHostAdmissionClient(10)
+	client.statusNamespace = "ns-a"
+	client.statusEpoch = 3
+	client.statusDecisionSequence = 4
+	client.statusHostFingerprint = "host-fingerprint-1"
+	client.statusProfileFingerprint = "profile-fingerprint-1"
+	client.statusAccounting = map[string]admission.ProfileAccounting{
+		"profile-a": {
+			ProfileID:                "profile-a",
+			UnitCost:                 1,
+			ProfilePolicyFingerprint: "profile-fingerprint-1",
+			PendingUnits:             &pendingUnits,
+			WithheldUnits:            &withheldUnits,
+		},
+	}
+	client.adoptionFences["profile-b"] = true
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+	coordinator.namespace = "ns-a"
+	coordinator.hostFingerprint = "host-fingerprint-1"
+	coordinator.profileFingerprint = "profile-fingerprint-1"
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusDegraded {
+		t.Fatalf(
+			"expected host-wide adoption to report %q, got %q",
+			hostAdmissionStatusDegraded,
+			observed.Status,
+		)
 	}
 }
 

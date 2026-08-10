@@ -35,6 +35,11 @@ var ErrLeaseNotProvisional = errors.New("admission: lease is not provisional")
 // profile's protected reservation, or losing this round of fair rotation.
 var ErrBudgetExceeded = errors.New("admission: unit budget exceeded")
 
+// ErrAdoptionPending reports that one or more profile managers have not yet
+// completed existing-worker adoption. Ordinary acquisition remains blocked
+// host-wide until every durable adoption fence is cleared.
+var ErrAdoptionPending = errors.New("admission: existing-worker adoption pending")
+
 // ErrEvidenceRequired reports a Reconcile call without exact retained
 // evidence that the previous worker and registration are absent. Fenced
 // recovery never releases an active lease on ambiguous or missing evidence.
@@ -142,4 +147,10 @@ type Tombstone struct {
 	Reason    TombstoneReason `json:"reason"`
 	Evidence  string          `json:"evidence,omitempty"`
 	Sequence  int64           `json:"sequence"`
+}
+
+// AdoptionFence records one policy participant whose replacement manager has
+// not yet completed its recovered-running-worker adoption pass.
+type AdoptionFence struct {
+	ProfileID string `json:"profileId"`
 }

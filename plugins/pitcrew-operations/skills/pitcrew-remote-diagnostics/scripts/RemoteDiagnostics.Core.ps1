@@ -719,6 +719,7 @@ function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
             -MaximumLength 32
         if ($command -notin @(
                 'acquire',
+                'adopt',
                 'renew',
                 'activate',
                 'release',

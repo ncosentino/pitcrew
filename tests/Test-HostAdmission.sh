@@ -38,6 +38,7 @@ assert_false() {
 
 admission_cli="${TEMP_DIRECTORY}/pitcrew-admission"
 admission_calls="${TEMP_DIRECTORY}/admission-calls.log"
+adoption_attempt="${TEMP_DIRECTORY}/adoption-attempt"
 cat > "${admission_cli}" <<'EOF'
 #!/bin/sh
 command="$1"
@@ -59,8 +60,14 @@ printf '%s|%s|%s|%s\n' "${command}" "${profile}" "${slot}" "${demand}" \
     >> "${PITCREW_TEST_ADMISSION_CALLS}"
 case "${command}:${PITCREW_TEST_ADMISSION_MODE:-success}" in
     acquire:withheld) exit 3 ;;
-    acquire:degraded|activate:degraded) exit 5 ;;
-    acquire:error|release:error|reconcile:error) exit 1 ;;
+    acquire:degraded|activate:degraded|adopt:degraded) exit 5 ;;
+    acquire:error|adopt:error|release:error|reconcile:error) exit 1 ;;
+    adopt:flaky)
+        if [ ! -f "${PITCREW_TEST_ADOPTION_ATTEMPT}" ]; then
+            : > "${PITCREW_TEST_ADOPTION_ATTEMPT}"
+            exit 1
+        fi
+        ;;
     release:not-found|reconcile:not-found) exit 4 ;;
 esac
 case "${command}" in
@@ -75,7 +82,7 @@ case "${command}" in
             exit 1
         fi
         ;;
-    activate)
+    activate|adopt)
         printf '{"profileId":"%s","slotKey":"%s","leaseId":"lease-1","units":2,"status":"active"}\n' \
             "${profile}" "${slot}"
         ;;
@@ -83,13 +90,28 @@ esac
 EOF
 chmod +x "${admission_cli}"
 
+docker_calls="${TEMP_DIRECTORY}/docker-calls.log"
+cat > "${TEMP_DIRECTORY}/docker" <<'EOF'
+#!/bin/sh
+printf '%s\n' "$*" >> "${PITCREW_TEST_DOCKER_CALLS}"
+if [ "$1" = "inspect" ]; then
+    printf '%s\n' "true"
+    exit 0
+fi
+exit 1
+EOF
+chmod +x "${TEMP_DIRECTORY}/docker"
+
 PROFILE_ID="control"
 PITCREW_HOST_ADMISSION_NAMESPACE="primary"
 PITCREW_HOST_ADMISSION_SOCKET="/var/lib/pitcrew-admission/coordinator.sock"
 PITCREW_HOST_ADMISSION_CLI="${admission_cli}"
 PITCREW_HOST_ADMISSION_CLI_TIMEOUT=2
 PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY="${TEMP_DIRECTORY}/pending-releases"
+PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY="${TEMP_DIRECTORY}/pending-adoptions"
 PITCREW_TEST_ADMISSION_CALLS="${admission_calls}"
+PITCREW_TEST_ADOPTION_ATTEMPT="${adoption_attempt}"
+PITCREW_TEST_DOCKER_CALLS="${docker_calls}"
 export \
     PROFILE_ID \
     PITCREW_HOST_ADMISSION_NAMESPACE \
@@ -97,7 +119,10 @@ export \
     PITCREW_HOST_ADMISSION_CLI \
     PITCREW_HOST_ADMISSION_CLI_TIMEOUT \
     PITCREW_HOST_ADMISSION_RELEASE_DIRECTORY \
-    PITCREW_TEST_ADMISSION_CALLS
+    PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY \
+    PITCREW_TEST_ADMISSION_CALLS \
+    PITCREW_TEST_ADOPTION_ATTEMPT \
+    PITCREW_TEST_DOCKER_CALLS
 . "${ROOT}/manager/host-admission.sh"
 
 manager_source="${ROOT}/manager/manage-runners.sh"
@@ -113,6 +138,15 @@ assert_true \
 assert_true \
     "Fixed manager does not activate leases before Docker start." \
     grep -Fq 'host_admission_activate' "${manager_source}"
+assert_true \
+    "Fixed manager recovery does not adopt already-running workers." \
+    grep -Fq 'host_admission_adopt_running' "${manager_source}"
+assert_true \
+    "Fixed manager recovery does not establish a coordinator adoption fence." \
+    grep -Fq 'host_admission_begin_adoption' "${manager_source}"
+assert_true \
+    "Fixed manager recovery clears the coordinator fence before tracked adoptions finish." \
+    grep -Fq 'while host_admission_adoption_pending' "${manager_source}"
 assert_true \
     "Fixed manager recovery ignores created worker containers." \
     grep -Fq 'docker ps -aq --filter "label=${MANAGED_LABEL}"' "${manager_source}"
@@ -154,6 +188,20 @@ admission_slots="${TEMP_DIRECTORY}/admission-slots"
 admission_slot="${admission_slots}/control-1"
 mkdir -p "${admission_slot}"
 : > "${admission_calls}"
+assert_true \
+    "Fixed manager could not establish the host-wide adoption fence." \
+    host_admission_begin_adoption
+assert_true \
+    "Fixed manager did not send the profile-scoped begin-adoption command." \
+    grep -q '^begin-adoption|control||' "${admission_calls}"
+assert_true \
+    "Fixed manager could not clear the host-wide adoption fence." \
+    host_admission_complete_adoption
+assert_true \
+    "Fixed manager did not send the profile-scoped complete-adoption command." \
+    grep -q '^complete-adoption|control||' "${admission_calls}"
+
+: > "${admission_calls}"
 host_admission_begin_wait "${admission_slot}" "${admission_slots}"
 assert_true \
     "Waiting fixed slot did not publish one unit of pending demand." \
@@ -179,6 +227,39 @@ assert_true \
     host_admission_release "${admission_slot}" "control-1"
 assert_false \
     "Released host-admission lease file remained in slot state." \
+    test -f "${admission_slot}/${HOST_ADMISSION_LEASE_FILE}"
+
+: > "${admission_calls}"
+rm -f "${adoption_attempt}"
+PITCREW_TEST_ADMISSION_MODE="flaky"
+export PITCREW_TEST_ADMISSION_MODE
+PATH="${TEMP_DIRECTORY}:${PATH}"
+export PATH
+assert_true \
+    "Fixed running-worker adoption did not retry after a transient coordinator outage." \
+    host_admission_adopt_running \
+        "${admission_slot}" \
+        "control-1" \
+        "legacy-container" \
+        0
+assert_equals \
+    "2" \
+    "$(grep -c '^adopt|control|control-1|' "${admission_calls}")" \
+    "Fixed running-worker adoption did not retry the same deterministic slot identity."
+assert_true \
+    "Fixed running-worker adoption did not persist an active lease." \
+    jq -e '.slotKey == "control-1" and .status == "active"' \
+        "${admission_slot}/${HOST_ADMISSION_LEASE_FILE}"
+assert_false \
+    "Fixed running-worker adoption attempted worker removal." \
+    grep -Eq '(^| )rm( |$)|(^| )stop( |$)' "${docker_calls}"
+PITCREW_TEST_ADMISSION_MODE="success"
+export PITCREW_TEST_ADMISSION_MODE
+assert_true \
+    "Fixed adopted lease did not release on natural worker exit." \
+    host_admission_release "${admission_slot}" "control-1"
+assert_false \
+    "Released fixed adopted lease remained in slot state." \
     test -f "${admission_slot}/${HOST_ADMISSION_LEASE_FILE}"
 
 PITCREW_TEST_ADMISSION_MODE="withheld"
@@ -319,6 +400,24 @@ assert_true \
     "Available host-admission status did not report its own scoped last decision." \
     jq -e '.lastDecision.command == "acquire" and .lastDecision.granted == true' \
         "${status_output}" >/dev/null
+
+adoption_pending_snapshot="${TEMP_DIRECTORY}/status-adoption-pending.json"
+jq '.adoptionFences = [{"profileId":"other-profile"}]' \
+    "${status_snapshot}" > "${adoption_pending_snapshot}"
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${adoption_pending_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-a"
+    PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT="profile-fingerprint-a"
+    export \
+        PITCREW_TEST_STATUS_SNAPSHOT \
+        PITCREW_HOST_ADMISSION_HOST_FINGERPRINT \
+        PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "A host-wide adoption fence was reported as available." \
+    jq -e '.status == "degraded"' "${status_output}" >/dev/null
 
 (
     PITCREW_TEST_STATUS_SNAPSHOT="${status_snapshot}"
