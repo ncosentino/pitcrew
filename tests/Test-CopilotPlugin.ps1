@@ -275,7 +275,7 @@ Add-Check (
     $poolUpdateSkill -match '`observedAt` is later than' -and
     $poolUpdateSkill -match 'every two seconds' -and
     $poolUpdateSkill -match 'at most 120 seconds' -and
-    $poolUpdateSkill -match 'stale handoff evidence'
+    $poolUpdateSkill -match 'stale\s+handoff evidence'
 ) 'The pool update skill does not fence verification to the replacement manager publication.'
 Add-Check (
     $poolUpdateSkill -match 'Stop immediately when fresh post-handoff evidence is\s+degraded, rejected, or mismatched' -and
