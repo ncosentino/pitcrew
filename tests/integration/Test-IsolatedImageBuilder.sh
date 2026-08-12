@@ -56,8 +56,9 @@ pwsh -NoProfile -File "${CERTIFICATE_SETUP}" \
 SERVER_CERTIFICATE_DIRECTORY="${TEMP_DIRECTORY}/certificates/server"
 CLIENT_CERTIFICATE_DIRECTORY="${TEMP_DIRECTORY}/certificates/client"
 CONTEXT_DIRECTORY="${TEMP_DIRECTORY}/context"
+INTERRUPT_DIRECTORY="${TEMP_DIRECTORY}/interrupt"
 OUTPUT_DIRECTORY="${TEMP_DIRECTORY}/output"
-mkdir -p "${CONTEXT_DIRECTORY}" "${OUTPUT_DIRECTORY}"
+mkdir -p "${CONTEXT_DIRECTORY}" "${INTERRUPT_DIRECTORY}" "${OUTPUT_DIRECTORY}"
 
 cat > "${CONTEXT_DIRECTORY}/Dockerfile" <<'EOF'
 # syntax=docker/dockerfile:1.7
@@ -67,6 +68,10 @@ LABEL org.opencontainers.image.test-payload="${PAYLOAD}"
 COPY payload.txt /payload.txt
 EOF
 printf 'isolated-image-builder\n' > "${CONTEXT_DIRECTORY}/payload.txt"
+cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
+FROM alpine:3.22
+RUN sleep 300
+EOF
 
 pwsh -NoProfile -File "${SERVICE_SETUP}" \
     -ServerCertificateDirectory "${SERVER_CERTIFICATE_DIRECTORY}"
@@ -141,18 +146,92 @@ fi
 docker run --rm \
     --network "${NETWORK_NAME}" \
     --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
-    --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
-    --entrypoint buildctl \
+    --mount "type=bind,src=${INTERRUPT_DIRECTORY},dst=/workspace,readonly" \
+    --entrypoint /bin/bash \
     "${CLIENT_IMAGE}" \
-    --addr tcp://buildkitd:1234 \
-    --tlsservername buildkitd \
-    --tlsdir /tls \
-    build \
-    --frontend dockerfile.v0 \
-    --local context=/workspace \
-    --local dockerfile=/workspace \
-    --opt platform=linux/amd64 \
-    --progress plain >/dev/null
+    -lc '
+        set -euo pipefail
+        arguments=(
+            --addr tcp://buildkitd:1234
+            --tlsservername buildkitd
+            --tlsdir /tls
+        )
+        set -m
+        buildctl "${arguments[@]}" build \
+            --frontend dockerfile.v0 \
+            --local context=/workspace \
+            --local dockerfile=/workspace \
+            --opt platform=linux/amd64 \
+            --output type=oci,dest=/tmp/interrupted.tar \
+            --progress plain \
+            >/tmp/interrupted.log 2>&1 &
+        build_pid=$!
+        set +m
+        build_pgid="$(
+            ps -o pgid= -p "${build_pid}" |
+                tr -d "[:space:]"
+        )"
+        if [[ "${build_pgid}" != "${build_pid}" ]]; then
+            kill -KILL "${build_pid}" 2>/dev/null || true
+            wait "${build_pid}" 2>/dev/null || true
+            exit 1
+        fi
+        recorded=false
+        for _ in $(seq 1 120); do
+            histories="$(
+                buildctl \
+                    "${arguments[@]}" \
+                    debug histories \
+                    --format "{{json .}}"
+            )"
+            usage="$(
+                buildctl \
+                    "${arguments[@]}" \
+                    du \
+                    --format "{{json .}}"
+            )"
+            if [[ -n "${histories}" ]] &&
+                [[ -n "${usage}" && "${usage}" != "null" ]]; then
+                recorded=true
+                break
+            fi
+            sleep 1
+        done
+        if [[ "${recorded}" != "true" ]]; then
+            kill -KILL -- "-${build_pgid}" 2>/dev/null || true
+            wait "${build_pid}" 2>/dev/null || true
+            exit 1
+        fi
+        # The build may exit between the recorded-state observation and signal
+        # delivery. The nonzero wait status and settled residue checks below are
+        # the authoritative interruption evidence.
+        set +e
+        kill -KILL -- "-${build_pgid}" 2>/dev/null
+        wait "${build_pid}"
+        build_status=$?
+        set -e
+        if [[ "${build_status}" -eq 0 ]]; then
+            exit 1
+        fi
+        for _ in $(seq 1 60); do
+            usage="$(
+                buildctl \
+                    "${arguments[@]}" \
+                    du \
+                    --format "{{json .}}"
+            )"
+            if jq -e \
+                "type == \"array\" and
+                 length > 0 and
+                 all(.[]; .inUse == false)" \
+                <<<"${usage}" \
+                >/dev/null; then
+                exit 0
+            fi
+            sleep 1
+        done
+        exit 1
+    '
 seeded_cache="$(
     docker run --rm \
         --network "${NETWORK_NAME}" \
@@ -166,6 +245,22 @@ seeded_cache="$(
 )"
 if [[ -z "${seeded_cache}" || "${seeded_cache}" == "null" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit state for preflight cleanup." >&2
+    exit 1
+fi
+seeded_histories="$(
+    docker run --rm \
+        --network "${NETWORK_NAME}" \
+        --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+        --entrypoint buildctl \
+        "${CLIENT_IMAGE}" \
+        --addr tcp://buildkitd:1234 \
+        --tlsservername buildkitd \
+        --tlsdir /tls \
+        debug histories \
+        --format '{{json .}}'
+)"
+if [[ -z "${seeded_histories}" ]]; then
+    echo "Interrupted-job fixture did not leave BuildKit history." >&2
     exit 1
 fi
 
@@ -252,6 +347,22 @@ remaining_cache="$(
 )"
 if [[ -n "${remaining_cache}" && "${remaining_cache}" != "null" ]]; then
     echo "BuildKit retained cache after the job boundary: ${remaining_cache}" >&2
+    exit 1
+fi
+remaining_histories="$(
+    docker run --rm \
+        --network "${NETWORK_NAME}" \
+        --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+        --entrypoint buildctl \
+        "${CLIENT_IMAGE}" \
+        --addr tcp://buildkitd:1234 \
+        --tlsservername buildkitd \
+        --tlsdir /tls \
+        debug histories \
+        --format '{{json .}}'
+)"
+if [[ -n "${remaining_histories}" ]]; then
+    echo "BuildKit retained history after the job boundary." >&2
     exit 1
 fi
 

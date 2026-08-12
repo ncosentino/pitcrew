@@ -108,6 +108,23 @@ foreach ($argument in @(
     Add-Check ($helper -match [regex]::Escape($argument)) "Image-builder helper omits '$argument'."
 }
 Add-Check ($helper -notmatch '\beval\b|/var/run/docker\.sock') 'Image-builder helper uses unsafe evaluation or Docker access.'
+$historyPruneIndex = $helper.IndexOf(
+    'prune-histories',
+    [StringComparison]::Ordinal)
+$cachePruneIndex = $helper.IndexOf(
+    'prune --all',
+    [StringComparison]::Ordinal)
+Add-Check (
+    $historyPruneIndex -ge 0 -and
+    $cachePruneIndex -gt $historyPruneIndex
+) 'Image-builder helper does not delete histories before pruning cache.'
+Add-Check (
+    $helper -match '\bdu\b' -and
+    $helper -match [regex]::Escape("--format '{{json .}}'") -and
+    $helper -match 'debug histories' -and
+    $helper -match '\$\{usage\}" == "null"' -and
+    $helper -match 'seq 1 30'
+) 'Image-builder helper does not verify bounded empty cache and history state.'
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "pitcrew-buildkit-cert-tests-$([guid]::NewGuid().ToString('N'))"
 try {
