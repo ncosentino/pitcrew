@@ -194,6 +194,11 @@ The helper compares BuildKit metadata with the registry digest returned by pinne
 Build arguments with secret-shaped names are rejected. Use BuildKit secret mounts for
 future secret-bearing build inputs; do not pass secrets as ordinary build arguments.
 
+Before and after every build, the helper deletes BuildKit history before pruning
+cache. It retries the cache prune for up to 30 seconds and succeeds only after both
+history and disk usage are verified empty. BuildKit 0.32.2 serializes empty disk usage
+as JSON `null`; any other nonempty value is retained state and fails the job boundary.
+
 ## Qualification
 
 Before enabling a repository workflow, prove:

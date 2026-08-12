@@ -194,12 +194,45 @@ buildctl_arguments=(
 )
 
 cleanup_builder() {
-    local cleanup_status=0
-    buildctl "${buildctl_arguments[@]}" prune --all >/dev/null ||
-        cleanup_status=$?
-    buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null ||
-        cleanup_status=$?
-    return "${cleanup_status}"
+    local histories
+    local usage
+
+    for _ in $(seq 1 30); do
+        if ! buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null; then
+            sleep 1
+            continue
+        fi
+        if ! buildctl "${buildctl_arguments[@]}" prune --all >/dev/null; then
+            sleep 1
+            continue
+        fi
+        if ! usage="$(
+            buildctl \
+                "${buildctl_arguments[@]}" \
+                du \
+                --format '{{json .}}'
+        )"; then
+            sleep 1
+            continue
+        fi
+        if ! histories="$(
+            buildctl \
+                "${buildctl_arguments[@]}" \
+                debug histories \
+                --format '{{json .}}'
+        )"; then
+            sleep 1
+            continue
+        fi
+        if [[ -z "${histories}" ]] &&
+            [[ -z "${usage}" || "${usage}" == "null" ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+
+    echo "BuildKit cleanup did not reach empty cache and history state." >&2
+    return 1
 }
 
 cleanup_on_exit() {
@@ -214,7 +247,10 @@ cleanup_on_exit() {
     exit "${build_status}"
 }
 
-cleanup_builder
+if ! cleanup_builder; then
+    echo "BuildKit preflight cleanup failed; the daemon must not be reused." >&2
+    exit 1
+fi
 trap cleanup_on_exit EXIT
 
 mkdir -p "$(dirname "${metadata_file}")"
