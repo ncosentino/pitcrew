@@ -149,9 +149,9 @@ pitcrew-build-image \
   --output-oci "$RUNNER_TEMP/project-verification.tar"
 ```
 
-This builds the Dockerfile, writes an OCI tarball, verifies its digest with `crane`,
-and creates no registry tag. Put toolchain assertions inside the Dockerfile so the
-build itself proves the resulting image contract.
+This builds the Dockerfile, writes an OCI tarball, verifies the digest and manifest
+blob declared by its OCI index, and creates no registry tag. Put toolchain assertions
+inside the Dockerfile so the build itself proves the resulting image contract.
 
 ## Publish and verify an immutable image
 

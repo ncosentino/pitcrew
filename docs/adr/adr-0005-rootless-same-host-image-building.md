@@ -134,10 +134,10 @@ Arguments are assembled as arrays and passed directly to `buildctl`; the helper 
 uses `eval`. Secret-shaped build-argument names, control characters, unsupported
 platforms, mixed output modes, and unbounded values fail before contacting BuildKit.
 
-Pull-request verification writes an OCI tarball and verifies its digest with
-`crane --tarball`. It creates no registry tag. Protected publication pushes the
-tagged image, reads the BuildKit metadata digest, and can require `crane digest` to
-return the same registry digest.
+Pull-request verification writes an OCI tarball and verifies the digest and manifest
+blob declared by its standard `index.json`. It creates no registry tag. Protected
+publication pushes the tagged image, reads the BuildKit metadata digest, and can
+require `crane digest` to return the same registry digest.
 
 The helper removes cache and unpinned build history before and after every build. A
 hard-cancelled worker may skip its exit trap, so the next job's preflight cleanup is

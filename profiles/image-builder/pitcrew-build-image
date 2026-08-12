@@ -262,9 +262,17 @@ if [[ "${mode}" == "push" ]]; then
     fi
     printf '%s@%s\n' "${image_ref%:*}" "${digest}"
 else
-    tarball_digest="$(crane digest --tarball "${oci_output}")"
+    tarball_digest="$(
+        tar -xOf "${oci_output}" index.json |
+            jq -r '.manifests[0].digest // empty'
+    )"
     if [[ "${tarball_digest}" != "${digest}" ]]; then
         echo "OCI output digest '${tarball_digest}' does not match BuildKit digest '${digest}'." >&2
+        exit 1
+    fi
+    digest_blob="blobs/sha256/${digest#sha256:}"
+    if ! tar -tf "${oci_output}" | grep -Fqx "${digest_blob}"; then
+        echo "OCI output does not contain its declared manifest blob." >&2
         exit 1
     fi
     printf 'oci://%s@%s\n' "${oci_output}" "${digest}"
