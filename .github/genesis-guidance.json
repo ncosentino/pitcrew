@@ -41,13 +41,17 @@
       "observed-state.schema.json",
       "plugins/pitcrew-operations/plugin.json",
       "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/SKILL.md",
+      "profiles/android-emulator/Dockerfile",
       "profiles/copilot-cli/Dockerfile",
+      "profiles/image-builder/Dockerfile",
       "README.md",
       "runner-profile.schema.json",
       "RunnerProfiles.Functions.ps1",
       "scripts/release/New-PitCrewReleaseAssets.ps1",
       "Setup-Runner.ps1",
       "tests/Test-CopilotPlugin.ps1",
+      "tests/integration/Test-AndroidEmulatorImage.sh",
+      "tests/integration/Test-IsolatedImageBuilder.sh",
       "tests/Test-RunnerProfiles.ps1"
     ]
   },

@@ -8,7 +8,7 @@ $script:RunnerManagerContractVersion = 18
 $script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerDefinedHostAdmissionContractVersion = 18
 $script:RunnerDefinedDiagnosticsContractVersion = 18
-$script:RunnerWorkerRuntimeContractVersion = 2
+$script:RunnerWorkerRuntimeContractVersion = 3
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384
 $script:RunnerManagerJournalMaximumEvidenceLength = 160
@@ -409,6 +409,8 @@ function Resolve-RunnerProfile {
     $verificationCommands = @()
     $effectiveReadOnlyVolumes = @()
     $effectiveServiceNetwork = $null
+    $effectiveRuntimeDevices = @()
+    $effectiveSharedMemory = $null
     $build = $null
     $effectiveAutoscaling = $null
     $effectiveHostAdmission = $null
@@ -488,6 +490,18 @@ function Resolve-RunnerProfile {
             }
             $effectiveServiceNetwork = [PSCustomObject][ordered]@{
                 Source = $serviceNetworkSource
+            }
+        }
+        if ($manifest.PSObject.Properties['runtime']) {
+            if ($manifest.runtime.PSObject.Properties['devices']) {
+                $effectiveRuntimeDevices = @(
+                    @($manifest.runtime.devices) |
+                        ForEach-Object { ([string]$_).Trim().ToLowerInvariant() } |
+                        Sort-Object -Unique
+                )
+            }
+            if ($manifest.runtime.PSObject.Properties['sharedMemory']) {
+                $effectiveSharedMemory = [string]$manifest.runtime.sharedMemory
             }
         }
         if ($manifest.PSObject.Properties['autoscaling']) {
@@ -704,6 +718,32 @@ function Resolve-RunnerProfile {
         }
     }
 
+    foreach ($device in $effectiveRuntimeDevices) {
+        if ($device -cne 'kvm') {
+            throw "Worker runtime device '$device' is unsupported. Only the typed 'kvm' device is allowed."
+        }
+    }
+    $sharedMemoryBytes = if ($null -ne $effectiveSharedMemory) {
+        ConvertTo-RunnerByteLimit `
+            -Value $effectiveSharedMemory `
+            -LimitName 'Worker shared-memory size' `
+            -MinimumBytes 67108864
+    } else {
+        $null
+    }
+    $runtimePolicy = if (
+        $effectiveRuntimeDevices.Count -gt 0 -or
+        $null -ne $sharedMemoryBytes
+    ) {
+        [PSCustomObject][ordered]@{
+            Devices = @($effectiveRuntimeDevices)
+            DevicesValue = $effectiveRuntimeDevices -join ','
+            SharedMemoryBytes = $sharedMemoryBytes
+        }
+    } else {
+        $null
+    }
+
     $requiredLabel = if ($profileName -eq 'default') { 'general-purpose' } else { $profileName }
     $labelList = ConvertTo-RunnerLabelList `
         -Labels $effectiveLabels `
@@ -828,6 +868,7 @@ function Resolve-RunnerProfile {
         Autoscaling = $effectiveAutoscaling
         HostAdmission = $effectiveHostAdmission
         Resources = $resourcePolicy
+        Runtime = $runtimePolicy
         ReadOnlyVolumes = @($effectiveReadOnlyVolumes)
         ReadOnlyVolumesValue = @(
             $effectiveReadOnlyVolumes |
@@ -1797,6 +1838,14 @@ function New-RunnerStaticProfileState {
         } else {
             $null
         }
+        runtime = if ($Profile.Runtime) {
+            [PSCustomObject][ordered]@{
+                devices = @($Profile.Runtime.Devices)
+                sharedMemoryBytes = $Profile.Runtime.SharedMemoryBytes
+            }
+        } else {
+            $null
+        }
         readOnlyVolumes = @(
             $Profile.ReadOnlyVolumes |
                 ForEach-Object {
@@ -1906,6 +1955,11 @@ function Get-RunnerWorkerConfiguration {
         } else {
             $null
         }
+        runtime = if ($Configuration.PSObject.Properties['runtime']) {
+            $Configuration.runtime
+        } else {
+            $null
+        }
         readOnlyVolumes = if (
             $Configuration.PSObject.Properties['readOnlyVolumes']
         ) {
@@ -1959,6 +2013,7 @@ function Get-RunnerRefreshCompatibilityConfiguration {
         resolvedImageId = $worker.resolvedImageId
         build = $worker.build
         resources = $worker.resources
+        runtime = $worker.runtime
         readOnlyVolumes = @($worker.readOnlyVolumes)
         serviceNetwork = $worker.serviceNetwork
         labels = @($worker.labels)
@@ -2212,6 +2267,15 @@ function New-RunnerEnvironmentContent {
         $Profile.NamePrefix,
         $Profile.LabelsValue,
         $Profile.RunnerGroup,
+        $(if ($Profile.Runtime) { $Profile.Runtime.DevicesValue } else { '' }),
+        $(if (
+            $Profile.Runtime -and
+            $null -ne $Profile.Runtime.SharedMemoryBytes
+        ) {
+            [string]$Profile.Runtime.SharedMemoryBytes
+        } else {
+            ''
+        }),
         $Profile.ReadOnlyVolumesValue,
         $Profile.ServiceNetworkValue,
         $Profile.HostAdmissionVolumeName,
@@ -2264,6 +2328,19 @@ function New-RunnerEnvironmentContent {
     } else {
         ''
     }
+    $runtimeDevices = if ($Profile.Runtime) {
+        [string]$Profile.Runtime.DevicesValue
+    } else {
+        ''
+    }
+    $sharedMemoryBytes = if (
+        $Profile.Runtime -and
+        $null -ne $Profile.Runtime.SharedMemoryBytes
+    ) {
+        [string]$Profile.Runtime.SharedMemoryBytes
+    } else {
+        ''
+    }
     $readOnlyVolumes = [string]$Profile.ReadOnlyVolumesValue
     $serviceNetwork = [string]$Profile.ServiceNetworkValue
     $hostAdmissionNamespace = if ($Profile.HostAdmission) {
@@ -2299,6 +2376,8 @@ function New-RunnerEnvironmentContent {
         "PITCREW_WORKER_MEMORY_SWAP_BYTES=$memorySwapBytes"
         "PITCREW_WORKER_CPU_CORES=$cpuCores"
         "PITCREW_WORKER_PIDS_LIMIT=$pidsLimit"
+        "PITCREW_WORKER_RUNTIME_DEVICES=$runtimeDevices"
+        "PITCREW_WORKER_SHM_SIZE_BYTES=$sharedMemoryBytes"
         "PITCREW_READ_ONLY_VOLUMES=$readOnlyVolumes"
         "PITCREW_SERVICE_NETWORK=$serviceNetwork"
         "PITCREW_SESSION_OWNER=$SessionOwner"

@@ -1,0 +1,82 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+if (($# < 1 || $# > 3)); then
+    echo "Usage: pitcrew-build-image IMAGE_REF [CONTEXT_DIRECTORY] [DOCKERFILE_DIRECTORY]" >&2
+    exit 2
+fi
+
+image_ref="$1"
+context_directory="${2:-.}"
+dockerfile_directory="${3:-${context_directory}}"
+buildkit_host="${BUILDKIT_HOST:-tcp://buildkitd:1234}"
+tls_directory="${BUILDKIT_TLS_DIR:-}"
+metadata_file="${PITCREW_BUILDKIT_METADATA_FILE:-${RUNNER_TEMP:-/tmp}/pitcrew-buildkit-metadata.json}"
+
+if [[ "${image_ref}" =~ [[:space:]] ]] || [[ "${image_ref}" != */*:* ]]; then
+    echo "IMAGE_REF must be a fully qualified tagged OCI image reference." >&2
+    exit 2
+fi
+if [[ ! -d "${context_directory}" || ! -d "${dockerfile_directory}" ]]; then
+    echo "Build context and Dockerfile locations must be existing directories." >&2
+    exit 2
+fi
+if [[ -z "${tls_directory}" ]]; then
+    echo "BUILDKIT_TLS_DIR is required." >&2
+    exit 2
+fi
+for certificate in ca.pem cert.pem key.pem; do
+    if [[ ! -r "${tls_directory}/${certificate}" ]]; then
+        echo "BUILDKIT_TLS_DIR is missing readable ${certificate}." >&2
+        exit 2
+    fi
+done
+
+buildctl_arguments=(
+    --addr "${buildkit_host}"
+    --tlsservername buildkitd
+    --tlsdir "${tls_directory}"
+)
+
+cleanup_builder() {
+    local cleanup_status=0
+    buildctl "${buildctl_arguments[@]}" prune --all >/dev/null ||
+        cleanup_status=$?
+    buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null ||
+        cleanup_status=$?
+    return "${cleanup_status}"
+}
+
+cleanup_on_exit() {
+    local build_status=$?
+    trap - EXIT
+    if ! cleanup_builder; then
+        echo "BuildKit cleanup failed; the profile must not reuse this daemon state." >&2
+        if ((build_status == 0)); then
+            build_status=1
+        fi
+    fi
+    exit "${build_status}"
+}
+
+cleanup_builder
+trap cleanup_on_exit EXIT
+
+mkdir -p "$(dirname "${metadata_file}")"
+rm -f "${metadata_file}"
+
+buildctl "${buildctl_arguments[@]}" build \
+    --frontend dockerfile.v0 \
+    --local "context=${context_directory}" \
+    --local "dockerfile=${dockerfile_directory}" \
+    --output "type=image,name=${image_ref},push=true" \
+    --metadata-file "${metadata_file}" \
+    --progress plain
+
+digest="$(jq -r '."containerimage.digest" // empty' "${metadata_file}")"
+if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+    echo "BuildKit did not return an immutable image digest." >&2
+    exit 1
+fi
+
+printf '%s@%s\n' "${image_ref%:*}" "${digest}"

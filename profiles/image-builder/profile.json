@@ -1,0 +1,37 @@
+{
+  "$schema": "../../runner-profile.schema.json",
+  "schemaVersion": 1,
+  "name": "image-builder",
+  "description": "Socketless OCI image builders that use an isolated mTLS BuildKit service.",
+  "image": "pitcrew-image-builder:0.32.2",
+  "labels": [
+    "oci-builder"
+  ],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true,
+  "autoscaling": {
+    "mode": "scale-set",
+    "minimumIdle": 0,
+    "scaleDownDelaySeconds": 60,
+    "maximumActiveWorkers": 1
+  },
+  "serviceNetwork": {
+    "source": "pitcrew-image-builder"
+  },
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile",
+    "args": {
+      "BUILDKIT_VERSION": "0.32.2",
+      "BUILDKIT_SHA256_X64": "2975d0f651ad96ba8b80b9992ae1f9a964f4408569af5b6dc36544165c3926af",
+      "BUILDKIT_SHA256_ARM64": "9e8f46bf309ec0ab262967be5538a4dbe06be756a82621f98253933bac5dcf92"
+    }
+  },
+  "verificationCommands": [
+    "test -x /actions-runner/bin/Runner.Listener",
+    "buildctl --version | grep -F \"v0.32.2\"",
+    "test -x /usr/local/bin/pitcrew-build-image",
+    "getent hosts buildkitd >/dev/null && timeout 5 bash -lc '</dev/tcp/buildkitd/1234'"
+  ]
+}

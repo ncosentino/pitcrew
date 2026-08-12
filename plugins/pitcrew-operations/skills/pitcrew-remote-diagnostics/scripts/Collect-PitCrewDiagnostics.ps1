@@ -692,6 +692,7 @@ function ConvertTo-PitCrewStateSummary {
             scope = Get-PitCrewProperty $configuration 'scope'
             autoscaling = Get-PitCrewProperty $configuration 'autoscaling'
             resources = Get-PitCrewProperty $configuration 'resources'
+            runtime = Get-PitCrewProperty $configuration 'runtime'
         }
         observed = [PSCustomObject][ordered]@{
             managerContractVersion = Get-PitCrewProperty $Observed 'managerContractVersion'

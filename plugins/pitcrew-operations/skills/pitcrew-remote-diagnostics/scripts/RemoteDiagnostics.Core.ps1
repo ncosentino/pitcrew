@@ -1102,7 +1102,8 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
             'pullImage',
             'scope',
             'autoscaling',
-            'resources') `
+            'resources',
+            'runtime') `
         -Context 'Static state'
     Assert-PitCrewRemoteDiagnosticsProperties `
         -Value $observed `

@@ -1,0 +1,50 @@
+{
+  "$schema": "../../runner-profile.schema.json",
+  "schemaVersion": 1,
+  "name": "android-emulator",
+  "description": "Disposable Android 14 emulator runners with typed KVM access.",
+  "image": "pitcrew-android-emulator:14.0-3.6.0-p0",
+  "labels": [
+    "android",
+    "android-14"
+  ],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true,
+  "autoscaling": {
+    "mode": "scale-set",
+    "minimumIdle": 0,
+    "scaleDownDelaySeconds": 120,
+    "maximumActiveWorkers": 1
+  },
+  "runtime": {
+    "devices": [
+      "kvm"
+    ],
+    "sharedMemory": "2g"
+  },
+  "resources": {
+    "memory": "8g",
+    "memorySwap": "8g",
+    "cpus": "4",
+    "pids": 4096
+  },
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile",
+    "args": {
+      "DOCKER_ANDROID_IMAGE": "budtmo/docker-android:emulator_14.0_v3.6.0-p0@sha256:d0e1c84530702c1b1bcfb1b51b12bfd63b179932accab86d159fb870a994404b",
+      "RUNNER_IMAGE": "myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817"
+    }
+  },
+  "verificationCommands": [
+    "test \"$(uname -m)\" = \"x86_64\"",
+    "/actions-runner/bin/Runner.Listener --version",
+    "test -x /usr/local/bin/start-android-emulator",
+    "test -c /dev/kvm && test -r /dev/kvm && test -w /dev/kvm",
+    "test \"$USER_BEHAVIOR_ANALYTICS\" = \"false\"",
+    "adb version",
+    "emulator -version",
+    "emulator -accel-check"
+  ]
+}

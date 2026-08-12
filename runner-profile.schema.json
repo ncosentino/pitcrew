@@ -153,6 +153,28 @@
         }
       }
     },
+    "runtime": {
+      "type": "object",
+      "additionalProperties": false,
+      "minProperties": 1,
+      "properties": {
+        "devices": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "uniqueItems": true,
+          "items": {
+            "enum": [
+              "kvm"
+            ]
+          }
+        },
+        "sharedMemory": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:[bBkKmMgGtT]|[kKmMgGtT][bBiI]|[kKmMgGtT][iI][bB])?$"
+        }
+      }
+    },
     "resources": {
       "type": "object",
       "additionalProperties": false,

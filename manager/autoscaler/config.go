@@ -33,6 +33,7 @@ type config struct {
 	maximumActiveWorkers int
 	workerImageID        string
 	resources            workerResourcePolicy
+	runtime              workerRuntimePolicy
 	readOnlyVolumes      []readOnlyVolume
 	serviceNetwork       string
 	scaleDownDelay       time.Duration
@@ -264,6 +265,10 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 	if err != nil {
 		return config{}, err
 	}
+	runtimePolicy, err := loadWorkerRuntimePolicy(value)
+	if err != nil {
+		return config{}, err
+	}
 	readOnlyVolumes, err := parseReadOnlyVolumes(
 		value("PITCREW_READ_ONLY_VOLUMES", ""),
 	)
@@ -300,6 +305,7 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		maximumActiveWorkers: maximumActiveWorkers,
 		workerImageID:        workerImageID,
 		resources:            resources,
+		runtime:              runtimePolicy,
 		readOnlyVolumes:      readOnlyVolumes,
 		serviceNetwork:       serviceNetwork,
 		scaleDownDelay:       scaleDownDelay,

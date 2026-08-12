@@ -23,6 +23,7 @@ type containerLaunch struct {
 	jitConfig string
 	labels    map[string]string
 	resources workerResourcePolicy
+	runtime   workerRuntimePolicy
 	volumes   []readOnlyVolume
 	network   string
 }
@@ -151,6 +152,9 @@ func (d *dockerCLI) run(ctx context.Context, launch containerLaunch) (string, er
 	if err := launch.resources.validate(); err != nil {
 		return "", fmt.Errorf("reject worker launch with invalid resource policy: %w", err)
 	}
+	if err := launch.runtime.validate(); err != nil {
+		return "", fmt.Errorf("reject worker launch with invalid runtime policy: %w", err)
+	}
 	output, err := d.executor.run(ctx, buildDockerRunArguments(launch)...)
 	if err != nil {
 		return "", fmt.Errorf("docker run failed: %w", err)
@@ -169,6 +173,9 @@ func (d *dockerCLI) run(ctx context.Context, launch containerLaunch) (string, er
 func (d *dockerCLI) create(ctx context.Context, launch containerLaunch) (string, error) {
 	if err := launch.resources.validate(); err != nil {
 		return "", fmt.Errorf("reject worker launch with invalid resource policy: %w", err)
+	}
+	if err := launch.runtime.validate(); err != nil {
+		return "", fmt.Errorf("reject worker launch with invalid runtime policy: %w", err)
 	}
 	output, err := d.executor.run(ctx, buildDockerCreateArguments(launch)...)
 	if err != nil {
@@ -282,6 +289,7 @@ func dockerLaunchArguments(verb string, detach bool, launch containerLaunch) []s
 		arguments = append(arguments, "--network", launch.network)
 	}
 	arguments = append(arguments, launch.resources.dockerArguments()...)
+	arguments = append(arguments, launch.runtime.dockerArguments()...)
 	for _, volume := range launch.volumes {
 		arguments = append(
 			arguments,

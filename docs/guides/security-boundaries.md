@@ -30,6 +30,21 @@ container actions, service containers, or Testcontainers.
 Do not restore host socket access as a convenience. Use a separate disposable
 VM or isolated daemon for Docker-dependent workloads.
 
+## Bound specialized container capabilities
+
+Profiles may opt into only two bounded runtime extensions: the typed KVM device and a
+canonical shared-memory size. Setup verifies them before manager replacement, and
+both managers render the same fixed Docker arguments.
+
+The contract does not accept arbitrary device paths, Linux capabilities, seccomp
+settings, blanket privilege, bind mounts, or Docker endpoints. KVM still increases
+the host-kernel attack surface, so use it only for trusted workflows under a
+dedicated profile label.
+
+Image-building workers use an mTLS BuildKit service through a profile service
+network. The service must not be the PitCrew orchestration daemon, and a worker
+without the approved client identity must be rejected.
+
 ## Protect registration credentials
 
 PitCrew writes the runner-registration token to `.env` or `.env.<profile>`.

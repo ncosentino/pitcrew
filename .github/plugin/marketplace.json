@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Operational skills for safely managing PitCrew runner pools and dashboards.",
-    "version": "1.11.5"
+    "version": "1.11.6"
   },
   "plugins": [
     {
       "name": "pitcrew-operations",
       "description": "Use PitCrew's supported scripts for capacity, safe rollouts, updates, local or remote diagnostics, read-only job-performance correlation, and manager-only recovery.",
-      "version": "1.11.5",
+      "version": "1.11.6",
       "source": "./plugins/pitcrew-operations",
       "homepage": "https://www.devleader.ca/projects/pitcrew",
       "repository": "https://github.com/ncosentino/pitcrew",

@@ -16,6 +16,10 @@ Use these guides after completing [Getting Started](../getting-started.md):
 - [Pool-Local Services](pool-local-services.md) - reach operator-owned services
   through stable, profile-scoped Docker DNS without worker mounts or host
   ports.
+- [Isolated Image Builder](isolated-image-builder.md) - publish OCI images
+  through an mTLS BuildKit service without exposing the orchestration socket.
+- [Android Emulator Runners](android-emulator.md) - run disposable Android 14
+  emulators with typed KVM access.
 - [Routing Workloads](routing-workloads.md) - target the correct pool from GitHub Actions.
 - [Host-Local Admission](host-admission.md) - calibrate service classes,
   coordinate host budget, diagnose withheld demand, and roll policy back

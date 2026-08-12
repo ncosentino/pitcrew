@@ -121,6 +121,7 @@ type runnerScaler struct {
 	image             string
 	imageID           string
 	resources         workerResourcePolicy
+	runtime           workerRuntimePolicy
 	volumes           []readOnlyVolume
 	network           string
 	workerRevision    string
@@ -185,6 +186,7 @@ func newRunnerScaler(
 		image:             cfg.runnerImage,
 		imageID:           cfg.workerImageID,
 		resources:         cfg.resources,
+		runtime:           cfg.runtime,
 		volumes:           cfg.readOnlyVolumes,
 		network:           cfg.serviceNetwork,
 		workerRevision:    cfg.workerRevision,
@@ -1412,6 +1414,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		jitConfig: jit.encoded,
 		labels:    labels,
 		resources: s.resources,
+		runtime:   s.runtime,
 		volumes:   s.volumes,
 		network:   s.network,
 	}

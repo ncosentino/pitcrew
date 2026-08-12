@@ -194,7 +194,7 @@ try {
             manifest = $null
             configuration = @{
                 managerContractVersion = 18
-                workerRuntimeContractVersion = 1
+                workerRuntimeContractVersion = 3
                 profile = 'default'
                 image = 'ghcr.io/example/worker:1.0.0'
                 resolvedImageId = 'sha256:' + ('d' * 64)
@@ -206,6 +206,10 @@ try {
                     memorySwapBytes = 4294967296
                     cpuCores = '2'
                     pids = 1024
+                }
+                runtime = @{
+                    devices = @('kvm')
+                    sharedMemoryBytes = 2147483648
                 }
             }
         } | ConvertTo-Json -Depth 20)
@@ -647,6 +651,11 @@ if ($CommandArguments[0] -eq '-Pi') {
         $linuxReport.verifiedMeasurements.state.observed.capacityEvidence.targets[0].reason -eq
             'host-admission-withheld'
     ) 'The collector omitted admission-specific capacity-deficit evidence.'
+    Add-Check (
+        $linuxReport.verifiedMeasurements.state.static.runtime.devices[0] -eq 'kvm' -and
+        $linuxReport.verifiedMeasurements.state.static.runtime.sharedMemoryBytes -eq
+            2147483648
+    ) 'The collector omitted the bounded worker runtime policy.'
     $adoptReport = $linuxReport |
         ConvertTo-Json -Depth 100 |
         ConvertFrom-Json -Depth 100

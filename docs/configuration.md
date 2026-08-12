@@ -72,6 +72,7 @@ Named profiles conform to
 | `hostAdmission` | No | Opt-in host-local admission namespace, capacity, safety margin, per-worker cost, reservation, and borrowing policy. |
 | `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
 | `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned profile services. |
+| `runtime` | No | Bounded container-runtime policy. Only typed KVM access and canonical shared-memory sizing are supported. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |
 | `build` | No | Local Docker build context, Dockerfile, and non-secret build arguments. |
@@ -88,6 +89,33 @@ Named profiles conform to
 `minimumIdle` and prewarming can reduce cold-start exposure, but they are
 operational mitigations rather than proof of any host, network, or package-feed
 root cause.
+
+### Bounded worker runtime
+
+The optional `runtime` object permits the narrow container capabilities that both
+manager modes implement:
+
+```json
+{
+  "runtime": {
+    "devices": ["kvm"],
+    "sharedMemory": "2g"
+  }
+}
+```
+
+`devices` currently accepts only `kvm`, which maps to the exact Docker device
+`/dev/kvm:/dev/kvm:rwm`. Arbitrary device paths, capabilities, blanket privilege,
+seccomp settings, host mounts, and Docker endpoints are rejected by the schema.
+
+`sharedMemory` uses the same canonical binary-size syntax as memory limits and must
+be at least 64 MiB. Runtime policy contributes to worker revision and static
+diagnostics. Setup applies it to image-verification containers before manager
+handoff, so a missing KVM device fails without replacing the current profile.
+
+Worker-runtime contract version 3 adds this normalized policy without changing the
+manager observed-state contract. Changes roll worker containers while preserving
+assigned jobs on their prior runtime.
 
 ### Host-local admission policy
 
