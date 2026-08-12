@@ -132,6 +132,7 @@ jobs:
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/integration/fake-runner/fake-runner.sh
           bash -n tests/integration/Test-CapacityReconciliation.sh
+          bash -n tests/integration/Test-AndroidEmulatorImage.sh
           bash -n tests/integration/Test-HostAdmissionContention.sh
           bash -n tests/integration/Test-IsolatedImageBuilder.sh
 
@@ -164,9 +165,23 @@ jobs:
       - name: Run isolated image-builder integration
         run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
 
+  specialized-images:
+    name: Specialized profile images
+    needs: [validation-plan, contracts]
+    if: >-
+      needs.validation-plan.outputs.scope == 'full' &&
+      needs.contracts.result == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Build and qualify Android emulator image
+        run: bash ./tests/integration/Test-AndroidEmulatorImage.sh
+
   ci:
     name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
-    needs: [validation-plan, contracts, docker-integration]
+    needs: [validation-plan, contracts, docker-integration, specialized-images]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -175,6 +190,7 @@ jobs:
       PLAN_RESULT: ${{ needs.validation-plan.result }}
       CONTRACTS_RESULT: ${{ needs.contracts.result }}
       DOCKER_RESULT: ${{ needs.docker-integration.result }}
+      SPECIALIZED_IMAGES_RESULT: ${{ needs.specialized-images.result }}
     steps:
       - name: Check validation results
         run: |
@@ -183,7 +199,7 @@ jobs:
             exit 1
           fi
 
-          for result in "$CONTRACTS_RESULT" "$DOCKER_RESULT"; do
+          for result in "$CONTRACTS_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "::error::A required validation job failed or was cancelled."
               exit 1
@@ -192,19 +208,25 @@ jobs:
 
           case "$SCOPE" in
             full)
-              if [ "$CONTRACTS_RESULT" != "success" ] || [ "$DOCKER_RESULT" != "success" ]; then
+              if [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$DOCKER_RESULT" != "success" ] ||
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "success" ]; then
                 echo "::error::Full validation did not complete successfully."
                 exit 1
               fi
               ;;
             subset)
-              if [ "$CONTRACTS_RESULT" != "success" ] || [ "$DOCKER_RESULT" != "skipped" ]; then
+              if [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$DOCKER_RESULT" != "skipped" ] ||
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ]; then
                 echo "::error::Draft subset validation did not complete as planned."
                 exit 1
               fi
               ;;
             ready-only)
-              if [ "$CONTRACTS_RESULT" != "skipped" ] || [ "$DOCKER_RESULT" != "skipped" ]; then
+              if [ "$CONTRACTS_RESULT" != "skipped" ] ||
+                 [ "$DOCKER_RESULT" != "skipped" ] ||
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ]; then
                 echo "::error::Ready-only draft validation ran unexpected jobs."
                 exit 1
               fi
