@@ -47,6 +47,21 @@ It never uses `--privileged` or `--oci-worker-no-process-sandbox`. If these root
 settings cannot start successfully, qualification fails; do not substitute
 privileged BuildKit on a shared PitCrew node.
 
+The shipped Compose contract also defaults the persistent service to:
+
+```text
+memory: 8 GiB
+memory plus swap: 8 GiB
+CPU: 4 cores
+PIDs: 4096
+```
+
+Override these through `PITCREW_IMAGE_BUILDER_MEMORY_LIMIT`,
+`PITCREW_IMAGE_BUILDER_MEMORY_SWAP_LIMIT`, `PITCREW_IMAGE_BUILDER_CPU_LIMIT`,
+and `PITCREW_IMAGE_BUILDER_PIDS_LIMIT` before running service setup. Setup rejects
+an effective container without all four ceilings. Include the chosen service limits
+when calibrating the image-builder profile's host-admission worker cost.
+
 ## Generate service and client certificates
 
 Run from the PitCrew checkout:

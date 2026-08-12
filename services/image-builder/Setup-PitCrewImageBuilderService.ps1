@@ -116,6 +116,14 @@ function Assert-ServiceContract {
         throw 'Rootless BuildKit service did not apply systempaths=unconfined.'
     }
     if (
+        [long]$container.HostConfig.Memory -lt 6291456 -or
+        [long]$container.HostConfig.MemorySwap -lt [long]$container.HostConfig.Memory -or
+        [long]$container.HostConfig.NanoCpus -lt 1 -or
+        [long]$container.HostConfig.PidsLimit -lt 1
+    ) {
+        throw 'Rootless BuildKit service does not have complete CPU, memory, swap, and PID ceilings.'
+    }
+    if (
         @(
             $container.Mounts |
                 Where-Object { $_.Source -eq '/var/run/docker.sock' }
@@ -131,6 +139,7 @@ function Assert-ServiceContract {
     ) {
         throw "Rootless BuildKit service is not attached to '$networkName'."
     }
+    return $container
 }
 
 function Restore-EnvironmentValue {
@@ -284,7 +293,7 @@ try {
     $env:PITCREW_IMAGE_BUILDER_CERT_VOLUME = $targetCertificateVolume
     Invoke-ServiceCompose config --quiet | Out-Null
     Invoke-ServiceCompose up --detach --wait --force-recreate | Out-Null
-    Assert-ServiceContract
+    $activeContainer = Assert-ServiceContract
     Write-ServiceState `
         -CertificateVolume $targetCertificateVolume `
         -CertificateSha256 $certificateSha256
@@ -298,7 +307,7 @@ try {
             $env:PITCREW_IMAGE_BUILDER_CERT_VOLUME =
                 [string]$previousState.certificateVolume
             Invoke-ServiceCompose up --detach --wait --force-recreate | Out-Null
-            Assert-ServiceContract
+            Assert-ServiceContract | Out-Null
             Invoke-Docker volume rm $targetCertificateVolume | Out-Null
         } catch {
             throw (
@@ -320,3 +329,7 @@ Write-Host "  Network: $networkName"
 Write-Host "  State volume: $stateVolume"
 Write-Host "  Certificate volume: $targetCertificateVolume"
 Write-Host "  Server certificate SHA-256: $certificateSha256"
+Write-Host "  Memory bytes: $($activeContainer.HostConfig.Memory)"
+Write-Host "  Memory-plus-swap bytes: $($activeContainer.HostConfig.MemorySwap)"
+Write-Host "  CPU cores: $([decimal]$activeContainer.HostConfig.NanoCpus / 1000000000)"
+Write-Host "  PID limit: $($activeContainer.HostConfig.PidsLimit)"

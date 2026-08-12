@@ -96,6 +96,7 @@ profile. The service:
   state, or `--oci-worker-no-process-sandbox`;
 - joins only the `pitcrew-image-builder` bridge network under alias `buildkitd`;
 - stores state and server certificates in exact named Docker volumes;
+- applies explicit CPU, memory, memory-plus-swap, and PID ceilings;
 - requires mutual TLS on its worker-facing TCP listener; and
 - retains a manager-local Unix listener for its health check.
 
@@ -208,6 +209,8 @@ violates the selected boundary. Rejected.
 - The host must support rootless user namespaces and three unconfined security
   options.
 - The persistent service consumes host resources outside worker admission accounting.
+- service limits and the profile's combined admission cost require operator
+  calibration for the target host.
 - Profile concurrency remains one.
 - Cache reuse remains intentionally disabled.
 - Operators must rotate client secrets and update protected repository secrets.
