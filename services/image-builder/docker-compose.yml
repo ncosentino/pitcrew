@@ -3,6 +3,10 @@ services:
     image: moby/buildkit:v0.32.2-rootless@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b
     restart: unless-stopped
     stop_grace_period: 60s
+    mem_limit: ${PITCREW_IMAGE_BUILDER_MEMORY_LIMIT:-8g}
+    memswap_limit: ${PITCREW_IMAGE_BUILDER_MEMORY_SWAP_LIMIT:-8g}
+    cpus: ${PITCREW_IMAGE_BUILDER_CPU_LIMIT:-4}
+    pids_limit: ${PITCREW_IMAGE_BUILDER_PIDS_LIMIT:-4096}
     command:
       - --config
       - /etc/buildkit/buildkitd.toml

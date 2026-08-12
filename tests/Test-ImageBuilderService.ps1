@@ -72,6 +72,10 @@ foreach ($option in @(
 Add-Check ($compose -notmatch '(?m)^\s*privileged\s*:|/var/run/docker\.sock') 'Service Compose exposes broad Docker host control.'
 Add-Check ($compose -notmatch '(?m)^\s*ports\s*:') 'Service Compose publishes a host port.'
 Add-Check ($compose -match 'external:\s+true') 'Service Compose does not preserve external network and volume identities.'
+Add-Check ($compose -match 'mem_limit: \$\{PITCREW_IMAGE_BUILDER_MEMORY_LIMIT:-8g\}') 'Service Compose does not bound memory by default.'
+Add-Check ($compose -match 'memswap_limit: \$\{PITCREW_IMAGE_BUILDER_MEMORY_SWAP_LIMIT:-8g\}') 'Service Compose does not prevent unbounded swap.'
+Add-Check ($compose -match 'cpus: \$\{PITCREW_IMAGE_BUILDER_CPU_LIMIT:-4\}') 'Service Compose does not bound CPU by default.'
+Add-Check ($compose -match 'pids_limit: \$\{PITCREW_IMAGE_BUILDER_PIDS_LIMIT:-4096\}') 'Service Compose does not bound processes by default.'
 Add-Check ($config -match 'root = "/home/user/\.local/share/buildkit"') 'BuildKit state is not rooted in the rootless user directory.'
 Add-Check ($config -match 'rootless = true') 'BuildKit OCI worker is not explicitly rootless.'
 Add-Check ($config -match 'noProcessSandbox = false') 'BuildKit process isolation is not explicitly retained.'
@@ -81,6 +85,12 @@ Add-Check ($setup -match 'SecurityOpt') 'Service setup does not verify exact sec
 Add-Check (
     $setup -match 'MaskedPaths' -and $setup -match 'ReadonlyPaths'
 ) 'Service setup does not verify systempaths=unconfined through Docker inspect.'
+Add-Check (
+    $setup -match 'HostConfig\.Memory' -and
+    $setup -match 'HostConfig\.MemorySwap' -and
+    $setup -match 'HostConfig\.NanoCpus' -and
+    $setup -match 'HostConfig\.PidsLimit'
+) 'Service setup does not verify effective resource ceilings.'
 Add-Check ($setup -match 'pitcrew-image-builder-certs-\$\(\$certificateSha256\.Substring') 'Service setup does not version certificate volumes by identity.'
 Add-Check ($setup -match 'force-recreate') 'Service setup does not force certificate reload.'
 Add-Check ($setup -match 'rollback also failed') 'Service setup does not surface failed certificate rollback.'
