@@ -48,8 +48,10 @@
       "runner-profile.schema.json",
       "RunnerProfiles.Functions.ps1",
       "scripts/release/New-PitCrewReleaseAssets.ps1",
+      "services/image-builder/Setup-PitCrewImageBuilderService.ps1",
       "Setup-Runner.ps1",
       "tests/Test-CopilotPlugin.ps1",
+      "tests/Test-ImageBuilderService.ps1",
       "tests/integration/Test-AndroidEmulatorImage.sh",
       "tests/integration/Test-IsolatedImageBuilder.sh",
       "tests/Test-RunnerProfiles.ps1"

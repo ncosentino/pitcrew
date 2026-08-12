@@ -71,7 +71,7 @@ Named profiles conform to
 | `autoscaling` | No | Scale-set mode, minimum idle runners, scale-down stabilization delay, and optional aggregate admission ceiling. |
 | `hostAdmission` | No | Opt-in host-local admission namespace, capacity, safety margin, per-worker cost, reservation, and borrowing policy. |
 | `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
-| `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned profile services. |
+| `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned or explicitly PitCrew-shipped profile services. |
 | `runtime` | No | Bounded container-runtime policy. Only typed KVM access and canonical shared-memory sizing are supported. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |

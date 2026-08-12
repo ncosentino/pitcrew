@@ -95,6 +95,10 @@ jobs:
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
 
+      - name: Validate image-builder service
+        shell: pwsh
+        run: ./tests/Test-ImageBuilderService.ps1
+
       - name: Validate Copilot operations plugin
         shell: pwsh
         run: ./tests/Test-CopilotPlugin.ps1
@@ -131,6 +135,7 @@ jobs:
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/integration/fake-runner/fake-runner.sh
+          bash -n profiles/image-builder/pitcrew-build-image
           bash -n tests/integration/Test-CapacityReconciliation.sh
           bash -n tests/integration/Test-AndroidEmulatorImage.sh
           bash -n tests/integration/Test-HostAdmissionContention.sh
@@ -143,7 +148,9 @@ jobs:
         run: sh ./tests/Test-HostAdmission.sh
 
       - name: Validate Docker Compose configuration
-        run: docker compose --file docker-compose.yml config --quiet
+        run: |
+          docker compose --file docker-compose.yml config --quiet
+          docker compose --file services/image-builder/docker-compose.yml config --quiet
 
   docker-integration:
     name: Real Docker capacity reconciliation

@@ -1,0 +1,33 @@
+root = "/home/user/.local/share/buildkit"
+
+[grpc]
+  address = [
+    "unix:///run/user/1000/buildkit/buildkitd.sock",
+    "tcp://0.0.0.0:1234"
+  ]
+  [grpc.tls]
+    cert = "/certs/server-cert.pem"
+    key = "/certs/server-key.pem"
+    ca = "/certs/ca.pem"
+
+[history]
+  maxAge = 60
+  maxEntries = 1
+
+[cdi]
+  disabled = true
+
+[worker.oci]
+  enabled = true
+  rootless = true
+  snapshotter = "auto"
+  noProcessSandbox = false
+  gc = true
+  max-parallelism = 1
+
+[frontend."dockerfile.v0"]
+  enabled = true
+
+[frontend."gateway.v0"]
+  enabled = true
+  allowedRepositories = [ "docker.io/docker/dockerfile" ]

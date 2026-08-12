@@ -9,8 +9,12 @@ read-through package mirror. PitCrew can attach workers to one existing Docker
 bridge network so repositories use the same network-scoped service name on
 every host.
 
-PitCrew does not create, configure, start, stop, inspect credentials for, or
-remove the network or any service attached to it.
+Generic profile services remain operator-owned: PitCrew does not create, configure,
+start, stop, inspect credentials for, or remove them. A feature-specific guide may
+ship a separate, exact service setup contract. The
+[Isolated Image Builder](isolated-image-builder.md) is the only current built-in
+exception; its scoped setup script owns only the documented BuildKit network,
+volumes, and service.
 
 ## Provision the network
 

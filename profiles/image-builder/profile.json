@@ -3,7 +3,7 @@
   "schemaVersion": 1,
   "name": "image-builder",
   "description": "Socketless OCI image builders that use an isolated mTLS BuildKit service.",
-  "image": "pitcrew-image-builder:0.32.2",
+  "image": "pitcrew-image-builder:0.32.2-0.21.9",
   "labels": [
     "oci-builder"
   ],
@@ -25,12 +25,16 @@
     "args": {
       "BUILDKIT_VERSION": "0.32.2",
       "BUILDKIT_SHA256_X64": "2975d0f651ad96ba8b80b9992ae1f9a964f4408569af5b6dc36544165c3926af",
-      "BUILDKIT_SHA256_ARM64": "9e8f46bf309ec0ab262967be5538a4dbe06be756a82621f98253933bac5dcf92"
+      "BUILDKIT_SHA256_ARM64": "9e8f46bf309ec0ab262967be5538a4dbe06be756a82621f98253933bac5dcf92",
+      "CRANE_VERSION": "0.21.9",
+      "CRANE_SHA256_X64": "5c16d8ddb971cb1d5e6ed8b1e743da8224414eeba2c2762d8f1a61b2f095699e",
+      "CRANE_SHA256_ARM64": "1f4c647b7bb260ab5435661df5b526cf59950ebf95201790db7183ac189cbcbd"
     }
   },
   "verificationCommands": [
     "test -x /actions-runner/bin/Runner.Listener",
     "buildctl --version | grep -F \"v0.32.2\"",
+    "crane version | grep -F \"v0.21.9\"",
     "test -x /usr/local/bin/pitcrew-build-image",
     "getent hosts buildkitd >/dev/null && timeout 5 bash -lc '</dev/tcp/buildkitd/1234'"
   ]

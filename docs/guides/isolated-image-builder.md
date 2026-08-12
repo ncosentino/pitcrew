@@ -1,72 +1,108 @@
 ---
-description: Build and publish OCI images from a socketless PitCrew worker through an isolated mTLS BuildKit service.
+description: Build, verify, and publish OCI images from socketless PitCrew workers through a rootless same-host BuildKit service.
 ---
 
 # Isolated Image Builder
 
-The `image-builder` profile builds and publishes OCI images without giving workflow
-code the PitCrew host's Docker socket. Its worker contains `buildctl` and reaches one
-operator-owned BuildKit daemon through the profile's isolated service network.
+The `image-builder` profile builds OCI images without giving workflow code the
+PitCrew host's Docker socket. Disposable workers contain `buildctl`, `crane`, and
+`pitcrew-build-image`; a rootless BuildKit service performs build execution on the
+same Docker host.
 
-This lane is for Dockerfile builds and image publication. It does not support Docker
-Compose, Testcontainers, service containers, or integration tests whose bind mounts
-must resolve on the runner's Docker daemon.
+This lane supports Dockerfile build verification and image publication. It does not
+provide Docker Compose, Testcontainers, service containers, or a generic Docker API.
 
 ## Architecture
 
 ```text
 GitHub job
   -> disposable image-builder worker
-  -> mTLS BuildKit API on pitcrew-image-builder network
-  -> isolated build daemon
-  -> OCI registry
+  -> mTLS on pitcrew-image-builder network
+  -> rootless BuildKit service
+  -> optional OCI registry
 ```
 
-The BuildKit daemon is never the PitCrew orchestration daemon. Workers receive no
-Docker socket and no generic Docker API.
+The service runs as UID 1000 and receives no Docker socket or host port. Dockerfile
+build processes run inside the BuildKit container and see only the context streamed
+by `buildctl`; they cannot read the Actions runner filesystem or registration state.
 
-BuildKit commonly requires elevated daemon-host capabilities. Run it on a dedicated
-builder host or virtual machine. If the BuildKit container shares a Docker daemon with
-PitCrew, dedicate that entire host to the image-builder trust boundary.
+## Host prerequisites
 
-## Provision the service boundary
+Rootless BuildKit requires unprivileged user namespaces. On Ubuntu 24.04 or later,
+the host may require:
 
-Create the profile network:
+```text
+kernel.apparmor_restrict_unprivileged_userns=0
+```
+
+The service uses exactly:
+
+```text
+seccomp=unconfined
+apparmor=unconfined
+systempaths=unconfined
+```
+
+It never uses `--privileged` or `--oci-worker-no-process-sandbox`. If these rootless
+settings cannot start successfully, qualification fails; do not substitute
+privileged BuildKit on a shared PitCrew node.
+
+## Generate service and client certificates
+
+Run from the PitCrew checkout:
 
 ```powershell
-docker network create --driver bridge pitcrew-image-builder
+$certificates = .\services\image-builder\New-PitCrewBuildKitCertificates.ps1 `
+    -OutputDirectory <operator-owned-certificate-directory>
 ```
 
-Configure BuildKit 0.32.2 with a TCP listener protected by mutual TLS:
+The script creates:
 
-```toml
-root = "/var/lib/buildkit"
-
-[grpc]
-  address = [ "tcp://0.0.0.0:1234" ]
-  [grpc.tls]
-    cert = "/certs/server-cert.pem"
-    key = "/certs/server-key.pem"
-    ca = "/certs/ca.pem"
-
-[history]
-  maxAge = 60
-  maxEntries = 1
-
-[worker.oci]
-  enabled = true
-  gc = true
-  max-parallelism = 1
+```text
+authority/ca.pem
+authority/ca-key.pem
+server/ca.pem
+server/server-cert.pem
+server/server-key.pem
+client/ca.pem
+client/cert.pem
+client/key.pem
 ```
 
-Attach the daemon or an operator-owned TLS passthrough proxy to
-`pitcrew-image-builder` with network alias `buildkitd`. Do not publish port 1234 to
-the host or attach the service to a manager Compose network.
+It prints paths, expiry, and certificate fingerprints but never private material.
+Keep `authority` and `server` outside repositories and GitHub. Store only the three
+`client` files as protected, job-scoped repository secrets.
 
-Keep the CA private key and server private key outside PitCrew. Give workflows only a
-client CA certificate, client certificate, and client key through GitHub secrets.
+## Start the rootless service
 
-## Install the profile
+```powershell
+.\services\image-builder\Setup-PitCrewImageBuilderService.ps1 `
+    -ServerCertificateDirectory $certificates.serverDirectory
+```
+
+The setup script:
+
+- creates or validates `pitcrew-image-builder`;
+- creates the exact state volume and an immutable certificate volume keyed by the
+  server certificate fingerprint;
+- imports only server material into the certificate volume;
+- starts the pinned rootless BuildKit Compose service;
+- verifies that it is healthy, non-privileged, socketless, and attached only to the
+  intended network; and
+- preserves service state and certificates when stopped.
+
+The service remains running while Actions workers scale to zero.
+Certificate rotation creates a new volume and force-recreates the service. A failed
+replacement restores the previously recorded certificate volume before returning an
+error.
+
+Stop it only after the image-builder profile has no active workers:
+
+```powershell
+.\services\image-builder\Setup-PitCrewImageBuilderService.ps1 -Down
+```
+
+## Install the worker profile
 
 ```powershell
 .\Setup-Runner.ps1 `
@@ -74,69 +110,100 @@ client CA certificate, client certificate, and client key through GitHub secrets
     -Repos https://github.com/example/project=1
 ```
 
-The profile:
+The effective GitHub labels include `linux`, the host architecture,
+`image-builder`, and `oci-builder`. The profile permits one active worker across all
+targets because cleanup applies to the entire BuildKit daemon.
 
-- omits broad default labels;
-- accepts `runs-on: [linux, x64, image-builder]`;
-- permits one active worker across all configured repository targets;
-- verifies BuildKit client version 0.32.2 by checksum; and
-- requires the exact `pitcrew-image-builder` service network before replacing a
-  manager.
+An operator may add a repository-specific alias while preserving built-in labels:
 
-## Publish an image
+```powershell
+.\Setup-Runner.ps1 `
+    -Profile image-builder `
+    -Labels 'oci-builder,project-image-builder' `
+    -Repos https://github.com/example/project=1
+```
 
-Materialize the client certificate bundle into a job-private directory containing
-`ca.pem`, `cert.pem`, and `key.pem`, then call:
+## Materialize job credentials
+
+Create a job-private directory containing `ca.pem`, `cert.pem`, and `key.pem`, then
+set:
 
 ```bash
 export BUILDKIT_HOST=tcp://buildkitd:1234
 export BUILDKIT_TLS_DIR="$RUNNER_TEMP/buildkit-tls"
+export DOCKER_CONFIG="$RUNNER_TEMP/docker-config"
+```
 
+Use an `if: always()` step to delete both directories. Never upload them as artifacts,
+print them, or include them in profile state.
+
+## Verify a pull request without publishing
+
+```bash
+pitcrew-build-image \
+  --image-ref ghcr.io/example/project:candidate \
+  --context . \
+  --dockerfile . \
+  --platform linux/amd64 \
+  --build-arg SDK_VERSION=1.2.3 \
+  --output-oci "$RUNNER_TEMP/project-verification.tar"
+```
+
+This builds the Dockerfile, writes an OCI tarball, verifies the digest and manifest
+blob declared by its OCI index, and creates no registry tag. Put toolchain assertions
+inside the Dockerfile so the build itself proves the resulting image contract.
+
+## Publish and verify an immutable image
+
+After materializing job-scoped registry authentication:
+
+```bash
 immutable_ref="$(
   pitcrew-build-image \
-    ghcr.io/example/project:candidate \
-    . \
-    .
+    --image-ref ghcr.io/example/project:sha-"$GITHUB_SHA" \
+    --context . \
+    --dockerfile . \
+    --platform linux/amd64 \
+    --build-arg SDK_VERSION=1.2.3 \
+    --label org.opencontainers.image.revision="$GITHUB_SHA" \
+    --push \
+    --verify-registry
 )"
 
 printf 'Published %s\n' "$immutable_ref"
 ```
 
-`pitcrew-build-image`:
+The helper compares BuildKit metadata with the registry digest returned by pinned
+`crane`. A mismatch fails the job.
 
-1. rejects missing mTLS material;
-2. removes cache and unpinned history from a prior interrupted job;
-3. sends the local context to BuildKit;
-4. pushes the image;
-5. validates the returned `sha256` digest; and
-6. removes cache and history again on exit.
+Build arguments with secret-shaped names are rejected. Use BuildKit secret mounts for
+future secret-bearing build inputs; do not pass secrets as ordinary build arguments.
 
-The profile's aggregate maximum is one because cache pruning is a profile-wide job
-boundary. Increasing concurrency requires independent BuildKit daemons and profiles;
-do not let concurrent jobs prune one shared daemon.
+## Qualification
 
-Registry authentication remains job-scoped. Configure `$DOCKER_CONFIG` inside the
-worker and remove it before the job exits. Never put registry credentials in the
-profile, image, BuildKit daemon configuration committed to this repository, or
-observed state.
+Before enabling a repository workflow, prove:
 
-## Validate isolation
-
-Before production use, prove:
-
-- a client without the expected certificate is rejected;
-- `/var/run/docker.sock` is absent inside the worker;
-- the published registry digest matches BuildKit metadata;
-- `buildctl du` is empty after the helper exits;
-- a cancelled build is cleaned by the next job's preflight; and
-- no service administration endpoint is reachable from unrelated profiles.
+- the service runs as UID 1000 and is not privileged;
+- all three required security options are present;
+- an authenticated client connects and a CA-only client is rejected;
+- `/var/run/docker.sock` and the server private key are absent inside workers;
+- an unrelated profile cannot resolve `buildkitd`;
+- literal build arguments and labels are not shell-expanded;
+- pull-request mode produces an OCI tarball and no registry tag;
+- push mode returns the same digest as the registry;
+- `buildctl du` is empty after each job; and
+- the next job removes cache/history left by an interrupted predecessor.
 
 ## Update and rollback
 
-BuildKit client changes are normal worker-image changes. Review the version and
-checksums, then replay the complete profile command. Busy workers finish on the prior
-image.
+Update PitCrew through the published release and replay the service setup plus profile
+setup. Existing assigned workers finish naturally.
 
-Roll back by restoring the previous profile manifest or PitCrew release and replaying
-the complete setup command. BuildKit daemon upgrades remain operator-owned and should
-be rolled independently after saving their exact configuration and state policy.
+If qualification fails:
+
+1. keep repository image-builder workflows disabled;
+2. stop or drain the exact image-builder profile;
+3. stop the service without deleting its volumes;
+4. retain service logs, configuration, certificate fingerprints, and state for
+   diagnosis; and
+5. restore the prior workflow and PitCrew release.

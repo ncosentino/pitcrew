@@ -41,9 +41,10 @@ settings, blanket privilege, bind mounts, or Docker endpoints. KVM still increas
 the host-kernel attack surface, so use it only for trusted workflows under a
 dedicated profile label.
 
-Image-building workers use an mTLS BuildKit service through a profile service
-network. The service must not be the PitCrew orchestration daemon, and a worker
-without the approved client identity must be rejected.
+Image-building workers use an mTLS rootless BuildKit service through a profile service
+network. The service runs without `--privileged`, host ports, or the Docker socket and
+uses only the reviewed rootless security options. A worker without the approved
+client identity must be rejected.
 
 ## Protect registration credentials
 

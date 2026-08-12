@@ -1,11 +1,11 @@
 ---
 title: "ADR-0004: Bounded container capabilities"
-status: "Accepted"
+status: "Superseded"
 date: "2026-08-11"
 authors: []
 tags: ["architecture", "containers", "security", "buildkit", "android"]
 supersedes: ""
-superseded_by: ""
+superseded_by: "ADR-0005"
 ---
 
 # ADR-0004: Bounded Container Capabilities
