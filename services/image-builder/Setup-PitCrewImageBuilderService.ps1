@@ -104,11 +104,16 @@ function Assert-ServiceContract {
     $securityOptions = @($container.HostConfig.SecurityOpt)
     foreach ($required in @(
             'seccomp=unconfined',
-            'apparmor=unconfined',
-            'systempaths=unconfined')) {
+            'apparmor=unconfined')) {
         if ($securityOptions -notcontains $required) {
             throw "Rootless BuildKit service is missing security option '$required'."
         }
+    }
+    if (
+        @($container.HostConfig.MaskedPaths).Count -ne 0 -or
+        @($container.HostConfig.ReadonlyPaths).Count -ne 0
+    ) {
+        throw 'Rootless BuildKit service did not apply systempaths=unconfined.'
     }
     if (
         @(

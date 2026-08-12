@@ -78,6 +78,9 @@ Add-Check ($config -match 'noProcessSandbox = false') 'BuildKit process isolatio
 Add-Check ($config -match 'allowedRepositories = \[ "docker\.io/docker/dockerfile" \]') 'BuildKit gateway frontend is not restricted to the Dockerfile frontend.'
 Add-Check ($setup -match 'HostConfig\.Privileged') 'Service setup does not verify the non-privileged boundary.'
 Add-Check ($setup -match 'SecurityOpt') 'Service setup does not verify exact security options.'
+Add-Check (
+    $setup -match 'MaskedPaths' -and $setup -match 'ReadonlyPaths'
+) 'Service setup does not verify systempaths=unconfined through Docker inspect.'
 Add-Check ($setup -match 'pitcrew-image-builder-certs-\$\(\$certificateSha256\.Substring') 'Service setup does not version certificate volumes by identity.'
 Add-Check ($setup -match 'force-recreate') 'Service setup does not force certificate reload.'
 Add-Check ($setup -match 'rollback also failed') 'Service setup does not surface failed certificate rollback.'
