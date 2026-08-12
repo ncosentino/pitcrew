@@ -82,6 +82,7 @@ Add-Check ($setup -match 'pitcrew-image-builder-certs-\$\(\$certificateSha256\.S
 Add-Check ($setup -match 'force-recreate') 'Service setup does not force certificate reload.'
 Add-Check ($setup -match 'rollback also failed') 'Service setup does not surface failed certificate rollback.'
 Add-Check ($setup -match 'Write-ServiceState') 'Service setup does not persist the active certificate volume.'
+Add-Check ($setup -match 'X509Certificate2\]::CreateFromPem\(') 'Service setup does not use the cross-platform certificate-only PEM loader.'
 Add-Check ($setup -notmatch 'docker\s+(system\s+prune|rm\s+-f\s+\$\(|volume\s+prune)') 'Service setup contains broad Docker cleanup.'
 Add-Check ($profile.build.args.CRANE_VERSION -eq '0.21.9') 'Image-builder profile does not pin crane 0.21.9.'
 Add-Check ($dockerfile -match 'CRANE_SHA256_X64') 'Image-builder Dockerfile does not verify the crane download.'

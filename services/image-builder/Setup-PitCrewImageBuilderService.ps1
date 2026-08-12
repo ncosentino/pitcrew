@@ -200,8 +200,8 @@ $serverCertificate =
         $certificatePaths.cert,
         $certificatePaths.key)
 $caCertificate =
-    [Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPemFile(
-        $certificatePaths.ca)
+    [Security.Cryptography.X509Certificates.X509Certificate2]::CreateFromPem(
+        [IO.File]::ReadAllText($certificatePaths.ca))
 try {
     if ($serverCertificate.NotAfter.ToUniversalTime() -le [DateTime]::UtcNow) {
         throw 'BuildKit server certificate is expired.'
