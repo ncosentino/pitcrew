@@ -1,5 +1,5 @@
-ARG RUNNER_IMAGE
-ARG DOCKER_ANDROID_IMAGE
+ARG RUNNER_IMAGE=myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817
+ARG DOCKER_ANDROID_IMAGE=budtmo/docker-android:emulator_14.0_v3.6.0-p0@sha256:d0e1c84530702c1b1bcfb1b51b12bfd63b179932accab86d159fb870a994404b
 
 FROM ${RUNNER_IMAGE} AS runner
 
@@ -8,7 +8,7 @@ FROM ${DOCKER_ANDROID_IMAGE}
 USER root
 
 RUN apt-get -qqy update \
- && apt-get -qqy install --no-install-recommends curl dumb-init git gosu jq openssl \
+ && apt-get -qqy install --no-install-recommends curl dumb-init git gosu jq libicu-dev openssl \
  && apt-get clean \
  && rm -rf /var/lib/apt/lists/*
 

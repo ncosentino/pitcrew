@@ -229,7 +229,7 @@ remaining_cache="$(
         --tlsdir /tls \
         du --format '{{json .}}'
 )"
-if [[ -n "${remaining_cache}" ]]; then
+if [[ -n "${remaining_cache}" && "${remaining_cache}" != "null" ]]; then
     echo "BuildKit retained cache after the job boundary: ${remaining_cache}" >&2
     exit 1
 fi
