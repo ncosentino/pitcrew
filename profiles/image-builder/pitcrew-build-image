@@ -1,26 +1,181 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-if (($# < 1 || $# > 3)); then
-    echo "Usage: pitcrew-build-image IMAGE_REF [CONTEXT_DIRECTORY] [DOCKERFILE_DIRECTORY]" >&2
-    exit 2
+usage() {
+    cat >&2 <<'EOF'
+Usage:
+  pitcrew-build-image --image-ref REF [options] (--push | --output-oci PATH)
+  pitcrew-build-image IMAGE_REF [CONTEXT_DIRECTORY] [DOCKERFILE_DIRECTORY]
+
+Options:
+  --context PATH
+  --dockerfile PATH
+  --platform linux/amd64|linux/arm64
+  --build-arg KEY=VALUE
+  --label KEY=VALUE
+  --push
+  --output-oci PATH
+  --verify-registry
+  --registry-insecure
+EOF
+}
+
+image_ref=""
+context_directory="."
+dockerfile_directory=""
+platform="linux/amd64"
+mode=""
+oci_output=""
+verify_registry=false
+registry_insecure=false
+declare -a build_args=()
+declare -a labels=()
+
+if (($# > 0)) && [[ "$1" != --* ]]; then
+    if (($# > 3)); then
+        usage
+        exit 2
+    fi
+    image_ref="$1"
+    context_directory="${2:-.}"
+    dockerfile_directory="${3:-${context_directory}}"
+    mode="push"
+else
+    while (($# > 0)); do
+        case "$1" in
+            --image-ref)
+                (($# >= 2)) || { usage; exit 2; }
+                image_ref="$2"
+                shift 2
+                ;;
+            --context)
+                (($# >= 2)) || { usage; exit 2; }
+                context_directory="$2"
+                shift 2
+                ;;
+            --dockerfile)
+                (($# >= 2)) || { usage; exit 2; }
+                dockerfile_directory="$2"
+                shift 2
+                ;;
+            --platform)
+                (($# >= 2)) || { usage; exit 2; }
+                platform="$2"
+                shift 2
+                ;;
+            --build-arg)
+                (($# >= 2)) || { usage; exit 2; }
+                build_args+=("$2")
+                shift 2
+                ;;
+            --label)
+                (($# >= 2)) || { usage; exit 2; }
+                labels+=("$2")
+                shift 2
+                ;;
+            --push)
+                [[ -z "${mode}" ]] || {
+                    echo "Select exactly one output mode." >&2
+                    exit 2
+                }
+                mode="push"
+                shift
+                ;;
+            --output-oci)
+                (($# >= 2)) || { usage; exit 2; }
+                [[ -z "${mode}" ]] || {
+                    echo "Select exactly one output mode." >&2
+                    exit 2
+                }
+                mode="oci"
+                oci_output="$2"
+                shift 2
+                ;;
+            --verify-registry)
+                verify_registry=true
+                shift
+                ;;
+            --registry-insecure)
+                registry_insecure=true
+                shift
+                ;;
+            --help|-h)
+                usage
+                exit 0
+                ;;
+            *)
+                echo "Unsupported argument: $1" >&2
+                usage
+                exit 2
+                ;;
+        esac
+    done
 fi
 
-image_ref="$1"
-context_directory="${2:-.}"
-dockerfile_directory="${3:-${context_directory}}"
-buildkit_host="${BUILDKIT_HOST:-tcp://buildkitd:1234}"
-tls_directory="${BUILDKIT_TLS_DIR:-}"
-metadata_file="${PITCREW_BUILDKIT_METADATA_FILE:-${RUNNER_TEMP:-/tmp}/pitcrew-buildkit-metadata.json}"
-
-if [[ "${image_ref}" =~ [[:space:]] ]] || [[ "${image_ref}" != */*:* ]]; then
+dockerfile_directory="${dockerfile_directory:-${context_directory}}"
+if [[ -z "${image_ref}" ]] ||
+    [[ ! "${image_ref}" =~ ^[A-Za-z0-9][A-Za-z0-9._:-]*/[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9._-]*$ ]]; then
     echo "IMAGE_REF must be a fully qualified tagged OCI image reference." >&2
     exit 2
 fi
+if [[ "${mode}" != "push" && "${mode}" != "oci" ]]; then
+    echo "Select exactly one output mode: --push or --output-oci." >&2
+    exit 2
+fi
+if [[ "${verify_registry}" == "true" && "${mode}" != "push" ]]; then
+    echo "--verify-registry requires --push." >&2
+    exit 2
+fi
+if [[ "${registry_insecure}" == "true" && "${verify_registry}" != "true" ]]; then
+    echo "--registry-insecure requires --verify-registry." >&2
+    exit 2
+fi
+case "${platform}" in
+    linux/amd64|linux/arm64) ;;
+    *)
+        echo "Unsupported platform: ${platform}" >&2
+        exit 2
+        ;;
+esac
 if [[ ! -d "${context_directory}" || ! -d "${dockerfile_directory}" ]]; then
     echo "Build context and Dockerfile locations must be existing directories." >&2
     exit 2
 fi
+if ((${#build_args[@]} > 32 || ${#labels[@]} > 32)); then
+    echo "At most 32 build arguments and 32 labels are supported." >&2
+    exit 2
+fi
+
+declare -a build_options=(--opt "platform=${platform}")
+for argument in "${build_args[@]}"; do
+    key="${argument%%=*}"
+    value="${argument#*=}"
+    if [[ "${argument}" == "${key}" ]] ||
+        [[ ! "${key}" =~ ^[A-Za-z_][A-Za-z0-9_]*$ ]] ||
+        [[ "${key,,}" =~ (token|secret|password|credential|private_?key|api_?key) ]] ||
+        [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]] ||
+        ((${#value} > 4096)); then
+        echo "Invalid or secret-shaped build argument." >&2
+        exit 2
+    fi
+    build_options+=(--opt "build-arg:${key}=${value}")
+done
+for label in "${labels[@]}"; do
+    key="${label%%=*}"
+    value="${label#*=}"
+    if [[ "${label}" == "${key}" ]] ||
+        [[ ! "${key}" =~ ^[a-z0-9][a-z0-9._/-]*$ ]] ||
+        [[ "${value}" == *$'\n'* || "${value}" == *$'\r'* ]] ||
+        ((${#value} > 4096)); then
+        echo "Invalid OCI label." >&2
+        exit 2
+    fi
+    build_options+=(--opt "label:${key}=${value}")
+done
+
+buildkit_host="${BUILDKIT_HOST:-tcp://buildkitd:1234}"
+tls_directory="${BUILDKIT_TLS_DIR:-}"
+metadata_file="${PITCREW_BUILDKIT_METADATA_FILE:-${RUNNER_TEMP:-/tmp}/pitcrew-buildkit-metadata.json}"
 if [[ -z "${tls_directory}" ]]; then
     echo "BUILDKIT_TLS_DIR is required." >&2
     exit 2
@@ -65,11 +220,24 @@ trap cleanup_on_exit EXIT
 mkdir -p "$(dirname "${metadata_file}")"
 rm -f "${metadata_file}"
 
+output_argument=""
+if [[ "${mode}" == "push" ]]; then
+    output_argument="type=image,name=${image_ref},push=true"
+    if [[ "${registry_insecure}" == "true" ]]; then
+        output_argument+=",registry.insecure=true"
+    fi
+else
+    mkdir -p "$(dirname "${oci_output}")"
+    rm -f "${oci_output}"
+    output_argument="type=oci,dest=${oci_output}"
+fi
+
 buildctl "${buildctl_arguments[@]}" build \
     --frontend dockerfile.v0 \
     --local "context=${context_directory}" \
     --local "dockerfile=${dockerfile_directory}" \
-    --output "type=image,name=${image_ref},push=true" \
+    "${build_options[@]}" \
+    --output "${output_argument}" \
     --metadata-file "${metadata_file}" \
     --progress plain
 
@@ -79,4 +247,25 @@ if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     exit 1
 fi
 
-printf '%s@%s\n' "${image_ref%:*}" "${digest}"
+if [[ "${mode}" == "push" ]]; then
+    if [[ "${verify_registry}" == "true" ]]; then
+        declare -a crane_arguments=(digest)
+        if [[ "${registry_insecure}" == "true" ]]; then
+            crane_arguments+=(--insecure)
+        fi
+        crane_arguments+=("${image_ref}")
+        registry_digest="$(crane "${crane_arguments[@]}")"
+        if [[ "${registry_digest}" != "${digest}" ]]; then
+            echo "Registry digest '${registry_digest}' does not match BuildKit digest '${digest}'." >&2
+            exit 1
+        fi
+    fi
+    printf '%s@%s\n' "${image_ref%:*}" "${digest}"
+else
+    tarball_digest="$(crane digest --tarball "${oci_output}")"
+    if [[ "${tarball_digest}" != "${digest}" ]]; then
+        echo "OCI output digest '${tarball_digest}' does not match BuildKit digest '${digest}'." >&2
+        exit 1
+    fi
+    printf 'oci://%s@%s\n' "${oci_output}" "${digest}"
+fi

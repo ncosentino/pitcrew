@@ -1,0 +1,48 @@
+services:
+  buildkitd:
+    image: moby/buildkit:v0.32.2-rootless@sha256:504731e577c20559c00f968f33219f30115e70be29ab96728d1d06e963fc494b
+    restart: unless-stopped
+    stop_grace_period: 60s
+    command:
+      - --config
+      - /etc/buildkit/buildkitd.toml
+    security_opt:
+      - seccomp=unconfined
+      - apparmor=unconfined
+      - systempaths=unconfined
+    labels:
+      pitcrew-service: image-builder
+      pitcrew-service-contract-version: "1"
+    volumes:
+      - image-builder-state:/home/user/.local/share/buildkit
+      - image-builder-certs:/certs:ro
+      - ${PITCREW_BUILDKIT_CONFIG:-./buildkitd.toml}:/etc/buildkit/buildkitd.toml:ro
+    networks:
+      image-builder:
+        aliases:
+          - buildkitd
+    healthcheck:
+      test:
+        - CMD
+        - buildctl
+        - --addr
+        - unix:///run/user/1000/buildkit/buildkitd.sock
+        - debug
+        - workers
+      interval: 5s
+      timeout: 5s
+      retries: 24
+      start_period: 10s
+
+networks:
+  image-builder:
+    external: true
+    name: ${PITCREW_IMAGE_BUILDER_NETWORK:-pitcrew-image-builder}
+
+volumes:
+  image-builder-state:
+    external: true
+    name: ${PITCREW_IMAGE_BUILDER_STATE_VOLUME:-pitcrew-image-builder-state}
+  image-builder-certs:
+    external: true
+    name: ${PITCREW_IMAGE_BUILDER_CERT_VOLUME:-pitcrew-image-builder-certs}

@@ -50,6 +50,7 @@ nav:
           - "ADR-0002: Workload-Agnostic Service Classes": adr/adr-0002-workload-agnostic-service-classes.md
           - "ADR-0003: Dedicated Host-Local Admission Service": adr/adr-0003-dedicated-host-admission-service.md
           - "ADR-0004: Bounded Container Capabilities": adr/adr-0004-bounded-container-capabilities.md
+          - "ADR-0005: Rootless Same-Host Image Building": adr/adr-0005-rootless-same-host-image-building.md
   - Guides:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md
