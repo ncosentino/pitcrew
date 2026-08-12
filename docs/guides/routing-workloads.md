@@ -81,9 +81,9 @@ jobs:
 
 ## Route Docker-dependent jobs
 
-Worker containers are socketless and cannot run container actions, service
-containers, Testcontainers, or Docker builds. Keep those jobs on a suitable
-GitHub-hosted or deliberately isolated Docker-capable runner:
+Ordinary worker containers are socketless and cannot run container actions,
+service containers, Testcontainers, or Docker builds. Keep integration workloads on
+a suitable GitHub-hosted or deliberately isolated Docker-capable runner:
 
 ```yaml
 jobs:
@@ -93,3 +93,9 @@ jobs:
   build:
     runs-on: [self-hosted, linux, x64, general-purpose]
 ```
+
+Dockerfile publication can use the bounded
+[Isolated Image Builder](isolated-image-builder.md) profile. It exposes BuildKit,
+not Docker control. Hardware-accelerated Android tests can use
+[Android Emulator Runners](android-emulator.md), which receive KVM but no Docker
+socket or blanket privilege.

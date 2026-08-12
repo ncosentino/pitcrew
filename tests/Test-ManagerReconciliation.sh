@@ -1102,6 +1102,30 @@ assert_false \
     "An invalid policy rendered Docker resource arguments." \
     render_worker_resource_arguments 1048576 '' '' ''
 
+assert_true \
+    "A bounded KVM runtime policy was rejected." \
+    worker_runtime_policy_is_valid kvm 2147483648
+assert_true \
+    "An empty worker runtime policy was rejected." \
+    worker_runtime_policy_is_valid '' ''
+assert_false \
+    "An arbitrary worker device was accepted." \
+    worker_runtime_policy_is_valid docker-socket 2147483648
+assert_false \
+    "Shared memory below 64 MiB was accepted." \
+    worker_runtime_policy_is_valid kvm 67108863
+assert_equals \
+    "--device /dev/kvm:/dev/kvm:rwm --shm-size 2147483648" \
+    "$(render_worker_runtime_arguments kvm 2147483648)" \
+    "The bounded worker runtime did not render exact Docker arguments."
+assert_equals \
+    "" \
+    "$(render_worker_runtime_arguments '' '')" \
+    "An empty worker runtime emitted Docker arguments."
+assert_false \
+    "An invalid worker runtime rendered Docker arguments." \
+    render_worker_runtime_arguments raw-device 2147483648
+
 resource_policy_json="${TEMP_DIRECTORY}/resource-policy.json"
 write_worker_resource_policy "${resource_policy_json}" '' '' '' ''
 assert_equals "null" "$(jq -r '.' "${resource_policy_json}")" "An unlimited policy was published as a policy object."

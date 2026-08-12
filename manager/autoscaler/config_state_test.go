@@ -53,6 +53,9 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	if cfg.serviceNetwork != "" {
 		t.Fatalf("unexpected default service network: %q", cfg.serviceNetwork)
 	}
+	if len(cfg.runtime.devices) != 0 || cfg.runtime.sharedMemoryBytes != nil {
+		t.Fatalf("unexpected default worker runtime: %#v", cfg.runtime)
+	}
 }
 
 func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
@@ -120,6 +123,9 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		{name: "invalid service network", key: "PITCREW_SERVICE_NETWORK", value: "host/network"},
 		{name: "default bridge network", key: "PITCREW_SERVICE_NETWORK", value: "bridge"},
 		{name: "reserved manager network", key: "PITCREW_SERVICE_NETWORK", value: "self-hosted-runner-profile-a_default"},
+		{name: "unsupported runtime device", key: "PITCREW_WORKER_RUNTIME_DEVICES", value: "docker-socket"},
+		{name: "duplicate runtime device", key: "PITCREW_WORKER_RUNTIME_DEVICES", value: "kvm,kvm"},
+		{name: "shared memory below minimum", key: "PITCREW_WORKER_SHM_SIZE_BYTES", value: "67108863"},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {

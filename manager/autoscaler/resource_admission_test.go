@@ -180,6 +180,45 @@ func TestDockerRunRejectsInvalidResourcePolicyBeforeLaunch(t *testing.T) {
 	}
 }
 
+func TestWorkerLaunchCarriesBoundedRuntimeArguments(t *testing.T) {
+	sharedMemory := int64(2147483648)
+	arguments := buildDockerRunArguments(containerLaunch{
+		name:      "worker",
+		image:     "example/runner:latest",
+		jitConfig: "encoded",
+		runtime: workerRuntimePolicy{
+			devices:           []string{"kvm"},
+			sharedMemoryBytes: &sharedMemory,
+		},
+	})
+	joined := strings.Join(arguments, " ")
+	for _, expected := range []string{
+		"--device /dev/kvm:/dev/kvm:rwm",
+		"--shm-size 2147483648",
+	} {
+		if !strings.Contains(joined, expected) {
+			t.Fatalf("expected %q in %q", expected, joined)
+		}
+	}
+	for _, forbidden := range []string{"--privileged", "/var/run/docker.sock"} {
+		if strings.Contains(joined, forbidden) {
+			t.Fatalf("runtime policy exposed forbidden Docker argument %q: %q", forbidden, joined)
+		}
+	}
+}
+
+func TestDockerRunRejectsInvalidRuntimePolicyBeforeLaunch(t *testing.T) {
+	client := &dockerCLI{executor: failingExecutor{}}
+	_, err := client.run(context.Background(), containerLaunch{
+		name:    "worker",
+		image:   "example/runner:latest",
+		runtime: workerRuntimePolicy{devices: []string{"raw-device"}},
+	})
+	if err == nil {
+		t.Fatal("invalid runtime policy reached docker run")
+	}
+}
+
 func TestDockerVolumePreflightRequiresExactExistingNames(t *testing.T) {
 	executor := newScriptedCommandExecutor(map[string][]scriptedCommandResult{
 		"volume": {

@@ -24,6 +24,11 @@ $schemaPath = Join-Path $runnerRoot 'runner-profile.schema.json'
 $observedStateSchemaPath = Join-Path $runnerRoot 'observed-state.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
+$imageBuilderProfilePath = Join-Path $runnerRoot 'profiles' 'image-builder' 'profile.json'
+$imageBuilderDockerfilePath = Join-Path $runnerRoot 'profiles' 'image-builder' 'Dockerfile'
+$androidProfilePath = Join-Path $runnerRoot 'profiles' 'android-emulator' 'profile.json'
+$androidDockerfilePath = Join-Path $runnerRoot 'profiles' 'android-emulator' 'Dockerfile'
+$androidStartPath = Join-Path $runnerRoot 'profiles' 'android-emulator' 'start-android-emulator'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
 $managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
@@ -297,6 +302,11 @@ $requiredPaths = @(
     $observedStateSchemaPath,
     $copilotProfilePath,
     $copilotDockerfilePath,
+    $imageBuilderProfilePath,
+    $imageBuilderDockerfilePath,
+    $androidProfilePath,
+    $androidDockerfilePath,
+    $androidStartPath,
     $managerPath,
     $managerEntrypointPath,
     $autoscalerModulePath,
@@ -322,6 +332,10 @@ if ($errors.Count -gt 0) {
 
 $profileJson = Get-Content -LiteralPath $copilotProfilePath -Raw -Encoding UTF8
 Add-Check ($profileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Copilot CLI profile does not conform to runner-profile.schema.json.'
+$imageBuilderProfileJson = Get-Content -LiteralPath $imageBuilderProfilePath -Raw -Encoding UTF8
+$androidProfileJson = Get-Content -LiteralPath $androidProfilePath -Raw -Encoding UTF8
+Add-Check ($imageBuilderProfileJson | Test-Json -SchemaFile $schemaPath) 'The built-in image-builder profile does not conform to runner-profile.schema.json.'
+Add-Check ($androidProfileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Android emulator profile does not conform to runner-profile.schema.json.'
 $autoscalingManifest = $profileJson | ConvertFrom-Json -Depth 20
 $autoscalingManifest | Add-Member -NotePropertyName autoscaling -NotePropertyValue ([PSCustomObject]@{
     mode = 'scale-set'
@@ -335,6 +349,10 @@ $autoscalingManifest | Add-Member -NotePropertyName resources -NotePropertyValue
     cpus = '2.5'
     pids = 256
 })
+$autoscalingManifest | Add-Member -NotePropertyName runtime -NotePropertyValue ([PSCustomObject]@{
+    devices = @('kvm')
+    sharedMemory = '2g'
+})
 $autoscalingManifest | Add-Member -NotePropertyName hostAdmission -NotePropertyValue ([PSCustomObject]@{
     namespace = 'primary'
     capacityUnits = 12
@@ -346,7 +364,28 @@ $autoscalingManifest | Add-Member -NotePropertyName hostAdmission -NotePropertyV
 Add-Check (
     ($autoscalingManifest | ConvertTo-Json -Depth 20) |
         Test-Json -SchemaFile $schemaPath
-) 'The profile schema rejects valid autoscaling, resource, or host-admission policy.'
+) 'The profile schema rejects valid autoscaling, runtime, resource, or host-admission policy.'
+$unknownRuntimeDeviceManifest = (
+    $autoscalingManifest |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unknownRuntimeDeviceManifest.runtime.devices = @('docker-socket')
+Add-Check (-not (
+    ($unknownRuntimeDeviceManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+)) 'The profile schema accepts an arbitrary worker device.'
+$unknownRuntimeFieldManifest = (
+    $autoscalingManifest |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unknownRuntimeFieldManifest.runtime |
+    Add-Member -NotePropertyName privileged -NotePropertyValue $true
+Add-Check (-not (
+    ($unknownRuntimeFieldManifest | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $schemaPath -ErrorAction SilentlyContinue
+)) 'The profile schema accepts blanket worker privilege.'
 $missingBorrowableManifest = (
     $autoscalingManifest |
         ConvertTo-Json -Depth 20 |
@@ -2164,6 +2203,8 @@ Add-Check (-not (
 
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
+$imageBuilderProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile image-builder -HostName 'test-host'
+$androidProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile android-emulator -HostName 'test-host'
 
 Add-Check $defaultProfile.IsDefault 'The implicit default profile is not marked as default.'
 Add-Check ($defaultProfile.Image -eq 'myoung34/github-runner:ubuntu-noble') 'The default profile changed its backward-compatible image.'
@@ -2174,6 +2215,19 @@ Add-Check ($defaultProfile.LabelsValue -eq 'general-purpose') 'The default profi
 Add-Check (-not $defaultProfile.DisableDefaultLabels) 'The default profile must retain GitHub default labels for backward compatibility.'
 Add-Check $defaultProfile.PullImage 'The default profile must retain pre-pull behavior for its remote base image.'
 Add-Check ($null -eq $defaultProfile.HostAdmission) 'The default profile unexpectedly enabled host-local admission.'
+Add-Check ($null -eq $defaultProfile.Runtime) 'The default profile unexpectedly enabled a specialized worker runtime.'
+
+Add-Check ($imageBuilderProfile.LabelsValue -eq 'image-builder,oci-builder') 'The image-builder profile does not expose exact isolated labels.'
+Add-Check ($imageBuilderProfile.ServiceNetwork.Source -eq 'pitcrew-image-builder') 'The image-builder profile does not require its isolated service network.'
+Add-Check ($imageBuilderProfile.Autoscaling.MaximumActiveWorkers -eq 1) 'The image-builder profile does not isolate profile-wide cleanup to one active worker.'
+Add-Check ($imageBuilderProfile.Build.Arguments.BUILDKIT_VERSION -eq '0.32.2') 'The image-builder profile does not pin the BuildKit client.'
+
+Add-Check ($androidProfile.LabelsValue -eq 'android,android-14,android-emulator') 'The Android profile does not expose exact isolated labels.'
+Add-Check ($androidProfile.Autoscaling.MaximumActiveWorkers -eq 1) 'The Android profile does not bound aggregate emulator concurrency.'
+Add-Check ($androidProfile.Runtime.DevicesValue -eq 'kvm') 'The Android profile does not request the typed KVM device.'
+Add-Check ($androidProfile.Runtime.SharedMemoryBytes -eq 2147483648) 'The Android profile did not canonicalize shared memory.'
+Add-Check ($androidProfile.Resources.MemoryBytes -eq 8589934592) 'The Android profile did not canonicalize its memory limit.'
+Add-Check ($androidProfile.Build.Arguments.DOCKER_ANDROID_IMAGE -match '@sha256:[0-9a-f]{64}$') 'The Android profile does not pin Docker-Android by digest.'
 
 $localDefaultProfile = Resolve-RunnerProfile `
     -RootPath $runnerRoot `
@@ -2538,6 +2592,12 @@ $copilotStaticProfile = New-RunnerStaticProfileState `
     -OrgName '' `
     -EnterpriseName '' `
     -ResolvedImageId $testWorkerImageId
+$androidStaticProfile = New-RunnerStaticProfileState `
+    -Profile $androidProfile `
+    -Scope repo `
+    -OrgName '' `
+    -EnterpriseName '' `
+    -ResolvedImageId $testWorkerImageId
 $replicaOverrideProfile = Resolve-RunnerProfile `
     -RootPath $runnerRoot `
     -Profile default `
@@ -2637,8 +2697,12 @@ Add-Check (
     )
 ) 'A resource-policy change is incorrectly treated as a routing-topology change.'
 Add-Check (
-    $defaultStaticProfile.configuration.workerRuntimeContractVersion -eq 2
+    $defaultStaticProfile.configuration.workerRuntimeContractVersion -eq 3
 ) 'Static profile state does not expose the current worker runtime contract.'
+Add-Check (
+    $androidStaticProfile.configuration.runtime.devices[0] -ceq 'kvm' -and
+    $androidStaticProfile.configuration.runtime.sharedMemoryBytes -eq 2147483648
+) 'Static profile state does not retain the bounded worker runtime.'
 Add-Check (
     $defaultStaticProfile.configuration.resolvedImageId -ceq $testWorkerImageId
 ) 'Static profile state does not retain immutable local image identity.'
@@ -2672,6 +2736,16 @@ Add-Check ($copilotDockerfile -match [regex]::Escape('sha256sum -c -')) 'The Cop
 Add-Check ($copilotDockerfile -match [regex]::Escape('/usr/local/bin/copilot')) 'The Copilot CLI image does not expose the documented stable executable path.'
 Add-Check ($copilotDockerfile -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN=)') 'The Copilot CLI image contains authentication material.'
 Add-Check ($profileJson -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN)') 'The Copilot CLI profile contains authentication material.'
+$imageBuilderDockerfile = Get-Content -LiteralPath $imageBuilderDockerfilePath -Raw -Encoding UTF8
+$androidDockerfile = Get-Content -LiteralPath $androidDockerfilePath -Raw -Encoding UTF8
+$androidStart = Get-Content -LiteralPath $androidStartPath -Raw -Encoding UTF8
+Add-Check ($imageBuilderDockerfile -match [regex]::Escape('sha256sum -c -')) 'The image-builder profile does not checksum the BuildKit client.'
+Add-Check ($imageBuilderDockerfile -match [regex]::Escape('/usr/local/bin/buildctl')) 'The image-builder profile does not expose buildctl at a stable path.'
+Add-Check ($imageBuilderDockerfile -notmatch '/var/run/docker\.sock|--privileged') 'The image-builder worker image requests host Docker access.'
+Add-Check ($androidDockerfile -match 'USER_BEHAVIOR_ANALYTICS=false') 'The Android profile does not disable upstream analytics by default.'
+Add-Check ($androidDockerfile -notmatch '/var/run/docker\.sock|--privileged') 'The Android worker image requests broad host access.'
+Add-Check ($androidStart -match 'USER_BEHAVIOR_ANALYTICS=false') 'The Android startup helper does not force analytics off.'
+Add-Check ($androidStart -match 'device_status') 'The Android startup helper does not use upstream readiness state.'
 
 $defaultEnvironment = New-RunnerEnvironmentContent `
     -Profile $defaultProfile `
@@ -2701,6 +2775,13 @@ $resourceEnvironment = New-RunnerEnvironmentContent `
     -SessionOwner 'pitcrew-resource' `
     -AssumeUnversionedCurrent $false `
     -ResolvedImageId $testWorkerImageId
+$androidEnvironment = New-RunnerEnvironmentContent `
+    -Profile $androidProfile `
+    -AccessToken 'test-registration-token' `
+    -WorkerRevision $androidStaticProfile.workerRevision `
+    -SessionOwner 'pitcrew-android-emulator' `
+    -AssumeUnversionedCurrent $false `
+    -ResolvedImageId $testWorkerImageId
 $admissionEnvironment = New-RunnerEnvironmentContent `
     -Profile $admissionProfile `
     -AccessToken 'test-registration-token' `
@@ -2721,6 +2802,8 @@ Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=$') 'The default memory-swap policy is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=$') 'The default CPU policy is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=$') 'The default PID policy is not represented as an empty manager-only value.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_RUNTIME_DEVICES=$') 'The default environment unexpectedly configures a worker device.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_SHM_SIZE_BYTES=$') 'The default environment unexpectedly configures shared memory.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_READ_ONLY_VOLUMES=$') 'The default environment unexpectedly configures external data volumes.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SERVICE_NETWORK=$') 'The default environment unexpectedly configures an external service network.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$') 'The default admission ceiling is not represented as an empty manager-only value.'
@@ -2733,6 +2816,8 @@ Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=5368709
 Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The canonical memory-swap policy is missing from the manager environment.'
 Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The canonical CPU policy is missing from the manager environment.'
 Add-Check ($resourceEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=256$') 'The canonical PID policy is missing from the manager environment.'
+Add-Check ($androidEnvironment -match '(?m)^PITCREW_WORKER_RUNTIME_DEVICES=kvm$') 'The typed KVM device is missing from the manager environment.'
+Add-Check ($androidEnvironment -match '(?m)^PITCREW_WORKER_SHM_SIZE_BYTES=2147483648$') 'Canonical shared memory is missing from the manager environment.'
 Add-Check ($admissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The profile admission ceiling is missing from the manager environment.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_PROFILE_ID=copilot-cli$') 'The specialized environment does not identify its profile.'
 Add-Check ($copilotEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'The specialized environment does not disable GitHub default labels.'
@@ -3593,6 +3678,8 @@ try {
         'PITCREW_WORKER_MEMORY_SWAP_BYTES',
         'PITCREW_WORKER_CPU_CORES',
         'PITCREW_WORKER_PIDS_LIMIT',
+        'PITCREW_WORKER_RUNTIME_DEVICES',
+        'PITCREW_WORKER_SHM_SIZE_BYTES',
         'PITCREW_READ_ONLY_VOLUMES',
         'PITCREW_SERVICE_NETWORK',
         'PITCREW_AUTOSCALING_MODE',
@@ -3621,6 +3708,8 @@ try {
     $env:PITCREW_WORKER_MEMORY_SWAP_BYTES = '999'
     $env:PITCREW_WORKER_CPU_CORES = '9.9'
     $env:PITCREW_WORKER_PIDS_LIMIT = '9999'
+    $env:PITCREW_WORKER_RUNTIME_DEVICES = 'ambient-device'
+    $env:PITCREW_WORKER_SHM_SIZE_BYTES = '9999999999'
     $env:PITCREW_READ_ONLY_VOLUMES = 'ambient=wrong-volume'
     $env:PITCREW_SERVICE_NETWORK = 'ambient-wrong-network'
     $env:PITCREW_AUTOSCALING_MODE = 'ambient-mode'
@@ -3640,7 +3729,7 @@ try {
         if ($dockerArguments[0] -eq 'compose') {
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
-                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_READ_ONLY_VOLUMES=$env:PITCREW_READ_ONLY_VOLUMES`tPITCREW_SERVICE_NETWORK=$env:PITCREW_SERVICE_NETWORK`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
+                -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_WORKER_RUNTIME_DEVICES=$env:PITCREW_WORKER_RUNTIME_DEVICES`tPITCREW_WORKER_SHM_SIZE_BYTES=$env:PITCREW_WORKER_SHM_SIZE_BYTES`tPITCREW_READ_ONLY_VOLUMES=$env:PITCREW_READ_ONLY_VOLUMES`tPITCREW_SERVICE_NETWORK=$env:PITCREW_SERVICE_NETWORK`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
             if (
                 $dockerArguments -contains 'build' -and
                 $dockerArguments -contains 'runner-manager' -and
@@ -4053,7 +4142,7 @@ try {
         Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
-        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_SERVICE_NETWORK=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_WORKER_RUNTIME_DEVICES=`tPITCREW_WORKER_SHM_SIZE_BYTES=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_SERVICE_NETWORK=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
         Set-TestCapacityAcknowledgement `
@@ -4643,6 +4732,38 @@ try {
         Add-Check ($namedDownCommands -match 'ps.*label=ephemeral-managed-runner-profile=copilot-cli') 'Named teardown did not target its exact Docker label.'
         Add-Check (-not ($namedDownCommands | Where-Object { $_ -match '(^|\t)label=ephemeral-managed-runner$' })) 'Named teardown targeted the legacy global Docker label.'
         Add-Check (-not ($namedDownCommands -match 'name=')) 'Named teardown used a broad container-name filter.'
+
+        $env:PITCREW_TEST_MANAGER_RUNNING = '0'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Profile android-emulator `
+            -Token 'test-registration-token' `
+            -Repos 'https://github.com/example/mobile-project=1'
+        $androidStatePath = Join-Path $fixtureRoot '.env.android-emulator'
+        $androidState = Get-Content -LiteralPath $androidStatePath -Raw -Encoding UTF8
+        $androidCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check ($androidState -match '(?m)^PITCREW_WORKER_RUNTIME_DEVICES=kvm$') 'Android setup did not persist typed KVM access.'
+        Add-Check ($androidState -match '(?m)^PITCREW_WORKER_SHM_SIZE_BYTES=2147483648$') 'Android setup did not persist canonical shared memory.'
+        Add-Check ($androidCommands -match "--device`t/dev/kvm:/dev/kvm:rwm") 'Android image verification did not receive typed KVM access.'
+        Add-Check ($androidCommands -match "--shm-size`t2147483648") 'Android image verification did not receive bounded shared memory.'
+        Add-Check (-not ($androidCommands -match '--privileged')) 'Android setup emitted blanket Docker privilege.'
+        Add-Check (-not ($androidCommands -match '/var/run/docker\.sock')) 'Android setup exposed the orchestration Docker socket.'
+        & $fixtureSetup -Profile android-emulator -Down
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Profile image-builder `
+            -Token 'test-registration-token' `
+            -Repos 'https://github.com/example/image-project=2'
+        $imageBuilderStatePath = Join-Path $fixtureRoot '.env.image-builder'
+        $imageBuilderState = Get-Content -LiteralPath $imageBuilderStatePath -Raw -Encoding UTF8
+        $imageBuilderCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check ($imageBuilderState -match '(?m)^PITCREW_SERVICE_NETWORK=pitcrew-image-builder$') 'Image-builder setup did not persist its isolated service network.'
+        Add-Check ($imageBuilderCommands -match "--network`tpitcrew-image-builder") 'Image-builder verification did not join the isolated service network.'
+        Add-Check ($imageBuilderCommands -match 'buildctl --version') 'Image-builder setup did not verify the pinned BuildKit client.'
+        Add-Check (-not ($imageBuilderCommands -match '/var/run/docker\.sock')) 'Image-builder setup exposed the orchestration Docker socket.'
+        & $fixtureSetup -Profile image-builder -Down
+        $env:PITCREW_TEST_MANAGER_RUNNING = '1'
 
         $defaultStateDirectory = Split-Path -Parent $defaultDesiredPath
         $defaultObservedPath = Join-Path $defaultStateDirectory 'observed-state.json'
@@ -5316,6 +5437,8 @@ Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compos
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_RUNTIME_DEVICES: ${PITCREW_WORKER_RUNTIME_DEVICES:-}')) 'Compose does not pass the typed worker-device contract to the manager.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_SHM_SIZE_BYTES: ${PITCREW_WORKER_SHM_SIZE_BYTES:-}')) 'Compose does not pass the shared-memory contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
 Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-18}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_HOST_PROC_PATH: /host/proc')) 'Manager containers do not use the fixed host-proc telemetry path.'

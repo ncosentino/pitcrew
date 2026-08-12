@@ -207,6 +207,7 @@ write_legacy_desired_state() {
 # Contract-11 worker resource policy. An empty value means the dimension has no
 # configured limit and must never be published or applied as zero.
 WORKER_MEMORY_MINIMUM_BYTES=6291456
+WORKER_SHARED_MEMORY_MINIMUM_BYTES=67108864
 WORKER_PIDS_MAXIMUM=2147483647
 
 worker_policy_byte_value_is_valid() {
@@ -259,6 +260,33 @@ render_worker_resource_arguments() {
         policy_arguments="${policy_arguments}--pids-limit $4 "
     fi
     printf '%s\n' "${policy_arguments% }"
+}
+
+worker_runtime_policy_is_valid() {
+    policy_devices="$1"
+    policy_shared_memory_bytes="$2"
+
+    case "${policy_devices}" in
+        ''|kvm) ;;
+        *) return 1 ;;
+    esac
+    if [ -n "${policy_shared_memory_bytes}" ]; then
+        worker_policy_byte_value_is_valid "${policy_shared_memory_bytes}" || return 1
+        [ "${policy_shared_memory_bytes}" -ge "${WORKER_SHARED_MEMORY_MINIMUM_BYTES}" ] ||
+            return 1
+    fi
+}
+
+render_worker_runtime_arguments() {
+    worker_runtime_policy_is_valid "$1" "$2" || return 1
+    runtime_arguments=""
+    if [ "$1" = "kvm" ]; then
+        runtime_arguments="${runtime_arguments}--device /dev/kvm:/dev/kvm:rwm "
+    fi
+    if [ -n "$2" ]; then
+        runtime_arguments="${runtime_arguments}--shm-size $2 "
+    fi
+    printf '%s\n' "${runtime_arguments% }"
 }
 
 write_worker_resource_policy() {

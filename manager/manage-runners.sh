@@ -26,6 +26,8 @@ WORKER_MEMORY_BYTES="${PITCREW_WORKER_MEMORY_BYTES:-}"
 WORKER_MEMORY_SWAP_BYTES="${PITCREW_WORKER_MEMORY_SWAP_BYTES:-}"
 WORKER_CPU_CORES="${PITCREW_WORKER_CPU_CORES:-}"
 WORKER_PIDS_LIMIT="${PITCREW_WORKER_PIDS_LIMIT:-}"
+WORKER_RUNTIME_DEVICES="${PITCREW_WORKER_RUNTIME_DEVICES:-}"
+WORKER_SHM_SIZE_BYTES="${PITCREW_WORKER_SHM_SIZE_BYTES:-}"
 READ_ONLY_VOLUMES="${PITCREW_READ_ONLY_VOLUMES:-}"
 SERVICE_NETWORK="${PITCREW_SERVICE_NETWORK:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
@@ -223,6 +225,18 @@ WORKER_RESOURCE_ARGUMENTS=$(render_worker_resource_arguments \
     "${WORKER_CPU_CORES}" \
     "${WORKER_PIDS_LIMIT}") || {
     echo "[manager:${PROFILE_ID}] worker resource policy could not be rendered." >&2
+    exit 1
+}
+if ! worker_runtime_policy_is_valid \
+    "${WORKER_RUNTIME_DEVICES}" \
+    "${WORKER_SHM_SIZE_BYTES}"; then
+    echo "[manager:${PROFILE_ID}] worker runtime policy is invalid." >&2
+    exit 1
+fi
+WORKER_RUNTIME_ARGUMENTS=$(render_worker_runtime_arguments \
+    "${WORKER_RUNTIME_DEVICES}" \
+    "${WORKER_SHM_SIZE_BYTES}") || {
+    echo "[manager:${PROFILE_ID}] worker runtime policy could not be rendered." >&2
     exit 1
 }
 
@@ -1038,7 +1052,7 @@ run_slot() {
         fi
         # Canonical policy values are validated at startup, so unquoted expansion
         # only splits manager-owned Docker arguments.
-        set -- "$@" ${WORKER_RESOURCE_ARGUMENTS} "${IMAGE}"
+        set -- "$@" ${WORKER_RESOURCE_ARGUMENTS} ${WORKER_RUNTIME_ARGUMENTS} "${IMAGE}"
         launch_started_epoch=$(date +%s)
         launch_output=$("$@" 2>&1)
         launch_status=$?

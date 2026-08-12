@@ -1,0 +1,64 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+timeout_seconds="${ANDROID_EMULATOR_START_TIMEOUT_SECONDS:-600}"
+case "${timeout_seconds}" in
+    ''|*[!0-9]*)
+        echo "ANDROID_EMULATOR_START_TIMEOUT_SECONDS must be an integer." >&2
+        exit 1
+        ;;
+esac
+if ((timeout_seconds < 30 || timeout_seconds > 1800)); then
+    echo "ANDROID_EMULATOR_START_TIMEOUT_SECONDS must be between 30 and 1800." >&2
+    exit 1
+fi
+
+pid_path="/tmp/pitcrew-android-emulator.pid"
+status_path="${WORK_PATH:-/home/androidusr}/device_status"
+log_path="${RUNNER_TEMP:-/tmp}/pitcrew-android-emulator.log"
+
+if [[ -f "${pid_path}" ]]; then
+    existing_pid="$(cat "${pid_path}")"
+    if [[ "${existing_pid}" =~ ^[0-9]+$ ]] && kill -0 "${existing_pid}" 2>/dev/null; then
+        if [[ -f "${status_path}" ]] && [[ "$(cat "${status_path}")" == "READY" ]]; then
+            echo "Android emulator is already ready."
+            exit 0
+        fi
+        echo "Android emulator is already starting." >&2
+        exit 1
+    fi
+fi
+
+rm -f "${pid_path}" "${status_path}"
+mkdir -p "$(dirname "${log_path}")"
+
+gosu androidusr env \
+    HOME=/home/androidusr \
+    APPIUM="${APPIUM:-false}" \
+    USER_BEHAVIOR_ANALYTICS=false \
+    WEB_LOG=false \
+    WEB_VNC=false \
+    bash "${APP_PATH}/mixins/scripts/run.sh" >"${log_path}" 2>&1 &
+emulator_pid=$!
+printf '%s\n' "${emulator_pid}" > "${pid_path}"
+
+deadline=$((SECONDS + timeout_seconds))
+while ((SECONDS < deadline)); do
+    if ! kill -0 "${emulator_pid}" 2>/dev/null; then
+        echo "Android emulator exited before reaching READY." >&2
+        tail -n 80 "${log_path}" >&2 || true
+        exit 1
+    fi
+    if [[ -f "${status_path}" ]] && [[ "$(cat "${status_path}")" == "READY" ]]; then
+        if gosu androidusr adb wait-for-device &&
+            [[ "$(gosu androidusr adb shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" == "1" ]]; then
+            echo "Android emulator is ready."
+            exit 0
+        fi
+    fi
+    sleep 2
+done
+
+echo "Android emulator did not reach READY within ${timeout_seconds} seconds." >&2
+tail -n 80 "${log_path}" >&2 || true
+exit 1

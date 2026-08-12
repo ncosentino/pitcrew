@@ -133,6 +133,7 @@ jobs:
           sh -n tests/integration/fake-runner/fake-runner.sh
           bash -n tests/integration/Test-CapacityReconciliation.sh
           bash -n tests/integration/Test-HostAdmissionContention.sh
+          bash -n tests/integration/Test-IsolatedImageBuilder.sh
 
       - name: Run manager reconciliation contracts
         run: sh ./tests/Test-ManagerReconciliation.sh
@@ -159,6 +160,9 @@ jobs:
 
       - name: Run host admission contention
         run: bash ./tests/integration/Test-HostAdmissionContention.sh
+
+      - name: Run isolated image-builder integration
+        run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
 
   ci:
     name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}

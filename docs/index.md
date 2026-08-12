@@ -71,6 +71,10 @@ GitHub runner scale-set demand to return toward their operator-defined maximum.
   indexing boundary.
 - [Guides](guides/index.md) cover profiles, routing, autoscaling, updates, security,
   services, external data, and Copilot operations.
+- [Isolated Image Builder](guides/isolated-image-builder.md) publishes OCI images
+  through an mTLS BuildKit service without exposing Docker control.
+- [Android Emulator Runners](guides/android-emulator.md) run a fresh
+  hardware-accelerated Android emulator inside each disposable worker.
 - [Contributor Architecture](contributing/architecture.md) maps implementation
   boundaries and executable contracts.
 - [Agent Guidance](contributing/agent-guidance.md) explains guidance ownership,

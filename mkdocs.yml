@@ -49,6 +49,7 @@ nav:
           - "ADR-0001: Docs-first Agent Guidance": adr/adr-0001-docs-first-agent-guidance.md
           - "ADR-0002: Workload-Agnostic Service Classes": adr/adr-0002-workload-agnostic-service-classes.md
           - "ADR-0003: Dedicated Host-Local Admission Service": adr/adr-0003-dedicated-host-admission-service.md
+          - "ADR-0004: Bounded Container Capabilities": adr/adr-0004-bounded-container-capabilities.md
   - Guides:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md
@@ -56,6 +57,8 @@ nav:
       - Repository-Owned Worker Images: guides/repository-owned-images.md
       - Read-Only External Data Volumes: guides/external-data-volumes.md
       - Pool-Local Services: guides/pool-local-services.md
+      - Isolated Image Builder: guides/isolated-image-builder.md
+      - Android Emulator Runners: guides/android-emulator.md
       - Routing Workloads: guides/routing-workloads.md
       - Host-Local Admission: guides/host-admission.md
       - Demand-Driven Autoscaling: guides/autoscaling.md

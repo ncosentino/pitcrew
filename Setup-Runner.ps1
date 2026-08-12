@@ -363,6 +363,8 @@ $composeEnvironmentNames = @(
     'PITCREW_WORKER_MEMORY_SWAP_BYTES',
     'PITCREW_WORKER_CPU_CORES',
     'PITCREW_WORKER_PIDS_LIMIT',
+    'PITCREW_WORKER_RUNTIME_DEVICES',
+    'PITCREW_WORKER_SHM_SIZE_BYTES',
     'PITCREW_READ_ONLY_VOLUMES',
     'PITCREW_SERVICE_NETWORK',
     'PITCREW_SESSION_OWNER',
@@ -2452,10 +2454,30 @@ try {
             } else {
                 @()
             }
+            $verificationRuntimeArguments = @(
+                if ($profileConfig.Runtime) {
+                    foreach ($device in $profileConfig.Runtime.Devices) {
+                        switch ($device) {
+                            'kvm' {
+                                '--device'
+                                '/dev/kvm:/dev/kvm:rwm'
+                            }
+                            default {
+                                throw "Unsupported worker runtime device '$device'."
+                            }
+                        }
+                    }
+                    if ($null -ne $profileConfig.Runtime.SharedMemoryBytes) {
+                        '--shm-size'
+                        [string]$profileConfig.Runtime.SharedMemoryBytes
+                    }
+                }
+            )
             foreach ($command in $profileConfig.VerificationCommands) {
                 & docker run `
                     --rm `
                     @verificationNetworkArguments `
+                    @verificationRuntimeArguments `
                     @verificationMountArguments `
                     --entrypoint /bin/sh `
                     $profileConfig.Image `
@@ -2471,6 +2493,7 @@ try {
                 & docker run `
                     --rm `
                     @verificationNetworkArguments `
+                    @verificationRuntimeArguments `
                     @verificationMountArguments `
                     --entrypoint /bin/sh `
                     $profileConfig.Image `
