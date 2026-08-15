@@ -111,9 +111,9 @@ type HostPolicy struct {
 	// physical CPU or memory quantity from them, and never uses them in
 	// place of TotalUnits for any admission decision. Zero for both means
 	// the publisher predates measured-capacity reporting (contract <=17).
-	CapacityUnits int `json:"capacityUnits,omitempty"`
+	CapacityUnits int `json:"capacityUnits"`
 	// SafetyMarginUnits is documented with CapacityUnits above.
-	SafetyMarginUnits int `json:"safetyMarginUnits,omitempty"`
+	SafetyMarginUnits int `json:"safetyMarginUnits"`
 	// HostPolicyFingerprint is an optional, opaque, bounded identity over
 	// the exact host-wide policy Setup computed. This package never
 	// derives or interprets it, only validates its bounded shape and
