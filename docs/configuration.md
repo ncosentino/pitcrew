@@ -222,8 +222,9 @@ ledger is never published. The published fields use these precise semantics:
 - `pendingUnits` — outstanding worker demand multiplied by this profile's unit
   cost.
 - `withheldUnits` — the same outstanding units while host admission has not
-  granted them. Both values are `null` until demand is republished after
-  coordinator restart or policy replacement.
+  granted them. Positive demand must be refreshed within 30 seconds. Both values
+  are `null` until demand is republished after coordinator restart, policy
+  replacement, or demand expiry.
 
 Per-target capacity evidence keeps this host result separate from the existing
 profile ceiling. `host-admission-withheld` identifies a target currently denied
@@ -240,9 +241,11 @@ addition to ordinary acquire, renew, activate, release, and reconcile decisions.
 
 Shared-pool fairness rotates equal unit opportunity among profiles with
 registered pending demand after own reservations and unused non-borrowable
-reservations are accounted for. It is not GitHub queue weighting or worker
-priority. Different worker costs can produce different worker counts and leave
-fragments smaller than one whole worker cost.
+reservations are accounted for. Abandoned positive demand expires after 30
+seconds so a stopped manager cannot protect shared capacity indefinitely. It is
+not GitHub queue weighting or worker priority. Different worker costs can
+produce different worker counts and leave fragments smaller than one whole
+worker cost.
 
 ### Read-only external volumes
 

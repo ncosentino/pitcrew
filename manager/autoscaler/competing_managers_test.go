@@ -63,6 +63,29 @@ type competingManagerActor interface {
 	release(string) error
 }
 
+type competingManagerClock struct {
+	mu      sync.Mutex
+	current time.Time
+}
+
+func newCompetingManagerClock() *competingManagerClock {
+	return &competingManagerClock{
+		current: time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC),
+	}
+}
+
+func (c *competingManagerClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.current
+}
+
+func (c *competingManagerClock) advance(duration time.Duration) {
+	c.mu.Lock()
+	c.current = c.current.Add(duration)
+	c.mu.Unlock()
+}
+
 type fixedCompetingManager struct {
 	coordinator *admission.Coordinator
 	profileID   string
@@ -196,6 +219,49 @@ func TestHostWideAdoptionFenceBlocksOtherManagersUntilEveryPassCompletes(t *test
 	}
 	if _, _, err := beta.acquire("beta-target", "new-beta"); !errors.Is(err, errHostAdmissionWithheld) {
 		t.Fatalf("above-budget adopted workers did not preserve ordinary budget enforcement: %v", err)
+	}
+}
+
+func TestExpiredCompetingDemandStopsWithholdingAvailableHostUnits(t *testing.T) {
+	clock := newCompetingManagerClock()
+	coordinator := admission.OpenMemory(clock, time.Minute)
+	if err := coordinator.ApplyPolicy(admission.HostPolicy{
+		Generation: 1,
+		TotalUnits: 4,
+		Profiles: []admission.ProfilePolicy{
+			{ProfileID: "active", UnitCost: 1},
+			{ProfileID: "stale-a", UnitCost: 1},
+			{ProfileID: "stale-b", UnitCost: 1},
+			{ProfileID: "stale-c", UnitCost: 1},
+			{ProfileID: "stale-d", UnitCost: 1},
+		},
+	}); err != nil {
+		t.Fatalf("apply demand-expiry policy: %v", err)
+	}
+	for _, profileID := range []string{"stale-a", "stale-b", "stale-c", "stale-d"} {
+		if err := coordinator.SetDemand(profileID, 1); err != nil {
+			t.Fatalf("publish stale demand for %s: %v", profileID, err)
+		}
+	}
+	active := newCompetingManagerActor("autoscaled", coordinator, "active")
+	if err := active.setDemand(4); err != nil {
+		t.Fatalf("publish active demand: %v", err)
+	}
+	if err := active.acquire("active-0"); err != nil {
+		t.Fatalf("acquire initial active share: %v", err)
+	}
+	if err := active.acquire("active-1"); !errors.Is(err, admission.ErrBudgetExceeded) {
+		t.Fatalf("fresh competing demand did not protect its fair share: %v", err)
+	}
+
+	clock.advance(admission.DefaultDemandTTL + time.Second)
+	if err := active.setDemand(3); err != nil {
+		t.Fatalf("refresh active demand after stale expiry: %v", err)
+	}
+	for index := 1; index < 4; index++ {
+		if err := active.acquire("active-" + strconv.Itoa(index)); err != nil {
+			t.Fatalf("expired competing demand withheld active slot %d: %v", index, err)
+		}
 	}
 }
 

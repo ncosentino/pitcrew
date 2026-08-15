@@ -71,7 +71,9 @@ gate and was not admitted.
 - `availableUnits < unitCost` means aggregate free budget cannot fit one whole
   worker for this profile.
 - With enough aggregate units visible, an unused non-borrowable reservation or
-  rotating shared-pool fairness may still protect another contender.
+  rotating shared-pool fairness may still protect another current contender.
+  Positive contender demand expires after 30 seconds without a refresh, so a
+  stopped manager cannot reserve that share indefinitely.
 
 The published accounting is profile-scoped, so it does not identify another
 profile's exact lease. Wait for capacity to release, reduce demand, or apply a
@@ -80,9 +82,9 @@ separate measurement.
 
 ## Host-admission coordination stays degraded
 
-After a coordinator restart or policy replacement, `pendingUnits` and
-`withheldUnits` remain `null` until the manager republishes demand. Null is
-unavailable evidence, not zero.
+After a coordinator restart, policy replacement, or demand expiry,
+`pendingUnits` and `withheldUnits` remain `null` until the manager republishes
+demand. Null is unavailable evidence, not zero.
 
 Take a second fresh sample. If `degraded` persists, compare namespace and policy
 fingerprints with the reviewed manifests, verify the profile is present in the
