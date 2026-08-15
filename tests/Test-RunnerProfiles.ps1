@@ -2207,7 +2207,10 @@ $imageBuilderProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile imag
 $androidProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile android-emulator -HostName 'test-host'
 
 Add-Check $defaultProfile.IsDefault 'The implicit default profile is not marked as default.'
-Add-Check ($defaultProfile.Image -eq 'myoung34/github-runner:ubuntu-noble') 'The default profile changed its backward-compatible image.'
+Add-Check (
+    $defaultProfile.Image -eq
+        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+) 'The default profile runner image is not pinned by version and digest.'
 Add-Check ($defaultProfile.Replicas -eq 1) 'The default profile changed its backward-compatible replica count.'
 Add-Check ($defaultProfile.EnvironmentPath -eq (Join-Path $runnerRoot '.env')) 'The default profile no longer uses the backward-compatible .env path.'
 Add-Check ($defaultProfile.ComposeProjectName -eq 'self-hosted-runner') 'The default profile no longer uses the backward-compatible Compose project.'
@@ -4153,7 +4156,14 @@ try {
         Add-Check ($defaultDesiredState.generation -eq 1) 'Initial desired capacity did not start at generation one.'
         Add-Check ($defaultDesiredState.repositories[0].workers -eq 1) 'Initial desired capacity did not preserve the repository worker count.'
         $defaultCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
-        Add-Check ($defaultCommands -match 'pull.*myoung34/github-runner:ubuntu-noble') 'Default setup did not prepare its pullable image before replacement.'
+        Add-Check (
+            $defaultCommands -match (
+                'pull.*' +
+                [regex]::Escape(
+                    'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+                )
+            )
+        ) 'Default setup did not prepare its pinned image before replacement.'
         Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_WORKER_RUNTIME_DEVICES=`tPITCREW_WORKER_SHM_SIZE_BYTES=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_SERVICE_NETWORK=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
@@ -4469,7 +4479,16 @@ try {
         $managerBuildFailureCommands = @(
             Get-Content -LiteralPath $dockerLog -Encoding UTF8
         )
-        Add-Check ($managerBuildFailureCommands -match "tag.*$([regex]::Escape($testWorkerImageId)).*myoung34/github-runner:ubuntu-noble") 'A pre-handoff manager-build failure did not restore the previous worker image.'
+        Add-Check (
+            -not (
+                $managerBuildFailureCommands -match (
+                    "tag.*$([regex]::Escape($testWorkerImageId)).*" +
+                    [regex]::Escape(
+                        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+                    )
+                )
+            )
+        ) 'A pre-handoff manager-build failure attempted to tag an immutable worker image.'
         Add-Check (-not ($managerBuildFailureCommands -match '^stop\t')) 'A failed replacement-manager build stopped the live manager.'
 
         $preRollbackEnvironment = Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8
@@ -4495,7 +4514,16 @@ try {
         Remove-Item Env:\PITCREW_TEST_MANAGER_BUILD_FAILURE -ErrorAction SilentlyContinue
         $rollbackCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check ($rollbackCommands -match 'tag.*sha256:manager-image.*ephemeral-runner-manager:profile-default') 'A failed manager start did not restore the previous manager image.'
-        Add-Check ($rollbackCommands -match "tag.*$([regex]::Escape($testWorkerImageId)).*myoung34/github-runner:ubuntu-noble") 'A failed manager start did not restore the previous worker image.'
+        Add-Check (
+            -not (
+                $rollbackCommands -match (
+                    "tag.*$([regex]::Escape($testWorkerImageId)).*" +
+                    [regex]::Escape(
+                        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+                    )
+                )
+            )
+        ) 'A failed manager start attempted to tag an immutable worker image.'
         Add-Check (
             (Get-Content -LiteralPath $defaultEnvironmentPath -Raw -Encoding UTF8) -ceq
             $preRollbackEnvironment
