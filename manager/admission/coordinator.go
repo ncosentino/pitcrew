@@ -31,6 +31,12 @@ func (SystemClock) Now() time.Time { return time.Now() }
 // constant as a measured host default.
 const DefaultProvisionalLeaseTTL = 30 * time.Second
 
+// DefaultDemandTTL bounds how long one positive pending-demand publication
+// participates in shared-pool fairness without a SetDemand or Acquire refresh.
+// Active and provisional leases use their own lifecycle and are never released
+// by demand expiry.
+const DefaultDemandTTL = 30 * time.Second
+
 // maxEvidenceBytes bounds Reconcile evidence to a strict, sanitized format:
 // a short, single-line, UTF-8 operator audit note rather than free-form or
 // arbitrarily large text.
@@ -49,14 +55,15 @@ const rotationSeedModulus = 1_000_000_007
 // It has no Docker, GitHub, or transport dependency; server.go and client.go
 // expose it over a Unix domain socket for use by shell and Go managers.
 type Coordinator struct {
-	mu             sync.Mutex
-	store          store
-	clock          Clock
-	provisionalTTL time.Duration
-	state          durableState
-	demand         map[string]int
-	demandKnown    map[string]bool
-	rotation       int
+	mu              sync.Mutex
+	store           store
+	clock           Clock
+	provisionalTTL  time.Duration
+	state           durableState
+	demand          map[string]int
+	demandKnown     map[string]bool
+	demandDeadlines map[string]time.Time
+	rotation        int
 
 	// provisionalDeadlines is the sole authority this package trusts for
 	// deciding whether a provisional lease has expired. ADR-0003 requires
@@ -104,12 +111,13 @@ func Open(backing store, clock Clock, provisionalTTL time.Duration) (*Coordinato
 		state = pruned
 	}
 	return &Coordinator{
-		store:          backing,
-		clock:          clock,
-		provisionalTTL: provisionalTTL,
-		state:          state,
-		demand:         make(map[string]int),
-		demandKnown:    make(map[string]bool),
+		store:           backing,
+		clock:           clock,
+		provisionalTTL:  provisionalTTL,
+		state:           state,
+		demand:          make(map[string]int),
+		demandKnown:     make(map[string]bool),
+		demandDeadlines: make(map[string]time.Time),
 		// Seeding rotation from the durable decision sequence, rather than
 		// always starting at zero, prevents a restart from always
 		// re-favoring the first sorted profile in a fairness tie: the
@@ -199,6 +207,7 @@ func (c *Coordinator) ApplyPolicy(policy HostPolicy) error {
 	c.state = next
 	c.demand = make(map[string]int)
 	c.demandKnown = make(map[string]bool)
+	c.demandDeadlines = make(map[string]time.Time)
 	return nil
 }
 
@@ -208,9 +217,10 @@ func (c *Coordinator) ApplyPolicy(policy HostPolicy) error {
 //
 // profileID must match the public profile identity syntax and must be
 // known to the currently applied policy; pending must not be negative. A
-// pending value of zero deletes the profile's demand entry rather than
-// storing a zero, so an arbitrary stream of stale or one-off profile
-// identities can never grow this map without bound.
+// positive demand expires unless SetDemand or Acquire refreshes it. A pending
+// value of zero deletes the profile's demand entry rather than storing a zero,
+// so an arbitrary stream of stale or one-off profile identities can never grow
+// this map without bound.
 func (c *Coordinator) SetDemand(profileID string, pending int) error {
 	if err := validateProfileID(profileID); err != nil {
 		return err
@@ -223,12 +233,16 @@ func (c *Coordinator) SetDemand(profileID string, pending int) error {
 	if _, known := c.state.Policy.profile(profileID); !known {
 		return ErrUnknownProfile
 	}
+	now := c.clock.Now()
+	c.expireStaleDemandLocked(now)
 	c.demandKnown[profileID] = true
 	if pending == 0 {
 		delete(c.demand, profileID)
+		delete(c.demandDeadlines, profileID)
 		return nil
 	}
 	c.demand[profileID] = pending
+	c.demandDeadlines[profileID] = now.Add(DefaultDemandTTL)
 	return nil
 }
 
@@ -302,6 +316,7 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 	if _, err = c.sweepExpiredLocked(now); err != nil {
 		return Lease{}, err
 	}
+	c.expireStaleDemandLocked(now)
 	if len(c.state.AdoptionFences) > 0 {
 		return Lease{}, ErrAdoptionPending
 	}
@@ -319,6 +334,7 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 	}
 	c.demand[profileID] = pendingDemand
 	c.demandKnown[profileID] = true
+	c.demandDeadlines[profileID] = now.Add(DefaultDemandTTL)
 
 	unitCost := profilePolicy.UnitCost
 	held := c.heldUnitsByProfileLocked()
@@ -371,6 +387,7 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 	c.provisionalDeadlines[key.String()] = deadline
 	if pendingDemand == 1 {
 		delete(c.demand, profileID)
+		delete(c.demandDeadlines, profileID)
 	} else {
 		c.demand[profileID] = pendingDemand - 1
 	}
@@ -704,8 +721,8 @@ func (c *Coordinator) recordDecisionLocked(
 //     currently holds beyond its own reservation, drawn from the shared
 //     fair pool or another profile's borrowable headroom.
 //   - PendingUnits: the profile's last known outstanding worker demand
-//     converted to policy units. It is null after coordinator restart or
-//     policy replacement until that profile republishes demand.
+//     converted to policy units. It is null after coordinator restart, policy
+//     replacement, or demand expiry until that profile republishes demand.
 //   - WithheldUnits: the same outstanding unit demand while it remains
 //     ungranted. A successful Acquire consumes one worker from demand before
 //     status can report it.
@@ -750,9 +767,11 @@ type ProfileAccounting struct {
 func (c *Coordinator) Status() (Snapshot, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, err := c.sweepExpiredLocked(c.clock.Now()); err != nil {
+	now := c.clock.Now()
+	if _, err := c.sweepExpiredLocked(now); err != nil {
 		return Snapshot{}, err
 	}
+	c.expireStaleDemandLocked(now)
 	policy := clonePolicy(c.state.Policy)
 	snapshot := Snapshot{
 		Namespace:             policy.Namespace,
@@ -870,11 +889,23 @@ func (c *Coordinator) sweepExpiredLocked(now time.Time) (map[string]bool, error)
 	for profileID := range expiredProfiles {
 		delete(c.demand, profileID)
 		delete(c.demandKnown, profileID)
+		delete(c.demandDeadlines, profileID)
 	}
 	for key := range expired {
 		delete(c.provisionalDeadlines, key)
 	}
 	return expired, nil
+}
+
+func (c *Coordinator) expireStaleDemandLocked(now time.Time) {
+	for profileID, deadline := range c.demandDeadlines {
+		if now.Before(deadline) {
+			continue
+		}
+		delete(c.demand, profileID)
+		delete(c.demandKnown, profileID)
+		delete(c.demandDeadlines, profileID)
+	}
 }
 
 func (c *Coordinator) heldUnitsByProfileLocked() map[string]int {

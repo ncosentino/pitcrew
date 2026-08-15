@@ -15,3 +15,4 @@ them with a new record.
 | [ADR-0003](adr-0003-dedicated-host-admission-service.md) | Accepted | Coordinate atomic host-local admission through one socket-local service without Docker access. |
 | [ADR-0004](adr-0004-bounded-container-capabilities.md) | Superseded | Permit only bounded service-network, KVM, and shared-memory extensions while preserving socketless disposable workers. |
 | [ADR-0005](adr-0005-rootless-same-host-image-building.md) | Accepted | Run the image-builder service rootless on existing nodes and support typed push and non-push image workflows. |
+| [ADR-0006](adr-0006-expiring-host-admission-demand.md) | Accepted | Expire abandoned pending demand without changing durable worker leases. |

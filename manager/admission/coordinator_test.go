@@ -313,6 +313,73 @@ func TestFairnessGuaranteesShareWhenBothProfilesContendSimultaneously(t *testing
 	}
 }
 
+func TestFairnessStopsProtectingExpiredDemand(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 4,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+			{ProfileID: "delta", UnitCost: 1},
+			{ProfileID: "epsilon", UnitCost: 1},
+			{ProfileID: "gamma", UnitCost: 1},
+		},
+	})
+	for _, profileID := range []string{"beta", "delta", "epsilon", "gamma"} {
+		if err := coordinator.SetDemand(profileID, 1); err != nil {
+			t.Fatalf("set demand for %s: %v", profileID, err)
+		}
+	}
+
+	if _, err := coordinator.Acquire("alpha", "alpha-0", 4); err != nil {
+		t.Fatalf("acquire alpha's initial fair share: %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "alpha-1", 3); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("expected fresh competing demand to protect the remaining shares, got %v", err)
+	}
+
+	clock.advance(DefaultDemandTTL + time.Second)
+	for index := 1; index < 4; index++ {
+		if _, err := coordinator.Acquire(
+			"alpha",
+			"alpha-"+itoa(index),
+			4-index,
+		); err != nil {
+			t.Fatalf("expired demand still withheld alpha slot %d: %v", index, err)
+		}
+	}
+}
+
+func TestSetDemandRefreshesFairnessDeadline(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 2,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	})
+	if err := coordinator.SetDemand("beta", 1); err != nil {
+		t.Fatalf("set beta demand: %v", err)
+	}
+	clock.advance(DefaultDemandTTL - time.Second)
+	if err := coordinator.SetDemand("beta", 1); err != nil {
+		t.Fatalf("refresh beta demand: %v", err)
+	}
+	clock.advance(2 * time.Second)
+
+	if _, err := coordinator.Acquire("alpha", "alpha-0", 2); err != nil {
+		t.Fatalf("acquire alpha's guaranteed share: %v", err)
+	}
+	if _, err := coordinator.Acquire("alpha", "alpha-1", 1); !errors.Is(err, ErrBudgetExceeded) {
+		t.Fatalf("refreshed beta demand did not retain its fair share: %v", err)
+	}
+}
+
 // TestFairTurnLockedAccountsForRequestedUnitCostNotJustHeldUnits directly
 // exercises fairTurnLocked with a synthetic held map that a real sequence of
 // Acquire calls cannot easily reproduce (available shrinks in lockstep with
@@ -1527,9 +1594,10 @@ func TestSetDemandDeletesEntryOnZeroDemand(t *testing.T) {
 	}
 	coordinator.mu.Lock()
 	_, present = coordinator.demand["alpha"]
+	_, deadlinePresent := coordinator.demandDeadlines["alpha"]
 	coordinator.mu.Unlock()
-	if present {
-		t.Fatal("expected a zero pending demand to delete the map entry rather than store a zero")
+	if present || deadlinePresent {
+		t.Fatal("expected zero demand to delete the pending entry and its deadline")
 	}
 }
 
@@ -1688,6 +1756,21 @@ func TestStatusConvertsPendingWorkersToPolicyUnits(t *testing.T) {
 	}
 	if withheld := mustInt(t, accounting.WithheldUnits, "withheld units"); withheld != 6 {
 		t.Fatalf("expected all outstanding demand to remain withheld, got %d", withheld)
+	}
+}
+
+func TestStatusExpiresAbandonedPositiveDemand(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 4, 1, 0, false))
+	if err := coordinator.SetDemand("alpha", 2); err != nil {
+		t.Fatalf("set demand: %v", err)
+	}
+	clock.advance(DefaultDemandTTL + time.Second)
+
+	accounting := mustStatus(t, coordinator).Accounting[0]
+	if accounting.PendingUnits != nil || accounting.WithheldUnits != nil {
+		t.Fatalf("expired demand remained current fairness evidence: %#v", accounting)
 	}
 }
 

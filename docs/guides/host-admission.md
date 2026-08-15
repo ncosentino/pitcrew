@@ -306,13 +306,15 @@ positive, and a target reports `host-admission-withheld`.
 If `availableUnits` is smaller than one `unitCost`, the aggregate free budget
 cannot admit that worker. If enough aggregate units appear free, protected
 non-borrowable reservation or rotating shared-pool fairness may be controlling
-the grant. The profile-scoped projection cannot prove which other profile owns
-the remaining units.
+the grant. Positive contender demand expires after 30 seconds without a
+`SetDemand` or lease-acquisition refresh, so an absent manager cannot protect
+that share indefinitely. The profile-scoped projection cannot prove which other
+profile owns the remaining units.
 
 ### Stale coordination
 
 Signal: `status` is `degraded`, or pending and withheld units are `null` after
-an epoch change or coordinator restart.
+an epoch change, coordinator restart, policy replacement, or demand expiry.
 
 Take a fresh sample after the manager has had time to republish demand. If the
 state remains degraded, compare the namespace and policy fingerprints with the
