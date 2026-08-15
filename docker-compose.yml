@@ -31,7 +31,7 @@ services:
       # The runner image each slot launches. The default base already ships
       # PowerShell 7 + a broad OS toolchain; point this at a custom image only if
       # you have one.
-      RUNNER_IMAGE: ${RUNNER_IMAGE:-myoung34/github-runner:ubuntu-noble}
+      RUNNER_IMAGE: ${RUNNER_IMAGE:-myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817}
       RUNNER_PULL_IMAGE: ${RUNNER_PULL_IMAGE:-1}
       # Scope, identity, and registration settings are static for the life of the
       # manager. Mutable targets and counts come from the mounted state directory.
