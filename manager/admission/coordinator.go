@@ -733,8 +733,8 @@ type Snapshot struct {
 	Epoch                 int64               `json:"epoch"`
 	DecisionSequence      int64               `json:"decisionSequence"`
 	Policy                HostPolicy          `json:"policy"`
-	CapacityUnits         int                 `json:"capacityUnits,omitempty"`
-	SafetyMarginUnits     int                 `json:"safetyMarginUnits,omitempty"`
+	CapacityUnits         int                 `json:"capacityUnits"`
+	SafetyMarginUnits     int                 `json:"safetyMarginUnits"`
 	EffectiveTotalUnits   int                 `json:"effectiveTotalUnits"`
 	HostPolicyFingerprint string              `json:"hostPolicyFingerprint,omitempty"`
 	AvailableUnits        int                 `json:"availableUnits"`

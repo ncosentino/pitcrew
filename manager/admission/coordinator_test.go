@@ -1,6 +1,7 @@
 package admission
 
 import (
+	"encoding/json"
 	"errors"
 	"path/filepath"
 	"strings"
@@ -1861,6 +1862,39 @@ func TestStatusReportsNamespaceCapacitySafetyMarginAndFingerprints(t *testing.T)
 	}
 	if len(snapshot.Accounting) != 1 || snapshot.Accounting[0].ProfilePolicyFingerprint != "profile-fingerprint-xyz789" {
 		t.Fatalf("expected profile fingerprint to round-trip, got %#v", snapshot.Accounting)
+	}
+}
+
+func TestStatusSerializesZeroSafetyMarginExplicitly(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation:        1,
+		TotalUnits:        20,
+		Namespace:         "primary",
+		CapacityUnits:     20,
+		SafetyMarginUnits: 0,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+		},
+	})
+
+	encoded, err := json.Marshal(mustStatus(t, coordinator))
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	var document map[string]any
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if margin, present := document["safetyMarginUnits"]; !present || margin != float64(0) {
+		t.Fatalf("root status omitted zero safety margin: %s", encoded)
+	}
+	policy, ok := document["policy"].(map[string]any)
+	if !ok {
+		t.Fatalf("status policy was not an object: %s", encoded)
+	}
+	if margin, present := policy["safetyMarginUnits"]; !present || margin != float64(0) {
+		t.Fatalf("nested policy omitted zero safety margin: %s", encoded)
 	}
 }
 
