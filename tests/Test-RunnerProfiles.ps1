@@ -2404,6 +2404,10 @@ Add-Check ($copilotProfile.EnvironmentPath -eq (Join-Path $runnerRoot '.env.copi
 Add-Check ($copilotProfile.NamePrefix -eq 'test-host-copilot-cli') 'Named profile runner names do not include the profile.'
 Add-Check ($copilotProfile.VerificationCommands.Count -eq 2) 'The Copilot CLI profile must verify path and version at runtime.'
 Add-Check (-not $copilotProfile.PullImage) 'A locally built profile must not be replaced by a remote pull.'
+Add-Check (
+    $copilotProfile.Build.Arguments['RUNNER_IMAGE'] -eq
+        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+) 'The Copilot CLI runner base image is not pinned by version and digest.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_VERSION'] -eq '1.0.71') 'The Copilot CLI version is not pinned in the profile.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI x64 checksum is not pinned.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
@@ -2732,6 +2736,14 @@ Add-Check (
 ) 'Locally built profiles do not fingerprint their complete build context.'
 
 $copilotDockerfile = Get-Content -LiteralPath $copilotDockerfilePath -Raw -Encoding UTF8
+Add-Check (
+    $copilotDockerfile -match
+        [regex]::Escape('FROM ${RUNNER_IMAGE}')
+) 'The Copilot CLI Dockerfile does not consume its pinned runner base.'
+Add-Check (
+    $copilotDockerfile -notmatch
+        '(?m)^FROM\s+myoung34/github-runner:[^@\r\n]+$'
+) 'The Copilot CLI Dockerfile still permits a mutable runner base.'
 Add-Check ($copilotDockerfile -match [regex]::Escape('sha256sum -c -')) 'The Copilot CLI image does not verify the downloaded checksum.'
 Add-Check ($copilotDockerfile -match [regex]::Escape('/usr/local/bin/copilot')) 'The Copilot CLI image does not expose the documented stable executable path.'
 Add-Check ($copilotDockerfile -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN=)') 'The Copilot CLI image contains authentication material.'

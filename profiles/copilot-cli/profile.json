@@ -14,6 +14,7 @@
     "context": ".",
     "dockerfile": "Dockerfile",
     "args": {
+      "RUNNER_IMAGE": "myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817",
       "COPILOT_CLI_VERSION": "1.0.71",
       "COPILOT_CLI_SHA256_X64": "779e9b3e52399d8fdf5bcd61779e3f1d606796ba478b614ad41fb80d522910bb",
       "COPILOT_CLI_SHA256_ARM64": "74cc7cdaaed398f26b7d72c7d41ba2bff41a903525aeac778361d6dbd8a0c60d"

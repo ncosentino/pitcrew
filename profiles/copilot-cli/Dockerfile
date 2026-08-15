@@ -1,4 +1,6 @@
-FROM myoung34/github-runner:ubuntu-noble
+ARG RUNNER_IMAGE=myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817
+
+FROM ${RUNNER_IMAGE}
 
 ARG COPILOT_CLI_VERSION
 ARG COPILOT_CLI_SHA256_X64
