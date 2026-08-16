@@ -469,9 +469,11 @@ Add-Check (
 ) 'The remote-first public endpoint probe can follow an unapproved redirect or accept a path URL.'
 Add-Check (
     $remoteReleaseAsset -match 'Collect-PitCrewDiagnostics\.ps1' -and
-    $remoteReleaseAsset -match '\$checksumAsset = "\$collectorAsset\.sha256"' -and
+    $remoteReleaseAsset -match 'support-broker-access\.json' -and
+    $remoteReleaseAsset -match 'support-broker-access\.schema\.json' -and
+    $remoteReleaseAsset -match '\$checksumPath = "\$assetPath\.sha256"' -and
     $remoteReleaseAsset -match 'Get-FileHash'
-) 'The release asset staging script does not publish the portable collector with its SHA-256 sidecar.'
+) 'The release asset staging script does not publish the collector and broker-access contracts with SHA-256 sidecars.'
 
 $performanceReportSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'SKILL.md') `

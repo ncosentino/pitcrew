@@ -1557,6 +1557,10 @@ publish_pending_acknowledgement() {
         rm -f "${acknowledgement_temporary}"
         return 1
     fi
+    if ! chmod 0644 "${acknowledgement_temporary}"; then
+        rm -f "${acknowledgement_temporary}"
+        return 1
+    fi
     if ! mv -f "${acknowledgement_temporary}" "${ACKNOWLEDGEMENT_PATH}"; then
         rm -f "${acknowledgement_temporary}"
         return 1

@@ -856,6 +856,7 @@ write_manager_observed_state \
     example/runner:1.0 \
     sha256:1111111111111111111111111111111111111111111111111111111111111111
 assert_true "Observed manager state was rejected." observed_state_is_valid "${observed_state_json}"
+assert_equals "644" "$(stat -c '%a' "${observed_state_json}")" "Observed state lost broker-readable file mode."
 assert_equals "10" "$(jq -r '.managerContractVersion' "${observed_state_json}")" "Observed state reported the wrong manager contract."
 assert_equals "2" "$(jq -r '.activeSlots' "${observed_state_json}")" "Observed state reported the wrong active slot count."
 assert_equals "1" "$(jq -r '.eligibleSlots' "${observed_state_json}")" "Observed state reported the wrong GitHub-eligible slot count."

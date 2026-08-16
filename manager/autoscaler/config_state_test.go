@@ -431,6 +431,20 @@ func TestAcknowledgementJSONUsesConfiguredMaximum(t *testing.T) {
 	if decoded["activeSlots"] != float64(3) {
 		t.Fatalf("atomic replacement did not publish the latest acknowledgement: %#v", decoded)
 	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm()&0o040 == 0 {
+		t.Fatalf("atomic replacement removed broker-readable group mode: %04o", info.Mode().Perm())
+	}
+	temporaryPaths, err := filepath.Glob(filepath.Join(filepath.Dir(path), ".*.tmp"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(temporaryPaths) != 0 {
+		t.Fatalf("atomic replacement retained temporary files: %v", temporaryPaths)
+	}
 	for _, field := range []string{
 		"schemaVersion", "status", "generation", "managerContractVersion",
 		"desiredStateHash", "observedAt", "desiredSlots", "addedSlots",

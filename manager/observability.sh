@@ -2314,6 +2314,10 @@ write_manager_observed_state() {
         rm -f "${observed_temporary}"
         return 1
     fi
+    if ! chmod 0644 "${observed_temporary}"; then
+        rm -f "${observed_temporary}"
+        return 1
+    fi
     if ! mv -f "${observed_temporary}" "${output_path}"; then
         rm -f "${observed_temporary}"
         return 1

@@ -1,0 +1,169 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ncosentino/pitcrew/main/support-broker-access.schema.json",
+  "title": "PitCrew Support Broker Access Contract",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "collector",
+    "pitcrewRoot",
+    "connectorHealth",
+    "access"
+  ],
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "schemaVersion": {
+      "const": 1
+    },
+    "collector": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "relativePath",
+        "fixedSwitches",
+        "boundedParameters"
+      ],
+      "properties": {
+        "relativePath": {
+          "const": "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/scripts/Collect-PitCrewDiagnostics.ps1"
+        },
+        "fixedSwitches": {
+          "const": [
+            "FileOnly",
+            "PassThruOnly"
+          ]
+        },
+        "boundedParameters": {
+          "const": [
+            "DiagnosticMode",
+            "Profile",
+            "PackageId"
+          ]
+        }
+      }
+    },
+    "pitcrewRoot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "probeFiles",
+        "stateRoot",
+        "profileIdPattern",
+        "profileReadFiles"
+      ],
+      "properties": {
+        "probeFiles": {
+          "const": [
+            "Setup-Runner.ps1",
+            "RunnerProfiles.Functions.ps1",
+            "docker-compose.yml"
+          ]
+        },
+        "stateRoot": {
+          "const": ".pitcrew-state"
+        },
+        "profileIdPattern": {
+          "const": "^[a-z0-9][a-z0-9-]{0,31}$"
+        },
+        "profileReadFiles": {
+          "const": [
+            "desired-capacity.json",
+            "acknowledged-capacity.json",
+            "static-profile.json",
+            "observed-state.json"
+          ]
+        }
+      }
+    },
+    "connectorHealth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "windowsBaseEnvironment",
+        "windowsRelativeRoot",
+        "linuxAbsoluteRoot",
+        "readFiles"
+      ],
+      "properties": {
+        "windowsBaseEnvironment": {
+          "const": "ProgramData"
+        },
+        "windowsRelativeRoot": {
+          "const": "PitCrew/Connector/health"
+        },
+        "linuxAbsoluteRoot": {
+          "const": "/var/lib/pitcrew-connector/health"
+        },
+        "readFiles": {
+          "const": [
+            "connector-health.json",
+            "connector-events.jsonl"
+          ]
+        }
+      }
+    },
+    "access": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "brokerRights",
+        "transportAgentRights",
+        "forbiddenPaths",
+        "inheritance"
+      ],
+      "properties": {
+        "brokerRights": {
+          "const": [
+            "read-collector",
+            "probe-pitcrew-root-files",
+            "traverse-and-list-state-root",
+            "read-profile-state-files",
+            "read-connector-health-files"
+          ]
+        },
+        "transportAgentRights": {
+          "const": []
+        },
+        "forbiddenPaths": {
+          "const": [
+            ".env",
+            ".env.*",
+            "connector-identity",
+            "registration-material",
+            "jit-configuration",
+            "job-output",
+            "docker-socket",
+            "arbitrary-paths"
+          ]
+        },
+        "inheritance": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "scope",
+            "atomicReplacement",
+            "windows",
+            "linux"
+          ],
+          "properties": {
+            "scope": {
+              "const": "directory"
+            },
+            "atomicReplacement": {
+              "const": "same-directory-temporary-file"
+            },
+            "windows": {
+              "const": "inheritable-directory-ace"
+            },
+            "linux": {
+              "const": "directory-access-and-default-acl"
+            }
+          }
+        }
+      }
+    }
+  }
+}
