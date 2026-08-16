@@ -2053,36 +2053,35 @@ $hostCapacity = if ($includeResources) {
 } else {
     $null
 }
-$safeUrls = if ($FileOnly) {
-    @()
-} else {
-    @(
+$safeUrls = @(
+    if (-not $FileOnly) {
         $ApprovedUrl |
             ForEach-Object { ConvertTo-PitCrewSafeUrl $_ } |
-            Sort-Object -Unique)
-}
-$urlProbes = if ($safeUrls.Count -gt 0) {
-    $runTemp = Join-Path `
-        ([IO.Path]::GetTempPath()) `
-        "pitcrew-diagnostics-$PackageId-$([Guid]::NewGuid().ToString('N'))"
-    $null = New-Item -ItemType Directory -Path $runTemp
-    try {
-        Invoke-PitCrewUrlProbes `
-            -Urls $safeUrls `
-            -HostPlatform $hostPlatform `
-            -WorkerImageId ([string]$stateSummary.static.resolvedImageId) `
-            -SelectedProfile $Profile `
-            -RunId $PackageId `
-            -RunTemp $runTemp `
-            -TimeoutSeconds $ProbeTimeoutSeconds
-    } finally {
-        if (Test-Path -LiteralPath $runTemp -PathType Container) {
-            Remove-Item -LiteralPath $runTemp -Recurse -Force
+            Sort-Object -Unique
+    }
+)
+$urlProbes = @(
+    if ($safeUrls.Count -gt 0) {
+        $runTemp = Join-Path `
+            ([IO.Path]::GetTempPath()) `
+            "pitcrew-diagnostics-$PackageId-$([Guid]::NewGuid().ToString('N'))"
+        $null = New-Item -ItemType Directory -Path $runTemp
+        try {
+            Invoke-PitCrewUrlProbes `
+                -Urls $safeUrls `
+                -HostPlatform $hostPlatform `
+                -WorkerImageId ([string]$stateSummary.static.resolvedImageId) `
+                -SelectedProfile $Profile `
+                -RunId $PackageId `
+                -RunTemp $runTemp `
+                -TimeoutSeconds $ProbeTimeoutSeconds
+        } finally {
+            if (Test-Path -LiteralPath $runTemp -PathType Container) {
+                Remove-Item -LiteralPath $runTemp -Recurse -Force
+            }
         }
     }
-} else {
-    @()
-}
+)
 $afterStats = if ($includeResources -and $safeUrls.Count -gt 0) {
     Get-PitCrewContainerStats `
         -Containers $containers `

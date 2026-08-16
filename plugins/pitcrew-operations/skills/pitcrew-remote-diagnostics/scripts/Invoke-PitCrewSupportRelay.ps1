@@ -38,7 +38,7 @@ param(
     [ValidateRange(60, 3600)]
     [int]$ExpiresInSeconds = 900,
 
-    [Guid]$SessionId,
+    [Guid]$SessionId = [Guid]::Empty,
 
     [switch]$PlanOnly
 )
@@ -403,7 +403,7 @@ try {
     $resultDirectory = Join-Path `
         $OutputDirectory `
         "pitcrew-support-result-$($SessionId.ToString('N'))"
-    Write-PitCrewRemoteDiagnosticsArtifacts `
+    $null = Write-PitCrewRemoteDiagnosticsArtifacts `
         -Envelope ([PSCustomObject][ordered]@{
             report = $payload.report
             markdown = [string]$payload.markdown

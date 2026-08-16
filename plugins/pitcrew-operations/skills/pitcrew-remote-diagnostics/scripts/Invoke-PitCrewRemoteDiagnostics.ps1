@@ -49,7 +49,7 @@ param(
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,62}$')]
     [string]$TenantId,
 
-    [Guid]$DashboardNodeId,
+    [Guid]$DashboardNodeId = [Guid]::Empty,
 
     [ValidateRange(30, 1800)]
     [int]$RelayTimeoutSeconds = 300,
@@ -57,7 +57,7 @@ param(
     [ValidateRange(60, 3600)]
     [int]$RelayExpiresInSeconds = 900,
 
-    [Guid]$SupportSessionId,
+    [Guid]$SupportSessionId = [Guid]::Empty,
 
     [switch]$PlanOnly
 )

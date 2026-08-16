@@ -795,7 +795,8 @@ if ($CommandArguments[0] -eq '-Pi') {
     $supportPayloadBytes = [Text.UTF8Encoding]::new($false).GetBytes(
         ($supportPayload | ConvertTo-Json -Depth 100 -Compress))
     $supportSigningKey = [Security.Cryptography.ECDsa]::Create(
-        [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+        [Security.Cryptography.ECCurve]::CreateFromFriendlyName(
+            'nistP256'))
     try {
         $supportPublicKey = $supportSigningKey.ExportSubjectPublicKeyInfo()
         $supportSignature = $supportSigningKey.SignData(
