@@ -54,7 +54,7 @@ param(
     [ValidateRange(30, 1800)]
     [int]$RelayTimeoutSeconds = 300,
 
-    [ValidateRange(60, 3600)]
+    [ValidateRange(300, 3600)]
     [int]$RelayExpiresInSeconds = 900,
 
     [Guid]$SupportSessionId = [Guid]::Empty,

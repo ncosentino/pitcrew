@@ -161,3 +161,6 @@ The decision is confirmed when coded tests prove:
 
 - [Security Boundaries](../guides/security-boundaries.md)
 - [Copilot CLI Operations](../guides/copilot-operations.md)
+- [Dashboard ADR-0008](https://github.com/ncosentino/pitcrew-dashboard/blob/main/docs/adr/adr-0008-support-plane-v1-read-only-diagnostics.md)
+  defines the paired authorization, relay, support-agent, broker, storage, and
+  user-experience boundaries.

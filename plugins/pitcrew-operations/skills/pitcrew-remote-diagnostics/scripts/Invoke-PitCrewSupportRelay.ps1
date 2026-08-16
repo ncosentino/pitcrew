@@ -35,7 +35,7 @@ param(
     [ValidateRange(30, 1800)]
     [int]$TimeoutSeconds = 300,
 
-    [ValidateRange(60, 3600)]
+    [ValidateRange(300, 3600)]
     [int]$ExpiresInSeconds = 900,
 
     [Guid]$SessionId = [Guid]::Empty,
