@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.11.6') 'The operations plugin patch version was not advanced for bounded worker runtime diagnostics.'
+Add-Check ($plugin.version -eq '1.12.0') 'The operations plugin minor version was not advanced for outbound support diagnostics.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -300,6 +300,9 @@ $remoteImportPath = Join-Path `
 $remoteInvokePath = Join-Path `
     $remoteDiagnosticsScripts `
     'Invoke-PitCrewRemoteDiagnostics.ps1'
+$remoteRelayPath = Join-Path `
+    $remoteDiagnosticsScripts `
+    'Invoke-PitCrewSupportRelay.ps1'
 $remotePreflightPath = Join-Path `
     $remoteDiagnosticsScripts `
     'New-PitCrewDiagnosticsPreflight.ps1'
@@ -319,6 +322,7 @@ foreach ($path in @(
         $remotePackagePath,
         $remoteImportPath,
         $remoteInvokePath,
+        $remoteRelayPath,
         $remotePreflightPath,
         $remoteCorePath,
         $remoteTransportPath,
@@ -341,6 +345,10 @@ $remoteImport = Get-Content `
     -Encoding UTF8
 $remoteInvoke = Get-Content `
     -LiteralPath $remoteInvokePath `
+    -Raw `
+    -Encoding UTF8
+$remoteRelay = Get-Content `
+    -LiteralPath $remoteRelayPath `
     -Raw `
     -Encoding UTF8
 $remoteTransport = Get-Content `
@@ -368,6 +376,7 @@ Add-Check (
     $remoteDiagnosticsSkill -match 'Full'
 ) 'The remote diagnostics skill does not narrow incidents after remote-first triage.'
 Add-Check (
+    $remoteDiagnosticsSkill -match '(?m)^### Outbound support relay' -and
     $remoteDiagnosticsSkill -match '(?m)^### Direct' -and
     $remoteDiagnosticsSkill -match '(?m)^### Explicit SSH' -and
     $remoteDiagnosticsSkill -match '(?m)^### Explicit WinRM' -and
@@ -415,18 +424,39 @@ Add-Check (
     $remoteCollector -match 'ApprovedUrl values must be literal HTTP or HTTPS URLs'
 ) 'The portable collector reads a forbidden surface, invokes a destructive Docker command, or weakens URL validation.'
 Add-Check (
+    $remoteCollector -match '\[switch\]\$FileOnly' -and
+    $remoteCollector -match 'FileOnly collection does not permit URL probes' -and
+    $remoteCollector -match 'InventoryAvailable' -and
+    $remoteCollector -match
+        'collectionScope = if \(\$FileOnly\) \{ ''file-only'' \}'
+) 'The portable collector does not expose the bounded file-only support contract.'
+Add-Check (
     $remotePackage -match 'New-PitCrewDeterministicZip' -and
     $remotePackage -match 'collector\.sha256' -and
     $remotePackage -match 'AGENT-PROMPT\.md' -and
     $remotePackage -match 'Invoke-Collection\.ps1'
 ) 'The handoff package is not deterministic or omits its checksum, invocation, or prompt.'
 Add-Check (
-    $remoteInvoke -match "'Direct', 'Ssh', 'WinRM', 'Package'" -and
+    $remoteInvoke -match "'Direct', 'Ssh', 'WinRM', 'Package', 'Relay'" -and
     $remoteTransport -match 'Invoke-Command' -and
     $remoteTransport -match 'reportJson' -and
     $remoteInvoke -match 'PlanOnly' -and
     $remoteInvoke -notmatch '\[string\]\$Command\b'
 ) 'The orchestrator omits an approved path, dry transport plan, or exposes a generic command.'
+Add-Check (
+    $remoteRelay -match 'AllowAutoRedirect = \$false' -and
+    $remoteRelay -match 'PITCREW_DIAGNOSTICS_CREDENTIAL' -and
+    $remoteRelay -match 'PitCrew-Diagnostics' -and
+    $remoteRelay -match 'ES256-P1363' -and
+    $remoteRelay -match 'nodeSigningKeyFingerprint' -and
+    $remoteRelay -match 'ExpectedNodeSigningKeyFingerprint' -and
+    $remoteRelay -match 'ExpectedRequestDigest' -and
+    $remoteRelay -match 'pitcrew\.diagnostics\.snapshot\.v1' -and
+    $remoteRelay -match 'VerifyData' -and
+    $remoteRelay -match '\$payload\.tenantId' -and
+    $remoteRelay -match '\$payload\.nodeId' -and
+    $remoteRelay -notmatch '\[string\]\$Command\b'
+) 'The relay client does not fail closed on transport, credential, identity, signature, tenant, and node boundaries.'
 Add-Check (
     $remoteImport -match 'checksum verification failed' -and
     $remoteImport -match 'ExpectedPackageId' -and

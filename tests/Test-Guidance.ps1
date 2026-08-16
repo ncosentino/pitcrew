@@ -105,10 +105,10 @@ function New-GuidanceFixture {
 
 try {
     $result = & $validator -ProjectRoot $root
-    Add-Check ($result.instructions -eq 8) (
-        'The repository guidance contract did not discover eight instructions.')
-    Add-Check ($result.adrs -eq 6) (
-        'The repository guidance contract did not discover all six ADRs.')
+    Add-Check ($result.instructions -eq 9) (
+        'The repository guidance contract did not discover nine instructions.')
+    Add-Check ($result.adrs -eq 7) (
+        'The repository guidance contract did not discover all seven ADRs.')
     $inventory = & $inventoryScript -ProjectRoot $root
     Add-Check (
         @(
@@ -125,11 +125,27 @@ try {
         ($resolverOutput -join "`n") -match 'README\.md' -and
         ($resolverOutput -join "`n") -match 'docs/index\.md'
     ) 'The multi-path resolver invocation did not return both requested paths.'
+    $supportResolverOutput = @(
+        & $resolver -Path (
+            'plugins/pitcrew-operations/skills/' +
+            'pitcrew-remote-diagnostics/scripts/' +
+            'Invoke-PitCrewSupportRelay.ps1'
+        )
+    )
+    $supportInstructionPaths = @(
+        $supportResolverOutput |
+            ForEach-Object { [string]$_.InstructionPath })
+    Add-Check (
+        $supportInstructionPaths -contains
+            '.github/instructions/support-plane.instructions.md' -and
+        $supportInstructionPaths -contains
+            '.github/instructions/operations-plugin.instructions.md'
+    ) 'The support relay does not receive both trust-boundary and product guidance.'
 
     $base = Join-Path $temporaryRoot 'base'
     New-GuidanceFixture -Path $base
     Add-Check (
-        (& $validator -ProjectRoot $base).instructions -eq 8
+        (& $validator -ProjectRoot $base).instructions -eq 9
     ) 'The clean guidance fixture did not validate.'
 
     $rootBudget = Join-Path $temporaryRoot 'root-budget'

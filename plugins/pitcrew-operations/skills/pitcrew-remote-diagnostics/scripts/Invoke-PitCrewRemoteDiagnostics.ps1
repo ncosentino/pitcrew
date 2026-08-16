@@ -6,10 +6,9 @@ Runs or packages the portable PitCrew diagnostics collector.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Direct', 'Ssh', 'WinRM', 'Package')]
+    [ValidateSet('Direct', 'Ssh', 'WinRM', 'Package', 'Relay')]
     [string]$ExecutionMode,
 
-    [Parameter(Mandatory)]
     [string]$PitCrewRoot,
 
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,31}$')]
@@ -45,6 +44,29 @@ param(
 
     [PSCredential]$WinRMCredential,
 
+    [Uri]$DashboardUrl,
+
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,62}$')]
+    [string]$TenantId,
+
+    [Guid]$DashboardNodeId = [Guid]::Empty,
+
+    [ValidateRange(30, 1800)]
+    [int]$RelayTimeoutSeconds = 300,
+
+    [ValidateRange(300, 3600)]
+    [int]$RelayExpiresInSeconds = 900,
+
+    [Guid]$SupportSessionId = [Guid]::Empty,
+
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$SupportNodeSigningKeyFingerprint,
+
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$SupportRequestDigest,
+
+    [Nullable[DateTimeOffset]]$SupportExpiresAt,
+
     [switch]$PlanOnly
 )
 
@@ -53,6 +75,60 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'RemoteDiagnostics.Core.ps1')
 . (Join-Path $PSScriptRoot 'RemoteDiagnostics.Transport.ps1')
 
+if ($ExecutionMode -eq 'Relay') {
+    foreach ($required in @(
+            @{ Name = 'DashboardUrl'; Value = $DashboardUrl },
+            @{ Name = 'TenantId'; Value = $TenantId })) {
+        if ($null -eq $required.Value -or
+            [string]::IsNullOrWhiteSpace([string]$required.Value)) {
+            throw "Relay mode requires $($required.Name)."
+        }
+    }
+    if ($DashboardNodeId -eq [Guid]::Empty) {
+        throw 'Relay mode requires DashboardNodeId.'
+    }
+    if ($SupportSessionId -ne [Guid]::Empty -and
+        ([string]::IsNullOrWhiteSpace(
+                $SupportNodeSigningKeyFingerprint) -or
+            [string]::IsNullOrWhiteSpace($SupportRequestDigest) -or
+            $null -eq $SupportExpiresAt)) {
+        throw 'Resuming requires the pinned node key, request digest, and expiry.'
+    }
+    if ($SupportSessionId -eq [Guid]::Empty -and
+        (-not [string]::IsNullOrWhiteSpace(
+                $SupportNodeSigningKeyFingerprint) -or
+            -not [string]::IsNullOrWhiteSpace($SupportRequestDigest) -or
+            $null -ne $SupportExpiresAt)) {
+        throw 'Pinned session values are valid only when resuming.'
+    }
+    $relayScript = Join-Path $PSScriptRoot 'Invoke-PitCrewSupportRelay.ps1'
+    $relayArguments = @{
+        DashboardUrl = $DashboardUrl
+        TenantId = $TenantId
+        DashboardNodeId = $DashboardNodeId
+        DiagnosticMode = $DiagnosticMode
+        PreflightPath = $PreflightPath
+        OutputDirectory = $OutputDirectory
+        TimeoutSeconds = $RelayTimeoutSeconds
+        ExpiresInSeconds = $RelayExpiresInSeconds
+        PlanOnly = $PlanOnly
+    }
+    if ($SupportSessionId -ne [Guid]::Empty) {
+        $relayArguments.SessionId = $SupportSessionId
+        $relayArguments.ExpectedNodeSigningKeyFingerprint =
+            $SupportNodeSigningKeyFingerprint
+        $relayArguments.ExpectedRequestDigest = $SupportRequestDigest
+        $relayArguments.ExpectedExpiresAt = $SupportExpiresAt
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+        $relayArguments.Profile = $Profile
+    }
+    return & $relayScript @relayArguments
+}
+
+if ([string]::IsNullOrWhiteSpace($PitCrewRoot)) {
+    throw "$ExecutionMode mode requires PitCrewRoot."
+}
 Assert-PitCrewRemoteRootLiteral $PitCrewRoot
 $collectorPath = Join-Path $PSScriptRoot 'Collect-PitCrewDiagnostics.ps1'
 $packageScript = Join-Path $PSScriptRoot 'New-PitCrewDiagnosticsPackage.ps1'
