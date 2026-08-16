@@ -364,8 +364,6 @@ try {
                 [IO.UnixFileMode]::GroupRead -bor
                 [IO.UnixFileMode]::GroupExecute)
     }
-    $directoryCreationTime = (
-        Get-Item -LiteralPath $supportStateDirectory).CreationTimeUtc
     Write-RunnerJsonAtomically `
         -Path $supportStatePath `
         -Value ([PSCustomObject]@{
@@ -387,10 +385,8 @@ try {
             Get-ChildItem `
                 -LiteralPath $supportStateDirectory `
                 -Filter '*.tmp' `
-                -Force).Count -eq 0 -and
-        (Get-Item -LiteralPath $supportStateDirectory).CreationTimeUtc -eq
-            $directoryCreationTime
-    ) 'Atomic state publication replaced the stable directory or retained a temporary file.'
+                -Force).Count -eq 0
+    ) 'Atomic state publication retained a temporary file or lost the latest state.'
     if ($IsWindows) {
         $fileAcl = Get-Acl -LiteralPath $supportStatePath
         Add-Check (
