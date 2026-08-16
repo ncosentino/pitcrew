@@ -26,6 +26,12 @@ $releaseAssetScript = Join-Path `
     'scripts' `
     'release' `
     'New-PitCrewReleaseAssets.ps1'
+$supportAccessContractPath = Join-Path `
+    $root `
+    'support-broker-access.json'
+$supportAccessSchemaPath = Join-Path `
+    $root `
+    'support-broker-access.schema.json'
 $errors = [Collections.Generic.List[string]]::new()
 $checks = 0
 
@@ -208,12 +214,34 @@ foreach ($path in @(
         $coreScript,
         $transportScript,
         $releaseAssetScript,
+        $supportAccessContractPath,
+        $supportAccessSchemaPath,
         (Join-Path $skillRoot 'SKILL.md'))) {
     Add-Check (
         Test-Path -LiteralPath $path -PathType Leaf
     ) "Remote diagnostics surface is missing: $path"
 }
 . $coreScript
+
+$supportAccessJson = Get-Content `
+    -LiteralPath $supportAccessContractPath `
+    -Raw `
+    -Encoding UTF8
+$supportAccess = $supportAccessJson |
+    ConvertFrom-Json -Depth 20
+Add-Check (
+    $supportAccessJson |
+        Test-Json -SchemaFile $supportAccessSchemaPath
+) 'The support broker access document does not satisfy its versioned schema.'
+Add-Check (
+    @($supportAccess.pitcrewRoot.profileReadFiles) -join ',' -eq
+        'desired-capacity.json,acknowledged-capacity.json,static-profile.json,observed-state.json' -and
+    @($supportAccess.connectorHealth.readFiles) -join ',' -eq
+        'connector-health.json,connector-events.jsonl' -and
+    @($supportAccess.access.transportAgentRights).Count -eq 0 -and
+    $supportAccess.access.inheritance.atomicReplacement -eq
+        'same-directory-temporary-file'
+) 'The support broker access document broadened reads or lost directory-inherited replacement.'
 
 $tempRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
@@ -1354,6 +1382,31 @@ if ($CommandArguments[0] -eq '-Pi') {
         $releaseAssets.sha256 -eq $sourceCollectorHash -and
         $releaseChecksum -eq $sourceCollectorHash
     ) 'The staged release collector or SHA-256 sidecar does not match the plugin collector.'
+    $releaseSources = @{
+        'Collect-PitCrewDiagnostics.ps1' = $collector
+        'support-broker-access.json' = $supportAccessContractPath
+        'support-broker-access.schema.json' = $supportAccessSchemaPath
+    }
+    Add-Check (
+        @($releaseAssets.assets).Count -eq $releaseSources.Count
+    ) 'The release asset staging result omitted a support diagnostics contract asset.'
+    foreach ($asset in @($releaseAssets.assets)) {
+        $sourceHash = (
+            Get-FileHash `
+                -LiteralPath $releaseSources[[string]$asset.name] `
+                -Algorithm SHA256).Hash.ToLowerInvariant()
+        $sidecarHash = (
+            Get-Content `
+                -LiteralPath $asset.checksumPath `
+                -Raw `
+                -Encoding UTF8).Split(
+                    ' ',
+                    [StringSplitOptions]::RemoveEmptyEntries)[0]
+        Add-Check (
+            $asset.sha256 -eq $sourceHash -and
+            $sidecarHash -eq $sourceHash
+        ) "Release asset '$($asset.name)' or its checksum does not match its reviewed source."
+    }
 
     Write-Host 'Remote diagnostics test: package collect import'
     $expandedPackage = Join-Path $tempRoot 'expanded-package'

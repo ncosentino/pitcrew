@@ -2127,6 +2127,14 @@ function Write-RunnerJsonAtomically {
     $json = $Value | ConvertTo-Json -Depth 20
     try {
         [IO.File]::WriteAllText($temporaryPath, "$json`n", [Text.UTF8Encoding]::new($false))
+        if (-not $IsWindows) {
+            [IO.File]::SetUnixFileMode(
+                $temporaryPath,
+                [IO.UnixFileMode]::UserRead -bor
+                    [IO.UnixFileMode]::UserWrite -bor
+                    [IO.UnixFileMode]::GroupRead -bor
+                    [IO.UnixFileMode]::OtherRead)
+        }
         [IO.File]::Move($temporaryPath, $Path, $true)
     }
     finally {

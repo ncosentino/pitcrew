@@ -1,0 +1,66 @@
+{
+  "$schema": "./support-broker-access.schema.json",
+  "schemaVersion": 1,
+  "collector": {
+    "relativePath": "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/scripts/Collect-PitCrewDiagnostics.ps1",
+    "fixedSwitches": [
+      "FileOnly",
+      "PassThruOnly"
+    ],
+    "boundedParameters": [
+      "DiagnosticMode",
+      "Profile",
+      "PackageId"
+    ]
+  },
+  "pitcrewRoot": {
+    "probeFiles": [
+      "Setup-Runner.ps1",
+      "RunnerProfiles.Functions.ps1",
+      "docker-compose.yml"
+    ],
+    "stateRoot": ".pitcrew-state",
+    "profileIdPattern": "^[a-z0-9][a-z0-9-]{0,31}$",
+    "profileReadFiles": [
+      "desired-capacity.json",
+      "acknowledged-capacity.json",
+      "static-profile.json",
+      "observed-state.json"
+    ]
+  },
+  "connectorHealth": {
+    "windowsBaseEnvironment": "ProgramData",
+    "windowsRelativeRoot": "PitCrew/Connector/health",
+    "linuxAbsoluteRoot": "/var/lib/pitcrew-connector/health",
+    "readFiles": [
+      "connector-health.json",
+      "connector-events.jsonl"
+    ]
+  },
+  "access": {
+    "brokerRights": [
+      "read-collector",
+      "probe-pitcrew-root-files",
+      "traverse-and-list-state-root",
+      "read-profile-state-files",
+      "read-connector-health-files"
+    ],
+    "transportAgentRights": [],
+    "forbiddenPaths": [
+      ".env",
+      ".env.*",
+      "connector-identity",
+      "registration-material",
+      "jit-configuration",
+      "job-output",
+      "docker-socket",
+      "arbitrary-paths"
+    ],
+    "inheritance": {
+      "scope": "directory",
+      "atomicReplacement": "same-directory-temporary-file",
+      "windows": "inheritable-directory-ace",
+      "linux": "directory-access-and-default-acl"
+    }
+  }
+}

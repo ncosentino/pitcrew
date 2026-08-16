@@ -330,6 +330,92 @@ if ($errors.Count -gt 0) {
 
 . $functionsPath
 
+$supportAccessRoot = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    "pitcrew-support-access-$([Guid]::NewGuid().ToString('N'))"
+$supportStateDirectory = Join-Path $supportAccessRoot 'default'
+$supportStatePath = Join-Path $supportStateDirectory 'desired-capacity.json'
+try {
+    $null = New-Item `
+        -ItemType Directory `
+        -Path $supportStateDirectory
+    if ($IsWindows) {
+        $brokerSid = [Security.Principal.SecurityIdentifier]::new(
+            [Security.Principal.WellKnownSidType]::BuiltinUsersSid,
+            $null)
+        $directoryAcl = Get-Acl -LiteralPath $supportStateDirectory
+        $directoryAcl.AddAccessRule(
+            [Security.AccessControl.FileSystemAccessRule]::new(
+                $brokerSid,
+                [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                    [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.AccessControlType]::Allow))
+        Set-Acl `
+            -LiteralPath $supportStateDirectory `
+            -AclObject $directoryAcl
+    } else {
+        [IO.File]::SetUnixFileMode(
+            $supportStateDirectory,
+            [IO.UnixFileMode]::UserRead -bor
+                [IO.UnixFileMode]::UserWrite -bor
+                [IO.UnixFileMode]::UserExecute -bor
+                [IO.UnixFileMode]::GroupRead -bor
+                [IO.UnixFileMode]::GroupExecute)
+    }
+    Write-RunnerJsonAtomically `
+        -Path $supportStatePath `
+        -Value ([PSCustomObject]@{
+            generation = 1
+        })
+    Write-RunnerJsonAtomically `
+        -Path $supportStatePath `
+        -Value ([PSCustomObject]@{
+            generation = 2
+        })
+    $storedSupportState = Get-Content `
+        -LiteralPath $supportStatePath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json
+    Add-Check (
+        $storedSupportState.generation -eq 2 -and
+        @(
+            Get-ChildItem `
+                -LiteralPath $supportStateDirectory `
+                -Filter '*.tmp' `
+                -Force).Count -eq 0
+    ) 'Atomic state publication retained a temporary file or lost the latest state.'
+    if ($IsWindows) {
+        $fileAcl = Get-Acl -LiteralPath $supportStatePath
+        Add-Check (
+            @(
+                $fileAcl.Access |
+                    Where-Object {
+                        $_.IdentityReference.Translate(
+                            [Security.Principal.SecurityIdentifier]) -eq
+                            $brokerSid -and
+                        $_.IsInherited -and
+                        ($_.FileSystemRights -band
+                            [Security.AccessControl.FileSystemRights]::Read) -ne 0
+                    }).Count -gt 0
+        ) 'Atomic state publication did not inherit the broker read ACE.'
+    } else {
+        $fileMode = [IO.File]::GetUnixFileMode($supportStatePath)
+        Add-Check (
+            ($fileMode -band [IO.UnixFileMode]::GroupRead) -ne 0
+        ) 'Atomic state publication removed group-readable broker access.'
+    }
+} finally {
+    if (Test-Path -LiteralPath $supportAccessRoot -PathType Container) {
+        Remove-Item `
+            -LiteralPath $supportAccessRoot `
+            -Recurse `
+            -Force
+    }
+}
+
 $profileJson = Get-Content -LiteralPath $copilotProfilePath -Raw -Encoding UTF8
 Add-Check ($profileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Copilot CLI profile does not conform to runner-profile.schema.json.'
 $imageBuilderProfileJson = Get-Content -LiteralPath $imageBuilderProfilePath -Raw -Encoding UTF8
@@ -5325,6 +5411,7 @@ $autoscalerModule = Get-Content -LiteralPath $autoscalerModulePath -Raw -Encodin
 $autoscalerHardware = Get-Content -LiteralPath $autoscalerHardwarePath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
 $setupSource = Get-Content -LiteralPath $setupPath -Raw -Encoding UTF8
+$functionsSource = Get-Content -LiteralPath $functionsPath -Raw -Encoding UTF8
 $observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
 $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
@@ -5463,6 +5550,18 @@ Add-Check (
 Add-Check ($diagnostics -match [regex]::Escape('DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384')) 'The operation journal does not bound its serialized size.'
 Add-Check ($diagnostics -match [regex]::Escape('sanitize_diagnostic_evidence')) 'Operation evidence is not sanitized before publication.'
 Add-Check ($diagnostics -match [regex]::Escape('mv -f "${append_temporary}" "${append_path}"')) 'The operation journal is not persisted atomically.'
+Add-Check (
+    $functionsSource -match [regex]::Escape(
+        '$temporaryPath = Join-Path $directory') -and
+    $functionsSource -match [regex]::Escape(
+        '[IO.UnixFileMode]::GroupRead')
+) 'PowerShell state publication does not preserve directory-inherited broker reads.'
+Add-Check (
+    $manager -match [regex]::Escape(
+        'chmod 0644 "${acknowledgement_temporary}"') -and
+    $observability -match [regex]::Escape(
+        'chmod 0644 "${observed_temporary}"')
+) 'Fixed-manager state publication does not retain broker-readable file mode.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY diagnostics.sh /usr/local/bin/diagnostics.sh')) 'The manager image does not ship the operation diagnostics helper.'
 Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
 Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'

@@ -1,5 +1,5 @@
 ---
-applyTo: "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/**,tests/Test-RemoteDiagnostics.ps1,docs/adr/adr-0007-outbound-read-only-support-plane.md,docs/guides/{security-boundaries,copilot-operations}.md"
+applyTo: "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/**,support-broker-access*.json,RunnerProfiles.Functions.ps1,manager/autoscaler/state_files.go,manager/{observability,manage-runners}.sh,tests/{Test-RemoteDiagnostics,Test-RunnerProfiles}.ps1,tests/Test-ManagerReconciliation.sh,docs/adr/adr-0007-outbound-read-only-support-plane.md,docs/guides/{security-boundaries,copilot-operations,support-broker-access}.md"
 ---
 
 # Support Plane
@@ -18,6 +18,14 @@ applyTo: "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/**,tests/
   Duplicate request digests return the cached result and never rerun collection.
 - The broker may invoke only the reviewed collector with
   `-FileOnly -PassThruOnly` against a locally configured PitCrew root.
+- `support-broker-access.json` is the canonical broker read and ACL contract.
+  Do not broaden collector reads without updating that contract and its tests.
+- Support-readable state producers create temporary files in the stable profile
+  directory and replace only the file path. Never replace the directory or move
+  state in from a directory that cannot inherit its access policy.
+- Installers grant the broker inherited/default directory access and grant the
+  transport agent no PitCrew-state or connector-health access. Per-file ACLs
+  alone are not a durable contract.
 - File-only collection launches no external command. Excluded Docker, host,
   network, and version evidence must be explicit unavailable values, never
   fabricated zeroes.

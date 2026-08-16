@@ -67,6 +67,7 @@ nav:
       - Demand-Driven Autoscaling: guides/autoscaling.md
       - Rolling Updates: guides/rolling-updates.md
       - Security Boundaries: guides/security-boundaries.md
+      - Support Broker Access: guides/support-broker-access.md
       - Copilot CLI Operations: guides/copilot-operations.md
 
 plugins:

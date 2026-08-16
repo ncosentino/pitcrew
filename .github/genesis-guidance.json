@@ -51,6 +51,8 @@
       "scripts/release/New-PitCrewReleaseAssets.ps1",
       "services/image-builder/Setup-PitCrewImageBuilderService.ps1",
       "Setup-Runner.ps1",
+      "support-broker-access.json",
+      "support-broker-access.schema.json",
       "tests/Test-CopilotPlugin.ps1",
       "tests/Test-RemoteDiagnostics.ps1",
       "tests/Test-ImageBuilderService.ps1",
