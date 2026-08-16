@@ -59,6 +59,14 @@ param(
 
     [Guid]$SupportSessionId = [Guid]::Empty,
 
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$SupportNodeSigningKeyFingerprint,
+
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$SupportRequestDigest,
+
+    [Nullable[DateTimeOffset]]$SupportExpiresAt,
+
     [switch]$PlanOnly
 )
 
@@ -79,6 +87,20 @@ if ($ExecutionMode -eq 'Relay') {
     if ($DashboardNodeId -eq [Guid]::Empty) {
         throw 'Relay mode requires DashboardNodeId.'
     }
+    if ($SupportSessionId -ne [Guid]::Empty -and
+        ([string]::IsNullOrWhiteSpace(
+                $SupportNodeSigningKeyFingerprint) -or
+            [string]::IsNullOrWhiteSpace($SupportRequestDigest) -or
+            $null -eq $SupportExpiresAt)) {
+        throw 'Resuming requires the pinned node key, request digest, and expiry.'
+    }
+    if ($SupportSessionId -eq [Guid]::Empty -and
+        (-not [string]::IsNullOrWhiteSpace(
+                $SupportNodeSigningKeyFingerprint) -or
+            -not [string]::IsNullOrWhiteSpace($SupportRequestDigest) -or
+            $null -ne $SupportExpiresAt)) {
+        throw 'Pinned session values are valid only when resuming.'
+    }
     $relayScript = Join-Path $PSScriptRoot 'Invoke-PitCrewSupportRelay.ps1'
     $relayArguments = @{
         DashboardUrl = $DashboardUrl
@@ -93,6 +115,10 @@ if ($ExecutionMode -eq 'Relay') {
     }
     if ($SupportSessionId -ne [Guid]::Empty) {
         $relayArguments.SessionId = $SupportSessionId
+        $relayArguments.ExpectedNodeSigningKeyFingerprint =
+            $SupportNodeSigningKeyFingerprint
+        $relayArguments.ExpectedRequestDigest = $SupportRequestDigest
+        $relayArguments.ExpectedExpiresAt = $SupportExpiresAt
     }
     if (-not [string]::IsNullOrWhiteSpace($Profile)) {
         $relayArguments.Profile = $Profile

@@ -449,6 +449,9 @@ Add-Check (
     $remoteRelay -match 'PitCrew-Diagnostics' -and
     $remoteRelay -match 'ES256-P1363' -and
     $remoteRelay -match 'nodeSigningKeyFingerprint' -and
+    $remoteRelay -match 'ExpectedNodeSigningKeyFingerprint' -and
+    $remoteRelay -match 'ExpectedRequestDigest' -and
+    $remoteRelay -match 'pitcrew\.diagnostics\.snapshot\.v1' -and
     $remoteRelay -match 'VerifyData' -and
     $remoteRelay -match '\$payload\.tenantId' -and
     $remoteRelay -match '\$payload\.nodeId' -and

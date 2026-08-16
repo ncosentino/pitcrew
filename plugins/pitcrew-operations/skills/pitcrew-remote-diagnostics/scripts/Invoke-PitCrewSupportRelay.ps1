@@ -40,6 +40,14 @@ param(
 
     [Guid]$SessionId = [Guid]::Empty,
 
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$ExpectedNodeSigningKeyFingerprint,
+
+    [ValidatePattern('^[a-f0-9]{64}$')]
+    [string]$ExpectedRequestDigest,
+
+    [Nullable[DateTimeOffset]]$ExpectedExpiresAt,
+
     [switch]$PlanOnly
 )
 
@@ -160,6 +168,21 @@ if ($SessionId -eq [Guid]::Empty -and
     $ExpiresInSeconds -lt $TimeoutSeconds) {
     throw 'ExpiresInSeconds cannot be shorter than TimeoutSeconds.'
 }
+$isResume = $SessionId -ne [Guid]::Empty
+if ($isResume -and
+    ([string]::IsNullOrWhiteSpace(
+            $ExpectedNodeSigningKeyFingerprint) -or
+        [string]::IsNullOrWhiteSpace($ExpectedRequestDigest) -or
+        $null -eq $ExpectedExpiresAt)) {
+    throw 'Resuming requires the pinned node key, request digest, and expiry.'
+}
+if (-not $isResume -and
+    (-not [string]::IsNullOrWhiteSpace(
+            $ExpectedNodeSigningKeyFingerprint) -or
+        -not [string]::IsNullOrWhiteSpace($ExpectedRequestDigest) -or
+        $null -ne $ExpectedExpiresAt)) {
+    throw 'Pinned session values are valid only when resuming.'
+}
 $loopbackHttp = $DashboardUrl.Scheme -eq 'http' -and
     $DashboardUrl.Host -in @('localhost', '127.0.0.1', '::1')
 if ($DashboardUrl.Scheme -ne 'https' -and -not $loopbackHttp) {
@@ -204,6 +227,10 @@ $plan = [PSCustomObject][ordered]@{
     } else {
         $SessionId.ToString('D')
     }
+    expectedNodeSigningKeyFingerprint =
+        $ExpectedNodeSigningKeyFingerprint
+    expectedRequestDigest = $ExpectedRequestDigest
+    expectedExpiresAt = $ExpectedExpiresAt
     credentialSource = 'PITCREW_DIAGNOSTICS_CREDENTIAL'
     mutation = $false
 }
@@ -258,6 +285,19 @@ try {
             throw 'Dashboard support API returned an invalid session identity.'
         }
         $SessionId = $createdSessionId
+        if ($session.nodeSigningKeyFingerprint -notmatch '^[a-f0-9]{64}$' -or
+            $session.requestDigest -notmatch '^[a-f0-9]{64}$' -or
+            [string]$session.capability -cne
+                'pitcrew.diagnostics.snapshot.v1') {
+            throw 'Dashboard support API did not bind the session to the requested capability and node identity.'
+        }
+        $ExpectedNodeSigningKeyFingerprint =
+            [string]$session.nodeSigningKeyFingerprint
+        $ExpectedRequestDigest = [string]$session.requestDigest
+        $ExpectedExpiresAt =
+            ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
+                -Value $session.expiresAt `
+                -Context 'Support session expiry'
     }
     $sessionUri = [Uri]::new(
         $DashboardUrl,
@@ -293,14 +333,13 @@ try {
             sessionUrl = $sessionUri.AbsoluteUri
             status = $sessionStatus
             completed = $false
+            nodeSigningKeyFingerprint =
+                $ExpectedNodeSigningKeyFingerprint
+            requestDigest = $ExpectedRequestDigest
+            expiresAt = $ExpectedExpiresAt
         }
     }
 
-    if ($session.nodeSigningKeyFingerprint -notmatch '^[a-f0-9]{64}$') {
-        throw 'Dashboard support API did not bind the session to an enrolled node signing key.'
-    }
-    $expectedNodeSigningKeyFingerprint =
-        [string]$session.nodeSigningKeyFingerprint
     $attestation = $session.result.attestation
     if ($attestation.signatureAlgorithm -ne 'ES256-P1363') {
         throw 'The support result uses an unsupported signature algorithm.'
@@ -333,7 +372,7 @@ try {
             [Security.Cryptography.SHA256]::HashData($publicKey))
     ).ToLowerInvariant()
     if ($actualNodeSigningKeyFingerprint -ne
-        $expectedNodeSigningKeyFingerprint) {
+        $ExpectedNodeSigningKeyFingerprint) {
         throw 'The support result was not signed by the enrolled node identity.'
     }
     if ($signature.Length -ne 64) {
@@ -377,10 +416,17 @@ try {
     $payloadNodeId = ConvertTo-PitCrewRemoteDiagnosticsGuid `
         -Value $payload.nodeId `
         -Context 'Support result node ID'
+    $payloadExpiresAt = ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
+        -Value $payload.expiresAt `
+        -Context 'Support result expiry'
     if (
         $payloadSessionId -ne $SessionId -or
         $payloadNodeId -ne $DashboardNodeId -or
         [string]$payload.tenantId -cne $TenantId -or
+        [string]$payload.capability -cne
+            'pitcrew.diagnostics.snapshot.v1' -or
+        [string]$payload.requestDigest -cne $ExpectedRequestDigest -or
+        $payloadExpiresAt -ne $ExpectedExpiresAt -or
         $payload.report.schemaVersion -ne 1 -or
         [string]$payload.report.diagnosticMode -cne $DiagnosticMode -or
         [string]$payload.report.collectionScope -cne 'file-only' -or
@@ -424,6 +470,10 @@ try {
         sessionUrl = $sessionUri.AbsoluteUri
         status = 'completed'
         completed = $true
+        nodeSigningKeyFingerprint =
+            $ExpectedNodeSigningKeyFingerprint
+        requestDigest = $ExpectedRequestDigest
+        expiresAt = $ExpectedExpiresAt
         resultDirectory = (Resolve-Path -LiteralPath $resultDirectory).Path
         diagnosisJsonPath = $imported.diagnosisJsonPath
         diagnosisMarkdownPath = $imported.diagnosisMarkdownPath

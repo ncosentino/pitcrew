@@ -104,8 +104,10 @@ imports the signed report through the same package and diagnosis contracts as
 direct and handoff collection.
 
 If the bounded wait ends before completion, retain the returned session ID and
-resume with `-SupportSessionId <id>` and the same node, mode, and profile
-instead of creating another request.
+the returned node-key fingerprint, request digest, and expiry. Resume with
+`-SupportSessionId`, `-SupportNodeSigningKeyFingerprint`,
+`-SupportRequestDigest`, and `-SupportExpiresAt` plus the same node, mode, and
+profile instead of creating another request.
 
 Relay mode never requests a mutation, accepts arbitrary node paths, handles
 device private keys, or falls back to another transport when signature,

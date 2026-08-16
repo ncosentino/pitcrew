@@ -690,6 +690,42 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         -not (Test-Path -LiteralPath $relayPlanOutput)
     ) 'Relay plan mode wrote output or required a credential.'
+    Add-ThrowsCheck `
+        -Action {
+            & $orchestrator `
+                -ExecutionMode Relay `
+                -DashboardUrl https://dashboard.example `
+                -TenantId example `
+                -DashboardNodeId $relayNodeId `
+                -DiagnosticMode CapacityMismatch `
+                -PreflightPath $minimalPreflightPath `
+                -OutputDirectory $relayPlanOutput `
+                -SupportSessionId (
+                    [Guid]'55555555-5555-5555-5555-555555555555') `
+                -PlanOnly
+        } `
+        -ExpectedMessage 'Resuming requires the pinned node key, request digest, and expiry.' `
+        -Failure 'Relay resume accepted a session ID without pinned request identity.'
+    $resumeExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(10)
+    $resumePlan = & $orchestrator `
+        -ExecutionMode Relay `
+        -DashboardUrl https://dashboard.example `
+        -TenantId example `
+        -DashboardNodeId $relayNodeId `
+        -DiagnosticMode CapacityMismatch `
+        -PreflightPath $minimalPreflightPath `
+        -OutputDirectory $relayPlanOutput `
+        -SupportSessionId (
+            [Guid]'55555555-5555-5555-5555-555555555555') `
+        -SupportNodeSigningKeyFingerprint ('b' * 64) `
+        -SupportRequestDigest ('c' * 64) `
+        -SupportExpiresAt $resumeExpiresAt `
+        -PlanOnly
+    Add-Check (
+        $resumePlan.expectedNodeSigningKeyFingerprint -eq ('b' * 64) -and
+        $resumePlan.expectedRequestDigest -eq ('c' * 64) -and
+        $resumePlan.expectedExpiresAt -eq $resumeExpiresAt
+    ) 'Relay resume plan did not preserve pinned request identity.'
 
     $beforeHashes = Get-FixtureHashes -Path $fixtureRoot
     Write-Host 'Remote diagnostics test: Windows collector'
@@ -785,10 +821,15 @@ if ($CommandArguments[0] -eq '-Pi') {
         [Guid]'88888888-8888-8888-8888-888888888888'
     $supportNodeId =
         [Guid]'44444444-4444-4444-4444-444444444444'
+    $supportRequestDigest = 'a' * 64
+    $supportExpiresAt = [DateTimeOffset]::UtcNow.AddMinutes(15)
     $supportPayload = [PSCustomObject][ordered]@{
         tenantId = 'example'
         nodeId = $supportNodeId.ToString('D')
         sessionId = $supportSessionId.ToString('D')
+        capability = 'pitcrew.diagnostics.snapshot.v1'
+        requestDigest = $supportRequestDigest
+        expiresAt = $supportExpiresAt.ToString('O')
         report = $supportEnvelope.report
         markdown = $supportEnvelope.markdown
     }
@@ -813,6 +854,10 @@ if ($CommandArguments[0] -eq '-Pi') {
     $supportCreateResponse = [PSCustomObject][ordered]@{
         sessionId = $supportSessionId.ToString('D')
         status = 'queued'
+        capability = 'pitcrew.diagnostics.snapshot.v1'
+        requestDigest = $supportRequestDigest
+        expiresAt = $supportExpiresAt.ToString('O')
+        nodeSigningKeyFingerprint = $supportFingerprint
     } | ConvertTo-Json -Depth 10 -Compress
     $supportCompletedResponse = [PSCustomObject][ordered]@{
         sessionId = $supportSessionId.ToString('D')
@@ -865,6 +910,9 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         $supportRelayResult.completed -eq $true -and
         $supportRelayResult.sessionId -eq $supportSessionId -and
+        $supportRelayResult.nodeSigningKeyFingerprint -eq
+            $supportFingerprint -and
+        $supportRelayResult.requestDigest -eq $supportRequestDigest -and
         (Test-Path -LiteralPath $supportRelayResult.diagnosisJsonPath -PathType Leaf) -and
         (Test-Path -LiteralPath $supportRelayResult.diagnosisMarkdownPath -PathType Leaf)
     ) 'The relay client did not verify and import the signed node result.'
@@ -944,6 +992,85 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         $supportServerJob.State -eq 'Completed'
     ) 'The invalid-signature relay fixture did not receive the expected requests.'
+    Remove-Job -Job $supportServerJob -Force
+    $supportServerJob = $null
+    $substitutedSigningKey = [Security.Cryptography.ECDsa]::Create(
+        [Security.Cryptography.ECCurve]::CreateFromFriendlyName(
+            'nistP256'))
+    try {
+        $substitutedPublicKey =
+            $substitutedSigningKey.ExportSubjectPublicKeyInfo()
+        $substitutedSignature = $substitutedSigningKey.SignData(
+            $supportPayloadBytes,
+            [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation)
+    } finally {
+        $substitutedSigningKey.Dispose()
+    }
+    $substitutedFingerprint = (
+        [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData(
+                $substitutedPublicKey))
+    ).ToLowerInvariant()
+    $substitutedKeyResponse = [PSCustomObject][ordered]@{
+        sessionId = $supportSessionId.ToString('D')
+        status = 'completed'
+        nodeSigningKeyFingerprint = $substitutedFingerprint
+        result = [PSCustomObject][ordered]@{
+            attestation = [PSCustomObject][ordered]@{
+                signatureAlgorithm = 'ES256-P1363'
+                nodeSigningPublicKeySpki =
+                    [Convert]::ToBase64String($substitutedPublicKey)
+                payloadBase64Url =
+                    ConvertTo-TestBase64Url $supportPayloadBytes
+                signatureBase64Url =
+                    ConvertTo-TestBase64Url $substitutedSignature
+            }
+        }
+    } | ConvertTo-Json -Depth 20 -Compress
+    $substitutedReadyPath = Join-Path `
+        $tempRoot `
+        'substituted-support-server.ready'
+    $supportServerJob = Start-TestJsonServer `
+        -ReadyPath $substitutedReadyPath `
+        -Responses @(
+            $supportCreateResponse,
+            $substitutedKeyResponse)
+    $readyDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    while (
+        -not (
+            Test-Path `
+                -LiteralPath $substitutedReadyPath `
+                -PathType Leaf) -and
+        [DateTimeOffset]::UtcNow -lt $readyDeadline
+    ) {
+        Start-Sleep -Milliseconds 100
+    }
+    $substitutedPort = [int](
+        Get-Content `
+            -LiteralPath $substitutedReadyPath `
+            -Raw `
+            -Encoding UTF8)
+    Add-ThrowsCheck `
+        -Action {
+            & $orchestrator `
+                -ExecutionMode Relay `
+                -DashboardUrl "http://127.0.0.1:$substitutedPort" `
+                -TenantId example `
+                -DashboardNodeId $supportNodeId `
+                -Profile default `
+                -DiagnosticMode Full `
+                -PreflightPath $minimalPreflightPath `
+                -OutputDirectory (
+                    Join-Path $outputRoot 'substituted-support-relay') `
+                -RelayTimeoutSeconds 30
+        } `
+        -ExpectedMessage 'The support result was not signed by the enrolled node identity.' `
+        -Failure 'The relay client accepted a key and matching fingerprint substituted after session creation.'
+    $null = Wait-Job -Job $supportServerJob -Timeout 10
+    Add-Check (
+        $supportServerJob.State -eq 'Completed'
+    ) 'The substituted-key relay fixture did not receive the expected requests.'
     Remove-Job -Job $supportServerJob -Force
     $supportServerJob = $null
 
