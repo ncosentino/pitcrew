@@ -17,6 +17,7 @@ $collector = Join-Path $scriptsRoot 'Collect-PitCrewDiagnostics.ps1'
 $packageScript = Join-Path $scriptsRoot 'New-PitCrewDiagnosticsPackage.ps1'
 $importScript = Join-Path $scriptsRoot 'Import-PitCrewDiagnostics.ps1'
 $orchestrator = Join-Path $scriptsRoot 'Invoke-PitCrewRemoteDiagnostics.ps1'
+$relayScript = Join-Path $scriptsRoot 'Invoke-PitCrewSupportRelay.ps1'
 $preflightScript = Join-Path $scriptsRoot 'New-PitCrewDiagnosticsPreflight.ps1'
 $coreScript = Join-Path $scriptsRoot 'RemoteDiagnostics.Core.ps1'
 $transportScript = Join-Path $scriptsRoot 'RemoteDiagnostics.Transport.ps1'
@@ -106,11 +107,103 @@ function Test-HashMapsEqual {
     return $true
 }
 
+function ConvertTo-TestBase64Url {
+    param([Parameter(Mandatory)][byte[]]$Bytes)
+
+    $encoded = [Convert]::ToBase64String($Bytes)
+    return $encoded.TrimEnd('=').Replace('+', '-').Replace('/', '_')
+}
+
+function Start-TestJsonServer {
+    param(
+        [Parameter(Mandatory)][string]$ReadyPath,
+        [Parameter(Mandatory)][string[]]$Responses
+    )
+
+    $responsePayload = ConvertTo-Json `
+        -InputObject ([object[]]$Responses) `
+        -Compress
+    return Start-Job `
+        -ArgumentList @($ReadyPath, $responsePayload) `
+        -ScriptBlock {
+        param($ReadyPath, $ResponsePayload)
+
+        $ErrorActionPreference = 'Stop'
+        $Responses = @($ResponsePayload | ConvertFrom-Json)
+        $listener = [Net.Sockets.TcpListener]::new(
+            [Net.IPAddress]::Loopback,
+            0)
+        try {
+            $listener.Start()
+            $port = ([Net.IPEndPoint]$listener.LocalEndpoint).Port
+            [IO.File]::WriteAllText(
+                $ReadyPath,
+                [string]$port,
+                [Text.UTF8Encoding]::new($false))
+            foreach ($responseJson in $Responses) {
+                $client = $listener.AcceptTcpClient()
+                try {
+                    $stream = $client.GetStream()
+                    $reader = [IO.StreamReader]::new(
+                        $stream,
+                        [Text.UTF8Encoding]::new($false),
+                        $false,
+                        1024,
+                        $true)
+                    $contentLength = 0
+                    try {
+                        while ($true) {
+                            $line = $reader.ReadLine()
+                            if ([string]::IsNullOrEmpty($line)) {
+                                break
+                            }
+                            if ($line -match '^Content-Length:\s*(\d+)$') {
+                                $contentLength = [int]$Matches[1]
+                            }
+                        }
+                        if ($contentLength -gt 0) {
+                            $buffer = [char[]]::new($contentLength)
+                            $read = 0
+                            while ($read -lt $contentLength) {
+                                $count = $reader.Read(
+                                    $buffer,
+                                    $read,
+                                    $contentLength - $read)
+                                if ($count -le 0) {
+                                    break
+                                }
+                                $read += $count
+                            }
+                        }
+                    } finally {
+                        $reader.Dispose()
+                    }
+                    $body = [Text.UTF8Encoding]::new($false).GetBytes(
+                        $responseJson)
+                    $headers = [Text.Encoding]::ASCII.GetBytes(
+                        "HTTP/1.1 200 OK`r`n" +
+                        "Content-Type: application/json`r`n" +
+                        "Content-Length: $($body.Length)`r`n" +
+                        "Connection: close`r`n`r`n")
+                    $stream.Write($headers, 0, $headers.Length)
+                    $stream.Write($body, 0, $body.Length)
+                    $stream.Flush()
+                } finally {
+                    $client.Dispose()
+                }
+            }
+        } finally {
+            $listener.Stop()
+        }
+    }
+}
+
 foreach ($path in @(
         $collector,
         $packageScript,
         $importScript,
         $orchestrator,
+        $relayScript,
         $preflightScript,
         $coreScript,
         $transportScript,
@@ -135,6 +228,8 @@ $originalPath = $env:PATH
 $originalProgramData = $env:ProgramData
 $originalCommandLog = $env:PITCREW_TEST_COMMAND_LOG
 $originalSessionId = $env:PITCREW_TEST_SESSION_ID
+$originalDiagnosticCredential = $env:PITCREW_DIAGNOSTICS_CREDENTIAL
+$supportServerJob = $null
 try {
     foreach ($directory in @(
             $fixtureRoot,
@@ -572,6 +667,29 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         -not (Test-Path -LiteralPath $minimalPlanOutput)
     ) 'Minimal package plan mode wrote output instead of remaining dry.'
+    $relayPlanOutput = Join-Path `
+        $outputRoot `
+        'relay-plan-should-not-exist'
+    $relayNodeId = [Guid]'44444444-4444-4444-4444-444444444444'
+    $relayPlan = & $orchestrator `
+        -ExecutionMode Relay `
+        -DashboardUrl https://dashboard.example `
+        -TenantId example `
+        -DashboardNodeId $relayNodeId `
+        -Profile default `
+        -DiagnosticMode CapacityMismatch `
+        -PreflightPath $minimalPreflightPath `
+        -OutputDirectory $relayPlanOutput `
+        -PlanOnly
+    Add-Check (
+        $relayPlan.executionMode -eq 'Relay' -and
+        $relayPlan.nodeId -eq $relayNodeId.ToString('D') -and
+        $relayPlan.credentialSource -eq 'PITCREW_DIAGNOSTICS_CREDENTIAL' -and
+        $relayPlan.mutation -eq $false
+    ) 'Relay plan mode did not preserve the bounded support request.'
+    Add-Check (
+        -not (Test-Path -LiteralPath $relayPlanOutput)
+    ) 'Relay plan mode wrote output or required a credential.'
 
     $beforeHashes = Get-FixtureHashes -Path $fixtureRoot
     Write-Host 'Remote diagnostics test: Windows collector'
@@ -613,6 +731,220 @@ if ($CommandArguments[0] -eq '-Pi') {
             $windowsText -notmatch [regex]::Escape($sentinel)
         ) "The Windows collector leaked '$sentinel'."
     }
+
+    Write-Host 'Remote diagnostics test: file-only support collector'
+    Write-Utf8 -Path $commandLog -Content ''
+    $supportPackageId = '66666666666666666666666666666666'
+    $supportEnvelope = & $collector `
+        -PitCrewRoot $fixtureRoot `
+        -Profile default `
+        -DiagnosticMode Full `
+        -Platform Windows `
+        -PackageId $supportPackageId `
+        -FileOnly `
+        -PassThruOnly
+    $supportCommands = @(
+        Get-Content -LiteralPath $commandLog -Encoding UTF8 |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) })
+    Add-Check (
+        $supportEnvelope.report.collectionScope -eq 'file-only'
+    ) 'The support collector did not identify its file-only boundary.'
+    Add-Check (
+        $null -eq $supportEnvelope.report.verifiedMeasurements.capacity[0].liveWorkers -and
+        $null -eq $supportEnvelope.report.verifiedMeasurements.capacity[0].mismatch -and
+        $supportEnvelope.report.verifiedMeasurements.containers.available -eq $false
+    ) 'The support collector fabricated live Docker capacity as zero.'
+    Add-Check (
+        @($supportEnvelope.report.unavailableEvidence |
+                Where-Object category -eq 'docker-inventory').Count -eq 1 -and
+        @($supportEnvelope.report.unavailableEvidence |
+                Where-Object category -eq 'host-resource-sample').Count -eq 1 -and
+        @($supportEnvelope.report.unavailableEvidence |
+                Where-Object category -eq 'pitcrew-version').Count -eq 1
+    ) 'The support collector did not identify excluded live evidence as unavailable.'
+    Add-Check (
+        $supportCommands.Count -eq 0
+    ) 'The support collector launched an external command.'
+    Add-ThrowsCheck `
+        -Action {
+            & $collector `
+                -PitCrewRoot $fixtureRoot `
+                -Profile default `
+                -DiagnosticMode Full `
+                -Platform Windows `
+                -ApprovedUrl https://example.test/artifact `
+                -PackageId '77777777777777777777777777777777' `
+                -FileOnly `
+                -PassThruOnly
+        } `
+        -ExpectedMessage 'FileOnly collection does not permit URL probes.' `
+        -Failure 'The support collector accepted a URL probe.'
+
+    Write-Host 'Remote diagnostics test: signed relay result'
+    $supportSessionId =
+        [Guid]'88888888-8888-8888-8888-888888888888'
+    $supportNodeId =
+        [Guid]'44444444-4444-4444-4444-444444444444'
+    $supportPayload = [PSCustomObject][ordered]@{
+        tenantId = 'example'
+        nodeId = $supportNodeId.ToString('D')
+        sessionId = $supportSessionId.ToString('D')
+        report = $supportEnvelope.report
+        markdown = $supportEnvelope.markdown
+    }
+    $supportPayloadBytes = [Text.UTF8Encoding]::new($false).GetBytes(
+        ($supportPayload | ConvertTo-Json -Depth 100 -Compress))
+    $supportSigningKey = [Security.Cryptography.ECDsa]::Create(
+        [Security.Cryptography.ECCurve]::NamedCurves.nistP256)
+    try {
+        $supportPublicKey = $supportSigningKey.ExportSubjectPublicKeyInfo()
+        $supportSignature = $supportSigningKey.SignData(
+            $supportPayloadBytes,
+            [Security.Cryptography.HashAlgorithmName]::SHA256,
+            [Security.Cryptography.DSASignatureFormat]::IeeeP1363FixedFieldConcatenation)
+    } finally {
+        $supportSigningKey.Dispose()
+    }
+    $supportFingerprint = (
+        [Convert]::ToHexString(
+            [Security.Cryptography.SHA256]::HashData($supportPublicKey))
+    ).ToLowerInvariant()
+    $supportCreateResponse = [PSCustomObject][ordered]@{
+        sessionId = $supportSessionId.ToString('D')
+        status = 'queued'
+    } | ConvertTo-Json -Depth 10 -Compress
+    $supportCompletedResponse = [PSCustomObject][ordered]@{
+        sessionId = $supportSessionId.ToString('D')
+        status = 'completed'
+        nodeSigningKeyFingerprint = $supportFingerprint
+        result = [PSCustomObject][ordered]@{
+            attestation = [PSCustomObject][ordered]@{
+                signatureAlgorithm = 'ES256-P1363'
+                nodeSigningPublicKeySpki =
+                    [Convert]::ToBase64String($supportPublicKey)
+                payloadBase64Url =
+                    ConvertTo-TestBase64Url $supportPayloadBytes
+                signatureBase64Url =
+                    ConvertTo-TestBase64Url $supportSignature
+            }
+        }
+    } | ConvertTo-Json -Depth 20 -Compress
+    $supportReadyPath = Join-Path $tempRoot 'support-server.ready'
+    $supportServerJob = Start-TestJsonServer `
+        -ReadyPath $supportReadyPath `
+        -Responses @(
+            $supportCreateResponse,
+            $supportCompletedResponse)
+    $readyDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    while (-not (Test-Path -LiteralPath $supportReadyPath -PathType Leaf) -and
+        [DateTimeOffset]::UtcNow -lt $readyDeadline) {
+        Start-Sleep -Milliseconds 100
+    }
+    Add-Check (
+        Test-Path -LiteralPath $supportReadyPath -PathType Leaf
+    ) 'The local support-relay fixture did not start.'
+    $supportPort = [int](
+        Get-Content -LiteralPath $supportReadyPath -Raw -Encoding UTF8)
+    $env:PITCREW_DIAGNOSTICS_CREDENTIAL = 'fixture-read-only-credential'
+    $supportRelayOutput = Join-Path $outputRoot 'support-relay'
+    $supportRelayResult = & $orchestrator `
+        -ExecutionMode Relay `
+        -DashboardUrl "http://127.0.0.1:$supportPort" `
+        -TenantId example `
+        -DashboardNodeId $supportNodeId `
+        -Profile default `
+        -DiagnosticMode Full `
+        -PreflightPath $minimalPreflightPath `
+        -OutputDirectory $supportRelayOutput `
+        -RelayTimeoutSeconds 30
+    $null = Wait-Job -Job $supportServerJob -Timeout 10
+    Add-Check (
+        $supportServerJob.State -eq 'Completed'
+    ) 'The local support-relay fixture did not receive the expected requests.'
+    Add-Check (
+        $supportRelayResult.completed -eq $true -and
+        $supportRelayResult.sessionId -eq $supportSessionId -and
+        (Test-Path -LiteralPath $supportRelayResult.diagnosisJsonPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $supportRelayResult.diagnosisMarkdownPath -PathType Leaf)
+    ) 'The relay client did not verify and import the signed node result.'
+    $supportDiagnosis = Get-Content `
+        -LiteralPath $supportRelayResult.diagnosisJsonPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 100
+    Add-Check (
+        $supportDiagnosis.collectionScope -eq 'file-only' -and
+        $supportDiagnosis.verifiedMeasurements.host.containers.available -eq
+            $false -and
+        $null -eq
+            $supportDiagnosis.verifiedMeasurements.host.containers.managerCount -and
+        $null -eq
+            $supportDiagnosis.verifiedMeasurements.host.containers.workerCount
+    ) 'The imported relay diagnosis converted unavailable container evidence to zero.'
+    Remove-Job -Job $supportServerJob -Force
+    $supportServerJob = $null
+    $invalidSupportSignature = [byte[]]$supportSignature.Clone()
+    $invalidSupportSignature[0] = $invalidSupportSignature[0] -bxor 1
+    $invalidSupportResponse = [PSCustomObject][ordered]@{
+        sessionId = $supportSessionId.ToString('D')
+        status = 'completed'
+        nodeSigningKeyFingerprint = $supportFingerprint
+        result = [PSCustomObject][ordered]@{
+            attestation = [PSCustomObject][ordered]@{
+                signatureAlgorithm = 'ES256-P1363'
+                nodeSigningPublicKeySpki =
+                    [Convert]::ToBase64String($supportPublicKey)
+                payloadBase64Url =
+                    ConvertTo-TestBase64Url $supportPayloadBytes
+                signatureBase64Url =
+                    ConvertTo-TestBase64Url $invalidSupportSignature
+            }
+        }
+    } | ConvertTo-Json -Depth 20 -Compress
+    $invalidSupportReadyPath = Join-Path `
+        $tempRoot `
+        'invalid-support-server.ready'
+    $supportServerJob = Start-TestJsonServer `
+        -ReadyPath $invalidSupportReadyPath `
+        -Responses @(
+            $supportCreateResponse,
+            $invalidSupportResponse)
+    $readyDeadline = [DateTimeOffset]::UtcNow.AddSeconds(10)
+    while (
+        -not (
+            Test-Path `
+                -LiteralPath $invalidSupportReadyPath `
+                -PathType Leaf) -and
+        [DateTimeOffset]::UtcNow -lt $readyDeadline
+    ) {
+        Start-Sleep -Milliseconds 100
+    }
+    $invalidSupportPort = [int](
+        Get-Content `
+            -LiteralPath $invalidSupportReadyPath `
+            -Raw `
+            -Encoding UTF8)
+    Add-ThrowsCheck `
+        -Action {
+            & $orchestrator `
+                -ExecutionMode Relay `
+                -DashboardUrl "http://127.0.0.1:$invalidSupportPort" `
+                -TenantId example `
+                -DashboardNodeId $supportNodeId `
+                -Profile default `
+                -DiagnosticMode Full `
+                -PreflightPath $minimalPreflightPath `
+                -OutputDirectory (Join-Path $outputRoot 'invalid-support-relay') `
+                -RelayTimeoutSeconds 30
+        } `
+        -ExpectedMessage 'The support result node signature is invalid.' `
+        -Failure 'The relay client accepted a result with a modified signature.'
+    $null = Wait-Job -Job $supportServerJob -Timeout 10
+    Add-Check (
+        $supportServerJob.State -eq 'Completed'
+    ) 'The invalid-signature relay fixture did not receive the expected requests.'
+    Remove-Job -Job $supportServerJob -Force
+    $supportServerJob = $null
 
     Write-Host 'Remote diagnostics test: Linux collector'
     $linuxPackageId = '22222222222222222222222222222222'
@@ -1326,6 +1658,11 @@ if ($CommandArguments[0] -eq '-Pi') {
     $env:ProgramData = $originalProgramData
     $env:PITCREW_TEST_COMMAND_LOG = $originalCommandLog
     $env:PITCREW_TEST_SESSION_ID = $originalSessionId
+    $env:PITCREW_DIAGNOSTICS_CREDENTIAL = $originalDiagnosticCredential
+    if ($null -ne $supportServerJob) {
+        Stop-Job -Job $supportServerJob -ErrorAction SilentlyContinue
+        Remove-Job -Job $supportServerJob -Force -ErrorAction SilentlyContinue
+    }
     if (Test-Path -LiteralPath $tempRoot -PathType Container) {
         Remove-Item -LiteralPath $tempRoot -Recurse -Force
     }

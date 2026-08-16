@@ -71,6 +71,20 @@ dashboards are read-only consumers and never receive the Docker socket.
 `observed-state.schema.json`, the two manager implementations, and their contract
 tests must advance together.
 
+## Support-plane boundary
+
+Support-plane v1 is additive to the manager and normal connector. A dedicated
+node transport polls outward through an opaque relay, while a separate
+networkless broker reads only the fixed diagnostic files through
+`Collect-PitCrewDiagnostics.ps1 -FileOnly`.
+
+PitCrew owns the collector, report/import contract, operations skill, and
+support guidance. PitCrew Dashboard owns protocol canonicalization,
+authorization and identity, relay, agent and broker applications, persistence,
+API, UX, installers, and node packages. The trust and mixed-version rules are
+recorded in
+[ADR-0007](../adr/adr-0007-outbound-read-only-support-plane.md).
+
 ## Operations plugin
 
 `plugins/pitcrew-operations/` is a published product surface, not contributor

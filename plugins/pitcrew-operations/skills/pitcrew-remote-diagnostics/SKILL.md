@@ -1,6 +1,6 @@
 ---
 name: pitcrew-remote-diagnostics
-description: Triage a PitCrew incident remotely first, then run a fixed read-only collector directly, through explicit PowerShell SSH or WinRM transport, or through a deterministic agent-handoff bundle and verify the returned diagnosis.
+description: Triage a PitCrew incident remotely first, then run a fixed read-only collector through the outbound support relay, directly, through explicit PowerShell SSH or WinRM transport, or through a deterministic agent-handoff bundle and verify the returned diagnosis.
 license: MIT
 ---
 
@@ -21,6 +21,7 @@ Use only the supported scripts in this skill's `scripts` directory:
 - `New-PitCrewDiagnosticsPackage.ps1`
 - `Collect-PitCrewDiagnostics.ps1`
 - `Import-PitCrewDiagnostics.ps1`
+- `Invoke-PitCrewSupportRelay.ps1`
 
 ## Non-negotiable boundaries
 
@@ -74,9 +75,41 @@ pwsh ./scripts/New-PitCrewDiagnosticsPreflight.ps1 `
 ```
 
 Omit unavailable optional inputs rather than inventing them. The preflight file
-must exist before direct, transport, or package collection begins.
+must exist before relay, direct, transport, or package collection begins.
 
 ## Phase 2: choose one execution path
+
+### Outbound support relay
+
+Prefer `Relay` when the node advertises the read-only support-plane v1
+capability. The node polls outward over HTTPS; the skill never opens an inbound
+connection or receives a shell.
+
+```powershell
+pwsh ./scripts/Invoke-PitCrewRemoteDiagnostics.ps1 `
+    -ExecutionMode Relay `
+    -DashboardUrl https://dashboard.example `
+    -TenantId <tenant-id> `
+    -DashboardNodeId <support-node-id> `
+    -Profile <profile> `
+    -DiagnosticMode CapacityMismatch `
+    -PreflightPath <session-directory>\pitcrew-diagnostics-preflight.json `
+    -OutputDirectory <session-directory>\pitcrew-diagnostics
+```
+
+The request uses the expiring read-only credential from
+`PITCREW_DIAGNOSTICS_CREDENTIAL`. The skill independently verifies that the
+node signature matches the identity bound when the session was created, then
+imports the signed report through the same package and diagnosis contracts as
+direct and handoff collection.
+
+If the bounded wait ends before completion, retain the returned session ID and
+resume with `-SupportSessionId <id>` and the same node, mode, and profile
+instead of creating another request.
+
+Relay mode never requests a mutation, accepts arbitrary node paths, handles
+device private keys, or falls back to another transport when signature,
+tenant, node, capability, or package verification fails.
 
 ### Direct
 

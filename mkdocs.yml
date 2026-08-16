@@ -52,6 +52,7 @@ nav:
           - "ADR-0004: Bounded Container Capabilities": adr/adr-0004-bounded-container-capabilities.md
           - "ADR-0005: Rootless Same-Host Image Building": adr/adr-0005-rootless-same-host-image-building.md
           - "ADR-0006: Expiring Host-Admission Demand": adr/adr-0006-expiring-host-admission-demand.md
+          - "ADR-0007: Outbound Read-Only Support Plane": adr/adr-0007-outbound-read-only-support-plane.md
   - Guides:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md

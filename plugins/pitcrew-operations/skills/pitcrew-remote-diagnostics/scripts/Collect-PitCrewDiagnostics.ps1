@@ -7,7 +7,8 @@ Collects a bounded, read-only PitCrew host diagnostic report.
 Reads only generated non-secret PitCrew state, the standard connector health
 journal, exact-label Docker evidence, and optional caller-approved URL timing.
 It never reads environment files, connector identity, job output, JIT material,
-or registration payloads.
+or registration payloads. FileOnly mode reads only the fixed state and health
+files and launches no external process.
 #>
 [CmdletBinding()]
 param(
@@ -34,6 +35,8 @@ param(
     [ValidateRange(1, 900)]
     [int]$ProbeTimeoutSeconds = 300,
 
+    [switch]$FileOnly,
+
     [string]$OutputDirectory,
 
     [ValidatePattern('^[a-f0-9]{16,64}$')]
@@ -44,7 +47,7 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
-$script:CollectorVersion = '1.0.0'
+$script:CollectorVersion = '1.1.0'
 $script:Unavailable = [Collections.Generic.List[object]]::new()
 $script:Commands = [Collections.Generic.List[object]]::new()
 
@@ -1018,6 +1021,7 @@ function Get-PitCrewContainerInventory {
         }
     )
     return [PSCustomObject][ordered]@{
+        available = $true
         managers = $managers
         workers = $workers
         images = $imageEvidence
@@ -1571,7 +1575,8 @@ function Invoke-PitCrewUrlProbes {
 function Get-PitCrewCapacityComparison {
     param(
         [AllowNull()][object]$StateSummary,
-        [AllowNull()][object]$Inventory
+        [AllowNull()][object]$Inventory,
+        [bool]$InventoryAvailable = $true
     )
 
     $desiredMap = @{}
@@ -1655,8 +1660,11 @@ function Get-PitCrewCapacityComparison {
             } else {
                 $null
             }
-            $live = [int](
-                Get-PitCrewProperty $liveByRepository $key 0)
+            $live = if ($InventoryAvailable) {
+                [int](Get-PitCrewProperty $liveByRepository $key 0)
+            } else {
+                $null
+            }
             [PSCustomObject][ordered]@{
                 target = $key
                 desiredWorkers = Get-PitCrewProperty $desiredMap $key
@@ -1665,7 +1673,9 @@ function Get-PitCrewCapacityComparison {
                 registeredWorkers = $registered
                 states = @($group.state)
                 scaleSet = Get-PitCrewProperty $targetMap $key
-                mismatch = if ($group.Count -eq 0) {
+                mismatch = if (-not $InventoryAvailable) {
+                    $null
+                } elseif ($group.Count -eq 0) {
                     $live -gt 0
                 } elseif (-not $registrationComplete) {
                     $null
@@ -1903,6 +1913,9 @@ function Write-PitCrewResultArtifacts {
 }
 
 $startedAt = [DateTimeOffset]::UtcNow
+if ($FileOnly -and $ApprovedUrl.Count -gt 0) {
+    throw 'FileOnly collection does not permit URL probes.'
+}
 if ([string]::IsNullOrWhiteSpace($PackageId)) {
     $PackageId = [Guid]::NewGuid().ToString('N')
 }
@@ -1982,22 +1995,39 @@ $stateSummary = ConvertTo-PitCrewStateSummary `
     -Observed $observed `
     -CollectedAt $collectedAt
 $connectorHealth = Get-PitCrewConnectorHealth -HostPlatform $hostPlatform
-$includeDocker = $DiagnosticMode -ne 'ConnectorOffline'
+$includeDocker = -not $FileOnly -and
+    $DiagnosticMode -ne 'ConnectorOffline'
 $inventory = if ($includeDocker) {
     Get-PitCrewContainerInventory `
         -SelectedProfile $Profile `
         -StateSummary $stateSummary
 } else {
     [PSCustomObject][ordered]@{
+        available = $false
         managers = @()
         workers = @()
         images = @()
     }
 }
+if ($FileOnly) {
+    Add-PitCrewUnavailable `
+        -Category 'docker-inventory' `
+        -Reason 'The support-safe collector excludes Docker access by design.' `
+        -FollowUp 'Use an explicitly approved deep-diagnostics workflow when exact Docker evidence is required.'
+}
 $capacity = Get-PitCrewCapacityComparison `
     -StateSummary $stateSummary `
-    -Inventory $inventory
-$includeResources = $DiagnosticMode -in @('HostPressure', 'Full')
+    -Inventory $inventory `
+    -InventoryAvailable $includeDocker
+$includeResources = -not $FileOnly -and
+    $DiagnosticMode -in @('HostPressure', 'Full')
+if ($FileOnly -and
+    $DiagnosticMode -in @('HostPressure', 'Full')) {
+    Add-PitCrewUnavailable `
+        -Category 'host-resource-sample' `
+        -Reason 'The support-safe collector excludes live host and container resource queries.' `
+        -FollowUp 'Use an explicitly approved deep-diagnostics workflow when live resource evidence is required.'
+}
 $containers = @($inventory.managers) + @($inventory.workers)
 $beforeStats = if ($includeResources) {
     Get-PitCrewContainerStats `
@@ -2023,16 +2053,20 @@ $hostCapacity = if ($includeResources) {
 } else {
     $null
 }
-$safeUrls = @(
-    $ApprovedUrl |
-        ForEach-Object { ConvertTo-PitCrewSafeUrl $_ } |
-        Sort-Object -Unique)
-$runTemp = Join-Path `
-    ([IO.Path]::GetTempPath()) `
-    "pitcrew-diagnostics-$PackageId-$([Guid]::NewGuid().ToString('N'))"
-$null = New-Item -ItemType Directory -Path $runTemp
-try {
-    $urlProbes = if ($safeUrls.Count -gt 0) {
+$safeUrls = if ($FileOnly) {
+    @()
+} else {
+    @(
+        $ApprovedUrl |
+            ForEach-Object { ConvertTo-PitCrewSafeUrl $_ } |
+            Sort-Object -Unique)
+}
+$urlProbes = if ($safeUrls.Count -gt 0) {
+    $runTemp = Join-Path `
+        ([IO.Path]::GetTempPath()) `
+        "pitcrew-diagnostics-$PackageId-$([Guid]::NewGuid().ToString('N'))"
+    $null = New-Item -ItemType Directory -Path $runTemp
+    try {
         Invoke-PitCrewUrlProbes `
             -Urls $safeUrls `
             -HostPlatform $hostPlatform `
@@ -2041,13 +2075,13 @@ try {
             -RunId $PackageId `
             -RunTemp $runTemp `
             -TimeoutSeconds $ProbeTimeoutSeconds
-    } else {
-        @()
+    } finally {
+        if (Test-Path -LiteralPath $runTemp -PathType Container) {
+            Remove-Item -LiteralPath $runTemp -Recurse -Force
+        }
     }
-} finally {
-    if (Test-Path -LiteralPath $runTemp -PathType Container) {
-        Remove-Item -LiteralPath $runTemp -Recurse -Force
-    }
+} else {
+    @()
 }
 $afterStats = if ($includeResources -and $safeUrls.Count -gt 0) {
     Get-PitCrewContainerStats `
@@ -2068,16 +2102,24 @@ $afterAdapters = if ($includeResources -and $safeUrls.Count -gt 0) {
 } else {
     $null
 }
-$gitVersion = Invoke-PitCrewProcess `
-    -Name git `
-    -Arguments @(
-        '-C',
-        $resolvedRoot,
-        'describe',
-        '--tags',
-        '--always',
-        '--dirty') `
-    -DisplayCommand 'git -C <pitcrew-root> describe --tags --always --dirty'
+$gitVersion = if ($FileOnly) {
+    Add-PitCrewUnavailable `
+        -Category 'pitcrew-version' `
+        -Reason 'The support-safe collector does not launch source-control commands.' `
+        -FollowUp 'Correlate the generated static profile fingerprint with deployment inventory.'
+    $null
+} else {
+    Invoke-PitCrewProcess `
+        -Name git `
+        -Arguments @(
+            '-C',
+            $resolvedRoot,
+            'describe',
+            '--tags',
+            '--always',
+            '--dirty') `
+        -DisplayCommand 'git -C <pitcrew-root> describe --tags --always --dirty'
+}
 $completedAt = [DateTimeOffset]::UtcNow
 $hypotheses = New-PitCrewHypotheses `
     -StateSummary $stateSummary `
@@ -2095,6 +2137,7 @@ $report = [PSCustomObject][ordered]@{
     }
     packageId = $PackageId
     diagnosticMode = $DiagnosticMode
+    collectionScope = if ($FileOnly) { 'file-only' } else { 'full' }
     platform = $hostPlatform
     platformSource = if ($Platform -eq 'Auto') { 'detected' } else { 'explicit' }
     profile = $Profile
@@ -2102,7 +2145,8 @@ $report = [PSCustomObject][ordered]@{
     startedAt = $startedAt
     completedAt = $completedAt
     verifiedMeasurements = [PSCustomObject][ordered]@{
-        pitcrewVersion = if ($gitVersion.exitCode -eq 0) {
+        pitcrewVersion = if ($null -ne $gitVersion -and
+            $gitVersion.exitCode -eq 0) {
             $gitVersion.output.Trim()
         } else {
             $null

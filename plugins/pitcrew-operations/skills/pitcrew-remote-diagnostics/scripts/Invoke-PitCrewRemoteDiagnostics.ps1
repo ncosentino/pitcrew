@@ -6,10 +6,9 @@ Runs or packages the portable PitCrew diagnostics collector.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory)]
-    [ValidateSet('Direct', 'Ssh', 'WinRM', 'Package')]
+    [ValidateSet('Direct', 'Ssh', 'WinRM', 'Package', 'Relay')]
     [string]$ExecutionMode,
 
-    [Parameter(Mandatory)]
     [string]$PitCrewRoot,
 
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,31}$')]
@@ -45,6 +44,21 @@ param(
 
     [PSCredential]$WinRMCredential,
 
+    [Uri]$DashboardUrl,
+
+    [ValidatePattern('^[a-z0-9][a-z0-9-]{0,62}$')]
+    [string]$TenantId,
+
+    [Guid]$DashboardNodeId,
+
+    [ValidateRange(30, 1800)]
+    [int]$RelayTimeoutSeconds = 300,
+
+    [ValidateRange(60, 3600)]
+    [int]$RelayExpiresInSeconds = 900,
+
+    [Guid]$SupportSessionId,
+
     [switch]$PlanOnly
 )
 
@@ -53,6 +67,42 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'RemoteDiagnostics.Core.ps1')
 . (Join-Path $PSScriptRoot 'RemoteDiagnostics.Transport.ps1')
 
+if ($ExecutionMode -eq 'Relay') {
+    foreach ($required in @(
+            @{ Name = 'DashboardUrl'; Value = $DashboardUrl },
+            @{ Name = 'TenantId'; Value = $TenantId })) {
+        if ($null -eq $required.Value -or
+            [string]::IsNullOrWhiteSpace([string]$required.Value)) {
+            throw "Relay mode requires $($required.Name)."
+        }
+    }
+    if ($DashboardNodeId -eq [Guid]::Empty) {
+        throw 'Relay mode requires DashboardNodeId.'
+    }
+    $relayScript = Join-Path $PSScriptRoot 'Invoke-PitCrewSupportRelay.ps1'
+    $relayArguments = @{
+        DashboardUrl = $DashboardUrl
+        TenantId = $TenantId
+        DashboardNodeId = $DashboardNodeId
+        DiagnosticMode = $DiagnosticMode
+        PreflightPath = $PreflightPath
+        OutputDirectory = $OutputDirectory
+        TimeoutSeconds = $RelayTimeoutSeconds
+        ExpiresInSeconds = $RelayExpiresInSeconds
+        PlanOnly = $PlanOnly
+    }
+    if ($SupportSessionId -ne [Guid]::Empty) {
+        $relayArguments.SessionId = $SupportSessionId
+    }
+    if (-not [string]::IsNullOrWhiteSpace($Profile)) {
+        $relayArguments.Profile = $Profile
+    }
+    return & $relayScript @relayArguments
+}
+
+if ([string]::IsNullOrWhiteSpace($PitCrewRoot)) {
+    throw "$ExecutionMode mode requires PitCrewRoot."
+}
 Assert-PitCrewRemoteRootLiteral $PitCrewRoot
 $collectorPath = Join-Path $PSScriptRoot 'Collect-PitCrewDiagnostics.ps1'
 $packageScript = Join-Path $PSScriptRoot 'New-PitCrewDiagnosticsPackage.ps1'

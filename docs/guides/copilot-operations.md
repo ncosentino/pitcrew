@@ -5,10 +5,9 @@ description: Install PitCrew's Copilot CLI plugin and use its skills for capacit
 # Copilot CLI Operations
 
 PitCrew publishes an installable Copilot CLI marketplace plugin that teaches
-Copilot the repository's supported operational procedures. The plugin does not
-add a remote control plane or replace `Setup-Runner.ps1`; it makes Copilot use
-the existing scripts, scoped Compose commands, and read-only diagnostics
-consistently.
+Copilot the repository's supported operational procedures. It does not replace
+`Setup-Runner.ps1`; it makes Copilot use the existing scripts, scoped Compose
+commands, and typed read-only diagnostics consistently.
 
 ## Install the plugin
 
@@ -215,6 +214,13 @@ without changing the node. I do not have a remote transport, so create the
 operator handoff bundle.
 ```
 
+When a node advertises support-plane v1, the preferred path creates a typed
+Dashboard diagnostic session. A dedicated node agent polls outward through an
+opaque relay, independently verifies authorization, and invokes a separate
+file-only diagnostics broker. No inbound port, shell, arbitrary command, Docker
+socket, URL probe, or mutation capability is exposed. The returned report is
+accepted only after its signature matches the enrolled node identity.
+
 When the current session is already on the node, the skill runs the portable
 collector directly. When the caller explicitly supplies a PowerShell-remoting
 SSH or WinRM endpoint, it transmits the fixed collector in memory and returns
@@ -224,7 +230,10 @@ manifest, checksum, exact invocation, and exact node-agent prompt.
 
 The portable `Collect-PitCrewDiagnostics.ps1` script reads only fixed generated
 profile state, the standard bounded connector health journal, exact-label
-Docker inventory, and optional caller-approved query-free URLs. It does not
+Docker inventory, and optional caller-approved query-free URLs. Support-plane
+collection uses its stricter file-only mode, which launches no external
+command and reports omitted Docker, resource, URL, and version evidence as
+unavailable rather than zero. The collector does not
 read environment files, connector identity, JIT material, registration
 payloads, job output, or arbitrary paths. Docker resource queries use exact
 labels or IDs; the only cleanup permitted is the collector's own run-scoped
@@ -258,6 +267,28 @@ those exact assets from the reviewed plugin source before publishing:
 pwsh scripts/release/New-PitCrewReleaseAssets.ps1 `
     -OutputDirectory <release-assets>
 ```
+
+### Support-plane compatibility and rollback
+
+Support-plane compatibility is capability-based, not inferred from the normal
+connector protocol. A node advertises the exact support capability and envelope
+major versions it installed. Dashboard authorizes only a compatible
+intersection; an older or diagnostics-disabled node remains visible as support
+unavailable without changing its runner or connector health.
+
+Roll out v1 in this order:
+
+1. Deploy the matching Dashboard authorization service and opaque relay.
+2. Install the published support-agent package and file-only broker on one node.
+3. Enroll its independent support identity and verify the advertised v1
+   diagnostic capability.
+4. Update the operations plugin and complete one signed file-only diagnosis.
+5. Expand node enrollment only after the canary result and audit record pass.
+
+Rollback disables the support service, revokes its independent identity, and
+restores or uninstalls only the support package. It does not re-enroll the
+normal connector, stop managers or workers, change profile state, or restore a
+database snapshot after new support records have been accepted.
 
 ## Performance report skill
 

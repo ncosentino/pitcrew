@@ -1042,6 +1042,7 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
             'collectorSha256',
             'packageId',
             'diagnosticMode',
+            'collectionScope',
             'platform',
             'platformSource',
             'profile',
@@ -1254,11 +1255,29 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
                         -Context 'Capacity mismatch'
             }
         })
+    $collectionScope = [string](
+        Get-PitCrewRemoteDiagnosticsProperty `
+            $Report `
+            'collectionScope' `
+            'full')
+    if ($collectionScope -notin @('full', 'file-only')) {
+        throw 'Diagnostics collection scope is invalid.'
+    }
     $containers = $verified.containers
     Assert-PitCrewRemoteDiagnosticsProperties `
         -Value $containers `
-        -Allowed @('managers', 'workers', 'images') `
+        -Allowed @('available', 'managers', 'workers', 'images') `
         -Context 'Container evidence'
+    $containerEvidenceAvailable =
+        ConvertTo-PitCrewRemoteDiagnosticsBoolean `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $containers `
+                'available' `
+                $true) `
+            -Context 'Container evidence availability'
+    if ($null -eq $containerEvidenceAvailable) {
+        throw 'Container evidence availability is missing.'
+    }
     $managerItems = @(
         $containers.managers |
             Where-Object { $null -ne $_ })
@@ -1299,6 +1318,12 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
             -Value $image `
             -Allowed @('role', 'reference', 'imageId', 'repoDigests') `
             -Context 'Image evidence'
+    }
+    if (-not $containerEvidenceAvailable -and
+        ($managerItems.Count -gt 0 -or
+            $workers.Count -gt 0 -or
+            @($containers.images).Count -gt 0)) {
+        throw 'Unavailable container evidence cannot contain inventory.'
     }
     $urlItems = @(
         $verified.urlProbes |
@@ -1414,6 +1439,7 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
                 $observed `
                 'capacityEvidence')
     return [PSCustomObject][ordered]@{
+        collectionScope = $collectionScope
         startedAt = ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
             -Value $Report.startedAt `
             -Context 'Collection start'
@@ -1509,9 +1535,22 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
             connectorHealth = $connectorSummary
             capacity = $capacity
             containers = [PSCustomObject][ordered]@{
-                managerCount = $managerItems.Count
-                workerCount = $workers.Count
-                writableLayerBytes = $writableLayerBytes
+                available = $containerEvidenceAvailable
+                managerCount = if ($containerEvidenceAvailable) {
+                    $managerItems.Count
+                } else {
+                    $null
+                }
+                workerCount = if ($containerEvidenceAvailable) {
+                    $workers.Count
+                } else {
+                    $null
+                }
+                writableLayerBytes = if ($containerEvidenceAvailable) {
+                    $writableLayerBytes
+                } else {
+                    $null
+                }
             }
             urlProbes = $urlProbes
         }
@@ -1837,6 +1876,7 @@ function New-PitCrewRemoteDiagnosticsDiagnosis {
     return [PSCustomObject][ordered]@{
         schemaVersion = 1
         packageId = $Report.packageId
+        collectionScope = $reportSummary.collectionScope
         generatedAt = [DateTimeOffset]::UtcNow
         correlation = $correlation
         verifiedMeasurements = [PSCustomObject][ordered]@{
@@ -1855,6 +1895,7 @@ function New-PitCrewRemoteDiagnosticsDiagnosisMarkdown {
     $null = $builder.AppendLine('# PitCrew remote diagnosis')
     $null = $builder.AppendLine()
     $null = $builder.AppendLine("- Package: ``$($Diagnosis.packageId)``")
+    $null = $builder.AppendLine("- Collection scope: ``$($Diagnosis.collectionScope)``")
     $null = $builder.AppendLine("- Collection window: ``$($Diagnosis.correlation.collectionStartedAt)`` to ``$($Diagnosis.correlation.collectionCompletedAt)``")
     $null = $builder.AppendLine("- Preflight-to-collection delay: ``$($Diagnosis.correlation.preflightToCollectionSeconds)`` seconds")
     $null = $builder.AppendLine("- Active connector outage overlapped collection: ``$($Diagnosis.correlation.activeConnectorOutageOverlappedCollection)``")

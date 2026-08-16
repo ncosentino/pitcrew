@@ -1,11 +1,28 @@
 ---
-description: Understand PitCrew's Docker socket, credential, workflow-trigger, and public-repository trust boundaries.
+description: Understand PitCrew's support-plane, Docker socket, credential, workflow-trigger, and public-repository trust boundaries.
 ---
 
 # Security Boundaries
 
 PitCrew reduces worker persistence, but self-hosted GitHub Actions runners still
 execute repository-controlled code on infrastructure you own.
+
+## Keep support outbound and typed
+
+Support-plane v1 does not open an inbound node port. A dedicated low-privilege
+agent polls an opaque relay over outbound HTTPS and passes only node-verified,
+typed diagnostic requests to a separate local broker.
+
+The relay cannot authorize or decrypt requests and results. The transport agent
+cannot read PitCrew state. The broker has no network or Docker access and may
+invoke only file-only collection against the locally configured PitCrew root.
+Requests cannot carry commands, scripts, arbitrary paths, URLs, ports, tunnels,
+or mutation capabilities.
+
+Node identity, request expiry, tenant, capability, digest, and replay state are
+verified locally. Returned evidence is signed by the enrolled node identity and
+encrypted to Dashboard. A duplicate request returns its cached signed result
+instead of executing again.
 
 ## Protect the Docker host
 
