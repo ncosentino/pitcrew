@@ -1,6 +1,6 @@
 ---
 name: pitcrew-dashboard-update
-description: Update a hosted PitCrew Dashboard release or enable its typed capacity controls using the release installer and existing connector identity. Use when the user asks to update, upgrade, or enable dashboard operations.
+description: Update a hosted PitCrew Dashboard or optional support relay, or enable typed capacity controls using release-pinned artifacts and existing identities. Use when the user asks to update, upgrade, or enable dashboard operations.
 license: MIT
 ---
 
@@ -18,21 +18,32 @@ Read [operations safety](../../references/safety.md) before running commands.
    - `docker-compose.hosted.yml`
    - `deploy/caddy.compose.yml`
    - `deploy/cloudflare-tunnel.compose.yml`
+   - optional `deploy/support-relay.compose.yml`
+   - optional `deploy/support-relay-caddy.compose.yml`
 2. Determine the active Compose project and ingress from `docker compose ls
    --format json` and its config-file list. Continue only when exactly one of the
    Caddy or Cloudflare Tunnel overlays is active.
+   Treat the support relay as enabled only when the active config-file list
+   contains `deploy/support-relay.compose.yml`. A support-enabled Caddy model
+   must also contain `deploy/support-relay-caddy.compose.yml`; Cloudflare must
+   not. Stop on partial or unexpected support overlay identity.
    When the deployment is stopped and therefore absent from `compose ls`,
-   require the user to name both the Compose project and configured ingress
-   instead of guessing.
+   require the user to name the Compose project, configured ingress, and whether
+   support relay is enabled instead of guessing.
 3. Read only the current `PITCREW_DASHBOARD_VERSION` value. Never display the
    rest of `.env.hosted`. Use a filtered command that returns only the matching
    version line; never open the file with a content-viewing tool.
+   When support relay is enabled, separately read only
+   `PITCREW_SUPPORT_RELAY_VERSION`. Never read or display the relay domain,
+   bearer, or Dashboard private keys.
 4. Use a version explicitly named by the user. Otherwise query the latest
    published, non-draft release from `ncosentino/pitcrew-dashboard`.
 5. Verify the target release exists before editing local configuration. Release
    tags use a leading `v`; strip exactly one leading `v` for the GHCR image tag.
    Verify `ghcr.io/ncosentino/pitcrew-dashboard:<image-version>` exists before
    editing `.env.hosted`.
+   When support relay is enabled, verify the currently pinned
+   `ghcr.io/ncosentino/pitcrew-dashboard-support-relay:<relay-version>` exists.
 
 ## Update
 
@@ -44,7 +55,13 @@ docker compose
   --env-file .env.hosted
   --file docker-compose.hosted.yml
   --file <active-ingress-overlay>
+  [--file deploy/support-relay.compose.yml]
+  [--file deploy/support-relay-caddy.compose.yml]
 ```
+
+Include the bracketed files only when discovery proved they are active. Use
+this same complete model for every validation, stop, one-off database tool,
+private start, rollback, and final start.
 
 1. Validate the current model with `config --quiet`. Never render the resolved
    Compose configuration.
@@ -79,10 +96,32 @@ docker compose
 5. Run the same one-off tool's `verify` command against the backup and retain
    its exact path. If backup or verification fails, restart the unchanged old
    stack and stop the update.
-6. Replace only the `PITCREW_DASHBOARD_VERSION` line in `.env.hosted`, retaining
+6. When support relay is enabled, create and verify an independent timestamped
+   backup inside `support-relay-data` with the old relay version still pinned.
+   Use the same bundled database tool through the `support-relay` service:
+
+   ```text
+   backup
+   --database /var/lib/pitcrew-support-relay/support-relay.db
+   --output /var/lib/pitcrew-support-relay/backups/support-relay-<timestamp>.db
+   ```
+
+   Retain its exact path. If backup or verification fails, restart the
+   unchanged complete model and stop.
+7. Replace only the `PITCREW_DASHBOARD_VERSION` line in `.env.hosted`, retaining
    its previous value for rollback. Write the normalized image version without
-   the release tag's leading `v`.
-7. Start only the dashboard service while ingress remains stopped:
+   the release tag's leading `v`. When support relay is enabled, verify the
+   `PITCREW_SUPPORT_RELAY_VERSION` line is byte-for-byte unchanged.
+8. When support relay is enabled, start only `support-relay` while ingress and
+   Dashboard remain stopped:
+
+   ```text
+   up --detach --no-deps --wait --wait-timeout 120 support-relay
+   ```
+
+   Verify its previously pinned image identity, private `/healthz`, dedicated
+   volume, internal-only network, and absence of host ports.
+9. Start only the dashboard service while ingress remains stopped:
 
    ```text
    up --detach --no-deps --wait --wait-timeout 120 dashboard
@@ -105,14 +144,24 @@ contract from inside the Compose network:
 pitcrew-dashboard-hosted-ingress-v1
 ```
 
+When support relay is enabled, also verify the unchanged relay version remains
+healthy and that Dashboard uses the internal-only relay network while the
+ingress service does not join it.
+
 If this private verification fails:
 
 1. Restore the previous version line.
 2. Stop the private new-version dashboard.
 3. Run the documented database-tool `restore` command in a one-off
    `--no-deps` dashboard container using the verified pre-update backup.
-4. Reapply the previous version with the same scoped pull and
+4. When support relay is enabled, restore its verified pre-update database
+   backup with the `support-relay` service because the failed Dashboard may
+   have processed durable relay cleanup during private verification.
+5. Reapply the previous version with the same scoped pull and
    `up --detach --wait --wait-timeout 120` commands.
+
+The relay image version is not changed during a Dashboard-only update. Retain
+both verified backups as incident evidence.
 
 After private verification succeeds, enable ingress with the complete model:
 
@@ -128,6 +177,34 @@ partial update requiring diagnosis while preserving the migrated database.
 Report private verification failure even when database and image rollback
 succeed. Retain the backup for operator inspection. Do not restart Docker, stop
 unrelated containers, or prune images.
+
+## Update the optional support relay
+
+Use this workflow only when the user explicitly requests a relay update and
+discovery proved the support overlay is active.
+
+1. Resolve an explicit target release and verify
+   `ghcr.io/ncosentino/pitcrew-dashboard-support-relay:<target-version>`
+   exists.
+2. Validate the complete active model with `config --quiet`.
+3. While the old stack is online, pre-pull only `support-relay` with a
+   process-scoped `PITCREW_SUPPORT_RELAY_VERSION` override. Clear it in a
+   `finally` block.
+4. Stop the complete scoped project.
+5. Create and verify the relay database backup with the old pinned image.
+6. Replace only `PITCREW_SUPPORT_RELAY_VERSION`; keep
+   `PITCREW_DASHBOARD_VERSION` and every secret-bearing line unchanged.
+7. Start only `support-relay` with `--no-deps --wait`, then verify the target
+   image, private `/healthz`, volume, internal-only network, and no host ports.
+8. Start only Dashboard and verify private Dashboard health plus the hosted
+   ingress contract.
+9. Start the complete model and verify public Dashboard and relay health.
+
+If private relay verification fails, restore the previous relay version,
+restore the verified relay database with the bundled tool, and restart the old
+complete model. After public ingress activation, preserve current relay state
+instead of automatically restoring the old database because nodes may have
+written new sessions.
 
 ## Enable capacity operations
 

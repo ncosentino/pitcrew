@@ -6,13 +6,13 @@
   },
   "metadata": {
     "description": "Operational skills for safely managing PitCrew runner pools and dashboards.",
-    "version": "1.12.0"
+    "version": "1.13.0"
   },
   "plugins": [
     {
       "name": "pitcrew-operations",
-      "description": "Use PitCrew's supported scripts for capacity, safe rollouts, updates, local or outbound-relay diagnostics, read-only job-performance correlation, and manager-only recovery.",
-      "version": "1.12.0",
+      "description": "Use PitCrew's supported scripts for capacity, safe rollouts, Dashboard and hosted-relay updates, local or outbound-relay diagnostics, read-only job-performance correlation, and manager-only recovery.",
+      "version": "1.13.0",
       "source": "./plugins/pitcrew-operations",
       "homepage": "https://www.devleader.ca/projects/pitcrew",
       "repository": "https://github.com/ncosentino/pitcrew",
