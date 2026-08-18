@@ -115,6 +115,10 @@ assert_true \
     publish_support_evidence_snapshot \
         "${support_state_directory}" \
         "${support_evidence_directory}"
+assert_equals \
+    "700" \
+    "$(stat -c '%a' "${support_evidence_directory}")" \
+    "The fixed manager support evidence directory is not owner-only by default."
 for support_file in \
     desired-capacity.json \
     acknowledged-capacity.json \
@@ -124,6 +128,10 @@ for support_file in \
         "${support_file}-v1" \
         "$(cat "${support_evidence_directory}/${support_file}")" \
         "The fixed manager support evidence snapshot did not preserve ${support_file}."
+    assert_equals \
+        "640" \
+        "$(stat -c '%a' "${support_evidence_directory}/${support_file}")" \
+        "The fixed manager support evidence file mask does not retain named ACL reads safely."
 done
 assert_false \
     "The fixed manager mirrored non-allowlisted state." \

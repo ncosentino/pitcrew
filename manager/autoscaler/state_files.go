@@ -58,7 +58,7 @@ func newStatePaths(directory string) statePaths {
 func publishSupportEvidenceSnapshot(paths statePaths) error {
 	evidenceInfo, err := os.Lstat(paths.supportEvidence)
 	if errors.Is(err, os.ErrNotExist) {
-		if err := os.MkdirAll(paths.supportEvidence, 0o755); err != nil {
+		if err := os.MkdirAll(paths.supportEvidence, 0o700); err != nil {
 			return fmt.Errorf("create support evidence directory: %w", err)
 		}
 	} else if err != nil {
@@ -105,7 +105,7 @@ func publishSupportEvidenceSnapshot(paths statePaths) error {
 		if err != nil {
 			return fmt.Errorf("read support evidence %s: %w", name, err)
 		}
-		if err := writeBytesAtomically(destination, data, 0o644); err != nil {
+		if err := writeBytesAtomically(destination, data, 0o640); err != nil {
 			return fmt.Errorf("publish support evidence %s: %w", name, err)
 		}
 	}

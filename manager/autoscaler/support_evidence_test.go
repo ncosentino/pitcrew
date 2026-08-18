@@ -28,10 +28,22 @@ func TestPublishSupportEvidenceSnapshotCopiesOnlyAllowlistedState(t *testing.T) 
 	if err := publishSupportEvidenceSnapshot(paths); err != nil {
 		t.Fatal(err)
 	}
-	for source, expected := range sources {
-		data, err := os.ReadFile(
-			filepath.Join(paths.supportEvidence, filepath.Base(source)),
+	evidenceInfo, err := os.Stat(paths.supportEvidence)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if evidenceInfo.Mode().Perm() != 0o700 {
+		t.Fatalf(
+			"support evidence directory mode = %04o, want 0700",
+			evidenceInfo.Mode().Perm(),
 		)
+	}
+	for source, expected := range sources {
+		destination := filepath.Join(
+			paths.supportEvidence,
+			filepath.Base(source),
+		)
+		data, err := os.ReadFile(destination)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -41,6 +53,17 @@ func TestPublishSupportEvidenceSnapshotCopiesOnlyAllowlistedState(t *testing.T) 
 				filepath.Base(source),
 				data,
 				expected,
+			)
+		}
+		info, err := os.Stat(destination)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if info.Mode().Perm() != 0o640 {
+			t.Fatalf(
+				"support evidence %s mode = %04o, want 0640",
+				filepath.Base(source),
+				info.Mode().Perm(),
 			)
 		}
 	}

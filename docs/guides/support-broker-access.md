@@ -61,6 +61,8 @@ The fixed manager and Go autoscaler instead publish bounded copies of only the
 four approved documents into the stable `support-evidence` directory. Each copy
 uses a same-directory temporary file and rename. A mirror failure is diagnostic:
 it is surfaced and retried without stopping scaling or changing live workers.
+Before support ACLs are installed, the directory is owner-only and files retain
+only the group-class read bit needed for a later named-ACL mask.
 
 Installers apply inheritable access only to the two directories whose complete
 contents are support evidence:

@@ -2179,7 +2179,7 @@ publish_support_evidence_snapshot() (
     [ ! -L "${evidence_directory}" ] || exit 1
     if [ ! -d "${evidence_directory}" ]; then
         mkdir -p "${evidence_directory}" || exit 1
-        chmod 0755 "${evidence_directory}" || exit 1
+        chmod 0700 "${evidence_directory}" || exit 1
     fi
     for file_name in \
         desired-capacity.json \
@@ -2201,7 +2201,7 @@ publish_support_evidence_snapshot() (
             rm -f "${temporary_path}"
             exit 1
         fi
-        if ! chmod 0644 "${temporary_path}"; then
+        if ! chmod 0640 "${temporary_path}"; then
             rm -f "${temporary_path}"
             exit 1
         fi
