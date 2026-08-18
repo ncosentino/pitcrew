@@ -42,6 +42,7 @@ DESIRED_STATE_PATH="${STATE_DIRECTORY}/desired-capacity.json"
 ACCEPTED_STATE_PATH="${STATE_DIRECTORY}/last-valid-capacity.json"
 ACKNOWLEDGEMENT_PATH="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE_PATH="${STATE_DIRECTORY}/observed-state.json"
+SUPPORT_EVIDENCE_DIRECTORY="${STATE_DIRECTORY}/support-evidence"
 DIAGNOSTICS_DIRECTORY="${STATE_DIRECTORY}/diagnostics"
 SHUTDOWN_REQUEST_PATH="${STATE_DIRECTORY}/manager-shutdown.json"
 RECONCILE_INTERVAL="${PITCREW_RECONCILE_INTERVAL:-1}"
@@ -505,7 +506,14 @@ publish_observed_state() {
         "${WORKER_IMAGE_ID}" \
         "${observed_hardware_path}" \
         "${observed_host_admission_path}"; then
-        LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
+        if publish_support_evidence_snapshot \
+            "${STATE_DIRECTORY}" \
+            "${SUPPORT_EVIDENCE_DIRECTORY}"; then
+            LAST_OBSERVED_STATE_PUBLISH_EPOCH="${observed_now}"
+        else
+            mark_observed_state_dirty
+            echo "[manager:${PROFILE_ID}] could not publish support evidence snapshot" >&2
+        fi
     else
         mark_observed_state_dirty
         echo "[manager:${PROFILE_ID}] could not publish observed state" >&2

@@ -52,16 +52,17 @@ type autoscalerManager struct {
 	hardwareLoaded    bool
 	hardwareAt        time.Time
 
-	dirty                 chan struct{}
-	errors                chan error
-	listenerFailureSignal chan struct{}
-	listenerFailureMu     sync.Mutex
-	listenerFailureState  map[string]error
-	restarts              map[string]restartState
-	shutdownMu            sync.Mutex
-	shutdownTimeout       time.Duration
-	writeObserved         func(string, any) error
-	writeHardware         func(string, any) error
+	dirty                  chan struct{}
+	errors                 chan error
+	listenerFailureSignal  chan struct{}
+	listenerFailureMu      sync.Mutex
+	listenerFailureState   map[string]error
+	restarts               map[string]restartState
+	shutdownMu             sync.Mutex
+	shutdownTimeout        time.Duration
+	writeObserved          func(string, any) error
+	writeHardware          func(string, any) error
+	publishSupportEvidence func(statePaths) error
 }
 
 // recoveredAdmissionKey names the admission member that holds workers recovered
@@ -95,28 +96,29 @@ func newAutoscalerManager(
 			boundScaleSetServiceFactory(factory),
 			diagnostics,
 		),
-		docker:                instrumentDockerClient(boundDockerClient(docker), diagnostics),
-		clock:                 managerClock,
-		logger:                logger,
-		instanceID:            instanceID,
-		admission:             newAdmissionController(cfg.maximumActiveWorkers),
-		hostAdmission:         newHostAdmissionCoordinator(cfg.hostAdmission, cfg.profileID),
-		diagnostics:           diagnostics,
-		controllers:           make(map[string]*targetController),
-		retiring:              make(map[string]*targetController),
-		pending:               make(map[string]pendingScaleSet),
-		recovered:             make(map[string][]recoveredContainer),
-		retirementRecords:     make(map[string]retirementRecord),
-		managerStatus:         "starting",
-		desiredStatus:         "waiting",
-		dirty:                 make(chan struct{}, 1),
-		errors:                make(chan error, 128),
-		listenerFailureSignal: make(chan struct{}, 1),
-		listenerFailureState:  make(map[string]error),
-		restarts:              make(map[string]restartState),
-		shutdownTimeout:       managerShutdownTimeout,
-		writeObserved:         writeJSONAtomically,
-		writeHardware:         writeJSONAtomically,
+		docker:                 instrumentDockerClient(boundDockerClient(docker), diagnostics),
+		clock:                  managerClock,
+		logger:                 logger,
+		instanceID:             instanceID,
+		admission:              newAdmissionController(cfg.maximumActiveWorkers),
+		hostAdmission:          newHostAdmissionCoordinator(cfg.hostAdmission, cfg.profileID),
+		diagnostics:            diagnostics,
+		controllers:            make(map[string]*targetController),
+		retiring:               make(map[string]*targetController),
+		pending:                make(map[string]pendingScaleSet),
+		recovered:              make(map[string][]recoveredContainer),
+		retirementRecords:      make(map[string]retirementRecord),
+		managerStatus:          "starting",
+		desiredStatus:          "waiting",
+		dirty:                  make(chan struct{}, 1),
+		errors:                 make(chan error, 128),
+		listenerFailureSignal:  make(chan struct{}, 1),
+		listenerFailureState:   make(map[string]error),
+		restarts:               make(map[string]restartState),
+		shutdownTimeout:        managerShutdownTimeout,
+		writeObserved:          writeJSONAtomically,
+		writeHardware:          writeJSONAtomically,
+		publishSupportEvidence: publishSupportEvidenceSnapshot,
 	}
 }
 
@@ -997,6 +999,11 @@ func (m *autoscalerManager) publishObserved() error {
 	})
 	if err := m.writeObserved(m.paths.observed, state); err != nil {
 		return fmt.Errorf("publish observed state: %w", err)
+	}
+	if m.publishSupportEvidence != nil {
+		if err := m.publishSupportEvidence(m.paths); err != nil {
+			return fmt.Errorf("publish support evidence snapshot: %w", err)
+		}
 	}
 	return nil
 }

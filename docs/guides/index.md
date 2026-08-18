@@ -30,7 +30,7 @@ Use these guides after completing [Getting Started](../getting-started.md):
   safe idle workers, and preserve active jobs.
 - [Security Boundaries](security-boundaries.md) - protect the Docker host and workflow credentials.
 - [Support Broker Access](support-broker-access.md) - grant the diagnostics
-  broker inherited access to only the file-only state and connector-health
-  projections.
+  broker inherited access only inside dedicated profile and connector-health
+  evidence directories.
 - [Copilot CLI Operations](copilot-operations.md) - install repeatable capacity
   and version-update skills.

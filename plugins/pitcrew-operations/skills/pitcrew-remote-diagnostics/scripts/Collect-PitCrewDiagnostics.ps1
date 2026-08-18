@@ -1974,17 +1974,27 @@ $profileItem = Get-Item -LiteralPath $profileDirectory -Force
 if (($profileItem.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
     throw 'Linked PitCrew profile state directories are not supported.'
 }
+$profileEvidenceDirectory = Join-Path $profileDirectory 'support-evidence'
+if (Test-Path -LiteralPath $profileEvidenceDirectory -PathType Container) {
+    if (-not (Test-PitCrewUnlinkedPath `
+            -BasePath $profileDirectory `
+            -TargetPath $profileEvidenceDirectory)) {
+        throw 'Linked PitCrew support evidence directories are not supported.'
+    }
+} else {
+    $profileEvidenceDirectory = $profileDirectory
+}
 $desired = Read-PitCrewBoundedJson `
-    -LiteralPath (Join-Path $profileDirectory 'desired-capacity.json') `
+    -LiteralPath (Join-Path $profileEvidenceDirectory 'desired-capacity.json') `
     -EvidenceName 'desired-capacity'
 $acknowledged = Read-PitCrewBoundedJson `
-    -LiteralPath (Join-Path $profileDirectory 'acknowledged-capacity.json') `
+    -LiteralPath (Join-Path $profileEvidenceDirectory 'acknowledged-capacity.json') `
     -EvidenceName 'acknowledged-capacity'
 $static = Read-PitCrewBoundedJson `
-    -LiteralPath (Join-Path $profileDirectory 'static-profile.json') `
+    -LiteralPath (Join-Path $profileEvidenceDirectory 'static-profile.json') `
     -EvidenceName 'static-profile'
 $observed = Read-PitCrewBoundedJson `
-    -LiteralPath (Join-Path $profileDirectory 'observed-state.json') `
+    -LiteralPath (Join-Path $profileEvidenceDirectory 'observed-state.json') `
     -EvidenceName 'observed-state' `
     -MaximumBytes 2097152
 $collectedAt = [DateTimeOffset]::UtcNow

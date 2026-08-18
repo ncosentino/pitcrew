@@ -84,7 +84,8 @@ authorization and identity, relay, agent and broker applications, persistence,
 API, UX, installers, and node packages. The trust and mixed-version rules are
 recorded in
 [ADR-0007](../adr/adr-0007-outbound-read-only-support-plane.md).
-The versioned broker read and directory-inheritance contract is documented in
+The versioned broker read and dedicated-directory inheritance contract is
+documented in
 [Support Broker Access](../guides/support-broker-access.md).
 
 ## Operations plugin

@@ -42,6 +42,18 @@ func TestObservedStatePublishesContractTwelveDiagnostics(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	supportData, err := os.ReadFile(
+		filepath.Join(
+			manager.paths.supportEvidence,
+			filepath.Base(manager.paths.observed),
+		),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(supportData) != string(data) {
+		t.Fatal("autoscaler support evidence did not mirror observed state")
+	}
 	var decoded map[string]any
 	if err := json.Unmarshal(data, &decoded); err != nil {
 		t.Fatal(err)

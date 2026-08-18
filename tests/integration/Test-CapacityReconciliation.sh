@@ -19,6 +19,7 @@ STATE_DIRECTORY="${ROOT}/.pitcrew-state/${PROFILE_NAME}"
 DESIRED_STATE="${STATE_DIRECTORY}/desired-capacity.json"
 ACKNOWLEDGEMENT="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE="${STATE_DIRECTORY}/observed-state.json"
+SUPPORT_EVIDENCE_DIRECTORY="${STATE_DIRECTORY}/support-evidence"
 LEGACY_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${LEGACY_PROFILE_NAME}"
 LEGACY_DESIRED_STATE="${LEGACY_STATE_DIRECTORY}/desired-capacity.json"
 LEGACY_COMPOSE_PROJECT="self-hosted-runner-${LEGACY_PROFILE_NAME}"
@@ -93,6 +94,36 @@ wait_for_observed_generation() {
     done
     echo "Timed out waiting for observed generation ${expected_generation} with status ${expected_status}." >&2
     return 1
+}
+
+assert_support_evidence_generation() {
+    expected_generation="$1"
+    for file_name in \
+        desired-capacity.json \
+        acknowledged-capacity.json \
+        static-profile.json \
+        observed-state.json; do
+        [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/${file_name}" ] || {
+            echo "Support evidence omitted ${file_name}." >&2
+            return 1
+        }
+    done
+    [ "$(jq -r '.generation' "${SUPPORT_EVIDENCE_DIRECTORY}/desired-capacity.json")" -eq "${expected_generation}" ] || {
+        echo "Support desired-capacity evidence did not reach generation ${expected_generation}." >&2
+        return 1
+    }
+    [ "$(jq -r '.generation' "${SUPPORT_EVIDENCE_DIRECTORY}/acknowledged-capacity.json")" -eq "${expected_generation}" ] || {
+        echo "Support acknowledgement evidence did not reach generation ${expected_generation}." >&2
+        return 1
+    }
+    [ "$(jq -r '.generation' "${SUPPORT_EVIDENCE_DIRECTORY}/observed-state.json")" -eq "${expected_generation}" ] || {
+        echo "Support observed-state evidence did not reach generation ${expected_generation}." >&2
+        return 1
+    }
+    [ ! -e "${SUPPORT_EVIDENCE_DIRECTORY}/last-valid-capacity.json" ] || {
+        echo "Support evidence included non-allowlisted manager state." >&2
+        return 1
+    }
 }
 
 wait_for_resource_slot_count() {
@@ -375,6 +406,7 @@ wait_for_legacy_worker_count 0
 run_setup 5
 wait_for_acknowledgement 1
 wait_for_observed_generation 1 accepted
+assert_support_evidence_generation 1
 wait_for_worker_count 5
 wait_for_resource_slot_count 5
 manager_image_kib=$(docker run \
@@ -519,6 +551,7 @@ worker_mount=$(docker inspect \
 run_setup 6
 wait_for_acknowledgement 2
 wait_for_observed_generation 2 accepted
+assert_support_evidence_generation 2
 wait_for_worker_count 6
 [ "$(manager_id)" = "${MANAGER_ID}" ] || {
     echo "Capacity scale-up replaced the manager container." >&2

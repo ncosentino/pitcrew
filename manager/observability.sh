@@ -2172,6 +2172,46 @@ remove_observed_optional_snapshots() {
     return 0
 }
 
+publish_support_evidence_snapshot() (
+    state_directory="$1"
+    evidence_directory="${2:-${state_directory}/support-evidence}"
+
+    [ ! -L "${evidence_directory}" ] || exit 1
+    if [ ! -d "${evidence_directory}" ]; then
+        mkdir -p "${evidence_directory}" || exit 1
+        chmod 0755 "${evidence_directory}" || exit 1
+    fi
+    for file_name in \
+        desired-capacity.json \
+        acknowledged-capacity.json \
+        static-profile.json \
+        observed-state.json; do
+        source_path="${state_directory}/${file_name}"
+        destination_path="${evidence_directory}/${file_name}"
+        if [ -L "${source_path}" ]; then
+            rm -f "${destination_path}" || exit 1
+            exit 1
+        fi
+        if [ ! -f "${source_path}" ]; then
+            rm -f "${destination_path}" || exit 1
+            continue
+        fi
+        temporary_path="${evidence_directory}/.${file_name}.$$.tmp"
+        if ! cp "${source_path}" "${temporary_path}"; then
+            rm -f "${temporary_path}"
+            exit 1
+        fi
+        if ! chmod 0644 "${temporary_path}"; then
+            rm -f "${temporary_path}"
+            exit 1
+        fi
+        if ! mv -f "${temporary_path}" "${destination_path}"; then
+            rm -f "${temporary_path}"
+            exit 1
+        fi
+    done
+)
+
 write_manager_observed_state() {
     output_path="$1"
     profile_id="$2"

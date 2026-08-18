@@ -20,12 +20,13 @@ applyTo: "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/**,suppor
   `-FileOnly -PassThruOnly` against a locally configured PitCrew root.
 - `support-broker-access.json` is the canonical broker read and ACL contract.
   Do not broaden collector reads without updating that contract and its tests.
-- Support-readable state producers create temporary files in the stable profile
-  directory and replace only the file path. Never replace the directory or move
-  state in from a directory that cannot inherit its access policy.
-- Installers grant the broker inherited/default directory access and grant the
-  transport agent no PitCrew-state or connector-health access. Per-file ACLs
-  alone are not a durable contract.
+- Managers publish only the four support-readable projections into the stable
+  per-profile `support-evidence` directory with same-directory atomic
+  replacement. Never mirror unrelated profile state or replace the directory.
+- Installers grant broker inherited/default read only on dedicated
+  `support-evidence` and connector-health directories. The profile root remains
+  traverse-only, the transport agent receives no evidence access, and per-file
+  ACLs alone are not a durable contract.
 - File-only collection launches no external command. Excluded Docker, host,
   network, and version evidence must be explicit unavailable values, never
   fabricated zeroes.
