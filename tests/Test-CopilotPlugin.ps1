@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.12.0') 'The operations plugin minor version was not advanced for outbound support diagnostics.'
+Add-Check ($plugin.version -eq '1.13.0') 'The operations plugin minor version was not advanced for hosted support-relay lifecycle safety.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -130,6 +130,22 @@ Add-Check (
 Add-Check (
     $dashboardUpdateSkill -match 'Do not manually copy credentials'
 ) 'The dashboard update skill still delegates identity migration to the user.'
+Add-Check (
+    $dashboardUpdateSkill -match 'deploy/support-relay\.compose\.yml' -and
+    $dashboardUpdateSkill -match 'PITCREW_SUPPORT_RELAY_VERSION' -and
+    $dashboardUpdateSkill -match 'support-relay-data'
+) 'The dashboard update skill does not discover and preserve the optional relay model.'
+Add-Check (
+    $dashboardUpdateSkill -match 'byte-for-byte unchanged' -and
+    $dashboardUpdateSkill -match 'internal-only relay network' -and
+    $dashboardUpdateSkill -match 'absence of host ports' -and
+    $dashboardUpdateSkill -match 'processed durable relay cleanup'
+) 'Dashboard-only updates do not protect the independent relay version and network boundary.'
+Add-Check (
+    $dashboardUpdateSkill -match '(?m)^## Update the optional support relay' -and
+    $dashboardUpdateSkill -match 'restore the verified relay database' -and
+    $dashboardUpdateSkill -match 'After public ingress activation'
+) 'The dashboard update skill lacks a bounded relay update and rollback workflow.'
 
 $hostDiagnosticsSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-host-diagnostics' 'SKILL.md') `

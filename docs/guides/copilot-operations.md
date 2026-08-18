@@ -124,7 +124,8 @@ creates, removes, configures, or attaches the service.
 ## Dashboard update skill
 
 `pitcrew-dashboard-update` updates a hosted PitCrew Dashboard deployment using
-its complete base-plus-ingress Compose model.
+its complete base-plus-ingress Compose model and every discovered optional
+support-relay overlay.
 
 ```text
 Use the pitcrew-dashboard-update skill to update the Cloudflare-hosted
@@ -143,6 +144,13 @@ backup snapshot. The new dashboard passes its private health contract before
 ingress is enabled. Failures before ingress activation restore both the previous
 image and database; after ingress opens, the skill preserves new writes instead
 of automatically restoring an older snapshot.
+
+When the optional support relay is active, the skill reads only its version
+line, includes its overlay in every Compose command, creates a separate verified
+relay database backup, and starts the unchanged relay before private Dashboard
+verification. A Dashboard-only update never changes the relay version. An
+explicit relay update has its own image pull, version edit, private health gate,
+database restore path, and public-ingress commit boundary.
 
 The same skill enables protocol-v3 capacity controls as one automated
 operation. It downloads the release-pinned host connector and installer,
