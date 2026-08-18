@@ -1250,8 +1250,11 @@ if ($CommandArguments[0] -eq '-Pi') {
         $legacyFixtureRoot `
         '.pitcrew-state' `
         'default'
-    $legacyAcknowledgedPath = Join-Path `
+    $legacyEvidenceRoot = Join-Path `
         $legacyProfileRoot `
+        'support-evidence'
+    $legacyAcknowledgedPath = Join-Path `
+        $legacyEvidenceRoot `
         'acknowledged-capacity.json'
     $legacyAcknowledged = Get-Content `
         -LiteralPath $legacyAcknowledgedPath `
@@ -1262,7 +1265,9 @@ if ($CommandArguments[0] -eq '-Pi') {
     Write-Utf8 `
         -Path $legacyAcknowledgedPath `
         -Content ($legacyAcknowledged | ConvertTo-Json -Depth 30)
-    $legacyStaticPath = Join-Path $legacyProfileRoot 'static-profile.json'
+    $legacyStaticPath = Join-Path `
+        $legacyEvidenceRoot `
+        'static-profile.json'
     $legacyStatic = Get-Content `
         -LiteralPath $legacyStaticPath `
         -Raw `
@@ -1272,7 +1277,9 @@ if ($CommandArguments[0] -eq '-Pi') {
     Write-Utf8 `
         -Path $legacyStaticPath `
         -Content ($legacyStatic | ConvertTo-Json -Depth 30)
-    $legacyObservedPath = Join-Path $legacyProfileRoot 'observed-state.json'
+    $legacyObservedPath = Join-Path `
+        $legacyEvidenceRoot `
+        'observed-state.json'
     $legacyObserved = Get-Content `
         -LiteralPath $legacyObservedPath `
         -Raw `
