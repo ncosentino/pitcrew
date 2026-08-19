@@ -2211,6 +2211,7 @@ publish_support_evidence_snapshot() (
             rm -f "${temporary_path}"
             exit 1
         fi
+        chown "${state_owner}" "${destination_path}" || exit 1
     done
 )
 

@@ -67,6 +67,13 @@ func publishSupportEvidenceSnapshot(paths statePaths) error {
 		evidenceInfo.Mode()&os.ModeSymlink != 0 {
 		return errors.New("support evidence path is not an unlinked directory")
 	}
+	stateDirectory := filepath.Dir(paths.supportEvidence)
+	if err := preserveSupportEvidenceOwner(
+		stateDirectory,
+		paths.supportEvidence,
+	); err != nil {
+		return fmt.Errorf("preserve support evidence directory owner: %w", err)
+	}
 	for _, source := range []string{
 		paths.desired,
 		paths.acknowledgement,
@@ -107,6 +114,16 @@ func publishSupportEvidenceSnapshot(paths statePaths) error {
 		}
 		if err := writeBytesAtomically(destination, data, 0o640); err != nil {
 			return fmt.Errorf("publish support evidence %s: %w", name, err)
+		}
+		if err := preserveSupportEvidenceOwner(
+			stateDirectory,
+			destination,
+		); err != nil {
+			return fmt.Errorf(
+				"preserve support evidence %s owner: %w",
+				name,
+				err,
+			)
 		}
 	}
 	return nil
