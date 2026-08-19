@@ -2176,11 +2176,13 @@ publish_support_evidence_snapshot() (
     state_directory="$1"
     evidence_directory="${2:-${state_directory}/support-evidence}"
 
+    state_owner=$(stat -c '%u:%g' "${state_directory}") || exit 1
     [ ! -L "${evidence_directory}" ] || exit 1
     if [ ! -d "${evidence_directory}" ]; then
         mkdir -p "${evidence_directory}" || exit 1
         chmod 0700 "${evidence_directory}" || exit 1
     fi
+    chown "${state_owner}" "${evidence_directory}" || exit 1
     for file_name in \
         desired-capacity.json \
         acknowledged-capacity.json \

@@ -113,6 +113,11 @@ wait_for_support_evidence_generation() {
         sleep 1
     done
     echo "Timed out waiting for support evidence generation ${expected_generation}." >&2
+    ls -lan "${STATE_DIRECTORY}" "${SUPPORT_EVIDENCE_DIRECTORY}" >&2 || true
+    manager_container=$(manager_id)
+    if [ -n "${manager_container}" ]; then
+        docker logs --tail 100 "${manager_container}" >&2 || true
+    fi
     return 1
 }
 
