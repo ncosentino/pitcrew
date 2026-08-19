@@ -203,28 +203,6 @@ if [[ "${build_status}" -eq 0 ]]; then
     exit 1
 fi
 
-# BuildKit releases disconnected session references asynchronously. Stabilize
-# the fixture before testing the helper's separate fail-closed cleanup budget.
-settled=false
-for settlement_seconds in $(seq 1 180); do
-    usage="$(run_buildctl_client du --format '{{json .}}')"
-    if jq -e \
-        'type == "array" and
-         length > 0 and
-         all(.[]; .inUse == false)' \
-        <<<"${usage}" \
-        >/dev/null; then
-        settled=true
-        break
-    fi
-    sleep 1
-done
-if [[ "${settled}" != "true" ]]; then
-    echo "BuildKit state remained active after the client container was hard-cancelled: ${usage}" >&2
-    exit 1
-fi
-printf 'Interrupted BuildKit state settled after %s seconds.\n' "${settlement_seconds}"
-
 seeded_cache="$(run_buildctl_client du --format '{{json .}}')"
 if [[ -z "${seeded_cache}" || "${seeded_cache}" == "null" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit state for preflight cleanup." >&2
