@@ -195,9 +195,11 @@ Build arguments with secret-shaped names are rejected. Use BuildKit secret mount
 future secret-bearing build inputs; do not pass secrets as ordinary build arguments.
 
 Before and after every build, the helper deletes BuildKit history before pruning
-cache. It retries the cache prune for up to 30 seconds and succeeds only after both
-history and disk usage are verified empty. BuildKit 0.32.2 serializes empty disk usage
-as JSON `null`; any other nonempty value is retained state and fails the job boundary.
+cache. It retries cleanup for up to three minutes because references from an
+abruptly disconnected client can be released asynchronously. The helper succeeds
+only after both history and disk usage are verified empty. BuildKit 0.32.2
+serializes empty disk usage as JSON `null`; any other nonempty value is retained
+state and fails the job boundary.
 
 ## Qualification
 

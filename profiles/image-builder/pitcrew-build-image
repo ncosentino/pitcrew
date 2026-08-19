@@ -194,10 +194,12 @@ buildctl_arguments=(
 )
 
 cleanup_builder() {
+    local cleanup_timeout_seconds=180
+    local cleanup_deadline=$((SECONDS + cleanup_timeout_seconds))
     local histories
     local usage
 
-    for _ in $(seq 1 30); do
+    while ((SECONDS < cleanup_deadline)); do
         if ! buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null; then
             sleep 1
             continue

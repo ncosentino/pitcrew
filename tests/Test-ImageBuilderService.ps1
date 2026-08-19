@@ -123,7 +123,8 @@ Add-Check (
     $helper -match [regex]::Escape("--format '{{json .}}'") -and
     $helper -match 'debug histories' -and
     $helper -match '\$\{usage\}" == "null"' -and
-    $helper -match 'seq 1 30'
+    $helper -match 'cleanup_timeout_seconds=180' -and
+    $helper -match 'while \(\(SECONDS < cleanup_deadline\)\)'
 ) 'Image-builder helper does not verify bounded empty cache and history state.'
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "pitcrew-buildkit-cert-tests-$([guid]::NewGuid().ToString('N'))"
