@@ -74,7 +74,9 @@ EOF
 printf 'isolated-image-builder\n' > "${CONTEXT_DIRECTORY}/payload.txt"
 cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
-RUN sleep 300
+# BuildKit may finish server-side work after an abrupt client disconnect.
+# Keep the solve observable but shorter than the inactive-state wait below.
+RUN sleep 30
 EOF
 
 pwsh -NoProfile -File "${SERVICE_SETUP}" \
