@@ -202,7 +202,23 @@ It reports `recovered`, `still-degraded`, `rejected`, `failed`, or
 `indeterminate`, and exits nonzero for everything except `recovered`. Recovery is
 never retried automatically: re-read observed state and reassess before any
 second attempt. A profile with no running manager is intentionally stopped or
-separately broken, and recovery will not start it.
+separately broken, and `-RecoverManager` will not start it.
+
+## A failed handoff left no running manager
+
+First determine that the profile is unexpectedly missing its manager rather
+than intentionally stopped. Preserve its workers and replay the exact existing
+configuration with an explicit missing-manager opt-in:
+
+```powershell
+.\Setup-Runner.ps1 -Profile copilot-cli -Repos <existing-targets> -Refresh -RecoverMissingManager
+```
+
+Omit `-Token` so setup validates and reuses the stored registration token.
+Setup requires compatible stored static state, builds the manager before
+committing staged profile files, and waits for a fresh acknowledgement. Plain
+`-Refresh` continues to reject a profile with no manager, and
+`-RecoverMissingManager` is rejected when a manager is already running.
 
 An adopted worker keeps reporting `starting` for the rest of its life. A
 worker's own log output only reports that its process is listening, and output

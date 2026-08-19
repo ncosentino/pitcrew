@@ -4307,7 +4307,92 @@ try {
         $stoppedRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check (-not ($stoppedRefreshCommands -match 'compose.*up')) 'A stopped profile refresh started a manager.'
 
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -RecoverMissingManager `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage '-RecoverMissingManager requires -Refresh' `
+            -Failure 'Missing-manager recovery was accepted without explicit refresh semantics.'
+        $missingRecoveryGuardCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8
+        )
+        Add-Check (
+            -not ($missingRecoveryGuardCommands -match 'compose.*\t(build|up)(\t|$)')
+        ) 'An invalid missing-manager recovery reached Docker Compose.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        $missingManagerAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation 1 `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 1
+        try {
+            & $fixtureSetup `
+                -Token 'test-registration-token' `
+                -Refresh `
+                -RecoverMissingManager `
+                -Repos 'https://github.com/example/project=1'
+        }
+        finally {
+            Wait-Job -Job $missingManagerAcknowledgement -Timeout 65 | Out-Null
+            Receive-Job `
+                -Job $missingManagerAcknowledgement `
+                -ErrorAction Stop | Out-Null
+            Remove-Job -Job $missingManagerAcknowledgement -Force
+        }
+        $missingManagerCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8
+        )
+        $missingManagerAck = Get-Content `
+            -LiteralPath $defaultAcknowledgementPath `
+            -Raw `
+            -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check (
+            $missingManagerCommands -match 'compose.*build.*runner-manager'
+        ) 'Explicit missing-manager recovery did not build the manager first.'
+        Add-Check (
+            $missingManagerCommands -match 'compose.*up.*runner-manager'
+        ) 'Explicit missing-manager recovery did not start the selected manager.'
+        Add-Check (
+            -not (
+                $missingManagerCommands -match
+                    '(stop|update|rm).*manager-container-id'
+            ) -and
+            -not ($missingManagerCommands -match 'compose.*\tdown(\t|$)')
+        ) 'Missing-manager recovery attempted a manager or profile shutdown path.'
+        Add-Check (
+            $missingManagerAck.generation -eq 1 -and
+            $missingManagerAck.managerContractVersion -eq 18
+        ) 'Missing-manager recovery did not require a fresh current-contract acknowledgement.'
+
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Token 'test-registration-token' `
+                    -Refresh `
+                    -RecoverMissingManager `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'already has a running manager' `
+            -Failure 'Missing-manager recovery accepted an already running profile.'
+        $runningRecoveryCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8
+        )
+        Add-Check (
+            -not ($runningRecoveryCommands -match 'compose.*\t(build|up)(\t|$)')
+        ) 'A rejected missing-manager recovery modified the running profile.'
+
         $savedStaticProfile = Get-Content -LiteralPath $defaultStaticProfilePath -Raw -Encoding UTF8
         Remove-Item -LiteralPath $defaultStaticProfilePath -Force
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
