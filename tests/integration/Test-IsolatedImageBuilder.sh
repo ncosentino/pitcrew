@@ -10,6 +10,7 @@ PROJECT_NAME="pitcrew-image-builder-service"
 SERVICE_STATE_PATH="${ROOT_DIRECTORY}/.pitcrew-state/image-builder-service/service.json"
 REGISTRY_NAME="pitcrew-registry-test-$$"
 CLIENT_IMAGE="pitcrew-image-builder-test:$$"
+INTERRUPT_CLIENT_ID=""
 TEMP_DIRECTORY="$(mktemp -d)"
 APPARMOR_RESTRICTION=""
 
@@ -20,6 +21,9 @@ cleanup() {
     fi
     pwsh -NoProfile -File "${SERVICE_SETUP}" -Down >/dev/null 2>&1 || true
     docker container rm --force "${REGISTRY_NAME}" >/dev/null 2>&1 || true
+    if [[ -n "${INTERRUPT_CLIENT_ID}" ]]; then
+        docker container rm --force "${INTERRUPT_CLIENT_ID}" >/dev/null 2>&1 || true
+    fi
     docker volume rm "${STATE_VOLUME}" >/dev/null 2>&1 || true
     if [[ -n "${certificate_volume}" ]]; then
         docker volume rm "${certificate_volume}" >/dev/null 2>&1 || true
@@ -70,7 +74,8 @@ EOF
 printf 'isolated-image-builder\n' > "${CONTEXT_DIRECTORY}/payload.txt"
 cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
-RUN sleep 300
+# Keep the solve observable while leaving preflight cleanup enough retry time.
+RUN sleep 5
 EOF
 
 pwsh -NoProfile -File "${SERVICE_SETUP}" \
@@ -143,96 +148,7 @@ if docker run --rm \
     exit 1
 fi
 
-docker run --rm \
-    --network "${NETWORK_NAME}" \
-    --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
-    --mount "type=bind,src=${INTERRUPT_DIRECTORY},dst=/workspace,readonly" \
-    --entrypoint /bin/bash \
-    "${CLIENT_IMAGE}" \
-    -lc '
-        set -euo pipefail
-        arguments=(
-            --addr tcp://buildkitd:1234
-            --tlsservername buildkitd
-            --tlsdir /tls
-        )
-        set -m
-        buildctl "${arguments[@]}" build \
-            --frontend dockerfile.v0 \
-            --local context=/workspace \
-            --local dockerfile=/workspace \
-            --opt platform=linux/amd64 \
-            --output type=oci,dest=/tmp/interrupted.tar \
-            --progress plain \
-            >/tmp/interrupted.log 2>&1 &
-        build_pid=$!
-        set +m
-        build_pgid="$(
-            ps -o pgid= -p "${build_pid}" |
-                tr -d "[:space:]"
-        )"
-        if [[ "${build_pgid}" != "${build_pid}" ]]; then
-            kill -KILL "${build_pid}" 2>/dev/null || true
-            wait "${build_pid}" 2>/dev/null || true
-            exit 1
-        fi
-        recorded=false
-        for _ in $(seq 1 120); do
-            histories="$(
-                buildctl \
-                    "${arguments[@]}" \
-                    debug histories \
-                    --format "{{json .}}"
-            )"
-            usage="$(
-                buildctl \
-                    "${arguments[@]}" \
-                    du \
-                    --format "{{json .}}"
-            )"
-            if [[ -n "${histories}" ]] &&
-                [[ -n "${usage}" && "${usage}" != "null" ]]; then
-                recorded=true
-                break
-            fi
-            sleep 1
-        done
-        if [[ "${recorded}" != "true" ]]; then
-            kill -KILL -- "-${build_pgid}" 2>/dev/null || true
-            wait "${build_pid}" 2>/dev/null || true
-            exit 1
-        fi
-        # The build may exit between the recorded-state observation and signal
-        # delivery. The nonzero wait status and settled residue checks below are
-        # the authoritative interruption evidence.
-        set +e
-        kill -KILL -- "-${build_pgid}" 2>/dev/null
-        wait "${build_pid}"
-        build_status=$?
-        set -e
-        if [[ "${build_status}" -eq 0 ]]; then
-            exit 1
-        fi
-        for _ in $(seq 1 60); do
-            usage="$(
-                buildctl \
-                    "${arguments[@]}" \
-                    du \
-                    --format "{{json .}}"
-            )"
-            if jq -e \
-                "type == \"array\" and
-                 length > 0 and
-                 all(.[]; .inUse == false)" \
-                <<<"${usage}" \
-                >/dev/null; then
-                exit 0
-            fi
-            sleep 1
-        done
-        exit 1
-    '
-seeded_cache="$(
+run_buildctl_client() {
     docker run --rm \
         --network "${NETWORK_NAME}" \
         --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
@@ -241,24 +157,58 @@ seeded_cache="$(
         --addr tcp://buildkitd:1234 \
         --tlsservername buildkitd \
         --tlsdir /tls \
-        du --format '{{json .}}'
+        "$@"
+}
+
+INTERRUPT_CLIENT_ID="$(
+    docker run --detach \
+        --network "${NETWORK_NAME}" \
+        --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+        --mount "type=bind,src=${INTERRUPT_DIRECTORY},dst=/workspace,readonly" \
+        --entrypoint buildctl \
+        "${CLIENT_IMAGE}" \
+        --addr tcp://buildkitd:1234 \
+        --tlsservername buildkitd \
+        --tlsdir /tls \
+        build \
+        --frontend dockerfile.v0 \
+        --local context=/workspace \
+        --local dockerfile=/workspace \
+        --opt platform=linux/amd64 \
+        --output type=oci,dest=/tmp/interrupted.tar \
+        --progress plain
 )"
+recorded=false
+for _ in $(seq 1 120); do
+    histories="$(run_buildctl_client debug histories --format '{{json .}}')"
+    usage="$(run_buildctl_client du --format '{{json .}}')"
+    if [[ -n "${histories}" ]] &&
+        [[ -n "${usage}" && "${usage}" != "null" ]]; then
+        recorded=true
+        break
+    fi
+    sleep 1
+done
+if [[ "${recorded}" != "true" ]]; then
+    echo "Interrupted client did not publish BuildKit state." >&2
+    exit 1
+fi
+
+docker kill --signal KILL "${INTERRUPT_CLIENT_ID}" >/dev/null
+build_status="$(docker wait "${INTERRUPT_CLIENT_ID}")"
+docker container rm "${INTERRUPT_CLIENT_ID}" >/dev/null
+INTERRUPT_CLIENT_ID=""
+if [[ "${build_status}" -eq 0 ]]; then
+    echo "Interrupted client completed before its hard cancellation." >&2
+    exit 1
+fi
+
+seeded_cache="$(run_buildctl_client du --format '{{json .}}')"
 if [[ -z "${seeded_cache}" || "${seeded_cache}" == "null" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit state for preflight cleanup." >&2
     exit 1
 fi
-seeded_histories="$(
-    docker run --rm \
-        --network "${NETWORK_NAME}" \
-        --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
-        --entrypoint buildctl \
-        "${CLIENT_IMAGE}" \
-        --addr tcp://buildkitd:1234 \
-        --tlsservername buildkitd \
-        --tlsdir /tls \
-        debug histories \
-        --format '{{json .}}'
-)"
+seeded_histories="$(run_buildctl_client debug histories --format '{{json .}}')"
 if [[ -z "${seeded_histories}" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit history." >&2
     exit 1
