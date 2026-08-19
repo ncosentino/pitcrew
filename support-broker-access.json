@@ -1,6 +1,6 @@
 {
   "$schema": "./support-broker-access.schema.json",
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "collector": {
     "relativePath": "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/scripts/Collect-PitCrewDiagnostics.ps1",
     "fixedSwitches": [
@@ -21,6 +21,7 @@
     ],
     "stateRoot": ".pitcrew-state",
     "profileIdPattern": "^[a-z0-9][a-z0-9-]{0,31}$",
+    "profileEvidenceDirectory": "support-evidence",
     "profileReadFiles": [
       "desired-capacity.json",
       "acknowledged-capacity.json",
@@ -42,7 +43,7 @@
       "read-collector",
       "probe-pitcrew-root-files",
       "traverse-and-list-state-root",
-      "read-profile-state-files",
+      "read-profile-evidence-files",
       "read-connector-health-files"
     ],
     "transportAgentRights": [],
@@ -57,10 +58,10 @@
       "arbitrary-paths"
     ],
     "inheritance": {
-      "scope": "directory",
+      "scope": "dedicated-evidence-directories",
       "atomicReplacement": "same-directory-temporary-file",
-      "windows": "inheritable-directory-ace",
-      "linux": "directory-access-and-default-acl"
+      "windows": "object-inherit-read-ace",
+      "linux": "directory-read-and-default-file-read-acl"
     }
   }
 }

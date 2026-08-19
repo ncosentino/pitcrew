@@ -98,6 +98,78 @@ assert_true "Five-worker desired state was rejected." desired_state_is_valid "${
 assert_true "Six-worker desired state was rejected." desired_state_is_valid "${state_six}"
 assert_true "Paused repository desired state was rejected." desired_state_is_valid "${state_paused}"
 assert_true "Paused organization desired state was rejected." desired_state_is_valid "${state_paused_org}"
+
+support_state_directory="${TEMP_DIRECTORY}/support-state"
+support_evidence_directory="${support_state_directory}/support-evidence"
+mkdir -p "${support_state_directory}"
+for support_file in \
+    desired-capacity.json \
+    acknowledged-capacity.json \
+    static-profile.json \
+    observed-state.json; do
+    printf '%s\n' "${support_file}-v1" > "${support_state_directory}/${support_file}"
+done
+printf '%s\n' "private-state" > "${support_state_directory}/last-valid-capacity.json"
+assert_true \
+    "The fixed manager could not publish its support evidence snapshot." \
+    publish_support_evidence_snapshot \
+        "${support_state_directory}" \
+        "${support_evidence_directory}"
+assert_equals \
+    "700" \
+    "$(stat -c '%a' "${support_evidence_directory}")" \
+    "The fixed manager support evidence directory is not owner-only by default."
+for support_file in \
+    desired-capacity.json \
+    acknowledged-capacity.json \
+    static-profile.json \
+    observed-state.json; do
+    assert_equals \
+        "${support_file}-v1" \
+        "$(cat "${support_evidence_directory}/${support_file}")" \
+        "The fixed manager support evidence snapshot did not preserve ${support_file}."
+    assert_equals \
+        "640" \
+        "$(stat -c '%a' "${support_evidence_directory}/${support_file}")" \
+        "The fixed manager support evidence file mask does not retain named ACL reads safely."
+done
+assert_false \
+    "The fixed manager mirrored non-allowlisted state." \
+    test -e "${support_evidence_directory}/last-valid-capacity.json"
+printf '%s\n' "observed-state.json-v2" > "${support_state_directory}/observed-state.json"
+rm -f "${support_state_directory}/desired-capacity.json"
+assert_true \
+    "The fixed manager could not refresh its support evidence snapshot." \
+    publish_support_evidence_snapshot \
+        "${support_state_directory}" \
+        "${support_evidence_directory}"
+assert_equals \
+    "observed-state.json-v2" \
+    "$(cat "${support_evidence_directory}/observed-state.json")" \
+    "The fixed manager retained a stale observed-state projection."
+assert_false \
+    "The fixed manager retained a stale desired-capacity projection." \
+    test -e "${support_evidence_directory}/desired-capacity.json"
+printf '%s\n' "desired-capacity.json-v2" > "${support_state_directory}/desired-capacity.json"
+assert_true \
+    "The fixed manager could not restore desired-capacity support evidence." \
+    publish_support_evidence_snapshot \
+        "${support_state_directory}" \
+        "${support_evidence_directory}"
+rm -f "${support_state_directory}/desired-capacity.json"
+ln -s \
+    "${support_state_directory}/last-valid-capacity.json" \
+    "${support_state_directory}/desired-capacity.json"
+assert_false \
+    "The fixed manager followed a linked support evidence source." \
+    publish_support_evidence_snapshot \
+        "${support_state_directory}" \
+        "${support_evidence_directory}"
+assert_false \
+    "The fixed manager mirrored a linked private state file." \
+    test -e "${support_evidence_directory}/desired-capacity.json"
+rm -f "${support_state_directory}/desired-capacity.json"
+
 render_desired_slots "${state_five}" "${slots_five}"
 render_desired_slots "${state_six}" "${slots_six}"
 render_desired_slots "${state_paused}" "${slots_paused}"

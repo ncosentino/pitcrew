@@ -19,6 +19,7 @@ STATE_DIRECTORY="${ROOT}/.pitcrew-state/${PROFILE_NAME}"
 DESIRED_STATE="${STATE_DIRECTORY}/desired-capacity.json"
 ACKNOWLEDGEMENT="${STATE_DIRECTORY}/acknowledged-capacity.json"
 OBSERVED_STATE="${STATE_DIRECTORY}/observed-state.json"
+SUPPORT_EVIDENCE_DIRECTORY="${STATE_DIRECTORY}/support-evidence"
 LEGACY_STATE_DIRECTORY="${ROOT}/.pitcrew-state/${LEGACY_PROFILE_NAME}"
 LEGACY_DESIRED_STATE="${LEGACY_STATE_DIRECTORY}/desired-capacity.json"
 LEGACY_COMPOSE_PROJECT="self-hosted-runner-${LEGACY_PROFILE_NAME}"
@@ -92,6 +93,31 @@ wait_for_observed_generation() {
         sleep 1
     done
     echo "Timed out waiting for observed generation ${expected_generation} with status ${expected_status}." >&2
+    return 1
+}
+
+wait_for_support_evidence_generation() {
+    expected_generation="$1"
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/desired-capacity.json" ] &&
+            [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/acknowledged-capacity.json" ] &&
+            [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/static-profile.json" ] &&
+            [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/observed-state.json" ] &&
+            [ "$(jq -r '.generation // -1' "${SUPPORT_EVIDENCE_DIRECTORY}/desired-capacity.json" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ "$(jq -r '.generation // -1' "${SUPPORT_EVIDENCE_DIRECTORY}/acknowledged-capacity.json" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ "$(jq -r '.generation // -1' "${SUPPORT_EVIDENCE_DIRECTORY}/observed-state.json" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ ! -e "${SUPPORT_EVIDENCE_DIRECTORY}/last-valid-capacity.json" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for support evidence generation ${expected_generation}." >&2
+    ls -lan "${STATE_DIRECTORY}" "${SUPPORT_EVIDENCE_DIRECTORY}" >&2 || true
+    manager_container=$(manager_id)
+    if [ -n "${manager_container}" ]; then
+        docker logs --tail 100 "${manager_container}" >&2 || true
+    fi
     return 1
 }
 
@@ -298,6 +324,8 @@ docker run \
     >/dev/null
 
 mkdir -p "${ROOT}/.pitcrew-state"
+mkdir -p "${LEGACY_STATE_DIRECTORY}/support-evidence"
+chmod 0700 "${LEGACY_STATE_DIRECTORY}/support-evidence"
 start_legacy_compose
 wait_for_legacy_worker_count 2
 [ -n "$(docker ps -q --filter "label=${LEGACY_MANAGER_LABEL}")" ] || {
@@ -375,6 +403,7 @@ wait_for_legacy_worker_count 0
 run_setup 5
 wait_for_acknowledgement 1
 wait_for_observed_generation 1 accepted
+wait_for_support_evidence_generation 1
 wait_for_worker_count 5
 wait_for_resource_slot_count 5
 manager_image_kib=$(docker run \
@@ -519,6 +548,7 @@ worker_mount=$(docker inspect \
 run_setup 6
 wait_for_acknowledgement 2
 wait_for_observed_generation 2 accepted
+wait_for_support_evidence_generation 2
 wait_for_worker_count 6
 [ "$(manager_id)" = "${MANAGER_ID}" ] || {
     echo "Capacity scale-up replaced the manager container." >&2

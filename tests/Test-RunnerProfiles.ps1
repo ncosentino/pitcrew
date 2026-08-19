@@ -333,7 +333,8 @@ if ($errors.Count -gt 0) {
 $supportAccessRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
     "pitcrew-support-access-$([Guid]::NewGuid().ToString('N'))"
-$supportStateDirectory = Join-Path $supportAccessRoot 'default'
+$supportProfileDirectory = Join-Path $supportAccessRoot 'default'
+$supportStateDirectory = Join-Path $supportProfileDirectory 'support-evidence'
 $supportStatePath = Join-Path $supportStateDirectory 'desired-capacity.json'
 try {
     $null = New-Item `
@@ -347,10 +348,9 @@ try {
         $directoryAcl.AddAccessRule(
             [Security.AccessControl.FileSystemAccessRule]::new(
                 $brokerSid,
-                [Security.AccessControl.FileSystemRights]::ReadAndExecute,
-                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
-                    [Security.AccessControl.InheritanceFlags]::ObjectInherit,
-                [Security.AccessControl.PropagationFlags]::None,
+                [Security.AccessControl.FileSystemRights]::Read,
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit,
+                [Security.AccessControl.PropagationFlags]::InheritOnly,
                 [Security.AccessControl.AccessControlType]::Allow))
         Set-Acl `
             -LiteralPath $supportStateDirectory `
@@ -400,7 +400,7 @@ try {
                         ($_.FileSystemRights -band
                             [Security.AccessControl.FileSystemRights]::Read) -ne 0
                     }).Count -gt 0
-        ) 'Atomic state publication did not inherit the broker read ACE.'
+        ) 'Dedicated support evidence publication did not inherit the broker file-read ACE.'
     } else {
         $fileMode = [IO.File]::GetUnixFileMode($supportStatePath)
         Add-Check (

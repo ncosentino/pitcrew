@@ -15,6 +15,8 @@ type statePaths struct {
 	lastValid       string
 	acknowledgement string
 	observed        string
+	static          string
+	supportEvidence string
 	hardware        string
 	retirements     string
 	shutdownRequest string
@@ -45,10 +47,86 @@ func newStatePaths(directory string) statePaths {
 		lastValid:       filepath.Join(directory, "last-valid-capacity.json"),
 		acknowledgement: filepath.Join(directory, "acknowledged-capacity.json"),
 		observed:        filepath.Join(directory, "observed-state.json"),
+		static:          filepath.Join(directory, "static-profile.json"),
+		supportEvidence: filepath.Join(directory, "support-evidence"),
 		hardware:        filepath.Join(directory, "host-hardware.json"),
 		retirements:     filepath.Join(directory, "retiring-targets.json"),
 		shutdownRequest: filepath.Join(directory, "manager-shutdown.json"),
 	}
+}
+
+func publishSupportEvidenceSnapshot(paths statePaths) error {
+	evidenceInfo, err := os.Lstat(paths.supportEvidence)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := os.MkdirAll(paths.supportEvidence, 0o700); err != nil {
+			return fmt.Errorf("create support evidence directory: %w", err)
+		}
+	} else if err != nil {
+		return fmt.Errorf("inspect support evidence directory: %w", err)
+	} else if !evidenceInfo.IsDir() ||
+		evidenceInfo.Mode()&os.ModeSymlink != 0 {
+		return errors.New("support evidence path is not an unlinked directory")
+	}
+	stateDirectory := filepath.Dir(paths.supportEvidence)
+	if err := preserveSupportEvidenceOwner(
+		stateDirectory,
+		paths.supportEvidence,
+	); err != nil {
+		return fmt.Errorf("preserve support evidence directory owner: %w", err)
+	}
+	for _, source := range []string{
+		paths.desired,
+		paths.acknowledgement,
+		paths.static,
+		paths.observed,
+	} {
+		name := filepath.Base(source)
+		destination := filepath.Join(paths.supportEvidence, name)
+		sourceInfo, err := os.Lstat(source)
+		if errors.Is(err, os.ErrNotExist) {
+			if err := os.Remove(destination); err != nil &&
+				!errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf(
+					"remove stale support evidence %s: %w",
+					name,
+					err,
+				)
+			}
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("inspect support evidence %s: %w", name, err)
+		}
+		if !sourceInfo.Mode().IsRegular() {
+			if err := os.Remove(destination); err != nil &&
+				!errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf(
+					"remove invalid support evidence %s: %w",
+					name,
+					err,
+				)
+			}
+			return fmt.Errorf("support evidence %s is not a regular file", name)
+		}
+		data, err := os.ReadFile(source)
+		if err != nil {
+			return fmt.Errorf("read support evidence %s: %w", name, err)
+		}
+		if err := writeBytesAtomically(destination, data, 0o640); err != nil {
+			return fmt.Errorf("publish support evidence %s: %w", name, err)
+		}
+		if err := preserveSupportEvidenceOwner(
+			stateDirectory,
+			destination,
+		); err != nil {
+			return fmt.Errorf(
+				"preserve support evidence %s owner: %w",
+				name,
+				err,
+			)
+		}
+	}
+	return nil
 }
 
 func writeJSONAtomically(path string, value any) error {

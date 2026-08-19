@@ -65,7 +65,7 @@ GitHub runner scale-set demand to return toward their operator-defined maximum.
 - [Host-Local Admission Operations](guides/host-admission.md) explains policy
   calibration, rollout, diagnostics, and rollback.
 - [Support Broker Access](guides/support-broker-access.md) defines the exact
-  read and inherited ACL contract for file-only support diagnostics.
+  read and dedicated evidence-directory ACL contract for file-only diagnostics.
 - [Troubleshooting](troubleshooting.md) diagnoses registration, routing, capacity,
   image, and Docker failures.
 - [Building from Source](building.md) identifies local validation entry points.

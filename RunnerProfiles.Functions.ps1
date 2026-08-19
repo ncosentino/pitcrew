@@ -804,6 +804,7 @@ function Resolve-RunnerProfile {
         CapacityAcknowledgementPath = Join-Path $stateDirectory 'acknowledged-capacity.json'
         ObservedStatePath = Join-Path $stateDirectory 'observed-state.json'
         StaticProfilePath = Join-Path $stateDirectory 'static-profile.json'
+        SupportEvidenceDirectory = Join-Path $stateDirectory 'support-evidence'
         ShutdownRequestPath = Join-Path $stateDirectory 'manager-shutdown.json'
         SessionOwnerPath = Join-Path $stateDirectory 'manager-session-owner.txt'
         LockPath = Join-Path $stateDirectory 'setup.lock'

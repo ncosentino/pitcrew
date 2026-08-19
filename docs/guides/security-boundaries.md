@@ -24,7 +24,7 @@ verified locally. Returned evidence is signed by the enrolled node identity and
 encrypted to Dashboard. A duplicate request returns its cached signed result
 instead of executing again.
 
-The exact file and inherited directory-access boundary is defined by
+The exact file and dedicated evidence-directory boundary is defined by
 [Support Broker Access](support-broker-access.md).
 
 ## Protect the Docker host

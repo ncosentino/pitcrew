@@ -234,20 +234,30 @@ Add-Check (
         Test-Json -SchemaFile $supportAccessSchemaPath
 ) 'The support broker access document does not satisfy its versioned schema.'
 Add-Check (
+    $supportAccess.schemaVersion -eq 2 -and
+    $supportAccess.pitcrewRoot.profileEvidenceDirectory -eq
+        'support-evidence' -and
     @($supportAccess.pitcrewRoot.profileReadFiles) -join ',' -eq
         'desired-capacity.json,acknowledged-capacity.json,static-profile.json,observed-state.json' -and
     @($supportAccess.connectorHealth.readFiles) -join ',' -eq
         'connector-health.json,connector-events.jsonl' -and
     @($supportAccess.access.transportAgentRights).Count -eq 0 -and
+    $supportAccess.access.inheritance.scope -eq
+        'dedicated-evidence-directories' -and
     $supportAccess.access.inheritance.atomicReplacement -eq
-        'same-directory-temporary-file'
-) 'The support broker access document broadened reads or lost directory-inherited replacement.'
+        'same-directory-temporary-file' -and
+    $supportAccess.access.inheritance.windows -eq
+        'object-inherit-read-ace' -and
+    $supportAccess.access.inheritance.linux -eq
+        'directory-read-and-default-file-read-acl'
+) 'The support broker access document broadened reads or lost dedicated-directory replacement.'
 
 $tempRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
     "pitcrew-remote-diagnostics-test-$([Guid]::NewGuid().ToString('N'))"
 $fixtureRoot = Join-Path $tempRoot 'pitcrew'
 $profileRoot = Join-Path $fixtureRoot '.pitcrew-state' 'default'
+$supportEvidenceRoot = Join-Path $profileRoot 'support-evidence'
 $fakeBin = Join-Path $tempRoot 'bin'
 $outputRoot = Join-Path $tempRoot 'output'
 $programData = Join-Path $tempRoot 'program-data'
@@ -262,6 +272,7 @@ try {
     foreach ($directory in @(
             $fixtureRoot,
             $profileRoot,
+            $supportEvidenceRoot,
             $fakeBin,
             $outputRoot)) {
         $null = New-Item -ItemType Directory -Path $directory -Force
@@ -442,6 +453,31 @@ try {
                     })
             }
         } | ConvertTo-Json -Depth 30)
+    foreach ($projection in @(
+            'desired-capacity.json',
+            'acknowledged-capacity.json',
+            'static-profile.json',
+            'observed-state.json')) {
+        Copy-Item `
+            -LiteralPath (Join-Path $profileRoot $projection) `
+            -Destination (Join-Path $supportEvidenceRoot $projection)
+    }
+    Write-Utf8 `
+        -Path (Join-Path $profileRoot 'desired-capacity.json') `
+        -Content (@{
+            schemaVersion = 1
+            generation = 99
+            scope = 'repo'
+            repositories = @(
+                @{
+                    url = 'https://github.com/example/project'
+                    workers = 99
+                })
+            replicas = $null
+        } | ConvertTo-Json -Depth 20)
+    Write-Utf8 `
+        -Path (Join-Path $profileRoot 'last-valid-capacity.json') `
+        -Content 'REMOTE_DIAGNOSTICS_PRIVATE_STATE_SENTINEL'
 
     $healthRoot = Join-Path $programData 'PitCrew' 'Connector' 'health'
     Write-Utf8 `
@@ -789,6 +825,7 @@ if ($CommandArguments[0] -eq '-Pi') {
             'REMOTE_DIAGNOSTICS_SECRET_SENTINEL',
             'REMOTE_DIAGNOSTICS_JOB_OUTPUT_SENTINEL',
             'REMOTE_DIAGNOSTICS_IDENTITY_SENTINEL',
+            'REMOTE_DIAGNOSTICS_PRIVATE_STATE_SENTINEL',
             'REMOTE_DIAGNOSTICS_MANAGER_ERROR_SENTINEL',
             $fixtureRoot)) {
         Add-Check (
@@ -813,6 +850,10 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         $supportEnvelope.report.collectionScope -eq 'file-only'
     ) 'The support collector did not identify its file-only boundary.'
+    Add-Check (
+        $supportEnvelope.report.verifiedMeasurements.capacity[0].desiredWorkers -eq
+            2
+    ) 'The support collector read broader profile state instead of the dedicated evidence projection.'
     Add-Check (
         $null -eq $supportEnvelope.report.verifiedMeasurements.capacity[0].liveWorkers -and
         $null -eq $supportEnvelope.report.verifiedMeasurements.capacity[0].mismatch -and
@@ -1209,8 +1250,11 @@ if ($CommandArguments[0] -eq '-Pi') {
         $legacyFixtureRoot `
         '.pitcrew-state' `
         'default'
-    $legacyAcknowledgedPath = Join-Path `
+    $legacyEvidenceRoot = Join-Path `
         $legacyProfileRoot `
+        'support-evidence'
+    $legacyAcknowledgedPath = Join-Path `
+        $legacyEvidenceRoot `
         'acknowledged-capacity.json'
     $legacyAcknowledged = Get-Content `
         -LiteralPath $legacyAcknowledgedPath `
@@ -1221,7 +1265,9 @@ if ($CommandArguments[0] -eq '-Pi') {
     Write-Utf8 `
         -Path $legacyAcknowledgedPath `
         -Content ($legacyAcknowledged | ConvertTo-Json -Depth 30)
-    $legacyStaticPath = Join-Path $legacyProfileRoot 'static-profile.json'
+    $legacyStaticPath = Join-Path `
+        $legacyEvidenceRoot `
+        'static-profile.json'
     $legacyStatic = Get-Content `
         -LiteralPath $legacyStaticPath `
         -Raw `
@@ -1231,7 +1277,9 @@ if ($CommandArguments[0] -eq '-Pi') {
     Write-Utf8 `
         -Path $legacyStaticPath `
         -Content ($legacyStatic | ConvertTo-Json -Depth 30)
-    $legacyObservedPath = Join-Path $legacyProfileRoot 'observed-state.json'
+    $legacyObservedPath = Join-Path `
+        $legacyEvidenceRoot `
+        'observed-state.json'
     $legacyObserved = Get-Content `
         -LiteralPath $legacyObservedPath `
         -Raw `

@@ -1,5 +1,5 @@
 ---
-description: Grant the support diagnostics broker only the inherited read access required by the file-only collector.
+description: Grant the support diagnostics broker inherited read only on dedicated allowlisted evidence directories.
 ---
 
 # Support Broker Access
@@ -26,12 +26,13 @@ The collector probes these PitCrew-root files without reading their contents:
 - `RunnerProfiles.Functions.ps1`
 - `docker-compose.yml`
 
-For the selected profile it reads only:
+Managers mirror these four documents into
+`.pitcrew-state/<profile>/support-evidence`, and the broker reads only:
 
-- `.pitcrew-state/<profile>/desired-capacity.json`
-- `.pitcrew-state/<profile>/acknowledged-capacity.json`
-- `.pitcrew-state/<profile>/static-profile.json`
-- `.pitcrew-state/<profile>/observed-state.json`
+- `.pitcrew-state/<profile>/support-evidence/desired-capacity.json`
+- `.pitcrew-state/<profile>/support-evidence/acknowledged-capacity.json`
+- `.pitcrew-state/<profile>/support-evidence/static-profile.json`
+- `.pitcrew-state/<profile>/support-evidence/observed-state.json`
 
 It may also read the bounded connector-health projection:
 
@@ -50,27 +51,31 @@ registration or JIT material, job output, the Docker socket, or arbitrary host
 paths. The transport agent receives no access to the PitCrew state or connector
 health directories.
 
-## Apply access at directories
+## Apply access only at dedicated evidence directories
 
-PitCrew state files are atomically replaced. Every current producer creates its
-temporary file in the destination profile directory and then renames it over
-the visible path:
+Operational PitCrew state files are atomically replaced alongside unrelated
+manager state. Granting inherited broker read on the profile directory would
+therefore expose files outside the collector allowlist.
 
-- PowerShell publishes desired and static state.
-- The fixed manager publishes acknowledgement and observed state.
-- The Go autoscaler publishes the same documents.
+`Setup-Runner.ps1` creates the stable `support-evidence` directory under the
+operator's profile state before starting the manager. The fixed manager and Go
+autoscaler publish bounded copies of only the four approved documents there.
+Each copy uses a same-directory temporary file and rename. A mirror failure is
+diagnostic: it is surfaced and retried without stopping scaling or changing
+live workers. Before support ACLs are installed, the directory is owner-only
+and mirrored files retain the profile-state owner plus only the group-class
+read bit needed for a later named-ACL mask.
 
-Installers must therefore apply inheritable access to stable directories rather
-than ACLs to the current files:
+Installers apply inheritable access only to the two directories whose complete
+contents are support evidence:
 
-- **Windows:** grant the broker identity inherited read/list/traverse access
-  through directory ACEs. Do not grant the transport-agent identity access.
-- **Linux:** grant directory traversal/listing plus default read ACLs to the
-  broker identity or broker-only group. Keep the agent outside that group.
+- `.pitcrew-state/<profile>/support-evidence`
+- the platform connector-health directory
 
-The profile directory itself is not replaced during compatible setup, capacity,
-manager, or image updates. Same-directory atomic replacement causes every new
-state file to receive the directory-owned access policy.
+**Windows** uses a direct list/traverse grant plus inheritable file-read ACEs.
+**Linux** uses directory traversal/listing plus default file-read ACLs. The
+profile directory remains traverse-only, unrelated state never enters the
+mirror, and the transport agent receives no evidence access.
 
 ## Installer verification
 
@@ -79,7 +84,8 @@ A support-agent installer must prove:
 1. the broker can read the collector and exact state/health files;
 2. the agent cannot traverse the state or connector-health directories;
 3. neither identity can access the Docker socket;
-4. a PitCrew capacity update replaces state and the broker can still read it;
+4. a PitCrew capacity update refreshes the dedicated mirror and the broker can
+   still read it;
 5. a fixed-manager and autoscaler publication preserve the same result.
 
 Failure to prove any check must leave support disabled without changing runner
