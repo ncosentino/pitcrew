@@ -2659,7 +2659,11 @@ try {
             throw "Cannot record the current manager image for profile '$($profileConfig.Name)' before handoff."
         }
     }
+    $managerAcknowledgementTimeoutSeconds =
+        Get-RunnerManagerAcknowledgementTimeoutSeconds `
+            -Autoscaling $profileConfig.Autoscaling
     $managerStoppedForHandoff = $false
+    $replacementManagerStarted = $false
     try {
         $stagedFiles.Add([PSCustomObject]@{
             TemporaryPath = New-RunnerTextStagingFile `
@@ -2748,17 +2752,30 @@ try {
                 '--force-recreate',
                 'runner-manager'
             )
+        $replacementManagerStarted = $true
 
-        if ($managerRunning) {
+        if ($managerRunning -or $Refresh) {
             $acknowledgement = Wait-RunnerCapacityAcknowledgement `
                 -ProfileConfig $profileConfig `
                 -Generation $nextGeneration `
-                -TimeoutSeconds 60 `
+                -TimeoutSeconds $managerAcknowledgementTimeoutSeconds `
                 -MinimumManagerContractVersion $profileConfig.ManagerContractVersion
         }
     }
     catch {
         $updateError = $_
+        if ($replacementManagerStarted) {
+            $currentManagerId =
+                Get-RunnerManagerContainerId -ProfileConfig $profileConfig
+            if ($currentManagerId) {
+                throw (
+                    "Manager update verification failed after the replacement " +
+                    "manager started: $($updateError.Exception.Message) " +
+                    "The replacement manager remains running, workers were " +
+                    "preserved, and rollback was not attempted."
+                )
+            }
+        }
         $hostAdmissionRollbackError = ''
         if ($hostAdmissionPolicyApplied -and $hostAdmissionRollbackPolicy) {
             try {
@@ -2820,6 +2837,15 @@ try {
                     if ($LASTEXITCODE -ne 0) {
                         throw "Failed to restore the previous manager image tag."
                     }
+                    if (Test-Path `
+                            -LiteralPath `
+                                $profileConfig.CapacityAcknowledgementPath) {
+                        Remove-Item `
+                            -LiteralPath `
+                                $profileConfig.CapacityAcknowledgementPath `
+                            -Force `
+                            -ErrorAction Stop
+                    }
                     Invoke-RunnerCompose `
                         -ProfileConfig $profileConfig `
                         -CommandArguments @(
@@ -2829,6 +2855,13 @@ try {
                             '--force-recreate',
                             'runner-manager'
                         )
+                    $null = Wait-RunnerCapacityAcknowledgement `
+                        -ProfileConfig $profileConfig `
+                        -Generation $currentGeneration `
+                        -TimeoutSeconds `
+                            $managerAcknowledgementTimeoutSeconds `
+                        -MinimumManagerContractVersion `
+                            $previousManagerContract
                 } catch {
                     $rollbackError = $_.Exception.Message
                 }

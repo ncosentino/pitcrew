@@ -155,7 +155,9 @@ function Start-TestCapacityAcknowledgementWriter {
         [int]$DrainingSlots,
         [int]$UnchangedSlots,
         [ValidateSet(0, 1)]
-        [int]$WaitForAcknowledgementRemoval
+        [int]$WaitForAcknowledgementRemoval,
+        [ValidateRange(0, 5000)]
+        [int]$DelayMilliseconds = 0
     )
 
     return Start-Job -ArgumentList @(
@@ -167,6 +169,7 @@ function Start-TestCapacityAcknowledgementWriter {
         $DrainingSlots,
         $UnchangedSlots,
         $WaitForAcknowledgementRemoval,
+        $DelayMilliseconds,
         $activeManagerContractVersion
     ) -ScriptBlock {
         param(
@@ -178,6 +181,7 @@ function Start-TestCapacityAcknowledgementWriter {
             $DrainingSlots,
             $UnchangedSlots,
             $WaitForAcknowledgementRemoval,
+            $DelayMilliseconds,
             $ManagerContractVersion
         )
 
@@ -187,6 +191,7 @@ function Start-TestCapacityAcknowledgementWriter {
         $acknowledgementRemovalObserved = -not (
             Test-Path -LiteralPath $AcknowledgementPath -PathType Leaf
         )
+        $delayApplied = $false
         do {
             if (
                 $WaitForAcknowledgementRemoval -eq 1 -and
@@ -197,6 +202,14 @@ function Start-TestCapacityAcknowledgementWriter {
                 )
                 Start-Sleep -Milliseconds 50
                 continue
+            }
+            if (
+                $WaitForAcknowledgementRemoval -eq 1 -and
+                $acknowledgementRemovalObserved -and
+                -not $delayApplied
+            ) {
+                Start-Sleep -Milliseconds $DelayMilliseconds
+                $delayApplied = $true
             }
             if (Test-Path -LiteralPath $DesiredPath -PathType Leaf) {
                 try {
@@ -329,6 +342,13 @@ if ($errors.Count -gt 0) {
 }
 
 . $functionsPath
+
+Add-Check (
+    (Get-RunnerManagerAcknowledgementTimeoutSeconds -Autoscaling $null) -eq
+        60 -and
+    (Get-RunnerManagerAcknowledgementTimeoutSeconds `
+        -Autoscaling ([PSCustomObject]@{ Mode = 'scale-set' })) -eq 180
+) 'Manager handoff acknowledgement timeouts do not distinguish fixed and autoscaled startup.'
 
 $supportAccessRoot = Join-Path `
     ([IO.Path]::GetTempPath()) `
@@ -4583,15 +4603,35 @@ try {
         $env:PITCREW_TEST_MANAGER_START_FAILURE = '1'
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
-        Add-ThrowsCheck `
-            -Action {
-                & $fixtureSetup `
-                    -Token 'test-registration-token' `
-                    -Refresh `
-                    -Repos 'https://github.com/example/project=1'
-            } `
-            -ExpectedMessage 'docker compose up failed' `
-            -Failure 'A failed manager start was not surfaced after rollback.'
+        $rollbackAcknowledgement = Start-TestCapacityAcknowledgementWriter `
+            -DesiredPath $defaultDesiredPath `
+            -AcknowledgementPath $defaultAcknowledgementPath `
+            -Generation 4 `
+            -DesiredSlots 1 `
+            -AddedSlots 0 `
+            -DrainingSlots 0 `
+            -UnchangedSlots 1 `
+            -WaitForAcknowledgementRemoval 1 `
+            -DelayMilliseconds 1000
+        try {
+            Add-ThrowsCheck `
+                -Action {
+                    & $fixtureSetup `
+                        -Token 'test-registration-token' `
+                        -Refresh `
+                        -Repos 'https://github.com/example/project=1'
+                } `
+                -ExpectedMessage 'docker compose up failed' `
+                -Failure 'A failed manager start was not surfaced after rollback.'
+        }
+        finally {
+            Wait-Job -Job $rollbackAcknowledgement -Timeout 65 | Out-Null
+            Receive-Job `
+                -Job $rollbackAcknowledgement `
+                -ErrorAction Stop |
+                Out-Null
+            Remove-Job -Job $rollbackAcknowledgement -Force
+        }
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_START_FAILURE_USED -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
@@ -5503,6 +5543,15 @@ Add-Check (
     $setupSource -match
         '(?s)Publish-RunnerHostAdmissionPolicy.*?begin-adoption.*?Stop-RunnerManagerForHandoff'
 ) 'Setup does not establish the durable host-wide adoption fence before manager handoff.'
+Add-Check (
+    $setupSource -match
+        [regex]::Escape(
+            'Get-RunnerManagerAcknowledgementTimeoutSeconds') -and
+    $setupSource -match
+        'replacement manager remains running' -and
+    $setupSource -match
+        '(?s)Failed to restore the previous manager image tag.*?Remove-Item.*?CapacityAcknowledgementPath.*?Wait-RunnerCapacityAcknowledgement'
+) 'Manager handoff does not preserve a running replacement or verify rollback acknowledgement.'
 Add-Check ($manager -match [regex]::Escape('diagnostics_initialize "${DIAGNOSTICS_DIRECTORY}"')) 'The fixed manager does not restore its durable operation journal.'
 Add-Check ($manager -match [regex]::Escape('record_manager_diagnostic')) 'The fixed manager does not record operation evidence.'
 Add-Check ($manager -match [regex]::Escape('render_fixed_capacity_evidence')) 'The fixed manager does not publish capacity-deficit evidence.'

@@ -22,10 +22,15 @@ The replacement manager discovers workers by exact profile and slot labels,
 adopts them, and resumes reconciliation. Busy jobs and idle registrations remain
 connected throughout the handoff.
 
-If a contract-9 replacement fails to start or acknowledge its generation, setup
-stops the partial replacement, restores the previous environment and state,
-retags both the previous manager image and previous worker image, and restarts
-the prior manager without touching worker containers.
+Fixed managers receive 60 seconds to acknowledge the generation; autoscaled
+managers receive 180 seconds so scale-set recovery and listener establishment
+can complete without a false handoff failure. If verification times out while
+the replacement manager is still running, setup leaves it running and reports
+the incomplete verification without attempting rollback. If the replacement
+failed to start or exited, setup restores the previous environment and state,
+retags the previous images, restarts the prior manager, and requires that
+manager to republish the previous acknowledgement before rollback succeeds.
+Worker containers are untouched in every path.
 
 The first upgrade from a pre-contract-9 manager removes that exact legacy
 manager without sending its destructive shutdown signal. A stable scale-set
