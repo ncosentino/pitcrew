@@ -1713,6 +1713,30 @@ try {
     }
     New-Item -ItemType Directory -Path $profileConfig.StateDirectory -Force | Out-Null
     $profileLock = Enter-RunnerProfileLock -Path $profileConfig.LockPath -TimeoutSeconds 30
+    $supportEvidenceDirectoryExists = Test-Path `
+        -LiteralPath $profileConfig.SupportEvidenceDirectory
+    if ($supportEvidenceDirectoryExists) {
+        $supportEvidenceDirectoryItem = Get-Item `
+            -LiteralPath $profileConfig.SupportEvidenceDirectory `
+            -Force
+        if (-not $supportEvidenceDirectoryItem.PSIsContainer -or
+            ($supportEvidenceDirectoryItem.Attributes -band
+                [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'The profile support-evidence path must be an unlinked directory.'
+        }
+    } else {
+        New-Item `
+            -ItemType Directory `
+            -Path $profileConfig.SupportEvidenceDirectory |
+            Out-Null
+        if (-not $IsWindows) {
+            [IO.File]::SetUnixFileMode(
+                $profileConfig.SupportEvidenceDirectory,
+                [IO.UnixFileMode]::UserRead -bor
+                    [IO.UnixFileMode]::UserWrite -bor
+                    [IO.UnixFileMode]::UserExecute)
+        }
+    }
 
     if ($RecoverManager) {
         if ($Down -or $Refresh -or $CapacityOnly -or $Pause) {

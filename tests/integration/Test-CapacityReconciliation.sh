@@ -96,34 +96,24 @@ wait_for_observed_generation() {
     return 1
 }
 
-assert_support_evidence_generation() {
+wait_for_support_evidence_generation() {
     expected_generation="$1"
-    for file_name in \
-        desired-capacity.json \
-        acknowledged-capacity.json \
-        static-profile.json \
-        observed-state.json; do
-        [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/${file_name}" ] || {
-            echo "Support evidence omitted ${file_name}." >&2
-            return 1
-        }
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/desired-capacity.json" ] &&
+            [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/acknowledged-capacity.json" ] &&
+            [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/static-profile.json" ] &&
+            [ -f "${SUPPORT_EVIDENCE_DIRECTORY}/observed-state.json" ] &&
+            [ "$(jq -r '.generation // -1' "${SUPPORT_EVIDENCE_DIRECTORY}/desired-capacity.json" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ "$(jq -r '.generation // -1' "${SUPPORT_EVIDENCE_DIRECTORY}/acknowledged-capacity.json" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ "$(jq -r '.generation // -1' "${SUPPORT_EVIDENCE_DIRECTORY}/observed-state.json" 2>/dev/null || echo -1)" -eq "${expected_generation}" ] &&
+            [ ! -e "${SUPPORT_EVIDENCE_DIRECTORY}/last-valid-capacity.json" ]; then
+            return
+        fi
+        sleep 1
     done
-    [ "$(jq -r '.generation' "${SUPPORT_EVIDENCE_DIRECTORY}/desired-capacity.json")" -eq "${expected_generation}" ] || {
-        echo "Support desired-capacity evidence did not reach generation ${expected_generation}." >&2
-        return 1
-    }
-    [ "$(jq -r '.generation' "${SUPPORT_EVIDENCE_DIRECTORY}/acknowledged-capacity.json")" -eq "${expected_generation}" ] || {
-        echo "Support acknowledgement evidence did not reach generation ${expected_generation}." >&2
-        return 1
-    }
-    [ "$(jq -r '.generation' "${SUPPORT_EVIDENCE_DIRECTORY}/observed-state.json")" -eq "${expected_generation}" ] || {
-        echo "Support observed-state evidence did not reach generation ${expected_generation}." >&2
-        return 1
-    }
-    [ ! -e "${SUPPORT_EVIDENCE_DIRECTORY}/last-valid-capacity.json" ] || {
-        echo "Support evidence included non-allowlisted manager state." >&2
-        return 1
-    }
+    echo "Timed out waiting for support evidence generation ${expected_generation}." >&2
+    return 1
 }
 
 wait_for_resource_slot_count() {
@@ -329,6 +319,8 @@ docker run \
     >/dev/null
 
 mkdir -p "${ROOT}/.pitcrew-state"
+mkdir -p "${LEGACY_STATE_DIRECTORY}/support-evidence"
+chmod 0700 "${LEGACY_STATE_DIRECTORY}/support-evidence"
 start_legacy_compose
 wait_for_legacy_worker_count 2
 [ -n "$(docker ps -q --filter "label=${LEGACY_MANAGER_LABEL}")" ] || {
@@ -406,7 +398,7 @@ wait_for_legacy_worker_count 0
 run_setup 5
 wait_for_acknowledgement 1
 wait_for_observed_generation 1 accepted
-assert_support_evidence_generation 1
+wait_for_support_evidence_generation 1
 wait_for_worker_count 5
 wait_for_resource_slot_count 5
 manager_image_kib=$(docker run \
@@ -551,7 +543,7 @@ worker_mount=$(docker inspect \
 run_setup 6
 wait_for_acknowledgement 2
 wait_for_observed_generation 2 accepted
-assert_support_evidence_generation 2
+wait_for_support_evidence_generation 2
 wait_for_worker_count 6
 [ "$(manager_id)" = "${MANAGER_ID}" ] || {
     echo "Capacity scale-up replaced the manager container." >&2

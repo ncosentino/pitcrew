@@ -57,12 +57,14 @@ Operational PitCrew state files are atomically replaced alongside unrelated
 manager state. Granting inherited broker read on the profile directory would
 therefore expose files outside the collector allowlist.
 
-The fixed manager and Go autoscaler instead publish bounded copies of only the
-four approved documents into the stable `support-evidence` directory. Each copy
-uses a same-directory temporary file and rename. A mirror failure is diagnostic:
-it is surfaced and retried without stopping scaling or changing live workers.
-Before support ACLs are installed, the directory is owner-only and files retain
-only the group-class read bit needed for a later named-ACL mask.
+`Setup-Runner.ps1` creates the stable `support-evidence` directory under the
+operator's profile state before starting the manager. The fixed manager and Go
+autoscaler publish bounded copies of only the four approved documents there.
+Each copy uses a same-directory temporary file and rename. A mirror failure is
+diagnostic: it is surfaced and retried without stopping scaling or changing
+live workers. Before support ACLs are installed, the directory is owner-only
+and files retain only the group-class read bit needed for a later named-ACL
+mask.
 
 Installers apply inheritable access only to the two directories whose complete
 contents are support evidence:
