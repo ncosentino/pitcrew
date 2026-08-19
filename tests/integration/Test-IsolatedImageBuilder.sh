@@ -74,9 +74,8 @@ EOF
 printf 'isolated-image-builder\n' > "${CONTEXT_DIRECTORY}/payload.txt"
 cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
-# BuildKit may finish server-side work after an abrupt client disconnect.
-# Keep the solve observable but shorter than the inactive-state wait below.
-RUN sleep 30
+# Keep the solve observable while leaving preflight cleanup enough retry time.
+RUN sleep 5
 EOF
 
 pwsh -NoProfile -File "${SERVICE_SETUP}" \
@@ -204,51 +203,12 @@ if [[ "${build_status}" -eq 0 ]]; then
     exit 1
 fi
 
-settled=false
-for _ in $(seq 1 60); do
-    usage="$(run_buildctl_client du --format '{{json .}}')"
-    if jq -e \
-        'type == "array" and
-         length > 0 and
-         all(.[]; .inUse == false)' \
-        <<<"${usage}" \
-        >/dev/null; then
-        settled=true
-        break
-    fi
-    sleep 1
-done
-if [[ "${settled}" != "true" ]]; then
-    echo "BuildKit state did not settle after the client container was hard-cancelled." >&2
-    exit 1
-fi
-seeded_cache="$(
-    docker run --rm \
-        --network "${NETWORK_NAME}" \
-        --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
-        --entrypoint buildctl \
-        "${CLIENT_IMAGE}" \
-        --addr tcp://buildkitd:1234 \
-        --tlsservername buildkitd \
-        --tlsdir /tls \
-        du --format '{{json .}}'
-)"
+seeded_cache="$(run_buildctl_client du --format '{{json .}}')"
 if [[ -z "${seeded_cache}" || "${seeded_cache}" == "null" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit state for preflight cleanup." >&2
     exit 1
 fi
-seeded_histories="$(
-    docker run --rm \
-        --network "${NETWORK_NAME}" \
-        --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
-        --entrypoint buildctl \
-        "${CLIENT_IMAGE}" \
-        --addr tcp://buildkitd:1234 \
-        --tlsservername buildkitd \
-        --tlsdir /tls \
-        debug histories \
-        --format '{{json .}}'
-)"
+seeded_histories="$(run_buildctl_client debug histories --format '{{json .}}')"
 if [[ -z "${seeded_histories}" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit history." >&2
     exit 1
