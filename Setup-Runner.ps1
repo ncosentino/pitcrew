@@ -103,6 +103,11 @@
     Build and hot-swap the selected profile manager while preserving an
     otherwise unchanged worker profile and any active jobs.
 
+.PARAMETER RecoverMissingManager
+    With -Refresh, explicitly authorize starting the selected existing profile
+    when it has no running manager. Plain -Refresh continues to preserve
+    intentionally stopped profiles.
+
 .PARAMETER CapacityOnly
     Require an in-place capacity reconciliation. Setup fails instead of
     replacing the selected profile when its manager or static configuration is
@@ -147,6 +152,9 @@
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -Repos https://github.com/me/repo-a -Refresh
+
+.EXAMPLE
+    .\Setup-Runner.ps1 -Profile copilot-cli -Repos https://github.com/me/repo-a -Refresh -RecoverMissingManager
 
 .EXAMPLE
     .\Setup-Runner.ps1 -Profile copilot-cli -AddRepos https://github.com/me/repo-a=4 -CapacityOnly
@@ -202,6 +210,7 @@ param(
     [string]$ProfilePath = '',
     [switch]$Down,
     [switch]$Refresh,
+    [switch]$RecoverMissingManager,
     [switch]$CapacityOnly,
     [switch]$Pause,
     [switch]$RecoverManager,
@@ -1698,6 +1707,10 @@ function Get-RunnerRegistrationAccessValidation {
     }
 }
 
+if ($RecoverMissingManager -and -not $Refresh) {
+    throw '-RecoverMissingManager requires -Refresh.'
+}
+
 Push-Location $here
 $profileLock = $null
 $hostAdmissionLock = $null
@@ -2303,7 +2316,10 @@ try {
     if ($Refresh -and -not $refreshConfigurationMatches) {
         throw '-Refresh can update the manager only when the worker profile configuration is otherwise unchanged. Apply worker image, labels, scope, or other static changes separately.'
     }
-    if ($Refresh -and -not $managerRunning) {
+    if ($RecoverMissingManager -and $managerRunning) {
+        throw "Profile '$($profileConfig.Name)' already has a running manager. Use plain -Refresh."
+    }
+    if ($Refresh -and -not $managerRunning -and -not $RecoverMissingManager) {
         throw "Profile '$($profileConfig.Name)' is not running. Refresh will not start a stopped profile."
     }
     if (
@@ -2694,7 +2710,9 @@ try {
             Write-Warning "Profile '$($profileConfig.Name)' retains GitHub's default labels, so jobs targeting only 'self-hosted' can run on it."
         }
 
-        if ($Refresh) {
+        if ($RecoverMissingManager) {
+            Write-Host "[recover] Building the missing manager for profile '$($profileConfig.Name)'"
+        } elseif ($Refresh) {
             Write-Host "[refresh] Building a replacement manager for profile '$($profileConfig.Name)'"
         } else {
             Write-Host "[replace] Building a rolling replacement for profile '$($profileConfig.Name)'"

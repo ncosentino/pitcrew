@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.14.0') 'The operations plugin minor version was not advanced for durable support evidence projections.'
+Add-Check ($plugin.version -eq '1.15.0') 'The operations plugin minor version was not advanced for explicit missing-manager recovery.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -297,6 +297,10 @@ Add-Check (
     $poolUpdateSkill -match 'Stop immediately when fresh post-handoff evidence is\s+degraded, rejected, or mismatched' -and
     $poolUpdateSkill -match 'do not restart or rerun the profile'
 ) 'The pool update freshness wait can hide a real replacement-manager failure.'
+Add-Check (
+    $poolUpdateSkill -match '`-Refresh -RecoverMissingManager`' -and
+    $poolUpdateSkill -match 'explicitly authorizes recovery'
+) 'The pool update skill can implicitly start an intentionally stopped profile.'
 
 $remoteDiagnosticsRoot = Join-Path $skillsRoot 'pitcrew-remote-diagnostics'
 $remoteDiagnosticsSkill = Get-Content `
@@ -754,6 +758,10 @@ Add-Check (
     $setupRunnerContent -match '(?m)^\.PARAMETER ExpectedDesiredStateHash' -and
     $setupRunnerContent -match '(?m)^\.PARAMETER RecoveryTimeoutSeconds'
 ) 'Setup-Runner.ps1 does not document the first-class manager recovery operation the skill invokes.'
+Add-Check (
+    $setupRunnerContent -match '\[switch\]\$RecoverMissingManager' -and
+    $setupRunnerContent -match '(?m)^\.PARAMETER RecoverMissingManager'
+) 'Setup-Runner.ps1 does not expose the explicit missing-manager recovery operation used by pool updates.'
 
 if ($errors.Count -gt 0) {
     foreach ($errorMessage in $errors) {

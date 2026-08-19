@@ -36,6 +36,7 @@ profile without changing other profiles on the same host.
 | `-WorkerPids` | No | Contract-11 positive per-worker process limit. | Unlimited |
 | `-Down` | No | Stops only the selected profile and removes its managed workers. | Off |
 | `-Refresh` | No | Builds and hot-swaps only the selected manager while preserving compatible workers and active jobs. | Off |
+| `-RecoverMissingManager` | No | With `-Refresh`, explicitly starts an existing selected profile that has no running manager. Plain refresh continues to preserve intentionally stopped profiles. | Off |
 | `-CapacityOnly` | No | Requires an in-place capacity update and fails rather than replacing a manager when the current profile cannot reconcile capacity safely. | Off |
 | `-Pause` | No | Reuses the existing desired targets, sets their effective capacity to zero, and drains busy workers naturally without stopping the manager. | Off |
 
@@ -805,6 +806,13 @@ worker image or resource-policy changes with the complete setup command; stop
 explicitly before routing or registration-topology changes. `-Refresh` and
 `-CapacityOnly` reject a changed local image ID even when its mutable tag is
 unchanged.
+
+Plain `-Refresh` refuses to start a profile with no running manager, preserving
+an intentionally stopped profile. After diagnosing an unexpected missing
+manager, replay the exact existing configuration with
+`-Refresh -RecoverMissingManager`. The explicit opt-in requires compatible
+stored static state, builds the manager before changing profile state, and
+requires the selected manager to be absent.
 
 Setup records Docker's immutable local `sha256:<64 hex>` image ID after pull or
 build and includes it in worker revision and refresh compatibility. A legacy

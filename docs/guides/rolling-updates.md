@@ -22,6 +22,13 @@ The replacement manager discovers workers by exact profile and slot labels,
 adopts them, and resumes reconciliation. Busy jobs and idle registrations remain
 connected throughout the handoff.
 
+Plain refresh never starts a profile with no running manager, because that
+profile may be intentionally stopped. After bounded diagnosis confirms an
+unexpected missing manager, replay the exact existing setup command with
+`-Refresh -RecoverMissingManager`. This explicit opt-in is rejected when a
+manager is already running, preserves every worker, and requires the recovered
+manager to acknowledge the desired generation before setup succeeds.
+
 Fixed managers receive 60 seconds to acknowledge the generation; autoscaled
 managers receive 180 seconds so scale-set recovery and listener establishment
 can complete without a false handoff failure. If verification times out while

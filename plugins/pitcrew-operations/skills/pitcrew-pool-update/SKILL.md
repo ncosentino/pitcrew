@@ -33,8 +33,9 @@ Read these shared references before running commands:
 2. Match each profile to its exact running manager label. Skip and report
    profiles with no running manager so an intentionally stopped profile remains
    stopped; the updated checkout will be used the next time its operator starts
-   it.
-3. Build the complete replay inputs for every running profile before changing
+   it. Only when the user explicitly authorizes recovery of one exact
+   unexpectedly missing manager may that profile remain in scope.
+3. Build the complete replay inputs for every in-scope profile before changing
    the checkout.
    - For an external profile with stored manifest provenance, resolve the exact
      approved manifest through the profile replay contract.
@@ -50,9 +51,14 @@ Read these shared references before running commands:
 1. Record the current commit for diagnosis or an explicit later rollback.
 2. Switch the clean deployment checkout to the selected release tag without
    rewriting history.
-3. For each running profile, invoke its complete existing setup command with
-   `-Refresh`. Omit `-Token` so `Setup-Runner.ps1` securely reuses and validates
-   the profile's stored registration token.
+3. For each in-scope profile with a running manager, invoke its complete
+   existing setup command with `-Refresh`. Omit `-Token` so
+   `Setup-Runner.ps1` securely reuses and validates the profile's stored
+   registration token.
+   For an explicitly authorized profile with no manager, invoke that same
+   complete command with `-Refresh -RecoverMissingManager`. Never infer this
+   authorization from a missing container; the extra switch is invalid when a
+   manager is already running.
 4. When setup rejects `-Refresh` because the target release changes worker
    image or build inputs, rerun the same complete setup command without
    `-Refresh`. Setup permits only rolling-compatible changes and fails before
