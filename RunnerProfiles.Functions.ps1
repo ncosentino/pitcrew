@@ -2143,6 +2143,19 @@ function Write-RunnerJsonAtomically {
     }
 }
 
+function Get-RunnerManagerAcknowledgementTimeoutSeconds {
+    [CmdletBinding()]
+    param(
+        [AllowNull()]
+        [object]$Autoscaling
+    )
+
+    if ($null -ne $Autoscaling) {
+        return 180
+    }
+    return 60
+}
+
 <#
 .SYNOPSIS
     Acquires exclusive ownership of a profile setup lock.
