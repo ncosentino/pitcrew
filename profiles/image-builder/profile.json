@@ -35,7 +35,7 @@
     "test -x /actions-runner/bin/Runner.Listener",
     "buildctl --version | grep -F \"v0.32.2\"",
     "test \"$(crane version)\" = \"0.21.9\"",
-    "test -x /usr/local/bin/pitcrew-build-image",
+    "test -x /usr/local/bin/pitcrew-build-image && ! grep -q \"$(printf '\\r')\" /usr/local/bin/pitcrew-build-image && bash -n /usr/local/bin/pitcrew-build-image",
     "getent hosts buildkitd >/dev/null && timeout 5 bash -lc '</dev/tcp/buildkitd/1234'"
   ]
 }

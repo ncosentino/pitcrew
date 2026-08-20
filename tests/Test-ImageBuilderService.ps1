@@ -12,6 +12,7 @@ $configPath = Join-Path $serviceRoot 'buildkitd.toml'
 $profilePath = Join-Path $root 'profiles' 'image-builder' 'profile.json'
 $dockerfilePath = Join-Path $root 'profiles' 'image-builder' 'Dockerfile'
 $helperPath = Join-Path $root 'profiles' 'image-builder' 'pitcrew-build-image'
+$attributesPath = Join-Path $root '.gitattributes'
 
 $errors = [Collections.Generic.List[string]]::new()
 $checks = 0
@@ -45,7 +46,8 @@ foreach ($path in @(
         $configPath,
         $profilePath,
         $dockerfilePath,
-        $helperPath)) {
+        $helperPath,
+        $attributesPath)) {
     Add-Check (Test-Path -LiteralPath $path -PathType Leaf) "Required image-builder surface is missing: $path"
 }
 if ($errors.Count) {
@@ -57,6 +59,8 @@ $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
 $setup = Get-Content -LiteralPath $setupScript -Raw -Encoding UTF8
 $dockerfile = Get-Content -LiteralPath $dockerfilePath -Raw -Encoding UTF8
 $helper = Get-Content -LiteralPath $helperPath -Raw -Encoding UTF8
+$helperBytes = [IO.File]::ReadAllBytes($helperPath)
+$attributes = Get-Content -LiteralPath $attributesPath -Raw -Encoding UTF8
 $profile = Get-Content -LiteralPath $profilePath -Raw -Encoding UTF8 |
     ConvertFrom-Json -Depth 20
 
@@ -107,6 +111,33 @@ Add-Check (
     $craneVerification[0] -ceq 'test "$(crane version)" = "0.21.9"'
 ) 'Image-builder profile does not require crane exact output 0.21.9.'
 Add-Check ($dockerfile -match 'CRANE_SHA256_X64') 'Image-builder Dockerfile does not verify the crane download.'
+Add-Check (
+    $dockerfile -match [regex]::Escape(
+        "sed -i 's/\r$//' /usr/local/bin/pitcrew-build-image")
+) 'Image-builder Dockerfile does not normalize the helper to LF.'
+Add-Check (
+    $dockerfile -match [regex]::Escape(
+        'grep -q "$(printf ''\r'')" /usr/local/bin/pitcrew-build-image') -and
+    $dockerfile -match 'bash -n /usr/local/bin/pitcrew-build-image'
+) 'Image-builder Dockerfile does not reject carriage returns and invalid Bash.'
+$helperVerification = @(
+    $profile.verificationCommands |
+        Where-Object { $_ -match '/usr/local/bin/pitcrew-build-image' }
+)
+Add-Check (
+    $helperVerification.Count -eq 1 -and
+    $helperVerification[0] -ceq (
+        'test -x /usr/local/bin/pitcrew-build-image && ' +
+        '! grep -q "$(printf ''\r'')" /usr/local/bin/pitcrew-build-image && ' +
+        'bash -n /usr/local/bin/pitcrew-build-image')
+) 'Image-builder profile does not verify LF-only valid Bash helper bytes.'
+Add-Check (
+    -not ($helperBytes -contains [byte]13)
+) 'Checked-in image-builder helper contains unsupported carriage returns.'
+Add-Check (
+    $attributes -match (
+        '(?m)^profiles/image-builder/pitcrew-build-image text eol=lf\r?$')
+) 'Git attributes do not force LF for the extensionless image-builder helper.'
 foreach ($argument in @(
         '--build-arg',
         '--label',

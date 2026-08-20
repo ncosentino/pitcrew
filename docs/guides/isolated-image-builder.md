@@ -11,6 +11,8 @@ same Docker host.
 
 The built-in profile pins `crane` 0.21.9 and verifies its exact upstream version
 output, `0.21.9`, before a worker image can replace the active revision.
+The worker image also normalizes the build helper to LF and verifies that it contains
+no carriage returns and parses as valid Bash before replacement.
 
 This lane supports Dockerfile build verification and image publication. It does not
 provide Docker Compose, Testcontainers, service containers, or a generic Docker API.
