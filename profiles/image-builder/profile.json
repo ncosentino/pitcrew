@@ -34,7 +34,7 @@
   "verificationCommands": [
     "test -x /actions-runner/bin/Runner.Listener",
     "buildctl --version | grep -F \"v0.32.2\"",
-    "crane version | grep -F \"v0.21.9\"",
+    "test \"$(crane version)\" = \"0.21.9\"",
     "test -x /usr/local/bin/pitcrew-build-image",
     "getent hosts buildkitd >/dev/null && timeout 5 bash -lc '</dev/tcp/buildkitd/1234'"
   ]

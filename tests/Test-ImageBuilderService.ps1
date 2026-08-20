@@ -98,6 +98,14 @@ Add-Check ($setup -match 'Write-ServiceState') 'Service setup does not persist t
 Add-Check ($setup -match 'X509Certificate2\]::CreateFromPem\(') 'Service setup does not use the cross-platform certificate-only PEM loader.'
 Add-Check ($setup -notmatch 'docker\s+(system\s+prune|rm\s+-f\s+\$\(|volume\s+prune)') 'Service setup contains broad Docker cleanup.'
 Add-Check ($profile.build.args.CRANE_VERSION -eq '0.21.9') 'Image-builder profile does not pin crane 0.21.9.'
+$craneVerification = @(
+    $profile.verificationCommands |
+        Where-Object { $_ -match 'crane version' }
+)
+Add-Check (
+    $craneVerification.Count -eq 1 -and
+    $craneVerification[0] -ceq 'test "$(crane version)" = "0.21.9"'
+) 'Image-builder profile does not require crane exact output 0.21.9.'
 Add-Check ($dockerfile -match 'CRANE_SHA256_X64') 'Image-builder Dockerfile does not verify the crane download.'
 foreach ($argument in @(
         '--build-arg',
