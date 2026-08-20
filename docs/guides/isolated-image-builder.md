@@ -9,6 +9,9 @@ PitCrew host's Docker socket. Disposable workers contain `buildctl`, `crane`, an
 `pitcrew-build-image`; a rootless BuildKit service performs build execution on the
 same Docker host.
 
+The built-in profile pins `crane` 0.21.9 and verifies its exact upstream version
+output, `0.21.9`, before a worker image can replace the active revision.
+
 This lane supports Dockerfile build verification and image publication. It does not
 provide Docker Compose, Testcontainers, service containers, or a generic Docker API.
 
