@@ -10,6 +10,12 @@ ARG CRANE_SHA256_ARM64
 COPY pitcrew-build-image /usr/local/bin/pitcrew-build-image
 
 RUN set -eu; \
+    sed -i 's/\r$//' /usr/local/bin/pitcrew-build-image; \
+    if grep -q "$(printf '\r')" /usr/local/bin/pitcrew-build-image; then \
+        echo 'pitcrew-build-image contains unsupported carriage returns.' >&2; \
+        exit 1; \
+    fi; \
+    bash -n /usr/local/bin/pitcrew-build-image; \
     case "$(uname -m)" in \
         x86_64) \
             architecture='amd64'; \
