@@ -67,7 +67,7 @@ Override the maximum only after reviewing host admission and repository demand.
 
 ## Qualification and rollout
 
-CI enforces an 850 MiB unpacked image budget and exercises the runner listener,
+CI enforces a 700 MiB unpacked image budget and exercises the runner listener,
 both retained Node runtimes, Git sparse checkout and push, GitHub CLI command
 surfaces, `jq`, PowerShell, non-root writes, and omitted-tool boundaries.
 

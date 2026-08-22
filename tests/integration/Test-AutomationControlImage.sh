@@ -5,7 +5,7 @@ ROOT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROFILE_DIRECTORY="${ROOT_DIRECTORY}/profiles/automation-control"
 PROFILE_PATH="${PROFILE_DIRECTORY}/profile.json"
 IMAGE_TAG="pitcrew-automation-control-test:local"
-MAX_IMAGE_SIZE_BYTES=891289600
+MAX_IMAGE_SIZE_BYTES=734003200
 
 cleanup() {
     docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
