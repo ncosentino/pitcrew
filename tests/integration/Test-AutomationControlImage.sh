@@ -68,7 +68,7 @@ docker run --rm \
         gh api graphql --help >/dev/null
         jq -e ".ready == true" <<< "{\"ready\":true}" >/dev/null
         pwsh -NoLogo -NoProfile -Command \
-            "\$value = ConvertFrom-Json '{\"ready\":true}'; if (-not \$value.ready) { exit 1 }; & gh --version | Out-Null"
+            "\$value = [pscustomobject]@{ Ready = \$true }; if (-not \$value.Ready) { exit 1 }; & gh --version | Out-Null"
 
         fixture="$(mktemp -d)"
         git -C "${fixture}" init source >/dev/null
