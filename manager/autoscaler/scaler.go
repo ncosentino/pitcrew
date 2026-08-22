@@ -48,6 +48,7 @@ type runnerRecord struct {
 	runnerID            int64
 	containerID         string
 	container           string
+	containerRunning    bool
 	state               runnerLifecycleState
 	startedAt           time.Time
 	updatedAt           time.Time
@@ -66,8 +67,8 @@ type runnerRecord struct {
 	// when host admission is disabled. Recovery preserves or derives this
 	// identity even when coordinator confirmation must be retried.
 	hostSlotKey string
-	// hostLeaseReleased guards exactly-once release. It must only be set
-	// with s.mu held, by markHostLeaseReleaseLocked.
+	// hostLeaseReleased guards exactly-once release. settleStoppedRunner
+	// updates it while holding s.mu and the host-lease settlement mutex.
 	hostLeaseReleased bool
 	// hostLeaseAdopted distinguishes recovered workers whose active lease
 	// has been confirmed by this manager from workers still awaiting a
@@ -707,6 +708,7 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		runnerID := candidate.runnerID
 		containerID := candidate.containerID
 		runnerKey := candidate.key
+		stoppedRunner := *candidate
 		s.mu.Unlock()
 		s.onChange()
 
@@ -749,33 +751,12 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 			continue
 		}
 
-		s.mu.Lock()
-		currentRunner := s.runners[runnerKey]
-		var hostSlotKey string
-		released := false
-		var pendingRecord hostLeaseCleanupRecord
-		var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
-		if currentRunner != nil {
-			hostSlotKey = currentRunner.hostSlotKey
-			released = s.markHostLeaseReleaseLocked(currentRunner)
-			if released {
-				pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
-					runnerKey, hostSlotKey, s.clock.now().UTC(),
-				)
-			}
-		}
-		delete(s.runners, runnerKey)
-		s.mu.Unlock()
-		if released {
-			s.reportEvictedHostLeaseReleases(evictedLeases)
-			s.persistPendingHostLeaseReleases(pendingLeaseRecords)
-			if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
-				operationErrors = append(operationErrors, fmt.Errorf(
-					"release host admission lease %s after scale-down: %w",
-					hostSlotKey,
-					err,
-				))
-			}
+		if err := s.settleStoppedRunner(stoppedRunner); err != nil {
+			operationErrors = append(operationErrors, fmt.Errorf(
+				"settle runner %s after scale-down: %w",
+				runnerKey,
+				err,
+			))
 		}
 		s.onChange()
 	}
@@ -818,33 +799,12 @@ func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {
 			))
 			continue
 		}
-		s.mu.Lock()
-		var hostSlotKey string
-		released := false
-		var pendingRecord hostLeaseCleanupRecord
-		var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
-		if current := s.runners[runner.key]; current != nil &&
-			current.state == runnerCleanupPending {
-			hostSlotKey = current.hostSlotKey
-			released = s.markHostLeaseReleaseLocked(current)
-			if released {
-				pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
-					runner.key, hostSlotKey, s.clock.now().UTC(),
-				)
-			}
-			delete(s.runners, runner.key)
-		}
-		s.mu.Unlock()
-		if released {
-			s.reportEvictedHostLeaseReleases(evictedLeases)
-			s.persistPendingHostLeaseReleases(pendingLeaseRecords)
-			if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
-				cleanupErrors = append(cleanupErrors, fmt.Errorf(
-					"release host admission lease %s after delayed cleanup: %w",
-					hostSlotKey,
-					err,
-				))
-			}
+		if err := s.settleStoppedRunner(runner); err != nil {
+			cleanupErrors = append(cleanupErrors, fmt.Errorf(
+				"settle runner %s after delayed cleanup: %w",
+				runner.key,
+				err,
+			))
 		}
 		s.onChange()
 	}
@@ -1042,12 +1002,9 @@ func (s *runnerScaler) beginPendingHostLeaseRelease(
 }
 
 // beginPendingHostLeaseReleaseLocked is the lock-already-held counterpart of
-// beginPendingHostLeaseRelease. Callers that mark a runner for deletion and
-// remove it from s.runners in the same locked section must call this first,
-// so the durable record's in-memory bookkeeping exists before that runner's
-// only remaining identity (the s.runners entry) disappears. The caller is
-// responsible for persisting the returned records and reporting any
-// eviction once it has released the lock.
+// beginPendingHostLeaseRelease. settleStoppedRunner uses it to prepare the
+// exact record while the runner identity is still retained, then persists
+// that record before removing the runner.
 func (s *runnerScaler) beginPendingHostLeaseReleaseLocked(
 	runnerKey string,
 	hostSlotKey string,
@@ -1204,10 +1161,9 @@ func (s *runnerScaler) pendingHostLeaseReleaseCount() int {
 // the exact lease identity before attempting release, so a transient
 // coordinator failure here can never strand an active lease without a
 // retry record: the pending record already exists on disk before this call
-// returns, regardless of outcome. Call sites that mark a runner for
-// deletion and remove it from s.runners while holding s.mu should instead
-// call beginPendingHostLeaseReleaseLocked before the delete, persist the
-// result once unlocked, and finish with attemptPendingHostLeaseRelease.
+// returns, regardless of outcome. Call sites that also remove a retained
+// runner must use settleStoppedRunner so persistence completes before the
+// identity is deleted.
 func (s *runnerScaler) releaseHostLeaseOrEnqueue(runnerKey, hostSlotKey string) error {
 	if hostSlotKey == "" {
 		return nil
@@ -1259,15 +1215,9 @@ func (s *runnerScaler) retryPendingHostLeaseReleases() error {
 	return errors.Join(releaseErrors...)
 }
 
-// removeExitedRegistration removes the exact JIT registration of a worker that
-// has exited, retaining a durable cleanup-pending record when GitHub cannot
-// confirm the removal.
-func (s *runnerScaler) removeExitedRegistration(
-	runner runnerRecord,
-	diagnostic lastExitDiagnostic,
+func (s *runnerScaler) attemptPendingRegistrationCleanup(
+	record registrationCleanupRecord,
 ) {
-	now := s.clock.now().UTC()
-	record := s.beginPendingRegistrationCleanup(runner, &diagnostic, now)
 	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
 	err := registrationRemovalError(
 		s.api.removeRunner(cleanupContext, record.RunnerID),
@@ -1586,6 +1536,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		runnerID:         jit.runnerID,
 		containerID:      containerID,
 		container:        containerName,
+		containerRunning: true,
 		state:            runnerStarting,
 		revision:         s.workerRevision,
 		startedAt:        now,
@@ -1919,15 +1870,16 @@ func (s *runnerScaler) insertRecoveredRunner(
 		startedAt = s.clock.now().UTC()
 	}
 	runner := &runnerRecord{
-		key:         container.slotKey,
-		targetKey:   container.targetKey,
-		repository:  s.target.repository,
-		runnerName:  container.runnerName,
-		runnerID:    container.runnerID,
-		containerID: container.containerID,
-		container:   container.name,
-		state:       runnerStarting,
-		revision:    container.revision,
+		key:              container.slotKey,
+		targetKey:        container.targetKey,
+		repository:       s.target.repository,
+		runnerName:       container.runnerName,
+		runnerID:         container.runnerID,
+		containerID:      container.containerID,
+		container:        container.name,
+		containerRunning: true,
+		state:            runnerStarting,
+		revision:         container.revision,
 		stale: container.revision != s.workerRevision &&
 			!(container.revision == "" && s.assumeUnversioned),
 		startedAt:        startedAt,
@@ -2056,36 +2008,12 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 			continue
 		}
 
-		s.mu.Lock()
-		currentRunner := s.runners[candidate.key]
-		var hostSlotKey string
-		released := false
-		var pendingRecord hostLeaseCleanupRecord
-		var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
-		if currentRunner != nil {
-			hostSlotKey = currentRunner.hostSlotKey
-			released = s.markHostLeaseReleaseLocked(currentRunner)
-			if released {
-				pendingRecord, evictedLeases, pendingLeaseRecords =
-					s.beginPendingHostLeaseReleaseLocked(
-						candidate.key,
-						hostSlotKey,
-						s.clock.now().UTC(),
-					)
-			}
-		}
-		delete(s.runners, candidate.key)
-		s.mu.Unlock()
-		if released {
-			s.reportEvictedHostLeaseReleases(evictedLeases)
-			s.persistPendingHostLeaseReleases(pendingLeaseRecords)
-			if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
-				operationErrors = append(operationErrors, fmt.Errorf(
-					"release host admission lease %s after stale-worker retirement: %w",
-					hostSlotKey,
-					err,
-				))
-			}
+		if err := s.settleStoppedRunner(candidate); err != nil {
+			operationErrors = append(operationErrors, fmt.Errorf(
+				"settle stale runner %s after retirement: %w",
+				candidate.key,
+				err,
+			))
 		}
 		s.onChange()
 	}
@@ -2093,54 +2021,39 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 }
 
 func (s *runnerScaler) monitorRunner(runner *runnerRecord, since time.Time) {
+	monitorContext, cancelMonitor := context.WithCancel(s.lifecycleContext)
 	go func() {
-		err := s.docker.followLogs(
-			s.lifecycleContext,
-			runner.containerID,
-			since,
-			func(line string) {
-				s.handleLogSignal(runner.containerID, line)
-			},
-		)
-		if err != nil && !errors.Is(err, context.Canceled) &&
-			s.lifecycleContext.Err() == nil {
-			s.onError(err)
-		}
-	}()
-	go func() {
+		nextSince := since
 		retryDelay := time.Second
 		for {
-			exitCode, err := s.docker.wait(
-				s.lifecycleContext,
+			attemptStarted := s.clock.now().UTC()
+			err := s.docker.followLogs(
+				monitorContext,
 				runner.containerID,
+				nextSince,
+				func(line string) {
+					s.handleLogSignal(runner.containerID, line)
+				},
 			)
-			if s.lifecycleContext.Err() != nil {
+			if monitorContext.Err() != nil || !s.hasRunner(runner.containerID) {
 				return
 			}
 			if err == nil {
-				s.handleContainerExit(runner.containerID, &exitCode)
 				return
 			}
-			s.onError(err)
-			running, stateErr := s.docker.isRunning(
-				s.lifecycleContext,
-				runner.containerID,
-			)
-			if s.lifecycleContext.Err() != nil {
-				return
+			if nextSince.IsZero() || attemptStarted.After(nextSince) {
+				nextSince = attemptStarted
 			}
-			if stateErr != nil {
-				s.onError(stateErr)
-			} else if !running {
-				s.handleContainerExit(runner.containerID, nil)
-				return
+			if errors.Is(err, context.DeadlineExceeded) {
+				retryDelay = time.Second
+				continue
 			}
-			if !s.hasRunner(runner.containerID) {
-				return
+			if !errors.Is(err, context.Canceled) {
+				s.onError(err)
 			}
 			timer := time.NewTimer(retryDelay)
 			select {
-			case <-s.lifecycleContext.Done():
+			case <-monitorContext.Done():
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
@@ -2153,6 +2066,78 @@ func (s *runnerScaler) monitorRunner(runner *runnerRecord, since time.Time) {
 			retryDelay = min(retryDelay*2, 30*time.Second)
 		}
 	}()
+	go func() {
+		defer cancelMonitor()
+		retryDelay := time.Second
+		for {
+			exitCode, err := s.docker.wait(
+				monitorContext,
+				runner.containerID,
+			)
+			if monitorContext.Err() != nil {
+				return
+			}
+			if err == nil {
+				cancelMonitor()
+				s.handleContainerExit(runner.containerID, &exitCode)
+				return
+			}
+			timedOut := errors.Is(err, context.DeadlineExceeded)
+			if !timedOut {
+				s.onError(err)
+			}
+			running, stateErr := s.docker.isRunning(
+				monitorContext,
+				runner.containerID,
+			)
+			if monitorContext.Err() != nil {
+				return
+			}
+			if stateErr != nil {
+				s.onError(stateErr)
+			} else {
+				if !running {
+					cancelMonitor()
+					s.handleContainerExit(runner.containerID, nil)
+					return
+				}
+				if !s.confirmContainerRunning(runner.containerID) {
+					return
+				}
+			}
+			if !s.hasRunner(runner.containerID) {
+				return
+			}
+			if timedOut && stateErr == nil && running {
+				retryDelay = time.Second
+				continue
+			}
+			timer := time.NewTimer(retryDelay)
+			select {
+			case <-monitorContext.Done():
+				if !timer.Stop() {
+					select {
+					case <-timer.C:
+					default:
+					}
+				}
+				return
+			case <-timer.C:
+			}
+			retryDelay = min(retryDelay*2, 30*time.Second)
+		}
+	}()
+}
+
+func (s *runnerScaler) confirmContainerRunning(containerID string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	runner := s.findRunnerByContainerLocked(containerID)
+	if runner == nil {
+		return false
+	}
+	runner.containerRunning = true
+	return true
 }
 
 func (s *runnerScaler) handleLogSignal(containerID, line string) {
@@ -2260,33 +2245,33 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	exited := *runner
 	shuttingDown := s.shuttingDown
 	unexpected := runner.state != runnerDraining && !shuttingDown
-	hostSlotKey := runner.hostSlotKey
-	releaseLease := s.markHostLeaseReleaseLocked(runner)
-	var pendingRecord hostLeaseCleanupRecord
-	var evictedLeases, pendingLeaseRecords []hostLeaseCleanupRecord
-	if releaseLease {
-		pendingRecord, evictedLeases, pendingLeaseRecords = s.beginPendingHostLeaseReleaseLocked(
-			exited.key, hostSlotKey, s.clock.now().UTC(),
+	s.mu.Unlock()
+
+	var registrationRecord *registrationCleanupRecord
+	if !shuttingDown && !exited.registrationRemoved {
+		record := s.beginPendingRegistrationCleanup(
+			exited,
+			&diagnostic,
+			s.clock.now().UTC(),
 		)
+		registrationRecord = &record
 	}
-	delete(s.runners, runner.key)
+
+	if err := s.settleStoppedRunner(exited); err != nil {
+		s.onError(fmt.Errorf(
+			"settle runner %s after container exit: %w",
+			exited.key,
+			err,
+		))
+	}
+
+	s.mu.Lock()
 	needsReconcile := !s.shuttingDown && s.capacityCountLocked() < s.targetSlots
 	if s.capacityCountLocked() <= s.targetSlots {
 		s.scaleDownAt = nil
 	}
 	s.mu.Unlock()
 	s.onChange()
-	if releaseLease {
-		s.reportEvictedHostLeaseReleases(evictedLeases)
-		s.persistPendingHostLeaseReleases(pendingLeaseRecords)
-		if err := s.attemptPendingHostLeaseRelease(pendingRecord); err != nil {
-			s.onError(fmt.Errorf(
-				"release host admission lease %s after container exit: %w",
-				hostSlotKey,
-				err,
-			))
-		}
-	}
 
 	s.diagnostics.record(diagnosticsObservation{
 		subsystem: subsystemWorkerExit,
@@ -2309,8 +2294,8 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 			diagnostic.Classification,
 		))
 	}
-	if !shuttingDown && !exited.registrationRemoved {
-		s.removeExitedRegistration(exited, diagnostic)
+	if registrationRecord != nil {
+		s.attemptPendingRegistrationCleanup(*registrationRecord)
 	}
 	if needsReconcile && s.lifecycleContext.Err() == nil {
 		if _, err := s.reconcileLocked(s.lifecycleContext); err != nil {
@@ -2514,20 +2499,6 @@ func (s *runnerScaler) capacityCountLocked() int {
 		}
 	}
 	return count
-}
-
-// markHostLeaseReleaseLocked flips a runner's hostLeaseReleased flag from
-// false to true and reports whether this call won that transition. Callers
-// must hold s.mu. Because s.runners stores shared *runnerRecord pointers,
-// this makes lease release exactly-once even when two lifecycle paths
-// (e.g. a scale-down and a concurrent container-exit event) observe the
-// same runner.
-func (s *runnerScaler) markHostLeaseReleaseLocked(runner *runnerRecord) bool {
-	if runner == nil || runner.hostSlotKey == "" || runner.hostLeaseReleased {
-		return false
-	}
-	runner.hostLeaseReleased = true
-	return true
 }
 
 func (s *runnerScaler) oldestIdleRunnerLocked() *runnerRecord {

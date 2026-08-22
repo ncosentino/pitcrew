@@ -35,6 +35,7 @@ $androidDockerfilePath = Join-Path $runnerRoot 'profiles' 'android-emulator' 'Do
 $androidStartPath = Join-Path $runnerRoot 'profiles' 'android-emulator' 'start-android-emulator'
 $managerPath = Join-Path $runnerRoot 'manager' 'manage-runners.sh'
 $managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
+$containerSupervisionPath = Join-Path $runnerRoot 'manager' 'container-supervision.sh'
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
 $autoscalerHardwarePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'hardware.go'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
@@ -326,6 +327,7 @@ $requiredPaths = @(
     $androidStartPath,
     $managerPath,
     $managerEntrypointPath,
+    $containerSupervisionPath,
     $autoscalerModulePath,
     $autoscalerHardwarePath,
     $managerDockerfilePath,
@@ -5659,6 +5661,10 @@ finally {
 
 $manager = Get-Content -LiteralPath $managerPath -Raw -Encoding UTF8
 $managerEntrypoint = Get-Content -LiteralPath $managerEntrypointPath -Raw -Encoding UTF8
+$containerSupervision = Get-Content `
+    -LiteralPath $containerSupervisionPath `
+    -Raw `
+    -Encoding UTF8
 $autoscalerModule = Get-Content -LiteralPath $autoscalerModulePath -Raw -Encoding UTF8
 $autoscalerHardware = Get-Content -LiteralPath $autoscalerHardwarePath -Raw -Encoding UTF8
 $managerDockerfile = Get-Content -LiteralPath $managerDockerfilePath -Raw -Encoding UTF8
@@ -5694,7 +5700,20 @@ Add-Check ($manager -match [regex]::Escape('restore_managed_slots')) 'A replacem
 Add-Check ($manager -match [regex]::Escape('received manager handoff signal; preserving managed runner containers')) 'Manager handoff still tears down profile workers.'
 Add-Check ($manager -match [regex]::Escape('docker run --rm --detach')) 'Fixed workers are not detached for manager adoption.'
 Add-Check ($manager -match [regex]::Escape('consume_slot_connect_marker "${slot_state_path}"')) 'Manager recovery still promotes an adopted worker from worker output produced before adoption.'
-Add-Check ($manager -match [regex]::Escape('slot_connect_marker_is_pending "${monitored_slot_path}"')) 'Worker output can promote a slot whose connect marker was already consumed.'
+Add-Check (
+    $containerSupervision -match [regex]::Escape(
+        'slot_connect_marker_is_pending "${monitored_slot_path}"')
+) 'Worker output can promote a slot whose connect marker was already consumed.'
+Add-Check (
+    $manager -match [regex]::Escape(
+        '. "${SCRIPT_DIRECTORY}/container-supervision.sh"') -and
+    $containerSupervision -match [regex]::Escape(
+        '"${CONTAINER_MONITOR_WINDOW_SECONDS}"') -and
+    $containerSupervision -match [regex]::Escape(
+        'probe_monitored_container') -and
+    $containerSupervision -match [regex]::Escape(
+        'host_admission_queue_release "${monitored_slot_path##*/}"')
+) 'Fixed worker supervision is not bounded, exactly probed, and release-queued before identity cleanup.'
 Add-Check ($manager -notmatch [regex]::Escape('rm -f "${slot_state_path}/connected"')) 'The connect-marker transition is still opened outside a fresh worker launch.'
 Add-Check ($manager -notmatch 'clearing any leftover managed runners') 'Manager startup still destroys workers left by its predecessor.'
 Add-Check ($manager -match [regex]::Escape('observed-state.json')) 'The manager does not project credential-free observed state.'
@@ -5824,6 +5843,14 @@ Add-Check (
         'chmod 0644 "${observed_temporary}"')
 ) 'Fixed-manager state publication does not retain broker-readable file mode.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY diagnostics.sh /usr/local/bin/diagnostics.sh')) 'The manager image does not ship the operation diagnostics helper.'
+Add-Check (
+    $managerDockerfile -match [regex]::Escape(
+        'COPY container-supervision.sh /usr/local/bin/container-supervision.sh') -and
+    $managerDockerfile -match [regex]::Escape(
+        'RUN timeout -s TERM -k 1 1 true && \') -and
+    $managerDockerfile -match [regex]::Escape(
+        '/usr/local/bin/container-supervision.sh')
+) 'The manager image does not ship the bounded container supervision helper.'
 Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
 Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'
 Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'

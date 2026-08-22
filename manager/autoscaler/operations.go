@@ -11,6 +11,7 @@ import (
 const (
 	scaleSetOperationTimeout = 15 * time.Second
 	dockerOperationTimeout   = 25 * time.Second
+	containerMonitorWindow   = time.Minute
 	cleanupOperationTimeout  = 10 * time.Second
 )
 
@@ -324,13 +325,12 @@ func (d *boundedDockerClient) wait(
 	ctx context.Context,
 	containerID string,
 ) (int, error) {
-	return runContextOperation(
-		ctx,
-		0,
-		func(operationContext context.Context) (int, error) {
-			return d.inner.wait(operationContext, containerID)
-		},
-	)
+	if ctx == nil {
+		return 0, errors.New("operation context is required")
+	}
+	operationContext, cancel := context.WithTimeout(ctx, containerMonitorWindow)
+	defer cancel()
+	return d.inner.wait(operationContext, containerID)
 }
 
 func (d *boundedDockerClient) isRunning(
@@ -387,17 +387,16 @@ func (d *boundedDockerClient) followLogs(
 	since time.Time,
 	onLine func(string),
 ) error {
-	return runContextError(
-		ctx,
-		0,
-		func(operationContext context.Context) error {
-			return d.inner.followLogs(
-				operationContext,
-				containerID,
-				since,
-				onLine,
-			)
-		},
+	if ctx == nil {
+		return errors.New("operation context is required")
+	}
+	operationContext, cancel := context.WithTimeout(ctx, containerMonitorWindow)
+	defer cancel()
+	return d.inner.followLogs(
+		operationContext,
+		containerID,
+		since,
+		onLine,
 	)
 }
 

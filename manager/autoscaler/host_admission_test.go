@@ -342,6 +342,31 @@ func newHostAdmissionTestScaler(
 	*hostAdmissionCoordinator,
 	context.CancelFunc,
 ) {
+	return newHostAdmissionTestScalerForProfile(
+		t,
+		maximum,
+		client,
+		"profile-a",
+		"repo-1234",
+		"pitcrew-runner",
+	)
+}
+
+func newHostAdmissionTestScalerForProfile(
+	t *testing.T,
+	maximum int,
+	client hostAdmissionLeaseClient,
+	profileID string,
+	targetKey string,
+	namePrefix string,
+) (
+	*runnerScaler,
+	*fakeScaleSetService,
+	*fakeDockerClient,
+	*fakeClock,
+	*hostAdmissionCoordinator,
+	context.CancelFunc,
+) {
 	t.Helper()
 	ctx, cancel := context.WithCancel(context.Background())
 	clock := &fakeClock{current: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)}
@@ -349,20 +374,20 @@ func newHostAdmissionTestScaler(
 	api := newFakeScaleSetService(events)
 	docker := newFakeDockerClient(events)
 	cfg := config{
-		profileID:         "profile-a",
+		profileID:         profileID,
 		runnerImage:       "example/runner:latest",
 		workerRevision:    testWorkerRevision,
-		sessionOwner:      "pitcrew-profile-a",
+		sessionOwner:      "pitcrew-" + profileID,
 		assumeUnversioned: true,
-		namePrefix:        "pitcrew-runner",
+		namePrefix:        namePrefix,
 		scaleDownDelay:    10 * time.Minute,
 	}
 	target := targetSpec{
-		key:             "repo-1234",
+		key:             targetKey,
 		registrationURL: "https://github.com/example/repository",
 		repository:      "https://github.com/example/repository",
 		maximum:         maximum,
-		scaleSetName:    "pitcrew-profile-a-deadbeef",
+		scaleSetName:    "pitcrew-" + profileID + "-deadbeef",
 	}
 	hostAdmission := newHostAdmissionCoordinatorWithClient(client, cfg.profileID)
 	scaler := newRunnerScaler(
@@ -1165,20 +1190,21 @@ func TestHostAdmissionStaleWorkerRetirementReleasesLease(t *testing.T) {
 	now := scaler.clock.now().UTC()
 	scaler.mu.Lock()
 	scaler.runners["stale-slot"] = &runnerRecord{
-		key:         "stale-slot",
-		targetKey:   scaler.target.key,
-		repository:  scaler.target.repository,
-		runnerName:  "stale-runner",
-		runnerID:    77,
-		containerID: "stale-container",
-		container:   "stale-container",
-		state:       runnerIdle,
-		revision:    "stale-revision",
-		stale:       true,
-		startedAt:   now.Add(-time.Minute),
-		updatedAt:   now,
-		idleSince:   timePointer(now.Add(-time.Minute)),
-		hostSlotKey: hostSlotKey,
+		key:              "stale-slot",
+		targetKey:        scaler.target.key,
+		repository:       scaler.target.repository,
+		runnerName:       "stale-runner",
+		runnerID:         77,
+		containerID:      "stale-container",
+		containerRunning: true,
+		container:        "stale-container",
+		state:            runnerIdle,
+		revision:         "stale-revision",
+		stale:            true,
+		startedAt:        now.Add(-time.Minute),
+		updatedAt:        now,
+		idleSince:        timePointer(now.Add(-time.Minute)),
+		hostSlotKey:      hostSlotKey,
 	}
 	scaler.mu.Unlock()
 
@@ -1551,6 +1577,114 @@ func TestHostAdmissionReleaseFailureOnNaturalExitIsRetried(t *testing.T) {
 	}
 	if client.leaseCount() != 0 {
 		t.Fatalf("lease was not eventually released, %d outstanding", client.leaseCount())
+	}
+}
+
+func TestContainerExitPersistsHostLeaseBeforeRunnerIdentityIsForgotten(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	scaler, _, _, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	defer cancel()
+	events := &eventRecorder{}
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	runner := findRunner(t, scaler)
+	scaler.hostLeaseCleanupStore = &recordingHostLeaseCleanupStore{
+		inner:  scaler.hostLeaseCleanupStore,
+		events: events,
+		runnerPresent: func() bool {
+			return scaler.hasRunner(runner.containerID)
+		},
+	}
+
+	scaler.handleContainerExit(runner.containerID, exitStatus(0))
+
+	recorded := events.snapshot()
+	if len(recorded) == 0 || recorded[0] != "host-lease-save-1" {
+		t.Fatalf("host lease release was not persisted before runner removal: %#v", recorded)
+	}
+}
+
+func TestSimultaneousMonitorTimeoutsReleaseExactLeasesAcrossProfiles(t *testing.T) {
+	client := newFakeHostAdmissionClient(2)
+	first, firstAPI, firstDocker, _, _, firstCancel :=
+		newHostAdmissionTestScalerForProfile(
+			t,
+			1,
+			client,
+			"profile-a",
+			"repo-a",
+			"pitcrew-a",
+		)
+	defer firstCancel()
+	second, secondAPI, secondDocker, _, _, secondCancel :=
+		newHostAdmissionTestScalerForProfile(
+			t,
+			1,
+			client,
+			"profile-b",
+			"repo-b",
+			"pitcrew-b",
+		)
+	defer secondCancel()
+
+	firstContinue := make(chan struct{})
+	secondContinue := make(chan struct{})
+	for _, docker := range []*fakeDockerClient{firstDocker, secondDocker} {
+		docker.waitResults["container-1"] = []fakeWaitResult{{
+			err: context.DeadlineExceeded,
+		}}
+		docker.waitObserved = make(chan string, 1)
+	}
+	firstDocker.waitContinue = firstContinue
+	secondDocker.waitContinue = secondContinue
+
+	if _, err := first.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	for index, observed := range []<-chan string{
+		firstDocker.waitObserved,
+		secondDocker.waitObserved,
+	} {
+		select {
+		case <-observed:
+		case <-time.After(time.Second):
+			t.Fatalf("profile %d Docker wait did not start", index+1)
+		}
+	}
+	firstDocker.mu.Lock()
+	firstDocker.running["container-1"] = false
+	firstDocker.mu.Unlock()
+	secondDocker.mu.Lock()
+	secondDocker.running["container-1"] = false
+	secondDocker.mu.Unlock()
+	close(firstContinue)
+	close(secondContinue)
+
+	deadline := time.Now().Add(time.Second)
+	for (firstAPI.jitCalls < 2 || secondAPI.jitCalls < 2) &&
+		time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if firstAPI.jitCalls != 2 || secondAPI.jitCalls != 2 {
+		t.Fatalf(
+			"simultaneous confirmed absences did not restore both profiles: first=%d second=%d",
+			firstAPI.jitCalls,
+			secondAPI.jitCalls,
+		)
+	}
+	if first.pendingHostLeaseReleaseCount() != 0 ||
+		second.pendingHostLeaseReleaseCount() != 0 {
+		t.Fatal("simultaneous confirmed absences left pending host lease releases")
+	}
+	client.mu.Lock()
+	releaseCalls := append([]string(nil), client.releaseCalls...)
+	client.mu.Unlock()
+	if len(releaseCalls) != 2 {
+		t.Fatalf("expected two exact profile lease releases, got %#v", releaseCalls)
 	}
 }
 

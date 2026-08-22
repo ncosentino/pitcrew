@@ -718,6 +718,181 @@ func TestDockerWaitErrorPreservesStillRunningContainer(t *testing.T) {
 	}
 }
 
+func TestDockerWaitTimeoutPreservesStillRunningContainer(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	docker.waitResults["container-1"] = []fakeWaitResult{
+		{err: context.DeadlineExceeded},
+		{err: errors.New("second wait observation")},
+	}
+	docker.waitObserved = make(chan string, 2)
+	docker.runningObserved = make(chan string, 1)
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-docker.waitObserved:
+	case <-time.After(time.Second):
+		t.Fatal("initial Docker wait did not start")
+	}
+	select {
+	case <-docker.runningObserved:
+	case <-time.After(time.Second):
+		t.Fatal("container running state was not checked after wait timeout")
+	}
+	select {
+	case <-docker.waitObserved:
+	case <-time.After(time.Second):
+		t.Fatal("Docker wait was not restarted after confirming the container remained live")
+	}
+	runner := findRunner(t, scaler)
+	if runner.containerID != "container-1" || api.jitCalls != 1 {
+		t.Fatalf("wait timeout discarded a live runner or launched a duplicate: %#v", runner)
+	}
+}
+
+func TestDockerWaitTimeoutRemovesConfirmedAbsentContainer(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	docker.waitResults["container-1"] = []fakeWaitResult{{
+		err: context.DeadlineExceeded,
+	}}
+	waitContinue := make(chan struct{})
+	docker.waitObserved = make(chan string, 1)
+	docker.waitContinue = waitContinue
+	docker.runningObserved = make(chan string, 1)
+	docker.followStopped = make(chan string, 1)
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-docker.waitObserved:
+	case <-time.After(time.Second):
+		t.Fatal("initial Docker wait did not start")
+	}
+	docker.mu.Lock()
+	docker.running["container-1"] = false
+	docker.mu.Unlock()
+	close(waitContinue)
+	select {
+	case <-docker.runningObserved:
+	case <-time.After(time.Second):
+		t.Fatal("container absence was not checked after wait timeout")
+	}
+	deadline := time.Now().Add(time.Second)
+	for api.jitCalls < 2 && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	replacement := findRunner(t, scaler)
+	if replacement.containerID == "container-1" || api.jitCalls != 2 {
+		t.Fatalf(
+			"confirmed absent runner was not replaced: runner=%#v jitCalls=%d",
+			replacement,
+			api.jitCalls,
+		)
+	}
+	select {
+	case stopped := <-docker.followStopped:
+		if stopped != "container-1" {
+			t.Fatalf("wrong log follower was cancelled: %q", stopped)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("paired Docker log follower was not cancelled after confirmed absence")
+	}
+}
+
+func TestDockerWaitTimeoutPreservesContainerWhenProbeIsUnavailable(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	docker.waitResults["container-1"] = []fakeWaitResult{{
+		err: context.DeadlineExceeded,
+	}}
+	docker.runningErrors["container-1"] = []error{
+		errors.New("Docker daemon unavailable"),
+	}
+	docker.runningObserved = make(chan string, 1)
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-docker.runningObserved:
+	case <-time.After(time.Second):
+		t.Fatal("container state was not probed after wait timeout")
+	}
+	runner := findRunner(t, scaler)
+	if runner.containerID != "container-1" || api.jitCalls != 1 {
+		t.Fatalf("ambiguous Docker state discarded a live runner or launched a duplicate: %#v", runner)
+	}
+}
+
+func TestDockerLogTimeoutRestartsFromBoundedOverlap(t *testing.T) {
+	scaler, _, docker, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	docker.followErrors["container-1"] = []error{context.DeadlineExceeded}
+	docker.followObserved = make(chan fakeFollowRequest, 2)
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	var first fakeFollowRequest
+	var second fakeFollowRequest
+	select {
+	case first = <-docker.followObserved:
+	case <-time.After(time.Second):
+		t.Fatal("initial Docker log follower did not start")
+	}
+	select {
+	case second = <-docker.followObserved:
+	case <-time.After(time.Second):
+		t.Fatal("Docker log follower did not restart after timeout")
+	}
+	if first.containerID != "container-1" || second.containerID != "container-1" {
+		t.Fatalf("log monitoring changed container identity: first=%#v second=%#v", first, second)
+	}
+	if !second.since.Equal(clock.now().UTC()) {
+		t.Fatalf("log monitoring did not restart from the bounded overlap: %#v", second)
+	}
+}
+
+func TestDockerLogTimeoutPreservesFutureReplayBoundary(t *testing.T) {
+	scaler, _, docker, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	futureBoundary := clock.now().UTC().Add(time.Hour)
+	runner := &runnerRecord{
+		key:              "repo-1234-1",
+		targetKey:        "repo-1234",
+		containerID:      "container-1",
+		containerRunning: true,
+		state:            runnerStarting,
+		startedAt:        clock.now().UTC(),
+		updatedAt:        clock.now().UTC(),
+	}
+	scaler.mu.Lock()
+	scaler.runners[runner.key] = runner
+	scaler.mu.Unlock()
+	docker.followErrors["container-1"] = []error{context.DeadlineExceeded}
+	docker.followObserved = make(chan fakeFollowRequest, 2)
+
+	scaler.monitorRunner(runner, futureBoundary)
+	select {
+	case <-docker.followObserved:
+	case <-time.After(time.Second):
+		t.Fatal("initial Docker log follower did not start")
+	}
+	var second fakeFollowRequest
+	select {
+	case second = <-docker.followObserved:
+	case <-time.After(time.Second):
+		t.Fatal("Docker log follower did not restart after timeout")
+	}
+	if !second.since.Equal(futureBoundary) {
+		t.Fatalf("log monitoring regressed the protected replay boundary: %#v", second)
+	}
+}
+
 func TestUnexpectedStoppedRunnerIsRemovedAndRetried(t *testing.T) {
 	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, time.Minute)
 	defer cancel()

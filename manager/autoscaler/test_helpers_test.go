@@ -206,7 +206,9 @@ type fakeDockerClient struct {
 	logs             map[string][]string
 	readLogErrors    map[string]error
 	followLines      map[string][]string
+	followErrors     map[string][]error
 	followObserved   chan fakeFollowRequest
+	followStopped    chan string
 	runErrors        []error
 	createErrors     []error
 	startErrors      []error
@@ -216,6 +218,7 @@ type fakeDockerClient struct {
 	stopErrors       map[string][]error
 	waitResults      map[string][]fakeWaitResult
 	waitObserved     chan string
+	waitContinue     <-chan struct{}
 	running          map[string]bool
 	exitStates       map[string]containerExitState
 	runningErrors    map[string][]error
@@ -323,6 +326,7 @@ func newFakeDockerClient(events *eventRecorder) *fakeDockerClient {
 		logs:             make(map[string][]string),
 		readLogErrors:    make(map[string]error),
 		followLines:      make(map[string][]string),
+		followErrors:     make(map[string][]error),
 		stopRemoveErrors: make(map[string][]error),
 		stopErrors:       make(map[string][]error),
 		waitResults:      make(map[string][]fakeWaitResult),
@@ -398,12 +402,16 @@ func (d *fakeDockerClient) wait(ctx context.Context, containerID string) (int, e
 		result := results[0]
 		d.waitResults[containerID] = results[1:]
 		observed := d.waitObserved
+		continued := d.waitContinue
 		d.mu.Unlock()
 		if observed != nil {
 			select {
 			case observed <- containerID:
 			default:
 			}
+		}
+		if continued != nil {
+			<-continued
 		}
 		return result.exitCode, result.err
 	}
@@ -463,8 +471,22 @@ func (d *fakeDockerClient) followLogs(
 ) error {
 	d.mu.Lock()
 	lines := append([]string(nil), d.followLines[containerID]...)
+	var err error
+	if candidates := d.followErrors[containerID]; len(candidates) > 0 {
+		err = candidates[0]
+		d.followErrors[containerID] = candidates[1:]
+	}
 	observed := d.followObserved
+	stopped := d.followStopped
 	d.mu.Unlock()
+	defer func() {
+		if stopped != nil {
+			select {
+			case stopped <- containerID:
+			default:
+			}
+		}
+	}()
 	for _, line := range lines {
 		onLine(line)
 	}
@@ -476,6 +498,9 @@ func (d *fakeDockerClient) followLogs(
 		}:
 		default:
 		}
+	}
+	if err != nil {
+		return err
 	}
 	<-ctx.Done()
 	return ctx.Err()
@@ -712,6 +737,27 @@ func (s *recordingCleanupStore) save(records []registrationCleanupRecord) error 
 		return err
 	}
 	s.events.add(fmt.Sprintf("cleanup-save-%d", len(records)))
+	return nil
+}
+
+type recordingHostLeaseCleanupStore struct {
+	inner         hostLeaseCleanupStore
+	events        *eventRecorder
+	runnerPresent func() bool
+}
+
+func (s *recordingHostLeaseCleanupStore) load() ([]hostLeaseCleanupRecord, error) {
+	return s.inner.load()
+}
+
+func (s *recordingHostLeaseCleanupStore) save(records []hostLeaseCleanupRecord) error {
+	if len(records) > 0 && s.runnerPresent != nil && !s.runnerPresent() {
+		return errors.New("runner identity was removed before host lease cleanup persistence")
+	}
+	if err := s.inner.save(records); err != nil {
+		return err
+	}
+	s.events.add(fmt.Sprintf("host-lease-save-%d", len(records)))
 	return nil
 }
 

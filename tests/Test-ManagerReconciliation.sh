@@ -840,6 +840,8 @@ mkdir -p \
     "${observed_slots_directory}/repo-example-000002"
 printf '%s\n' "$$" > "${observed_slots_directory}/repo-example-000001/pid"
 printf '%s\n' "$$" > "${observed_slots_directory}/repo-example-000002/pid"
+printf '%s\n' "container-one" > "${observed_slots_directory}/repo-example-000001/container-id"
+printf '%s\n' "container-two" > "${observed_slots_directory}/repo-example-000002/container-id"
 printf '%s\n' 'https://token@example.com/example/project?secret=value' > "${observed_slots_directory}/repo-example-000001/repo"
 printf '%s\n' 'https://github.com/example/project' > "${observed_slots_directory}/repo-example-000002/repo"
 write_slot_runtime_state \
@@ -950,6 +952,17 @@ assert_equals "16" "$(jq -r '.resourceTelemetry.host.logicalProcessorCount' "${o
 assert_equals "33554432" "$(jq -r '.resourceTelemetry.manager.memoryWorkingSetBytes' "${observed_state_json}")" "Observed state lost manager memory telemetry."
 assert_equals "0.25" "$(jq -r '.slots[] | select(.key == "repo-example-000001") | .resources.cpuCores' "${observed_state_json}")" "Observed state lost online slot CPU telemetry."
 assert_equals "0.5" "$(jq -r '.slots[] | select(.key == "repo-example-000002") | .resources.cpuCores' "${observed_state_json}")" "Observed state lost draining slot CPU telemetry."
+rm -f "${observed_slots_directory}/repo-example-000002/container-id"
+absent_container_slots_json="${TEMP_DIRECTORY}/absent-container-slots.json"
+render_observed_slots \
+    "${observed_slots_directory}" \
+    "${absent_container_slots_json}" \
+    "${resource_telemetry_json}"
+assert_equals \
+    "false" \
+    "$(jq -r '.[] | select(.key == "repo-example-000002") | .processRunning' "${absent_container_slots_json}")" \
+    "A live slot supervisor was reported as a running worker after exact container absence."
+printf '%s\n' "container-two" > "${observed_slots_directory}/repo-example-000002/container-id"
 assert_false "Observed state exposed an access token field." contains_access_token_field "${observed_state_json}"
 assert_false "Observed state exposed runner names or derived tags." contains_runner_identity_field "${observed_state_json}"
 

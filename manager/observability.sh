@@ -1981,7 +1981,8 @@ render_observed_slots() {
             fi
 
             process_running=false
-            if [ -f "${candidate_path}/pid" ]; then
+            if [ -f "${candidate_path}/pid" ] &&
+                [ -s "${candidate_path}/container-id" ]; then
                 candidate_pid=$(cat "${candidate_path}/pid")
                 if kill -0 "${candidate_pid}" 2>/dev/null; then
                     process_running=true

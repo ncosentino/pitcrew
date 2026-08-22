@@ -137,6 +137,21 @@ Never remove coordinator state before leases reconcile. For a full rollback,
 pause and drain every participant, run `-Down` for every participant, and only
 then reapply manifests without `hostAdmission`.
 
+## A missing worker still holds host-admission units
+
+Container supervision is bounded. When `docker wait` or the paired log follower
+stops responding, the manager probes the exact container identity:
+
+- a confirmed running container remains fenced and monitoring reconnects;
+- a confirmed absent or exited container continues exact registration and
+  lease cleanup; and
+- unavailable Docker evidence leaves the lease active and reports degraded
+  Docker health rather than risking host oversubscription.
+
+Do not delete coordinator state or start a replacement container manually.
+Collect diagnostics and restore Docker availability. Pending exact releases are
+durable and retry after manager restart.
+
 ## A specialized profile receives routine jobs
 
 Inspect the manifest and runner labels. Named profiles should keep

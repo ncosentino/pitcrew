@@ -10,6 +10,7 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/registration.sh"
 . "${SCRIPT_DIRECTORY}/diagnostics.sh"
 . "${SCRIPT_DIRECTORY}/host-admission.sh"
+. "${SCRIPT_DIRECTORY}/container-supervision.sh"
 
 MANAGER_CONTRACT_VERSION=18
 EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-18}"
@@ -55,6 +56,10 @@ RESOURCE_TELEMETRY_COMMAND_TIMEOUT=3
 HOST_HARDWARE_INTERVAL=300
 EXIT_EVIDENCE_EVENT_GRACE_SECONDS=2
 EXIT_EVIDENCE_COMMAND_TIMEOUT=5
+CONTAINER_MONITOR_WINDOW_SECONDS=60
+CONTAINER_MONITOR_PROBE_TIMEOUT_SECONDS=5
+CONTAINER_MONITOR_KILL_AFTER_SECONDS=5
+CONTAINER_MONITOR_RETRY_SECONDS=2
 REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
 REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
@@ -725,123 +730,6 @@ record_container_image_identity() {
         rm -f "${identity_slot_path}/image-id"
     fi
     mark_observed_state_dirty
-}
-
-monitor_runner_container() {
-    monitored_slot_path="$1"
-    monitored_name="$2"
-    monitored_id="$3"
-    monitored_log_path="$4"
-    monitored_since="${5:-}"
-
-    monitored_started_epoch=$(date +%s)
-    : > "${monitored_log_path}"
-    if [ -n "${monitored_since}" ]; then
-        docker logs --since "${monitored_since}" --follow "${monitored_id}" 2>&1
-    else
-        docker logs --follow "${monitored_id}" 2>&1
-    fi |
-        while IFS= read -r output_line || [ -n "${output_line:-}" ]; do
-            printf '%s\n' "${output_line}"
-            printf '%s\n' "${output_line}" >> "${monitored_log_path}"
-            case "${output_line}" in
-                *"${CONNECT_MARKER}"*)
-                    if slot_connect_marker_is_pending "${monitored_slot_path}"; then
-                        consume_slot_connect_marker "${monitored_slot_path}"
-                        write_slot_runtime_state \
-                            "${monitored_slot_path}" \
-                            "${OBSERVED_STATE_DIRTY}" \
-                            "online" \
-                            "${monitored_name}" \
-                            0 \
-                            0 || true
-                    fi
-                    ;;
-            esac
-        done &
-    logs_pid=$!
-
-    wait_output=$(docker wait "${monitored_id}" 2>/dev/null || true)
-    wait "${logs_pid}" 2>/dev/null || true
-    case "${wait_output}" in
-        ''|*[!0-9]*) wait_exit_code="" ;;
-        *) wait_exit_code="${wait_output}" ;;
-    esac
-
-    # Docker removes an ephemeral worker as soon as it exits, so exit state is
-    # captured immediately and never inferred when the record is already gone.
-    exit_evidence="unavailable"
-    exit_code="${wait_exit_code}"
-    exit_oom_killed=""
-    exit_inspect_path="${monitored_slot_path}/.container-exit.$$.json"
-    if docker inspect "${monitored_id}" > "${exit_inspect_path}" 2>/dev/null &&
-        jq -e '
-            (.[0].State.ExitCode | type == "number")
-            and (.[0].State.OOMKilled | type == "boolean")
-            and (.[0].State.Running == false)
-        ' "${exit_inspect_path}" >/dev/null 2>&1; then
-        exit_evidence="docker-inspect"
-        exit_code=$(jq -r '.[0].State.ExitCode' "${exit_inspect_path}")
-        exit_oom_killed=$(jq -r '.[0].State.OOMKilled' "${exit_inspect_path}")
-    elif [ -n "${wait_exit_code}" ]; then
-        exit_evidence="docker-wait"
-    fi
-    rm -f "${exit_inspect_path}"
-    if [ "${exit_oom_killed}" = "" ] && [ "${exit_code}" = "137" ]; then
-        # Docker keeps recent daemon events after an ephemeral worker record is
-        # removed, but an out-of-memory event can arrive just after the wait
-        # returns, so the query holds a short grace window open. Only an exact
-        # container match confirms an out-of-memory kill; a missing event stays
-        # unknown instead of turning a plain signal exit into a resource claim.
-        oom_actors=$(
-            timeout "${EXIT_EVIDENCE_COMMAND_TIMEOUT}" docker events \
-                --since "${monitored_started_epoch}" \
-                --until "$(($(date +%s) + EXIT_EVIDENCE_EVENT_GRACE_SECONDS))" \
-                --filter event=oom \
-                --format '{{.Actor.ID}}' 2>/dev/null || true
-        )
-        for oom_actor in ${oom_actors}; do
-            [ "${oom_actor}" = "${monitored_id}" ] || continue
-            exit_oom_killed="true"
-            break
-        done
-    fi
-    write_slot_exit_evidence \
-        "${monitored_slot_path}" \
-        "${OBSERVED_STATE_DIRTY}" \
-        "${exit_evidence}" \
-        "${exit_code}" \
-        "${exit_oom_killed}" || true
-    if [ "${exit_oom_killed}" = "true" ]; then
-        record_manager_diagnostic \
-            worker-exit \
-            worker-exit \
-            "${monitored_slot_path##*/}" \
-            failed \
-            "" \
-            invalid-state \
-            "Worker was terminated by a confirmed out of memory kill"
-    elif [ "${exit_code}" != "0" ]; then
-        record_manager_diagnostic \
-            worker-exit \
-            worker-exit \
-            "${monitored_slot_path##*/}" \
-            failed \
-            "" \
-            unknown \
-            "Worker exited without a clean status"
-    fi
-
-    rm -f \
-        "${monitored_slot_path}/container-id" \
-        "${monitored_slot_path}/container-name" \
-        "${monitored_slot_path}/image-id"
-    mark_observed_state_dirty
-    case "${exit_code}" in
-        ''|*[!0-9]*) return 0 ;;
-    esac
-    [ "${exit_code}" -le 255 ] || return 0
-    return "${exit_code}"
 }
 
 run_slot() {
