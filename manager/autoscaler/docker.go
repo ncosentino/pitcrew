@@ -88,6 +88,9 @@ func (execCommandExecutor) run(ctx context.Context, arguments ...string) ([]byte
 	command := exec.CommandContext(ctx, "docker", arguments...)
 	output, err := command.Output()
 	if err != nil {
+		if ctx.Err() != nil {
+			return output, ctx.Err()
+		}
 		return output, err
 	}
 	return output, nil
@@ -122,6 +125,9 @@ func (execCommandExecutor) stream(
 	scanErr := scanner.Err()
 	waitErr := <-wait
 	_ = reader.Close()
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
 	if scanErr != nil && !errors.Is(scanErr, context.Canceled) {
 		return scanErr
 	}

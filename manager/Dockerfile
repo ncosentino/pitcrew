@@ -86,15 +86,18 @@ COPY observability.sh /usr/local/bin/observability.sh
 COPY registration.sh /usr/local/bin/registration.sh
 COPY diagnostics.sh /usr/local/bin/diagnostics.sh
 COPY host-admission.sh /usr/local/bin/host-admission.sh
+COPY container-supervision.sh /usr/local/bin/container-supervision.sh
 COPY manage-runners.sh /usr/local/bin/manage-runners.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x \
+RUN timeout -s TERM -k 1 1 true && \
+    chmod +x \
     /usr/local/bin/entrypoint.sh \
     /usr/local/bin/manage-runners.sh \
     /usr/local/bin/observability.sh \
     /usr/local/bin/registration.sh \
     /usr/local/bin/diagnostics.sh \
     /usr/local/bin/host-admission.sh \
+    /usr/local/bin/container-supervision.sh \
     /usr/local/bin/reconciliation.sh \
     /usr/local/bin/pitcrew-autoscaler \
     /usr/local/bin/pitcrew-admission

@@ -51,26 +51,28 @@ func TestObservedStateAutoscalingContract(t *testing.T) {
 		busyRunners: 1,
 		runners: []runnerRecord{
 			{
-				key:         "scope-1",
-				targetKey:   "scope",
-				runnerName:  "runner-one",
-				runnerID:    1,
-				containerID: "container-one",
-				state:       runnerIdle,
-				startedAt:   now.Add(-2 * time.Minute),
-				updatedAt:   now,
-				idleSince:   &idleSince,
+				key:              "scope-1",
+				targetKey:        "scope",
+				runnerName:       "runner-one",
+				runnerID:         1,
+				containerID:      "container-one",
+				containerRunning: true,
+				state:            runnerIdle,
+				startedAt:        now.Add(-2 * time.Minute),
+				updatedAt:        now,
+				idleSince:        &idleSince,
 			},
 			{
-				key:         "scope-2",
-				targetKey:   "scope",
-				runnerName:  "runner-two",
-				runnerID:    2,
-				containerID: "container-two",
-				state:       runnerBusy,
-				startedAt:   now.Add(-time.Minute),
-				updatedAt:   now,
-				currentJob:  currentJob,
+				key:              "scope-2",
+				targetKey:        "scope",
+				runnerName:       "runner-two",
+				runnerID:         2,
+				containerID:      "container-two",
+				containerRunning: true,
+				state:            runnerBusy,
+				startedAt:        now.Add(-time.Minute),
+				updatedAt:        now,
+				currentJob:       currentJob,
 			},
 			{
 				key:         "scope-3",
@@ -225,6 +227,24 @@ func TestCleanupSlotOmitsRunnerNameHash(t *testing.T) {
 	}
 }
 
+func TestObservedRunnerDoesNotInferProcessFromRetainedRecord(t *testing.T) {
+	slot := observedRunnerSlot(
+		runnerRecord{
+			key:              "scope-1",
+			targetKey:        "scope",
+			containerID:      "container-one",
+			containerRunning: false,
+			state:            runnerDraining,
+			updatedAt:        time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC),
+		},
+		false,
+		"",
+	)
+	if slot.ProcessRunning {
+		t.Fatalf("retained runner record was reported as a running container: %#v", slot)
+	}
+}
+
 func TestObservedStateAggregatesPerTargetMinimumIdle(t *testing.T) {
 	current, err := parseDesiredState([]byte(`{
 	  "schemaVersion":1,
@@ -341,13 +361,14 @@ func TestObservedRecoveredRunnerUsesSafeActivity(t *testing.T) {
 		[]scalerSnapshot{{
 			target: targetSpec{key: "repo-a"},
 			runners: []runnerRecord{{
-				key:       "repo-a-1",
-				targetKey: "repo-a",
-				state:     runnerStarting,
-				startedAt: now,
-				updatedAt: now,
-				recovered: true,
-				protected: true,
+				key:              "repo-a-1",
+				targetKey:        "repo-a",
+				containerRunning: true,
+				state:            runnerStarting,
+				startedAt:        now,
+				updatedAt:        now,
+				recovered:        true,
+				protected:        true,
 			}},
 		}},
 		nil,

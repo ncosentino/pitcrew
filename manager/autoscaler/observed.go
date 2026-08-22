@@ -495,7 +495,7 @@ func observedRunnerSlot(
 		Desired: !retiring &&
 			runner.state != runnerDraining &&
 			runner.state != runnerCleanupPending,
-		ProcessRunning:     true,
+		ProcessRunning:     runner.containerRunning,
 		State:              state,
 		FailureCount:       0,
 		BackoffSeconds:     0,
