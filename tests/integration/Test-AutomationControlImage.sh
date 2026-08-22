@@ -62,6 +62,12 @@ docker run --rm \
         /actions-runner/externals/node24/bin/node -e "process.stdout.write(process.version)"
         test ! -e /actions-runner/externals/node20_alpine
         test ! -e /actions-runner/externals/node24_alpine
+        test -f /actions-runner/LICENSE
+        test -f /actions-runner/externals/node20/LICENSE
+        test -f /actions-runner/externals/node24/LICENSE
+        test -f /opt/git/share/licenses/git/COPYING
+        test -f /usr/share/licenses/gh/LICENSE
+        test -f /opt/microsoft/powershell/7/LICENSE.txt
         test ! -e /actions-runner/externals/node20/bin/npm
         test ! -e /actions-runner/externals/node24/bin/npm
         test ! -e /actions-runner/externals/node20/lib/node_modules

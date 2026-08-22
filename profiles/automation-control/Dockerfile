@@ -43,6 +43,9 @@ RUN set -eu; \
         NO_TCLTK=YesPlease \
         NO_EXPAT=YesPlease \
         install; \
+    install -D -m 0644 \
+        /tmp/git/COPYING \
+        /opt/git/share/licenses/git/COPYING; \
     find /opt/git -type f -perm /111 -exec sh -c \
         'for path do if readelf -h "${path}" >/dev/null 2>&1; then strip --strip-unneeded "${path}"; fi; done' \
         sh {} +
@@ -149,6 +152,9 @@ RUN set -eu; \
     install -m 0755 \
         "/tmp/gh_${GH_VERSION}_linux_${gh_architecture}/bin/gh" \
         /usr/local/bin/gh; \
+    install -D -m 0644 \
+        "/tmp/gh_${GH_VERSION}_linux_${gh_architecture}/LICENSE" \
+        /usr/share/licenses/gh/LICENSE; \
     curl --fail --location --retry 5 --retry-delay 2 \
         "https://github.com/PowerShell/PowerShell/releases/download/v${POWERSHELL_VERSION}/powershell-${POWERSHELL_VERSION}-linux-${powershell_architecture}.tar.gz" \
         --output /tmp/powershell.tar.gz; \
