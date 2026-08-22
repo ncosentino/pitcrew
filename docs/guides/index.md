@@ -10,6 +10,8 @@ Use these guides after completing [Getting Started](../getting-started.md):
 - [Custom Profiles](custom-profiles.md) - define a specialized image and verification contract.
 - [Repository-Owned Worker Images](repository-owned-images.md) - publish,
   activate, update, and roll back an external OCI runner image.
+- [Automation Control Runners](automation-control.md) - route repository policy
+  and orchestration to a minimal, non-root, scale-set-only image.
 - [Read-Only External Data Volumes](external-data-volumes.md) - attach
   operator-provisioned immutable datasets to workers without exposing storage
   credentials.

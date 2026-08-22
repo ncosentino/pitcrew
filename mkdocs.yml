@@ -58,6 +58,7 @@ nav:
       - Named Profiles: guides/named-profiles.md
       - Custom Profiles: guides/custom-profiles.md
       - Repository-Owned Worker Images: guides/repository-owned-images.md
+      - Automation Control Runners: guides/automation-control.md
       - Read-Only External Data Volumes: guides/external-data-volumes.md
       - Pool-Local Services: guides/pool-local-services.md
       - Isolated Image Builder: guides/isolated-image-builder.md

@@ -1,0 +1,50 @@
+{
+  "$schema": "../../runner-profile.schema.json",
+  "schemaVersion": 1,
+  "name": "automation-control",
+  "description": "Minimal non-root scale-set workers with Git, GitHub CLI, jq, and PowerShell.",
+  "image": "pitcrew-automation-control:runner2.336.0-gh2.98.0-pwsh7.6.5-git2.55.0",
+  "labels": [],
+  "replicas": 1,
+  "pullImage": false,
+  "disableDefaultLabels": true,
+  "autoscaling": {
+    "mode": "scale-set",
+    "minimumIdle": 0,
+    "scaleDownDelaySeconds": 60,
+    "maximumActiveWorkers": 1
+  },
+  "build": {
+    "context": ".",
+    "dockerfile": "Dockerfile",
+    "args": {
+      "RUNTIME_IMAGE": "mcr.microsoft.com/dotnet/runtime-deps:8.0-noble@sha256:6533e6633f557e0bc2b5c87bc19ba1dc069fd5e38d2703c6d6abadc9fbc378d7",
+      "GIT_VERSION": "2.55.0",
+      "GIT_SHA256": "457fdb04dc8728e007d4688695e6912e6f680727920f2a40bf11eacc17505357",
+      "RUNNER_VERSION": "2.336.0",
+      "RUNNER_SHA256_X64": "04cf0be1aff4c3ec3554466c39124ca250e3effd8873bb7e8d68535aa9505d5d",
+      "RUNNER_SHA256_ARM64": "58b758e420b87093fbd4bfddd368074960053e2f1388f01848c82624b90f27d1",
+      "GH_VERSION": "2.98.0",
+      "GH_SHA256_X64": "3b8ac6b30336802fc1a858d7c084e11cdf24ac1a761ca90b68022d7d729208de",
+      "GH_SHA256_ARM64": "cf689084f3a3618f7eae4a2420d335d74626d65f5e594b9828d125d69f800d86",
+      "POWERSHELL_VERSION": "7.6.5",
+      "POWERSHELL_SHA256_X64": "b34ab3b19acac1d3d4d0d3cfdb02acf62f457b0b6a962ff008132033f7566844",
+      "POWERSHELL_SHA256_ARM64": "ed4084f215d8bce2edd23aa7cb1f1e7b0818e41363a635a22065d2701b6141df"
+    }
+  },
+  "verificationCommands": [
+    "test \"$(id -u)\" = \"1001\"",
+    "test -w \"$HOME\"",
+    "/actions-runner/bin/Runner.Listener --version",
+    "/actions-runner/externals/node20/bin/node --version",
+    "/actions-runner/externals/node24/bin/node --version",
+    "git --version | grep -F \"2.55.0\"",
+    "git check-ref-format --branch automation-control",
+    "gh --version | grep -F \"2.98.0\"",
+    "jq --version",
+    "pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' | grep -F \"7.6.5\"",
+    "bash --version",
+    "test ! -e /actions-runner/externals/node20_alpine && test ! -e /actions-runner/externals/node24_alpine",
+    "! command -v docker && ! command -v kubectl && ! command -v helm && ! command -v python3 && ! command -v pip && ! command -v perl && ! command -v sudo && ! command -v gpg && ! command -v add-apt-repository && ! command -v dotnet && ! command -v java && ! command -v go && ! command -v gcc && ! command -v make"
+  ]
+}

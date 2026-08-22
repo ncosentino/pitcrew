@@ -75,6 +75,8 @@ GitHub runner scale-set demand to return toward their operator-defined maximum.
   services, external data, and Copilot operations.
 - [Isolated Image Builder](guides/isolated-image-builder.md) publishes OCI images
   through an mTLS BuildKit service without exposing Docker control.
+- [Automation Control Runners](guides/automation-control.md) provide a minimal,
+  non-root scale-set lane for repository policy and orchestration.
 - [Android Emulator Runners](guides/android-emulator.md) run a fresh
   hardware-accelerated Android emulator inside each disposable worker.
 - [Contributor Architecture](contributing/architecture.md) maps implementation

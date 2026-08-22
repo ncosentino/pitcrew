@@ -24,6 +24,10 @@ $schemaPath = Join-Path $runnerRoot 'runner-profile.schema.json'
 $observedStateSchemaPath = Join-Path $runnerRoot 'observed-state.schema.json'
 $copilotProfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'profile.json'
 $copilotDockerfilePath = Join-Path $runnerRoot 'profiles' 'copilot-cli' 'Dockerfile'
+$automationControlProfilePath = Join-Path `
+    $runnerRoot 'profiles' 'automation-control' 'profile.json'
+$automationControlDockerfilePath = Join-Path `
+    $runnerRoot 'profiles' 'automation-control' 'Dockerfile'
 $imageBuilderProfilePath = Join-Path $runnerRoot 'profiles' 'image-builder' 'profile.json'
 $imageBuilderDockerfilePath = Join-Path $runnerRoot 'profiles' 'image-builder' 'Dockerfile'
 $androidProfilePath = Join-Path $runnerRoot 'profiles' 'android-emulator' 'profile.json'
@@ -438,8 +442,13 @@ try {
 
 $profileJson = Get-Content -LiteralPath $copilotProfilePath -Raw -Encoding UTF8
 Add-Check ($profileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Copilot CLI profile does not conform to runner-profile.schema.json.'
+$automationControlProfileJson = Get-Content `
+    -LiteralPath $automationControlProfilePath `
+    -Raw `
+    -Encoding UTF8
 $imageBuilderProfileJson = Get-Content -LiteralPath $imageBuilderProfilePath -Raw -Encoding UTF8
 $androidProfileJson = Get-Content -LiteralPath $androidProfilePath -Raw -Encoding UTF8
+Add-Check ($automationControlProfileJson | Test-Json -SchemaFile $schemaPath) 'The built-in automation-control profile does not conform to runner-profile.schema.json.'
 Add-Check ($imageBuilderProfileJson | Test-Json -SchemaFile $schemaPath) 'The built-in image-builder profile does not conform to runner-profile.schema.json.'
 Add-Check ($androidProfileJson | Test-Json -SchemaFile $schemaPath) 'The built-in Android emulator profile does not conform to runner-profile.schema.json.'
 $autoscalingManifest = $profileJson | ConvertFrom-Json -Depth 20
@@ -2309,6 +2318,10 @@ Add-Check (-not (
 
 $defaultProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile default -HostName 'test-host'
 $copilotProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile copilot-cli -HostName 'test-host'
+$automationControlProfile = Resolve-RunnerProfile `
+    -RootPath $runnerRoot `
+    -Profile automation-control `
+    -HostName 'test-host'
 $imageBuilderProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile image-builder -HostName 'test-host'
 $androidProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile android-emulator -HostName 'test-host'
 
@@ -2325,6 +2338,56 @@ Add-Check (-not $defaultProfile.DisableDefaultLabels) 'The default profile must 
 Add-Check $defaultProfile.PullImage 'The default profile must retain pre-pull behavior for its remote base image.'
 Add-Check ($null -eq $defaultProfile.HostAdmission) 'The default profile unexpectedly enabled host-local admission.'
 Add-Check ($null -eq $defaultProfile.Runtime) 'The default profile unexpectedly enabled a specialized worker runtime.'
+
+Add-Check ($automationControlProfile.LabelsValue -eq 'automation-control') 'The automation-control profile exposes labels beyond its exact profile identity.'
+Add-Check $automationControlProfile.DisableDefaultLabels 'The automation-control profile permits broad default runner routing.'
+Add-Check (-not $automationControlProfile.PullImage) 'The locally built automation-control profile attempts to pull a remote replacement.'
+Add-Check ($automationControlProfile.Autoscaling.Mode -eq 'scale-set') 'The automation-control profile is not scale-set-only.'
+Add-Check ($automationControlProfile.Autoscaling.MinimumIdle -eq 0) 'The automation-control profile does not scale to zero.'
+Add-Check ($automationControlProfile.Autoscaling.MaximumActiveWorkers -eq 1) 'The automation-control profile does not use a conservative default maximum.'
+Add-Check (
+    $automationControlProfile.Build.Arguments.RUNTIME_IMAGE -match
+        '@sha256:[0-9a-f]{64}$'
+) 'The automation-control runtime base is not pinned by digest.'
+foreach ($argument in @(
+    'GIT_SHA256',
+    'RUNNER_SHA256_X64',
+    'RUNNER_SHA256_ARM64',
+    'GH_SHA256_X64',
+    'GH_SHA256_ARM64',
+    'POWERSHELL_SHA256_X64',
+    'POWERSHELL_SHA256_ARM64'
+)) {
+    Add-Check (
+        $automationControlProfile.Build.Arguments[$argument] -match
+            '^[0-9a-f]{64}$'
+    ) "The automation-control build argument '$argument' is not checksum pinned."
+}
+Add-Check (
+    $automationControlProfile.VerificationCommands -contains
+        '/actions-runner/bin/Runner.Listener --version'
+) 'The automation-control profile does not verify the JIT listener path.'
+Add-Check (
+    @(
+        $automationControlProfile.VerificationCommands |
+            Where-Object { $_ -match '^gh --version' }
+    ).Count -eq 1
+) 'The automation-control profile does not verify GitHub CLI.'
+Add-Check (
+    @(
+        $automationControlProfile.VerificationCommands |
+            Where-Object { $_ -match '^pwsh ' }
+    ).Count -eq 1
+) 'The automation-control profile does not verify PowerShell.'
+Add-Check (
+    @(
+        $automationControlProfile.VerificationCommands |
+            Where-Object {
+                $_ -match '! command -v docker' -and
+                $_ -match '! command -v sudo'
+            }
+    ).Count -eq 1
+) 'The automation-control profile does not verify its omitted-tool boundary.'
 
 Add-Check ($imageBuilderProfile.LabelsValue -eq 'image-builder,oci-builder') 'The image-builder profile does not expose exact isolated labels.'
 Add-Check ($imageBuilderProfile.ServiceNetwork.Source -eq 'pitcrew-image-builder') 'The image-builder profile does not require its isolated service network.'
@@ -2857,6 +2920,35 @@ Add-Check ($copilotDockerfile -match [regex]::Escape('sha256sum -c -')) 'The Cop
 Add-Check ($copilotDockerfile -match [regex]::Escape('/usr/local/bin/copilot')) 'The Copilot CLI image does not expose the documented stable executable path.'
 Add-Check ($copilotDockerfile -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN=)') 'The Copilot CLI image contains authentication material.'
 Add-Check ($profileJson -notmatch '(?i)(COPILOT_GITHUB_TOKEN|GH_TOKEN|GITHUB_TOKEN)') 'The Copilot CLI profile contains authentication material.'
+$automationControlDockerfile = Get-Content `
+    -LiteralPath $automationControlDockerfilePath `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $automationControlDockerfile -match
+        'mcr\.microsoft\.com/dotnet/runtime-deps:8\.0-noble@sha256:[0-9a-f]{64}'
+) 'The automation-control image does not use its pinned minimal runtime base.'
+Add-Check (
+    $automationControlDockerfile -notmatch
+        '(?m)^FROM\s+(?:myoung34|ghcr\.io/actions/actions-runner)'
+) 'The automation-control image inherits a full runner image.'
+Add-Check (
+    $automationControlDockerfile -match
+        [regex]::Escape('/actions-runner/externals/node20_alpine') -and
+    $automationControlDockerfile -match
+        [regex]::Escape('/actions-runner/externals/node24_alpine')
+) 'The automation-control image does not prune Alpine-only Node runtimes.'
+Add-Check (
+    $automationControlDockerfile -match 'NO_PERL=YesPlease' -and
+    $automationControlDockerfile -match 'NO_PYTHON=YesPlease'
+) 'The automation-control Git build retains unneeded scripting runtimes.'
+Add-Check (
+    $automationControlDockerfile -match '(?m)^USER runner$'
+) 'The automation-control image does not declare its non-root runtime identity.'
+Add-Check (
+    $automationControlDockerfile -notmatch
+        '(?i)(GH_TOKEN|GITHUB_TOKEN|password|credential|private[_-]?key)'
+) 'The automation-control image contains secret-shaped material.'
 $imageBuilderDockerfile = Get-Content -LiteralPath $imageBuilderDockerfilePath -Raw -Encoding UTF8
 $androidDockerfile = Get-Content -LiteralPath $androidDockerfilePath -Raw -Encoding UTF8
 $androidStart = Get-Content -LiteralPath $androidStartPath -Raw -Encoding UTF8
@@ -4975,6 +5067,35 @@ try {
         Add-Check ($namedCommands -match 'build.*--tag.*pitcrew-copilot-cli:1\.0\.71') 'Named setup did not build the profile image.'
         Add-Check ($namedCommands -match 'run.*--entrypoint.*/bin/sh.*copilot --version') 'Named setup did not run profile verification commands.'
         Add-Check ($namedCommands -match 'compose.*--project-name.*self-hosted-runner-copilot-cli.*up') 'Named setup did not start its isolated Compose project.'
+
+        $env:PITCREW_TEST_MANAGER_RUNNING = '0'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        & $fixtureSetup `
+            -Profile automation-control `
+            -Token 'test-registration-token' `
+            -Repos 'https://github.com/example/project=1'
+        $automationControlStatePath = Join-Path `
+            $fixtureRoot `
+            '.env.automation-control'
+        $automationControlState = Get-Content `
+            -LiteralPath $automationControlStatePath `
+            -Raw `
+            -Encoding UTF8
+        $automationControlCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8
+        )
+        Add-Check ($automationControlState -match '(?m)^RUNNER_PROFILE_ID=automation-control$') 'Automation-control setup did not write profile-specific state.'
+        Add-Check ($automationControlState -match '(?m)^RUNNER_LABELS=automation-control$') 'Automation-control setup exposed labels beyond its exact profile identity.'
+        Add-Check ($automationControlState -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'Automation-control setup did not disable broad default labels.'
+        Add-Check ($automationControlState -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Automation-control setup did not retain scale-set-only execution.'
+        Add-Check ($automationControlCommands -match 'build.*--tag.*pitcrew-automation-control:runner2\.336\.0-gh2\.98\.0-pwsh7\.6\.5-git2\.55\.0') 'Automation-control setup did not build the versioned image.'
+        Add-Check ($automationControlCommands -match 'run.*--entrypoint.*/bin/sh.*Runner\.Listener --version') 'Automation-control setup did not verify the JIT listener.'
+        Add-Check ($automationControlCommands -match 'run.*--entrypoint.*/bin/sh.*gh --version') 'Automation-control setup did not verify GitHub CLI.'
+        Add-Check ($automationControlCommands -match 'run.*--entrypoint.*/bin/sh.*pwsh ') 'Automation-control setup did not verify PowerShell.'
+        Add-Check (-not ($automationControlCommands -match '/var/run/docker\.sock')) 'Automation-control setup exposed the orchestration Docker socket.'
+        Add-Check ($automationControlCommands -match 'compose.*--project-name.*self-hosted-runner-automation-control.*up') 'Automation-control setup did not start its isolated Compose project.'
+        & $fixtureSetup -Profile automation-control -Down
+        $env:PITCREW_TEST_MANAGER_RUNNING = '1'
 
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         & $fixtureSetup -Profile copilot-cli -Down
