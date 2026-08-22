@@ -44,7 +44,7 @@
     "jq --version",
     "pwsh -NoLogo -NoProfile -Command '$PSVersionTable.PSVersion.ToString()' | grep -F \"7.6.5\"",
     "bash --version",
-    "test ! -e /actions-runner/externals/node20_alpine && test ! -e /actions-runner/externals/node24_alpine",
-    "! command -v docker && ! command -v kubectl && ! command -v helm && ! command -v python3 && ! command -v pip && ! command -v perl && ! command -v sudo && ! command -v gpg && ! command -v add-apt-repository && ! command -v dotnet && ! command -v java && ! command -v go && ! command -v gcc && ! command -v make"
+    "test ! -e /actions-runner/externals/node20_alpine && test ! -e /actions-runner/externals/node24_alpine && test ! -e /actions-runner/externals/node20/lib/node_modules && test ! -e /actions-runner/externals/node24/lib/node_modules",
+    "! command -v docker && ! command -v kubectl && ! command -v helm && ! command -v python3 && ! command -v pip && ! command -v perl && ! command -v sudo && ! command -v gpg && ! command -v add-apt-repository && ! command -v dotnet && ! command -v java && ! command -v go && ! command -v gcc && ! command -v make && ! command -v npm && ! command -v npx"
   ]
 }

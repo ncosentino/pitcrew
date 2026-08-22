@@ -12,7 +12,8 @@ image.
 
 The image includes:
 
-- the pinned GitHub Actions runner and its glibc Node 20 and Node 24 runtimes;
+- the pinned GitHub Actions runner and the glibc Node 20 and Node 24
+  executables required by JavaScript actions;
 - Bash, POSIX shell, coreutils, curl, and CA certificates;
 - checksum-pinned Git, GitHub CLI, `jq`, and PowerShell 7;
 - a non-root runner account with writable home and Actions work directories.
@@ -24,7 +25,7 @@ The image intentionally omits:
 
 - Docker CLI, Buildx, and Docker socket access;
 - Kubernetes hooks, `kubectl`, and Helm;
-- Alpine Node runtimes;
+- Alpine Node runtimes, npm, Node headers, and bundled package-manager payloads;
 - Python, pip, Perl, GPG repository tooling, and build SDKs;
 - `sudo` and privileged runtime package installation.
 
@@ -66,7 +67,7 @@ Override the maximum only after reviewing host admission and repository demand.
 
 ## Qualification and rollout
 
-CI enforces a 900 MiB unpacked image budget and exercises the runner listener,
+CI enforces an 850 MiB unpacked image budget and exercises the runner listener,
 both retained Node runtimes, Git sparse checkout and push, GitHub CLI command
 surfaces, `jq`, PowerShell, non-root writes, and omitted-tool boundaries.
 

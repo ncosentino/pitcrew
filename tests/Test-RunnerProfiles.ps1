@@ -2936,8 +2936,12 @@ Add-Check (
     $automationControlDockerfile -match
         [regex]::Escape('/actions-runner/externals/node20_alpine') -and
     $automationControlDockerfile -match
-        [regex]::Escape('/actions-runner/externals/node24_alpine')
-) 'The automation-control image does not prune Alpine-only Node runtimes.'
+        [regex]::Escape('/actions-runner/externals/node24_alpine') -and
+    $automationControlDockerfile -match
+        [regex]::Escape('/actions-runner/externals/node20/lib/node_modules') -and
+    $automationControlDockerfile -match
+        [regex]::Escape('/actions-runner/externals/node24/lib/node_modules')
+) 'The automation-control image does not prune non-runtime Node payloads.'
 Add-Check (
     $automationControlDockerfile -match 'NO_PERL=YesPlease' -and
     $automationControlDockerfile -match 'NO_PYTHON=YesPlease' -and

@@ -5,7 +5,7 @@ ROOT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 PROFILE_DIRECTORY="${ROOT_DIRECTORY}/profiles/automation-control"
 PROFILE_PATH="${PROFILE_DIRECTORY}/profile.json"
 IMAGE_TAG="pitcrew-automation-control-test:local"
-MAX_IMAGE_SIZE_BYTES=943718400
+MAX_IMAGE_SIZE_BYTES=891289600
 
 cleanup() {
     docker image rm "${IMAGE_TAG}" >/dev/null 2>&1 || true
@@ -62,6 +62,10 @@ docker run --rm \
         /actions-runner/externals/node24/bin/node -e "process.stdout.write(process.version)"
         test ! -e /actions-runner/externals/node20_alpine
         test ! -e /actions-runner/externals/node24_alpine
+        test ! -e /actions-runner/externals/node20/bin/npm
+        test ! -e /actions-runner/externals/node24/bin/npm
+        test ! -e /actions-runner/externals/node20/lib/node_modules
+        test ! -e /actions-runner/externals/node24/lib/node_modules
         git --version | grep -F "2.55.0"
         gh --version | grep -F "2.98.0"
         gh api --help >/dev/null
@@ -105,7 +109,9 @@ docker run --rm \
             java \
             go \
             gcc \
-            make; do
+            make \
+            npm \
+            npx; do
             if command -v "${omitted}" >/dev/null; then
                 echo "Unexpected automation-control tool: ${omitted}" >&2
                 exit 1
@@ -137,5 +143,18 @@ if ((image_size > MAX_IMAGE_SIZE_BYTES)); then
     echo "Automation-control image size ${image_size} exceeds ${MAX_IMAGE_SIZE_BYTES} bytes." >&2
     exit 1
 fi
+
+docker run --rm \
+    --entrypoint /bin/bash \
+    "${IMAGE_TAG}" \
+    -lc '
+        du -sb \
+            /actions-runner/bin \
+            /actions-runner/externals/node20 \
+            /actions-runner/externals/node24 \
+            /opt/git \
+            /opt/microsoft/powershell/7 \
+            /usr/local/bin/gh
+    '
 
 echo "Automation-control image qualification passed at ${image_size} bytes."

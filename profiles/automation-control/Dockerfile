@@ -42,7 +42,10 @@ RUN set -eu; \
         NO_RUST=YesPlease \
         NO_TCLTK=YesPlease \
         NO_EXPAT=YesPlease \
-        install
+        install; \
+    find /opt/git -type f -perm /111 -exec sh -c \
+        'for path do if readelf -h "${path}" >/dev/null 2>&1; then strip --strip-unneeded "${path}"; fi; done' \
+        sh {} +
 
 FROM ${RUNTIME_IMAGE}
 
@@ -118,6 +121,26 @@ RUN set -eu; \
     rm -rf \
         /actions-runner/externals/node20_alpine \
         /actions-runner/externals/node24_alpine; \
+    find /actions-runner/externals/node20 \
+        -mindepth 1 \
+        -maxdepth 1 \
+        ! -name bin \
+        ! -name LICENSE \
+        -exec rm -rf {} +; \
+    find /actions-runner/externals/node24 \
+        -mindepth 1 \
+        -maxdepth 1 \
+        ! -name bin \
+        ! -name LICENSE \
+        -exec rm -rf {} +; \
+    find /actions-runner/externals/node20/bin \
+        -mindepth 1 \
+        ! -name node \
+        -delete; \
+    find /actions-runner/externals/node24/bin \
+        -mindepth 1 \
+        ! -name node \
+        -delete; \
     curl --fail --location --retry 5 --retry-delay 2 \
         "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${gh_architecture}.tar.gz" \
         --output /tmp/gh.tar.gz; \
@@ -145,6 +168,8 @@ RUN set -eu; \
     test -x /actions-runner/externals/node24/bin/node; \
     test ! -e /actions-runner/externals/node20_alpine; \
     test ! -e /actions-runner/externals/node24_alpine; \
+    test ! -e /actions-runner/externals/node20/lib/node_modules; \
+    test ! -e /actions-runner/externals/node24/lib/node_modules; \
     git --version; \
     gh --version; \
     jq --version; \
