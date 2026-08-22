@@ -30,6 +30,7 @@ RUN set -eu; \
         NO_GETTEXT=YesPlease \
         NO_PERL=YesPlease \
         NO_PYTHON=YesPlease \
+        NO_RUST=YesPlease \
         NO_TCLTK=YesPlease \
         NO_EXPAT=YesPlease \
         all; \
@@ -38,6 +39,7 @@ RUN set -eu; \
         NO_GETTEXT=YesPlease \
         NO_PERL=YesPlease \
         NO_PYTHON=YesPlease \
+        NO_RUST=YesPlease \
         NO_TCLTK=YesPlease \
         NO_EXPAT=YesPlease \
         install

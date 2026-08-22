@@ -2940,7 +2940,8 @@ Add-Check (
 ) 'The automation-control image does not prune Alpine-only Node runtimes.'
 Add-Check (
     $automationControlDockerfile -match 'NO_PERL=YesPlease' -and
-    $automationControlDockerfile -match 'NO_PYTHON=YesPlease'
+    $automationControlDockerfile -match 'NO_PYTHON=YesPlease' -and
+    $automationControlDockerfile -match 'NO_RUST=YesPlease'
 ) 'The automation-control Git build retains unneeded scripting runtimes.'
 Add-Check (
     $automationControlDockerfile -match '(?m)^USER runner$'
