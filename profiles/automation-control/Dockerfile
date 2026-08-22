@@ -56,6 +56,7 @@ ARG TARGETARCH
 ARG RUNNER_VERSION
 ARG RUNNER_SHA256_X64
 ARG RUNNER_SHA256_ARM64
+ARG RUNNER_LICENSE_SHA256
 ARG GH_VERSION
 ARG GH_SHA256_X64
 ARG GH_SHA256_ARM64
@@ -111,6 +112,7 @@ RUN set -eu; \
     esac; \
     test -n "${RUNNER_VERSION}"; \
     test -n "${runner_checksum}"; \
+    test -n "${RUNNER_LICENSE_SHA256}"; \
     test -n "${GH_VERSION}"; \
     test -n "${gh_checksum}"; \
     test -n "${POWERSHELL_VERSION}"; \
@@ -121,6 +123,12 @@ RUN set -eu; \
     printf '%s  %s\n' "${runner_checksum}" /tmp/runner.tar.gz | sha256sum -c -; \
     install -d -o runner -g runner /actions-runner; \
     tar -xzf /tmp/runner.tar.gz -C /actions-runner; \
+    curl --fail --location --retry 5 --retry-delay 2 \
+        "https://raw.githubusercontent.com/actions/runner/v${RUNNER_VERSION}/LICENSE" \
+        --output /actions-runner/LICENSE; \
+    printf '%s  %s\n' \
+        "${RUNNER_LICENSE_SHA256}" \
+        /actions-runner/LICENSE | sha256sum -c -; \
     rm -rf \
         /actions-runner/externals/node20_alpine \
         /actions-runner/externals/node24_alpine; \

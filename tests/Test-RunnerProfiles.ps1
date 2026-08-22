@@ -2353,6 +2353,7 @@ foreach ($argument in @(
     'GIT_SHA256',
     'RUNNER_SHA256_X64',
     'RUNNER_SHA256_ARM64',
+    'RUNNER_LICENSE_SHA256',
     'GH_SHA256_X64',
     'GH_SHA256_ARM64',
     'POWERSHELL_SHA256_X64',
