@@ -284,14 +284,26 @@ major versions it installed. Dashboard authorizes only a compatible
 intersection; an older or diagnostics-disabled node remains visible as support
 unavailable without changing its runner or connector health.
 
+Dashboard owns the shared support HTTP wire records and exact serialized-property
+tests used by its API producer and node-agent consumer. PitCrew deliberately does
+not copy those DTOs; its executable contracts own the collector, report/import,
+and broker-access boundaries instead. A published package, matching tag, or
+successful build is therefore necessary but not sufficient compatibility evidence.
+
 Roll out v1 in this order:
 
 1. Deploy the matching Dashboard authorization service and opaque relay.
 2. Install the published support-agent package and file-only broker on one node.
-3. Enroll its independent support identity and verify the advertised v1
-   diagnostic capability.
-4. Update the operations plugin and complete one signed file-only diagnosis.
-5. Expand node enrollment only after the canary result and audit record pass.
+3. Complete one fresh or exact idempotently resumed enrollment and verify its
+   first accepted relay poll.
+4. Remove bootstrap material, restart only the support agent, and verify a second
+   accepted poll.
+5. Update the operations plugin and complete one signed file-only diagnosis.
+6. Expand node enrollment only after the complete canary and audit record pass.
+
+Until all six steps pass, report Relay as unqualified and retain the direct,
+SSH, WinRM, and package paths. Never infer interoperability from semantic
+version equality or release-asset presence.
 
 Rollback disables the support service, revokes its independent identity, and
 restores or uninstalls only the support package. It does not re-enroll the

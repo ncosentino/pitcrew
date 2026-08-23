@@ -77,6 +77,25 @@ pwsh ./scripts/New-PitCrewDiagnosticsPreflight.ps1 `
 Omit unavailable optional inputs rather than inventing them. The preflight file
 must exist before relay, direct, transport, or package collection begins.
 
+## Support release qualification
+
+A published package, matching semantic version, or successful image build does
+not prove that Dashboard authorization, node enrollment, polling, and result
+verification interoperate. Treat a support release as relay-qualified only after
+one canary has completed all of these with the published artifacts:
+
+1. one fresh or exact idempotently resumed enrollment;
+2. one accepted relay poll;
+3. bootstrap-material removal followed by an agent-only restart;
+4. a second accepted relay poll; and
+5. one completed signed read-only diagnostic whose node signature verifies.
+
+Do not expand enrollment or describe relay compatibility as verified before the
+complete canary passes. Keep `Direct`, `Ssh`, `WinRM`, and `Package` available
+while relay compatibility is unqualified; never infer compatibility from package
+presence or version equality and never fall back silently from a failed Relay
+attempt.
+
 ## Phase 2: choose one execution path
 
 ### Outbound support relay
