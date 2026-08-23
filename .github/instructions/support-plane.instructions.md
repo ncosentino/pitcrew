@@ -32,5 +32,12 @@ applyTo: "plugins/pitcrew-operations/skills/pitcrew-remote-diagnostics/**,suppor
   fabricated zeroes.
 - Reuse the existing bounded report, redaction, checksum, import, and diagnosis
   contracts. Add shared cryptographic vectors for envelope changes.
+- Dashboard owns support HTTP wire DTOs and their exact producer/consumer
+  serialization tests. Never mirror those field lists in PitCrew. Package tags,
+  assets, and matching semantic versions are not compatibility proof.
+- Qualify one canary with a fresh or idempotently resumed enrollment, two accepted
+  polls separated by an agent-only restart, and one signed read-only diagnostic
+  before expanding a support release. Until then, keep direct, SSH, WinRM, and
+  package diagnostics available and report relay compatibility as unqualified.
 - Preserve direct, SSH, WinRM, package, connector capacity, and connector
   recovery behavior unless a separately versioned migration changes them.
