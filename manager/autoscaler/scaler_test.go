@@ -782,15 +782,20 @@ func TestDockerWaitTimeoutRemovesConfirmedAbsentContainer(t *testing.T) {
 		t.Fatal("container absence was not checked after wait timeout")
 	}
 	deadline := time.Now().Add(time.Second)
-	for api.jitCalls < 2 && time.Now().Before(deadline) {
+	var replacement runnerRecord
+	for time.Now().Before(deadline) {
+		snapshot := scaler.snapshot()
+		if len(snapshot.runners) == 1 && snapshot.runners[0].containerID != "container-1" {
+			replacement = snapshot.runners[0]
+			break
+		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	replacement := findRunner(t, scaler)
-	if replacement.containerID == "container-1" || api.jitCalls != 2 {
+	if replacement.containerID == "" || api.jitCallCount() != 2 {
 		t.Fatalf(
 			"confirmed absent runner was not replaced: runner=%#v jitCalls=%d",
 			replacement,
-			api.jitCalls,
+			api.jitCallCount(),
 		)
 	}
 	select {
