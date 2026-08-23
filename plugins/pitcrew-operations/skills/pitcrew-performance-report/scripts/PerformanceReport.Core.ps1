@@ -119,6 +119,52 @@ function Test-PitCrewLiteralTextFilter {
     return $false
 }
 
+function Select-PitCrewGitHubStepMetadata {
+    param(
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Steps,
+
+        [string[]]$Filters = @()
+    )
+
+    $effectiveFilters = @(
+        $Filters |
+            ForEach-Object { ([string]$_).Trim() } |
+            Where-Object {
+                -not [string]::IsNullOrWhiteSpace($_)
+            } |
+            Sort-Object -Unique
+    )
+    if ($effectiveFilters.Count -eq 0) {
+        return
+    }
+    foreach ($step in $Steps) {
+        $name = [string]$step.name
+        if (-not (Test-PitCrewLiteralTextFilter `
+                -Value $name `
+                -Filters $effectiveFilters)) {
+            continue
+        }
+        [PSCustomObject][ordered]@{
+            number = [int](Get-PitCrewProperty $step 'number' 0)
+            name = $name
+            startedAt = if ($null -eq $step.started_at) {
+                $null
+            } else {
+                ConvertTo-PitCrewUtc $step.started_at
+            }
+            completedAt = if ($null -eq $step.completed_at) {
+                $null
+            } else {
+                ConvertTo-PitCrewUtc $step.completed_at
+            }
+            status = [string]$step.status
+            conclusion = Get-PitCrewProperty $step 'conclusion'
+        }
+    }
+}
+
 function Get-PitCrewPercentile {
     param(
         [Parameter(Mandatory)]
@@ -1377,6 +1423,86 @@ function New-PitCrewPerformanceReportModel {
         $jobDefinitionKey = Get-PitCrewSha256(
             "$repository`n$workflowId`n$jobName`n$($labels -join "`n")")
         $cohortKey = $jobDefinitionKey
+        $stepEvidence = @(
+            foreach ($step in @(
+                    Get-PitCrewProperty $job 'steps' @())) {
+                $stepName = [string]$step.name
+                $stepStartedValue = Get-PitCrewProperty $step 'startedAt'
+                $stepCompletedValue = Get-PitCrewProperty $step 'completedAt'
+                if ($null -eq $stepStartedValue) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'step-timing'
+                        repository = $repository
+                        jobId = [string]$job.jobId
+                        stepNumber = [int](
+                            Get-PitCrewProperty $step 'number' 0)
+                        stepName = $stepName
+                        reason = 'GitHub did not report a step start time.'
+                    })
+                    [PSCustomObject][ordered]@{
+                        number = [int](
+                            Get-PitCrewProperty $step 'number' 0)
+                        name = $stepName
+                        startedAt = $null
+                        completedAt = if (
+                            $null -eq $stepCompletedValue
+                        ) {
+                            $null
+                        } else {
+                            (ConvertTo-PitCrewUtc `
+                                $stepCompletedValue).ToString('O')
+                        }
+                        durationSeconds = $null
+                        status = [string]$step.status
+                        conclusion = Get-PitCrewProperty $step 'conclusion'
+                    }
+                    continue
+                }
+                $stepStartedAt = ConvertTo-PitCrewUtc $stepStartedValue
+                $stepCompletedAt = if ($null -eq $stepCompletedValue) {
+                    $To
+                } else {
+                    ConvertTo-PitCrewUtc $stepCompletedValue
+                }
+                if (
+                    $stepCompletedAt -le $From -or
+                    $stepStartedAt -ge $To
+                ) {
+                    continue
+                }
+                $stepDuration = if ($null -eq $stepCompletedValue) {
+                    $null
+                } elseif ($stepCompletedAt -lt $stepStartedAt) {
+                    $unavailable.Add([PSCustomObject][ordered]@{
+                        kind = 'step-timing'
+                        repository = $repository
+                        jobId = [string]$job.jobId
+                        stepNumber = [int](
+                            Get-PitCrewProperty $step 'number' 0)
+                        stepName = $stepName
+                        reason = 'GitHub reported a step end before its start.'
+                    })
+                    $null
+                } else {
+                    [Math]::Round(
+                        ($stepCompletedAt - $stepStartedAt).TotalSeconds,
+                        3)
+                }
+                [PSCustomObject][ordered]@{
+                    number = [int](Get-PitCrewProperty $step 'number' 0)
+                    name = $stepName
+                    startedAt = $stepStartedAt.ToString('O')
+                    completedAt = if ($null -eq $stepCompletedValue) {
+                        $null
+                    } else {
+                        $stepCompletedAt.ToString('O')
+                    }
+                    durationSeconds = $stepDuration
+                    status = [string]$step.status
+                    conclusion = Get-PitCrewProperty $step 'conclusion'
+                }
+            }
+        )
         $jobWork.Add([PSCustomObject][ordered]@{
             repository = $repository
             workflowRunId = [string]$job.workflowRunId
@@ -1416,9 +1542,11 @@ function New-PitCrewPerformanceReportModel {
             } else {
                 $completedAt
             }
+            _steps = $stepEvidence
         })
     }
 
+    $stepWork = [Collections.Generic.List[object]]::new()
     foreach ($job in $jobWork) {
         $otherJobs = @(
             $jobWork |
@@ -1450,6 +1578,39 @@ function New-PitCrewPerformanceReportModel {
         $job | Add-Member `
             -NotePropertyName crossProfileOverlap `
             -NotePropertyValue ($overlap -gt 0)
+        foreach ($step in @($job._steps)) {
+            $stepDefinitionKey = Get-PitCrewSha256(
+                "$($job.jobDefinitionKey)`n$($step.number)`n$($step.name)")
+            $stepWork.Add([PSCustomObject][ordered]@{
+                repository = $job.repository
+                workflowRunId = $job.workflowRunId
+                workflowId = $job.workflowId
+                workflowName = $job.workflowName
+                runAttempt = $job.runAttempt
+                jobId = $job.jobId
+                jobName = $job.jobName
+                jobDefinitionKey = $job.jobDefinitionKey
+                stepNumber = [int]$step.number
+                stepName = [string]$step.name
+                stepDefinitionKey = $stepDefinitionKey
+                cohortKey = $stepDefinitionKey
+                runnerNameHash = $job.runnerNameHash
+                startedAt = $step.startedAt
+                completedAt = $step.completedAt
+                durationSeconds = $step.durationSeconds
+                status = $step.status
+                conclusion = $step.conclusion
+                mappingStatus = $job.mappingStatus
+                nodeId = $job.nodeId
+                nodeKey = $job.nodeKey
+                profileId = $job.profileId
+                slotKey = $job.slotKey
+                hardwareInventoryHash = $job.hardwareInventoryHash
+                jobCrossProfileOverlapSeconds =
+                    $job.crossProfileOverlapSeconds
+                jobCrossProfileOverlap = $job.crossProfileOverlap
+            })
+        }
     }
 
     $reportedJobs = @(
@@ -1459,10 +1620,15 @@ function New-PitCrewPerformanceReportModel {
                     _startedAt, `
                     _completedAt, `
                     _overlapStartedAt, `
-                    _overlapCompletedAt
+                    _overlapCompletedAt, `
+                    _steps
         }
     )
+    $reportedSteps = @($stepWork)
     $matched = @($reportedJobs | Where-Object mappingStatus -eq 'matched')
+    $matchedSteps = @(
+        $reportedSteps |
+            Where-Object mappingStatus -eq 'matched')
     $nodeSummaries = @(
         $matched |
             Group-Object nodeKey |
@@ -1507,6 +1673,47 @@ function New-PitCrewPerformanceReportModel {
                     workflowName = $first.workflowName
                     jobName = $first.jobName
                     jobDefinitionKey = $first.jobDefinitionKey
+                    statistics = Get-PitCrewDurationStatistics $_.Group
+                }
+            }
+    )
+    $stepNodeSummaries = @(
+        $matchedSteps |
+            Group-Object { "$($_.nodeKey)|$($_.cohortKey)" } |
+            Sort-Object Name |
+            ForEach-Object {
+                $first = $_.Group[0]
+                [PSCustomObject][ordered]@{
+                    nodeKey = $first.nodeKey
+                    repository = $first.repository
+                    workflowId = $first.workflowId
+                    workflowName = $first.workflowName
+                    jobName = $first.jobName
+                    stepNumber = $first.stepNumber
+                    stepName = $first.stepName
+                    stepDefinitionKey = $first.stepDefinitionKey
+                    statistics = Get-PitCrewDurationStatistics $_.Group
+                }
+            }
+    )
+    $stepProfileSummaries = @(
+        $matchedSteps |
+            Group-Object {
+                "$($_.nodeKey)|$($_.profileId)|$($_.cohortKey)"
+            } |
+            Sort-Object Name |
+            ForEach-Object {
+                $first = $_.Group[0]
+                [PSCustomObject][ordered]@{
+                    nodeKey = $first.nodeKey
+                    profileId = $first.profileId
+                    repository = $first.repository
+                    workflowId = $first.workflowId
+                    workflowName = $first.workflowName
+                    jobName = $first.jobName
+                    stepNumber = $first.stepNumber
+                    stepName = $first.stepName
+                    stepDefinitionKey = $first.stepDefinitionKey
                     statistics = Get-PitCrewDurationStatistics $_.Group
                 }
             }
@@ -1613,7 +1820,7 @@ function New-PitCrewPerformanceReportModel {
     }
 
     return [PSCustomObject][ordered]@{
-        schemaVersion = 1
+        schemaVersion = 2
         generatedAt = $GeneratedAt.ToUniversalTime().ToString('O')
         range = [PSCustomObject][ordered]@{
             from = $From.ToUniversalTime().ToString('O')
@@ -1622,9 +1829,12 @@ function New-PitCrewPerformanceReportModel {
         repositories = @($Repositories)
         verifiedMeasurements = [PSCustomObject][ordered]@{
             jobs = $reportedJobs
+            steps = $reportedSteps
             nodeSummaries = $nodeSummaries
             jobNodeSummaries = $jobNodeSummaries
             profileSummaries = $profileSummaries
+            stepNodeSummaries = $stepNodeSummaries
+            stepProfileSummaries = $stepProfileSummaries
             overlapComparisons = $overlapComparisons
             admissionSummaries = @($admissionSummaries)
             nodes = @($nodeMeasurements)
@@ -1635,6 +1845,7 @@ function New-PitCrewPerformanceReportModel {
             'Correlation is not causation.',
             'One paired sample is not a host benchmark.',
             'A missing assignment or telemetry sample remains unavailable rather than being inferred.',
+            'Step measurements inherit job-level cross-profile overlap context; they do not prove overlap during the exact step interval.',
             'Host-admission units are abstract policy accounting, not CPU, memory, worker counts, or universal workload weights.',
             'Withheld units show that a worker start was gated; they do not prove GitHub queue delay or a running-job performance cause.'
         )
@@ -1684,6 +1895,69 @@ function ConvertTo-PitCrewPerformanceMarkdown {
         }
         $lines.Add(
             "| $repository | $jobName | $nodeKey | $profileId | $duration | $($job.crossProfileOverlapSeconds) | $conclusion |")
+    }
+    $lines.Add('')
+    $lines.Add('### Selected job step measurements')
+    $lines.Add('')
+    if (@($Report.verifiedMeasurements.steps).Count -eq 0) {
+        $lines.Add('No selected GitHub job step measurements were present.')
+    } else {
+        $lines.Add(
+            '| Repository | Workflow | Job | Step | Node | Profile | Duration (s) | Job overlap (s) | Conclusion |')
+        $lines.Add(
+            '| --- | --- | --- | --- | --- | --- | ---: | ---: | --- |')
+        foreach ($step in @($Report.verifiedMeasurements.steps)) {
+            $duration = if ($null -eq $step.durationSeconds) {
+                'unavailable'
+            } else {
+                [string]$step.durationSeconds
+            }
+            $nodeKey = if ($null -eq $step.nodeKey) {
+                'unmatched'
+            } else {
+                ConvertTo-PitCrewMarkdownText $step.nodeKey
+            }
+            $profileId = if ($null -eq $step.profileId) {
+                'unmatched'
+            } else {
+                ConvertTo-PitCrewMarkdownText $step.profileId
+            }
+            $conclusion = if ($null -eq $step.conclusion) {
+                'unfinished'
+            } else {
+                ConvertTo-PitCrewMarkdownText $step.conclusion
+            }
+            $lines.Add(
+                "| $(ConvertTo-PitCrewMarkdownText $step.repository) | " +
+                "$(ConvertTo-PitCrewMarkdownText $step.workflowName) | " +
+                "$(ConvertTo-PitCrewMarkdownText $step.jobName) | " +
+                "$(ConvertTo-PitCrewMarkdownText $step.stepName) | " +
+                "$nodeKey | $profileId | $duration | " +
+                "$($step.jobCrossProfileOverlapSeconds) | $conclusion |"
+            )
+        }
+    }
+    $lines.Add('')
+    $lines.Add('### Step duration summaries')
+    $lines.Add('')
+    $lines.Add(
+        '| Repository | Workflow | Job | Step | Node | Profile | Count | Completed | Median (s) | P95 (s) | Range (s) |')
+    $lines.Add(
+        '| --- | --- | --- | --- | --- | --- | ---: | ---: | ---: | ---: | ---: |')
+    foreach ($summary in @(
+            $Report.verifiedMeasurements.stepProfileSummaries)) {
+        $statistics = $summary.statistics
+        $lines.Add(
+            "| $(ConvertTo-PitCrewMarkdownText $summary.repository) | " +
+            "$(ConvertTo-PitCrewMarkdownText $summary.workflowName) | " +
+            "$(ConvertTo-PitCrewMarkdownText $summary.jobName) | " +
+            "$(ConvertTo-PitCrewMarkdownText $summary.stepName) | " +
+            "$(ConvertTo-PitCrewMarkdownText $summary.nodeKey) | " +
+            "$(ConvertTo-PitCrewMarkdownText $summary.profileId) | " +
+            "$($statistics.count) | $($statistics.completedCount) | " +
+            "$($statistics.medianSeconds) | $($statistics.p95Seconds) | " +
+            "$($statistics.rangeSeconds) |"
+        )
     }
     $lines.Add('')
     $lines.Add('### Node duration summaries')

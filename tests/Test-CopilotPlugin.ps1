@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.16.0') 'The operations plugin minor version was not advanced for support-release qualification.'
+Add-Check ($plugin.version -eq '1.17.0') 'The operations plugin minor version was not advanced for step-timing correlation.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -554,6 +554,12 @@ Add-Check (
     $performanceReportScript -match '\$githubJob' -and
     $performanceReportScript -match '''run_attempt'''
 ) 'The performance report script does not preserve GitHub pagination or profile-fallback retention evidence.'
+Add-Check (
+    $performanceReportSkill -match 'selected step metadata' -and
+    $performanceReportSkill -match '-Step' -and
+    $performanceReportScript -match '\$githubJob\.steps' -and
+    $performanceReportCore -match 'stepProfileSummaries'
+) 'The performance report does not expose bounded GitHub step-timing cohorts.'
 Add-Check (
     $performanceReportCore -notmatch 'ToHexStringLower' -and
     $performanceReportCore -match 'SHA256\]::Create' -and
