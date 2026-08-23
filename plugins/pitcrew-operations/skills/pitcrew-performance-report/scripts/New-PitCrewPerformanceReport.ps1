@@ -38,6 +38,10 @@ Optional case-insensitive workflow-name filters.
 .PARAMETER Job
 Optional case-insensitive job-name filters.
 
+.PARAMETER Step
+Optional case-insensitive step-name filters. Step metadata is collected only
+when at least one filter is supplied.
+
 .EXAMPLE
 $env:PITCREW_DIAGNOSTICS_CREDENTIAL = '<credential>'
 ./New-PitCrewPerformanceReport.ps1 `
@@ -75,7 +79,9 @@ param(
 
     [string[]]$Workflow = @(),
 
-    [string[]]$Job = @()
+    [string[]]$Job = @(),
+
+    [string[]]$Step = @()
 )
 
 Set-StrictMode -Version Latest
@@ -165,7 +171,9 @@ function Get-PitCrewGitHubJobs {
         [DateTimeOffset]$RangeStart,
 
         [Parameter(Mandatory)]
-        [DateTimeOffset]$RangeEnd
+        [DateTimeOffset]$RangeEnd,
+
+        [string[]]$StepFilters = @()
     )
 
     if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) {
@@ -271,6 +279,11 @@ function Get-PitCrewGitHubJobs {
                             $startedAt -ge $RangeEnd)) {
                         continue
                     }
+                    $selectedSteps = @(
+                        Select-PitCrewGitHubStepMetadata `
+                            -Steps @($githubJob.steps) `
+                            -Filters $StepFilters
+                    )
                     $jobs.Add([PSCustomObject][ordered]@{
                         repository = $repository.ToLowerInvariant()
                         workflowRunId = [string]$run.id
@@ -289,6 +302,7 @@ function Get-PitCrewGitHubJobs {
                         completedAt = $completedAt
                         status = [string]$githubJob.status
                         conclusion = $githubJob.conclusion
+                        steps = $selectedSteps
                     })
                 }
             }
@@ -309,6 +323,14 @@ $NodeId = @($NodeId | Sort-Object -Unique)
 $Profile = @($Profile | Sort-Object -Unique)
 $Workflow = @($Workflow | Sort-Object -Unique)
 $Job = @($Job | Sort-Object -Unique)
+$Step = @(
+    $Step |
+        ForEach-Object { $_.Trim() } |
+        Where-Object {
+            -not [string]::IsNullOrWhiteSpace($_)
+        } |
+        Sort-Object -Unique
+)
 if ($Profile.Count -gt 0 -and $NodeId.Count -eq 0) {
     throw 'Profile filters require explicit NodeId values so removed retained profiles remain enumerable.'
 }
@@ -464,7 +486,8 @@ foreach ($node in $nodes) {
 $jobs = Get-PitCrewGitHubJobs `
     -ApprovedRepositories $Repositories `
     -RangeStart $From `
-    -RangeEnd $To
+    -RangeEnd $To `
+    -StepFilters $Step
 $report = New-PitCrewPerformanceReportModel `
     -Jobs $jobs `
     -Nodes $nodes `
@@ -486,4 +509,5 @@ Write-Host "Performance report written:"
 Write-Host "  Markdown: $($written.MarkdownPath)"
 Write-Host "  JSON: $($written.JsonPath)"
 Write-Host "  Jobs: $(@($report.verifiedMeasurements.jobs).Count)"
+Write-Host "  Steps: $(@($report.verifiedMeasurements.steps).Count)"
 Write-Host "  Evidence gaps: $(@($report.unavailableEvidence).Count)"

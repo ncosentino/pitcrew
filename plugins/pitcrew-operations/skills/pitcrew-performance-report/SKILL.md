@@ -1,6 +1,6 @@
 ---
 name: pitcrew-performance-report
-description: Correlate bounded GitHub Actions job timing with scoped PitCrew Dashboard node, profile, telemetry, hardware, and cross-profile overlap evidence without reading logs or mutating runners.
+description: Correlate bounded GitHub Actions job and selected step timing with scoped PitCrew Dashboard node, profile, telemetry, hardware, and cross-profile overlap evidence without reading logs or mutating runners.
 license: MIT
 ---
 
@@ -19,7 +19,7 @@ Collect all of these from the caller:
 - one tenant identifier;
 - one or more explicitly approved `OWNER/REPOSITORY` values;
 - an inclusive start and exclusive end time;
-- optional node, profile, workflow, and job filters;
+- optional node, profile, workflow, job, and step filters;
 - an optional output directory.
 
 Require the raw diagnostic credential in the process environment variable
@@ -37,8 +37,8 @@ the report marks the assignment universe incomplete and verifies no mappings.
 
 ## Non-negotiable boundaries
 
-- Query only workflow-run and job metadata: IDs, names, exact runner name,
-  labels, timestamps, status, and conclusion.
+- Query only workflow-run, job, and selected step metadata: IDs, names, exact
+  runner name, labels, timestamps, status, and conclusion.
 - Never request or display job logs, artifacts, environment values, step
   output, caches, secrets, registration payloads, or JIT configuration.
 - Never mutate a workflow, run, job, runner, capacity command, manager,
@@ -68,8 +68,12 @@ Add only caller-approved filters:
 -Profile project-ci `
 -Workflow build `
 -Job test `
+-Step 'Run fixed contracts' `
 -OutputDirectory <report-directory>
 ```
+
+`-Step` limits the projected step cohort. Matching job metadata remains in the
+report so exact assignment, hardware, and overlap context are not discarded.
 
 Before execution, print the Dashboard origin, tenant, repositories, UTC range,
 filters, and output directory. Print only whether the diagnostic environment
@@ -87,16 +91,20 @@ The script:
 5. hashes each exact runner name locally;
 6. maps only one exact hash whose retained assignment interval overlaps the job;
 7. calculates count, median, p95, range, and timeout/cancellation rate;
-8. calculates same-node overlap with jobs mapped to other profiles;
-9. includes sanitized hardware and hardware changes;
-10. projects contract-18 host-admission fields and summarizes status,
+8. optionally calculates selected GitHub step duration cohorts by exact mapped
+   node and profile without reading step output or logs;
+9. calculates same-node overlap with jobs mapped to other profiles;
+10. includes sanitized hardware and hardware changes;
+11. projects contract-18 host-admission fields and summarizes status,
     epoch/decision progress, held/borrowed/pending/withheld units, and
     admission-related deficit reasons by node and profile;
-11. records partial telemetry, retention loss, truncation, missing timestamps,
+12. records partial telemetry, retention loss, truncation, missing timestamps,
     unmatched hashes, and ambiguous hashes as unavailable evidence.
 
 Cross-profile overlap is an association, not proof of contention. Hardware
 differences are context, not benchmark rankings.
+Selected step measurements inherit job-level overlap context; they do not prove
+that another profile overlapped the exact step interval.
 
 Host-admission interpretation is also bounded:
 

@@ -67,8 +67,15 @@ $report = New-PitCrewPerformanceReportModel `
 
 $jobs = @($report.verifiedMeasurements.jobs)
 $matched = @($jobs | Where-Object mappingStatus -eq 'matched')
+$steps = @($report.verifiedMeasurements.steps)
+$matchedSteps = @($steps | Where-Object mappingStatus -eq 'matched')
+Add-Check (
+    [int]$report.schemaVersion -eq 2
+) 'The performance report schema version did not advance for step measurements.'
 Add-Check ($jobs.Count -eq 6) 'The report did not enforce the requested time bounds.'
 Add-Check ($matched.Count -eq 5) 'Exact runner hashes did not map the expected jobs.'
+Add-Check ($steps.Count -eq 5) 'Selected GitHub step metadata was not preserved.'
+Add-Check ($matchedSteps.Count -eq 4) 'Mapped step measurements did not inherit job mapping.'
 Add-Check (
     ($matched | Where-Object jobId -eq '2003').crossProfileOverlapSeconds -eq 900
 ) 'The build overlap window was calculated incorrectly.'
@@ -106,6 +113,35 @@ Add-Check (
 Add-Check (
     $nodeAComparison.medianDeltaPercent -eq 100
 ) 'The overlap slowdown percentage was calculated incorrectly.'
+$nodeAStepSummary = $report.verifiedMeasurements.stepNodeSummaries |
+    Where-Object {
+        $_.nodeKey -eq 'node-1' -and
+        $_.stepName -eq 'Run fixed contracts'
+    }
+Add-Check (
+    $nodeAStepSummary.statistics.count -eq 3 -and
+    $nodeAStepSummary.statistics.medianSeconds -eq 180 -and
+    $nodeAStepSummary.statistics.p95Seconds -eq 600
+) 'Per-step node statistics did not preserve the selected timing cohort.'
+$nodeBStepSummary = $report.verifiedMeasurements.stepProfileSummaries |
+    Where-Object {
+        $_.nodeKey -eq 'node-2' -and
+        $_.profileId -eq 'build' -and
+        $_.stepName -eq 'Run fixed contracts'
+    }
+Add-Check (
+    $nodeBStepSummary.statistics.count -eq 1 -and
+    $nodeBStepSummary.statistics.medianSeconds -eq 90
+) 'Per-step profile statistics did not preserve the mapped node context.'
+$overlappedStep = $matchedSteps |
+    Where-Object jobId -eq '2003'
+Add-Check (
+    $overlappedStep.jobCrossProfileOverlapSeconds -eq 900
+) 'Selected step timing did not retain its job-level overlap context.'
+Add-Check (
+    @($report.unavailableEvidence |
+        Where-Object kind -eq 'step-timing').Count -eq 1
+) 'Missing GitHub step timestamps were not reported as unavailable evidence.'
 
 Add-Check (
     @($report.verifiedMeasurements.nodes |
@@ -254,6 +290,49 @@ Add-Check (-not (
             -Value 'test ubuntu' `
             -Filters @('test *')
     )) 'A literal job filter was interpreted as a wildcard.'
+$selectedStepMetadata = @(
+    Select-PitCrewGitHubStepMetadata `
+        -Steps @(
+            [PSCustomObject]@{
+                number = 3
+                name = 'Run fixed [contracts]'
+                started_at = '2026-08-01T10:00:00Z'
+                completed_at = '2026-08-01T10:00:05Z'
+                status = 'completed'
+                conclusion = 'success'
+            },
+            [PSCustomObject]@{
+                number = 4
+                name = 'Other step'
+                started_at = '2026-08-01T10:00:05Z'
+                completed_at = '2026-08-01T10:00:06Z'
+                status = 'completed'
+                conclusion = 'success'
+            }
+        ) `
+        -Filters @('Run fixed [contracts]')
+)
+Add-Check (
+    $selectedStepMetadata.Count -eq 1 -and
+    $selectedStepMetadata[0].number -eq 3 -and
+    $selectedStepMetadata[0].name -eq 'Run fixed [contracts]' -and
+    $selectedStepMetadata[0].startedAt -is [DateTimeOffset] -and
+    $selectedStepMetadata[0].completedAt -is [DateTimeOffset]
+) 'GitHub step metadata selection was not literal, bounded, or UTC-normalized.'
+Add-Check (
+    @(
+        Select-PitCrewGitHubStepMetadata `
+            -Steps @($selectedStepMetadata) `
+            -Filters @('Run fixed *')
+    ).Count -eq 0
+) 'A selected step filter was interpreted as a wildcard.'
+Add-Check (
+    @(
+        Select-PitCrewGitHubStepMetadata `
+            -Steps @($selectedStepMetadata) `
+            -Filters @(' ')
+    ).Count -eq 0
+) 'A blank selected step filter expanded to every GitHub step.'
 
 $json = $report | ConvertTo-Json -Depth 30
 Add-Check ($json -notmatch 'runner-a-build') 'The JSON report exposed a raw runner name.'
@@ -352,6 +431,11 @@ Add-Check (
     $markdown -match 'Host-admission observations' -and
     $markdown -match 'host-admission-withheld'
 ) 'The Markdown report omitted host-admission interpretation.'
+Add-Check (
+    $markdown -match 'Selected job step measurements' -and
+    $markdown -match 'Step duration summaries' -and
+    $markdown -match 'Run fixed contracts'
+) 'The Markdown report omitted selected step timing evidence.'
 Add-Check (
     @($report.limitations |
         Where-Object {
@@ -707,7 +791,9 @@ try {
         -Encoding UTF8 |
         ConvertFrom-Json -Depth 30
     Add-Check (
-        @($writtenJson.verifiedMeasurements.jobs).Count -eq $jobs.Count
+        [int]$writtenJson.schemaVersion -eq 2 -and
+        @($writtenJson.verifiedMeasurements.jobs).Count -eq $jobs.Count -and
+        @($writtenJson.verifiedMeasurements.steps).Count -eq $steps.Count
     ) 'The written JSON does not match the in-memory report.'
 } finally {
     if (Test-Path -LiteralPath $outputDirectory) {
