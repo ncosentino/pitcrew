@@ -762,9 +762,9 @@ function New-PitCrewHostAdmissionSummary {
                     (Get-PitCrewProperty $_ 'reason') -eq 'none'
                 }).Count
         reportedDeficitReasonObservationCount =
-            $reportedReasonEvidence.Count
+            @($reportedReasonEvidence).Count
         unreportedDeficitReasonObservationCount =
-            $reasonEvidence.Count - $reportedReasonEvidence.Count
+            @($reasonEvidence).Count - @($reportedReasonEvidence).Count
         capacityDeficitsTruncated = $CapacityDeficitsTruncated
         deficitReasons = $admissionReasons
     }

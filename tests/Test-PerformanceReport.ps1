@@ -249,6 +249,23 @@ Add-Check (
     $deduplicatedReasonSummary.deficitReasons.Count -eq 1 -and
     $deduplicatedReasonSummary.deficitReasons[0].samples -eq 1
 ) 'Sample and per-target admission reasons were counted twice.'
+$jsonElementDocument =
+    [Text.Json.JsonDocument]::Parse('{"reason":"none"}')
+try {
+    $singleReasonSummary = New-PitCrewHostAdmissionSummary `
+        -NodeKey node-single-reason `
+        -ProfileId single-reason-profile `
+        -Samples @() `
+        -CapacityDeficits @($jsonElementDocument.RootElement)
+    Add-Check (
+        (
+            $singleReasonSummary.reportedDeficitReasonObservationCount +
+            $singleReasonSummary.unreportedDeficitReasonObservationCount
+        ) -eq 1
+    ) 'A single live diagnostic reason required a synthetic Count property.'
+} finally {
+    $jsonElementDocument.Dispose()
+}
 $admissionDeficitReasons = @(
     $report.verifiedMeasurements.admissionSummaries |
         ForEach-Object { @($_.deficitReasons) } |
