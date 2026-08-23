@@ -169,6 +169,14 @@ run_buildctl_client() {
         "$@"
 }
 
+read_output_file() {
+    docker run --rm \
+        --mount "type=bind,src=${OUTPUT_DIRECTORY},dst=/output,readonly" \
+        --entrypoint cat \
+        "${CLIENT_IMAGE}" \
+        "/output/$1"
+}
+
 INTERRUPT_CLIENT_ID="$(
     docker run --detach \
         --network "${NETWORK_NAME}" \
@@ -226,7 +234,6 @@ fi
 literal_payload='literal-$(touch /tmp/pitcrew-injection)'
 published_reference="$(
     docker run --rm \
-        --user "$(id -u):$(id -g)" \
         --network "${NETWORK_NAME}" \
         --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
         --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
@@ -272,15 +279,12 @@ if ! jq -e \
         and ([.qualifications[].status] | all(. == "passed"))
         and .failureCategory == null
         and .failureDetail == null
-    ' "${OUTPUT_DIRECTORY}/published-candidate.json" >/dev/null; then
+    ' <<<"$(read_output_file published-candidate.json)" >/dev/null; then
     echo "Published candidate report is invalid." >&2
     exit 1
 fi
-published_candidate_access="$(
-    stat -c '%u:%g:%a' "${OUTPUT_DIRECTORY}/published-candidate.json"
-)"
-if [[ "${published_candidate_access}" != "$(id -u):$(id -g):600" ]]; then
-    echo "Published candidate report is not owner-readable and owner-only." >&2
+if [[ "$(stat -c '%a' "${OUTPUT_DIRECTORY}/published-candidate.json")" != "600" ]]; then
+    echo "Published candidate report is not owner-only." >&2
     exit 1
 fi
 
@@ -299,7 +303,6 @@ fi
 
 oci_reference="$(
     docker run --rm \
-        --user "$(id -u):$(id -g)" \
         --network "${NETWORK_NAME}" \
         --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
         --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
@@ -332,7 +335,7 @@ if ! jq -e \
         and .image.digest == $digest
         and .image.immutableReference == null
         and ([.qualifications[].status] | all(. == "passed"))
-    ' "${OUTPUT_DIRECTORY}/verification-candidate.json" >/dev/null; then
+    ' <<<"$(read_output_file verification-candidate.json)" >/dev/null; then
     echo "OCI candidate report is invalid." >&2
     exit 1
 fi
@@ -346,7 +349,6 @@ if docker run --rm \
 fi
 
 if docker run --rm \
-    --user "$(id -u):$(id -g)" \
     --network "${NETWORK_NAME}" \
     --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
     --mount "type=bind,src=${FAILED_CONTEXT_DIRECTORY},dst=/workspace,readonly" \
@@ -375,7 +377,7 @@ if ! jq -e '
         [.qualifications[] | select(.name == "image-build")][0].status ==
         "failed"
     )
-' "${OUTPUT_DIRECTORY}/failed-candidate.json" >/dev/null; then
+' <<<"$(read_output_file failed-candidate.json)" >/dev/null; then
     echo "Failed-build candidate report is invalid." >&2
     exit 1
 fi
