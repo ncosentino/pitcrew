@@ -226,6 +226,7 @@ fi
 literal_payload='literal-$(touch /tmp/pitcrew-injection)'
 published_reference="$(
     docker run --rm \
+        --user "$(id -u):$(id -g)" \
         --network "${NETWORK_NAME}" \
         --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
         --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
@@ -275,6 +276,13 @@ if ! jq -e \
     echo "Published candidate report is invalid." >&2
     exit 1
 fi
+published_candidate_access="$(
+    stat -c '%u:%g:%a' "${OUTPUT_DIRECTORY}/published-candidate.json"
+)"
+if [[ "${published_candidate_access}" != "$(id -u):$(id -g):600" ]]; then
+    echo "Published candidate report is not owner-readable and owner-only." >&2
+    exit 1
+fi
 
 published_config="$(
     docker run --rm \
@@ -291,6 +299,7 @@ fi
 
 oci_reference="$(
     docker run --rm \
+        --user "$(id -u):$(id -g)" \
         --network "${NETWORK_NAME}" \
         --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
         --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
@@ -337,6 +346,7 @@ if docker run --rm \
 fi
 
 if docker run --rm \
+    --user "$(id -u):$(id -g)" \
     --network "${NETWORK_NAME}" \
     --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
     --mount "type=bind,src=${FAILED_CONTEXT_DIRECTORY},dst=/workspace,readonly" \
