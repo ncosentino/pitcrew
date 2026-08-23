@@ -61,8 +61,13 @@ SERVER_CERTIFICATE_DIRECTORY="${TEMP_DIRECTORY}/certificates/server"
 CLIENT_CERTIFICATE_DIRECTORY="${TEMP_DIRECTORY}/certificates/client"
 CONTEXT_DIRECTORY="${TEMP_DIRECTORY}/context"
 INTERRUPT_DIRECTORY="${TEMP_DIRECTORY}/interrupt"
+FAILED_CONTEXT_DIRECTORY="${TEMP_DIRECTORY}/failed-context"
 OUTPUT_DIRECTORY="${TEMP_DIRECTORY}/output"
-mkdir -p "${CONTEXT_DIRECTORY}" "${INTERRUPT_DIRECTORY}" "${OUTPUT_DIRECTORY}"
+mkdir -p \
+    "${CONTEXT_DIRECTORY}" \
+    "${INTERRUPT_DIRECTORY}" \
+    "${FAILED_CONTEXT_DIRECTORY}" \
+    "${OUTPUT_DIRECTORY}"
 
 cat > "${CONTEXT_DIRECTORY}/Dockerfile" <<'EOF'
 # syntax=docker/dockerfile:1.7
@@ -76,6 +81,10 @@ cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
 # Keep the solve observable while leaving preflight cleanup enough retry time.
 RUN sleep 5
+EOF
+cat > "${FAILED_CONTEXT_DIRECTORY}/Dockerfile" <<'EOF'
+FROM alpine:3.22
+RUN false
 EOF
 
 pwsh -NoProfile -File "${SERVICE_SETUP}" \
@@ -160,6 +169,14 @@ run_buildctl_client() {
         "$@"
 }
 
+read_output_file() {
+    docker run --rm \
+        --mount "type=bind,src=${OUTPUT_DIRECTORY},dst=/output,readonly" \
+        --entrypoint cat \
+        "${CLIENT_IMAGE}" \
+        "/output/$1"
+}
+
 INTERRUPT_CLIENT_ID="$(
     docker run --detach \
         --network "${NETWORK_NAME}" \
@@ -220,6 +237,7 @@ published_reference="$(
         --network "${NETWORK_NAME}" \
         --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
         --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
+        --mount "type=bind,src=${OUTPUT_DIRECTORY},dst=/output" \
         --env BUILDKIT_HOST=tcp://buildkitd:1234 \
         --env BUILDKIT_TLS_DIR=/tls \
         --entrypoint pitcrew-build-image \
@@ -232,11 +250,41 @@ published_reference="$(
         --label org.opencontainers.image.revision=test-revision \
         --push \
         --verify-registry \
-        --registry-insecure
+        --registry-insecure \
+        --candidate-output /output/published-candidate.json \
+        --recipe-id application-ci \
+        --source-repository example-org/example-app \
+        --source-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+        --workflow-run-id 123
 )"
 published_digest="${published_reference##*@}"
 if [[ ! "${published_digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "Image-builder helper returned an invalid immutable reference: ${published_reference}" >&2
+    exit 1
+fi
+if ! jq -e \
+    --arg digest "${published_digest}" \
+    '
+        .schemaVersion == 1
+        and .status == "ready"
+        and .recipeId == "application-ci"
+        and .source.repository == "example-org/example-app"
+        and .source.commit == "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        and .source.workflowRunId == 123
+        and .image.outputMode == "registry"
+        and .image.digest == $digest
+        and .image.immutableReference == (
+            "registry:5000/pitcrew/image-builder-test@" + $digest
+        )
+        and ([.qualifications[].status] | all(. == "passed"))
+        and .failureCategory == null
+        and .failureDetail == null
+    ' <<<"$(read_output_file published-candidate.json)" >/dev/null; then
+    echo "Published candidate report is invalid." >&2
+    exit 1
+fi
+if [[ "$(stat -c '%a' "${OUTPUT_DIRECTORY}/published-candidate.json")" != "600" ]]; then
+    echo "Published candidate report is not owner-only." >&2
     exit 1
 fi
 
@@ -268,11 +316,27 @@ oci_reference="$(
         --dockerfile /workspace \
         --platform linux/amd64 \
         --build-arg PAYLOAD=verification \
-        --output-oci /output/verification.tar
+        --output-oci /output/verification.tar \
+        --candidate-output /output/verification-candidate.json \
+        --recipe-id application-ci
 )"
 if [[ ! "${oci_reference}" =~ ^oci:///output/verification\.tar@sha256:[0-9a-f]{64}$ ]] ||
     [[ ! -s "${OUTPUT_DIRECTORY}/verification.tar" ]]; then
     echo "Non-push OCI verification output is invalid: ${oci_reference}" >&2
+    exit 1
+fi
+oci_digest="${oci_reference##*@}"
+if ! jq -e \
+    --arg digest "${oci_digest}" \
+    '
+        .schemaVersion == 1
+        and .status == "ready"
+        and .image.outputMode == "oci"
+        and .image.digest == $digest
+        and .image.immutableReference == null
+        and ([.qualifications[].status] | all(. == "passed"))
+    ' <<<"$(read_output_file verification-candidate.json)" >/dev/null; then
+    echo "OCI candidate report is invalid." >&2
     exit 1
 fi
 if docker run --rm \
@@ -281,6 +345,59 @@ if docker run --rm \
     "${CLIENT_IMAGE}" \
     digest --insecure registry:5000/pitcrew/image-builder-test:verify >/dev/null 2>&1; then
     echo "Non-push verification unexpectedly created a registry tag." >&2
+    exit 1
+fi
+
+if docker run --rm \
+    --network "${NETWORK_NAME}" \
+    --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+    --mount "type=bind,src=${FAILED_CONTEXT_DIRECTORY},dst=/workspace,readonly" \
+    --mount "type=bind,src=${OUTPUT_DIRECTORY},dst=/output" \
+    --env BUILDKIT_HOST=tcp://buildkitd:1234 \
+    --env BUILDKIT_TLS_DIR=/tls \
+    --entrypoint pitcrew-build-image \
+    "${CLIENT_IMAGE}" \
+    --image-ref registry:5000/pitcrew/image-builder-test:failed \
+    --context /workspace \
+    --dockerfile /workspace \
+    --platform linux/amd64 \
+    --output-oci /output/failed.tar \
+    --candidate-output /output/failed-candidate.json \
+    --recipe-id application-ci; then
+    echo "A deliberately failed build reported success." >&2
+    exit 1
+fi
+if ! jq -e '
+    .schemaVersion == 1
+    and .status == "failed"
+    and .image.digest == null
+    and .failureCategory == "build-failed"
+    and .failureDetail == "Image build did not complete."
+    and (
+        [.qualifications[] | select(.name == "image-build")][0].status ==
+        "failed"
+    )
+' <<<"$(read_output_file failed-candidate.json)" >/dev/null; then
+    echo "Failed-build candidate report is invalid." >&2
+    exit 1
+fi
+
+if docker run --rm \
+    --network "${NETWORK_NAME}" \
+    --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+    --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
+    --env BUILDKIT_HOST=tcp://buildkitd:1234 \
+    --env BUILDKIT_TLS_DIR=/tls \
+    --entrypoint pitcrew-build-image \
+    "${CLIENT_IMAGE}" \
+    --image-ref registry:5000/pitcrew/image-builder-test:invalid \
+    --context /workspace \
+    --dockerfile /workspace \
+    --platform linux/amd64 \
+    --output-oci /tmp/invalid.tar \
+    --candidate-output /workspace/candidate.json \
+    --recipe-id application-ci; then
+    echo "Candidate evidence was written inside the reviewed build context." >&2
     exit 1
 fi
 

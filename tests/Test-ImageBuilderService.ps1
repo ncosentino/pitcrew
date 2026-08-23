@@ -12,6 +12,8 @@ $configPath = Join-Path $serviceRoot 'buildkitd.toml'
 $profilePath = Join-Path $root 'profiles' 'image-builder' 'profile.json'
 $dockerfilePath = Join-Path $root 'profiles' 'image-builder' 'Dockerfile'
 $helperPath = Join-Path $root 'profiles' 'image-builder' 'pitcrew-build-image'
+$candidateSchemaPath = Join-Path $root 'image-candidate.schema.json'
+$candidateValidatorPath = Join-Path $root 'scripts' 'Test-PitCrewImageCandidate.ps1'
 $attributesPath = Join-Path $root '.gitattributes'
 
 $errors = [Collections.Generic.List[string]]::new()
@@ -47,6 +49,8 @@ foreach ($path in @(
         $profilePath,
         $dockerfilePath,
         $helperPath,
+        $candidateSchemaPath,
+        $candidateValidatorPath,
         $attributesPath)) {
     Add-Check (Test-Path -LiteralPath $path -PathType Leaf) "Required image-builder surface is missing: $path"
 }
@@ -143,10 +147,25 @@ foreach ($argument in @(
         '--label',
         '--platform',
         '--output-oci',
-        '--verify-registry')) {
+        '--verify-registry',
+        '--candidate-output',
+        '--recipe-id',
+        '--source-repository',
+        '--source-commit',
+        '--workflow-run-id')) {
     Add-Check ($helper -match [regex]::Escape($argument)) "Image-builder helper omits '$argument'."
 }
 Add-Check ($helper -notmatch '\beval\b|/var/run/docker\.sock') 'Image-builder helper uses unsafe evaluation or Docker access.'
+Add-Check (
+    $helper -match [regex]::Escape(
+        'Candidate output must be outside the reviewed build context.') -and
+    $helper -match [regex]::Escape(
+        'Published candidates require --verify-registry.') -and
+    $helper -match [regex]::Escape(
+        'mv -f "${report_temporary}" "${candidate_output}"') -and
+    $helper -match [regex]::Escape(
+        'chmod 0600 "${report_temporary}"')
+) 'Image-builder helper does not constrain and atomically publish candidate evidence.'
 $historyPruneIndex = $helper.IndexOf(
     'prune-histories',
     [StringComparison]::Ordinal)
@@ -162,9 +181,125 @@ Add-Check (
     $helper -match [regex]::Escape("--format '{{json .}}'") -and
     $helper -match 'debug histories' -and
     $helper -match '\$\{usage\}" == "null"' -and
-    $helper -match 'cleanup_timeout_seconds=180' -and
-    $helper -match 'while \(\(SECONDS < cleanup_deadline\)\)'
+    $helper -match [regex]::Escape(
+        'PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS:-180') -and
+    $helper -match 'while true' -and
+    $helper -match 'if \(\(SECONDS >= cleanup_deadline\)\)'
 ) 'Image-builder helper does not verify bounded empty cache and history state.'
+
+$readyCandidate = @{
+    schemaVersion = 1
+    status = 'ready'
+    recipeId = 'application-ci'
+    createdAt = '2026-08-23T00:00:00Z'
+    source = @{
+        repository = 'example-org/example-app'
+        commit = ('a' * 40) -join ''
+        workflowRunId = 123
+    }
+    image = @{
+        reference = 'ghcr.io/example-org/application-ci:candidate'
+        digest = 'sha256:' + (('b' * 64) -join '')
+        immutableReference =
+            'ghcr.io/example-org/application-ci@sha256:' +
+                (('b' * 64) -join '')
+        platform = 'linux/amd64'
+        outputMode = 'registry'
+    }
+    qualifications = @(
+        @{ name = 'image-build'; status = 'passed' },
+        @{ name = 'buildkit-digest'; status = 'passed' },
+        @{ name = 'registry-digest'; status = 'passed' },
+        @{ name = 'builder-cleanup'; status = 'passed' }
+    )
+    failureCategory = $null
+    failureDetail = $null
+} | ConvertTo-Json -Depth 10
+Add-Check (
+    $readyCandidate | Test-Json -SchemaFile $candidateSchemaPath
+) 'Image-candidate schema rejects a valid ready registry candidate.'
+
+$failedCandidate = @{
+    schemaVersion = 1
+    status = 'failed'
+    recipeId = 'application-ci'
+    createdAt = '2026-08-23T00:00:00Z'
+    source = @{
+        repository = $null
+        commit = $null
+        workflowRunId = $null
+    }
+    image = @{
+        reference = 'registry.example/application-ci:candidate'
+        digest = $null
+        immutableReference = $null
+        platform = 'linux/arm64'
+        outputMode = 'oci'
+    }
+    qualifications = @(
+        @{ name = 'image-build'; status = 'failed' },
+        @{ name = 'buildkit-digest'; status = 'unavailable' },
+        @{ name = 'oci-manifest'; status = 'unavailable' },
+        @{ name = 'builder-cleanup'; status = 'passed' }
+    )
+    failureCategory = 'build-failed'
+    failureDetail = 'Image build did not complete.'
+} | ConvertTo-Json -Depth 10
+Add-Check (
+    $failedCandidate | Test-Json -SchemaFile $candidateSchemaPath
+) 'Image-candidate schema rejects a valid failed candidate.'
+
+$invalidCandidate = $readyCandidate | ConvertFrom-Json -Depth 10
+$invalidCandidate.qualifications[0].status = 'unavailable'
+Add-Check (-not (
+    ($invalidCandidate | ConvertTo-Json -Depth 10) |
+        Test-Json -SchemaFile $candidateSchemaPath -ErrorAction SilentlyContinue
+)) 'Image-candidate schema accepts ready evidence with unavailable qualification.'
+
+$candidateFixtureRoot = Join-Path (
+    [IO.Path]::GetTempPath()
+) "pitcrew-image-candidate-tests-$([guid]::NewGuid().ToString('N'))"
+try {
+    New-Item -ItemType Directory -Path $candidateFixtureRoot | Out-Null
+    $readyCandidatePath = Join-Path $candidateFixtureRoot 'ready.json'
+    [IO.File]::WriteAllText(
+        $readyCandidatePath,
+        $readyCandidate,
+        [Text.UTF8Encoding]::new($false))
+    $validatedCandidate = & $candidateValidatorPath -Path $readyCandidatePath
+    Add-Check (
+        $validatedCandidate.status -ceq 'ready' -and
+        $validatedCandidate.recipeId -ceq 'application-ci'
+    ) 'Image-candidate validator did not return the validated candidate.'
+
+    $invalidCandidatePath = Join-Path $candidateFixtureRoot 'invalid.json'
+    [IO.File]::WriteAllText(
+        $invalidCandidatePath,
+        ($invalidCandidate | ConvertTo-Json -Depth 10),
+        [Text.UTF8Encoding]::new($false))
+    Add-ThrowsCheck `
+        -Action {
+            & $candidateValidatorPath -Path $invalidCandidatePath | Out-Null
+        } `
+        -ExpectedMessage 'does not satisfy' `
+        -Failure 'Image-candidate validator accepted invalid ready evidence.'
+
+    $oversizedCandidatePath = Join-Path $candidateFixtureRoot 'oversized.json'
+    [IO.File]::WriteAllText(
+        $oversizedCandidatePath,
+        'x' * 16385,
+        [Text.UTF8Encoding]::new($false))
+    Add-ThrowsCheck `
+        -Action {
+            & $candidateValidatorPath -Path $oversizedCandidatePath | Out-Null
+        } `
+        -ExpectedMessage 'between 1 and 16384 bytes' `
+        -Failure 'Image-candidate validator accepted oversized evidence.'
+} finally {
+    if (Test-Path -LiteralPath $candidateFixtureRoot) {
+        Remove-Item -LiteralPath $candidateFixtureRoot -Recurse -Force
+    }
+}
 
 $tempRoot = Join-Path ([IO.Path]::GetTempPath()) "pitcrew-buildkit-cert-tests-$([guid]::NewGuid().ToString('N'))"
 try {
