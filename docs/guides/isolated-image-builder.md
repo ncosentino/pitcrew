@@ -166,7 +166,12 @@ pitcrew-build-image \
   --dockerfile . \
   --platform linux/amd64 \
   --build-arg SDK_VERSION=1.2.3 \
-  --output-oci "$RUNNER_TEMP/project-verification.tar"
+  --output-oci "$RUNNER_TEMP/project-verification.tar" \
+  --candidate-output "$RUNNER_TEMP/image-candidate.json" \
+  --recipe-id application-ci \
+  --source-repository example/project \
+  --source-commit "$GITHUB_SHA" \
+  --workflow-run-id "$GITHUB_RUN_ID"
 ```
 
 This builds the Dockerfile, writes an OCI tarball, verifies the digest and manifest
@@ -187,7 +192,12 @@ immutable_ref="$(
     --build-arg SDK_VERSION=1.2.3 \
     --label org.opencontainers.image.revision="$GITHUB_SHA" \
     --push \
-    --verify-registry
+    --verify-registry \
+    --candidate-output "$RUNNER_TEMP/image-candidate.json" \
+    --recipe-id application-ci \
+    --source-repository example/project \
+    --source-commit "$GITHUB_SHA" \
+    --workflow-run-id "$GITHUB_RUN_ID"
 )"
 
 printf 'Published %s\n' "$immutable_ref"
@@ -195,6 +205,42 @@ printf 'Published %s\n' "$immutable_ref"
 
 The helper compares BuildKit metadata with the registry digest returned by pinned
 `crane`. A mismatch fails the job.
+
+## Candidate evidence
+
+`--candidate-output` writes one atomic
+[`image-candidate.schema.json`](https://github.com/ncosentino/pitcrew/blob/main/image-candidate.schema.json)
+document after the authoritative post-build cleanup completes. The report contains
+only bounded build, digest, output, cleanup, and optional source provenance evidence.
+
+Published candidates require `--verify-registry`; a mutable tag without independent
+registry digest confirmation cannot become ready. OCI verification candidates carry
+the verified digest but no immutable registry reference.
+
+The report is written with owner-only permissions and must be outside the reviewed
+build context. Keep workflow transcripts, candidate reports, OCI output, TLS material,
+and Docker configuration under `RUNNER_TEMP`; adding generated output to the build
+context changes the reviewed inputs and is rejected.
+
+A failed build writes a failed candidate report when the candidate output and recipe
+identity were already validated. Failure categories and details use a closed
+non-secret vocabulary. Raw build logs remain in the owning workflow and are never
+embedded in candidate evidence.
+
+Validate an existing report before consuming or publishing it:
+
+```powershell
+$candidate = ./scripts/Test-PitCrewImageCandidate.ps1 `
+    -Path $env:RUNNER_TEMP/image-candidate.json
+```
+
+The validator accepts one UTF-8 document no larger than 16 KiB and returns the parsed
+candidate only after complete schema validation.
+
+Recipe-specific toolchain assertions remain in the reviewed Dockerfile or workflow.
+The generic report proves whether the image build, immutable digest verification,
+output verification, and BuildKit cleanup boundaries succeeded; it is not an
+arbitrary key/value evidence envelope.
 
 Build arguments with secret-shaped names are rejected. Use BuildKit secret mounts for
 future secret-bearing build inputs; do not pass secrets as ordinary build arguments.
@@ -205,6 +251,10 @@ abruptly disconnected client can be released asynchronously. The helper succeeds
 only after both history and disk usage are verified empty. BuildKit 0.32.2
 serializes empty disk usage as JSON `null`; any other nonempty value is retained
 state and fails the job boundary.
+
+`PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS` may set the fail-closed cleanup retry
+window between 1 and 600 seconds; the default remains 180. Changing the timeout
+never permits reuse while cache or history remains.
 
 ## Qualification
 

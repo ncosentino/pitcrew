@@ -1,0 +1,342 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "PitCrew image candidate",
+  "description": "Bounded non-secret evidence produced by a trusted PitCrew image-builder workflow.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "status",
+    "recipeId",
+    "createdAt",
+    "source",
+    "image",
+    "qualifications",
+    "failureCategory",
+    "failureDetail"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "status": {
+      "enum": [
+        "ready",
+        "failed"
+      ]
+    },
+    "recipeId": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9-]{0,63}$"
+    },
+    "createdAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "source": {
+      "$ref": "#/$defs/source"
+    },
+    "image": {
+      "$ref": "#/$defs/image"
+    },
+    "qualifications": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "uniqueItems": true,
+      "items": {
+        "$ref": "#/$defs/qualification"
+      }
+    },
+    "failureCategory": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/failureCategory"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "failureDetail": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/failureDetail"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "status": {
+            "const": "ready"
+          }
+        },
+        "required": [
+          "status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "failureCategory": {
+            "type": "null"
+          },
+          "failureDetail": {
+            "type": "null"
+          },
+          "image": {
+            "properties": {
+              "digest": {
+                "$ref": "#/$defs/digest"
+              }
+            }
+          },
+          "qualifications": {
+            "not": {
+              "contains": {
+                "properties": {
+                  "status": {
+                    "enum": [
+                      "failed",
+                      "unavailable"
+                    ]
+                  }
+                },
+                "required": [
+                  "status"
+                ]
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "failureCategory": {
+            "$ref": "#/$defs/failureCategory"
+          },
+          "failureDetail": {
+            "$ref": "#/$defs/failureDetail"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "allOf": [
+          {
+            "properties": {
+              "status": {
+                "const": "ready"
+              }
+            },
+            "required": [
+              "status"
+            ]
+          },
+          {
+            "properties": {
+              "image": {
+                "properties": {
+                  "outputMode": {
+                    "const": "registry"
+                  }
+                },
+                "required": [
+                  "outputMode"
+                ]
+              }
+            }
+          }
+        ]
+      },
+      "then": {
+        "properties": {
+          "image": {
+            "properties": {
+              "immutableReference": {
+                "$ref": "#/$defs/immutableReference"
+              }
+            }
+          }
+        }
+      },
+      "else": {
+        "if": {
+          "properties": {
+            "image": {
+              "properties": {
+                "outputMode": {
+                  "const": "oci"
+                }
+              },
+              "required": [
+                "outputMode"
+              ]
+            }
+          }
+        },
+        "then": {
+          "properties": {
+            "image": {
+              "properties": {
+                "immutableReference": {
+                  "type": "null"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "repository",
+        "commit",
+        "workflowRunId"
+      ],
+      "properties": {
+        "repository": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$",
+          "maxLength": 200
+        },
+        "commit": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "pattern": "^[0-9a-f]{40}$"
+        },
+        "workflowRunId": {
+          "type": [
+            "integer",
+            "null"
+          ],
+          "minimum": 1
+        }
+      }
+    },
+    "image": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "reference",
+        "digest",
+        "immutableReference",
+        "platform",
+        "outputMode"
+      ],
+      "properties": {
+        "reference": {
+          "type": "string",
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*/[A-Za-z0-9][A-Za-z0-9._/-]*:[A-Za-z0-9_][A-Za-z0-9._-]*$",
+          "maxLength": 512
+        },
+        "digest": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/digest"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "immutableReference": {
+          "oneOf": [
+            {
+              "$ref": "#/$defs/immutableReference"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "platform": {
+          "enum": [
+            "linux/amd64",
+            "linux/arm64"
+          ]
+        },
+        "outputMode": {
+          "enum": [
+            "registry",
+            "oci"
+          ]
+        }
+      }
+    },
+    "qualification": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "name",
+        "status"
+      ],
+      "properties": {
+        "name": {
+          "enum": [
+            "image-build",
+            "buildkit-digest",
+            "registry-digest",
+            "oci-manifest",
+            "builder-cleanup"
+          ]
+        },
+        "status": {
+          "enum": [
+            "passed",
+            "failed",
+            "unavailable"
+          ]
+        }
+      }
+    },
+    "digest": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$"
+    },
+    "immutableReference": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]*/[A-Za-z0-9][A-Za-z0-9._/-]*@sha256:[0-9a-f]{64}$",
+      "maxLength": 584
+    },
+    "failureCategory": {
+      "enum": [
+        "build-failed",
+        "digest-unavailable",
+        "registry-verification-failed",
+        "registry-digest-mismatch",
+        "oci-verification-failed",
+        "oci-digest-mismatch",
+        "oci-manifest-missing",
+        "builder-cleanup-failed"
+      ]
+    },
+    "failureDetail": {
+      "enum": [
+        "Image build did not complete.",
+        "BuildKit did not return an immutable image digest.",
+        "Registry digest verification failed.",
+        "Registry digest did not match BuildKit digest.",
+        "OCI output verification failed.",
+        "OCI output digest did not match BuildKit digest.",
+        "OCI output omitted its declared manifest blob.",
+        "BuildKit cleanup did not reach an empty state."
+      ]
+    }
+  }
+}

@@ -136,6 +136,7 @@ jobs:
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/Test-ContainerSupervision.sh
+          bash -n tests/Test-ImageCandidateReport.sh
           sh -n tests/integration/fake-runner/fake-runner.sh
           bash -n profiles/image-builder/pitcrew-build-image
           bash -n tests/integration/Test-AutomationControlImage.sh
@@ -152,6 +153,9 @@ jobs:
 
       - name: Run container supervision contracts
         run: sh ./tests/Test-ContainerSupervision.sh
+
+      - name: Run image candidate contracts
+        run: bash ./tests/Test-ImageCandidateReport.sh
 
       - name: Validate Docker Compose configuration
         run: |

@@ -17,6 +17,11 @@ Options:
   --output-oci PATH
   --verify-registry
   --registry-insecure
+  --candidate-output PATH
+  --recipe-id ID
+  --source-repository OWNER/REPOSITORY
+  --source-commit SHA
+  --workflow-run-id ID
 EOF
 }
 
@@ -28,6 +33,12 @@ mode=""
 oci_output=""
 verify_registry=false
 registry_insecure=false
+candidate_output=""
+recipe_id=""
+source_repository=""
+source_commit=""
+workflow_run_id=""
+builder_cleanup_timeout_seconds="${PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS:-180}"
 declare -a build_args=()
 declare -a labels=()
 
@@ -99,6 +110,31 @@ else
                 registry_insecure=true
                 shift
                 ;;
+            --candidate-output)
+                (($# >= 2)) || { usage; exit 2; }
+                candidate_output="$2"
+                shift 2
+                ;;
+            --recipe-id)
+                (($# >= 2)) || { usage; exit 2; }
+                recipe_id="$2"
+                shift 2
+                ;;
+            --source-repository)
+                (($# >= 2)) || { usage; exit 2; }
+                source_repository="$2"
+                shift 2
+                ;;
+            --source-commit)
+                (($# >= 2)) || { usage; exit 2; }
+                source_commit="$2"
+                shift 2
+                ;;
+            --workflow-run-id)
+                (($# >= 2)) || { usage; exit 2; }
+                workflow_run_id="$2"
+                shift 2
+                ;;
             --help|-h)
                 usage
                 exit 0
@@ -141,8 +177,59 @@ if [[ ! -d "${context_directory}" || ! -d "${dockerfile_directory}" ]]; then
     echo "Build context and Dockerfile locations must be existing directories." >&2
     exit 2
 fi
+if [[ -n "${candidate_output}" ]]; then
+    if [[ "${candidate_output}" == *$'\n'* ||
+        "${candidate_output}" == *$'\r'* ]]; then
+        echo "Candidate output path contains unsupported control characters." >&2
+        exit 2
+    fi
+    if [[ ! "${recipe_id}" =~ ^[a-z][a-z0-9-]{0,63}$ ]]; then
+        echo "--candidate-output requires a valid --recipe-id." >&2
+        exit 2
+    fi
+    if ((${#image_ref} > 512)); then
+        echo "Candidate image reference exceeds 512 characters." >&2
+        exit 2
+    fi
+    if [[ "${mode}" == "push" && "${verify_registry}" != "true" ]]; then
+        echo "Published candidates require --verify-registry." >&2
+        exit 2
+    fi
+    if [[ -n "${source_repository}" || -n "${source_commit}" ]]; then
+        if [[ ! "${source_repository}" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] ||
+            ((${#source_repository} > 200)) ||
+            [[ ! "${source_commit}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "Source repository and commit must be supplied together in canonical form." >&2
+            exit 2
+        fi
+    fi
+    if [[ -n "${workflow_run_id}" ]] &&
+        [[ ! "${workflow_run_id}" =~ ^[1-9][0-9]*$ ]]; then
+        echo "Workflow run ID must be a positive integer." >&2
+        exit 2
+    fi
+    context_real="$(realpath -e "${context_directory}")"
+    candidate_output_real="$(realpath -m "${candidate_output}")"
+    case "${candidate_output_real}" in
+        "${context_real}"|"${context_real}"/*)
+            echo "Candidate output must be outside the reviewed build context." >&2
+            exit 2
+            ;;
+    esac
+elif [[ -n "${recipe_id}" ||
+    -n "${source_repository}" ||
+    -n "${source_commit}" ||
+    -n "${workflow_run_id}" ]]; then
+    echo "Candidate provenance options require --candidate-output." >&2
+    exit 2
+fi
 if ((${#build_args[@]} > 32 || ${#labels[@]} > 32)); then
     echo "At most 32 build arguments and 32 labels are supported." >&2
+    exit 2
+fi
+if [[ ! "${builder_cleanup_timeout_seconds}" =~ ^[1-9][0-9]*$ ]] ||
+    ((builder_cleanup_timeout_seconds > 600)); then
+    echo "Builder cleanup timeout must be between 1 and 600 seconds." >&2
     exit 2
 fi
 
@@ -176,6 +263,18 @@ done
 buildkit_host="${BUILDKIT_HOST:-tcp://buildkitd:1234}"
 tls_directory="${BUILDKIT_TLS_DIR:-}"
 metadata_file="${PITCREW_BUILDKIT_METADATA_FILE:-${RUNNER_TEMP:-/tmp}/pitcrew-buildkit-metadata.json}"
+if [[ -n "${candidate_output}" ]]; then
+    metadata_file_real="$(realpath -m "${metadata_file}")"
+    if [[ "${candidate_output_real}" == "${metadata_file_real}" ]]; then
+        echo "Candidate output must differ from BuildKit metadata output." >&2
+        exit 2
+    fi
+    if [[ "${mode}" == "oci" ]] &&
+        [[ "${candidate_output_real}" == "$(realpath -m "${oci_output}")" ]]; then
+        echo "Candidate output must differ from OCI image output." >&2
+        exit 2
+    fi
+fi
 if [[ -z "${tls_directory}" ]]; then
     echo "BUILDKIT_TLS_DIR is required." >&2
     exit 2
@@ -193,9 +292,115 @@ buildctl_arguments=(
     --tlsdir "${tls_directory}"
 )
 
+candidate_operation_succeeded=false
+candidate_digest=""
+candidate_immutable_reference=""
+candidate_failure_category="build-failed"
+candidate_failure_detail="Image build did not complete."
+candidate_image_build_status="failed"
+candidate_digest_status="unavailable"
+candidate_output_status="unavailable"
+candidate_cleanup_status="unavailable"
+candidate_output_qualification="$(
+    if [[ "${mode}" == "push" ]]; then
+        printf '%s' "registry-digest"
+    else
+        printf '%s' "oci-manifest"
+    fi
+)"
+
+write_candidate_report() {
+    local report_status="failed"
+    local report_failure_category="${candidate_failure_category}"
+    local report_failure_detail="${candidate_failure_detail}"
+    local report_temporary="${candidate_output}.$$.tmp"
+
+    if [[ "${candidate_operation_succeeded}" == "true" &&
+        "${candidate_cleanup_status}" == "passed" ]]; then
+        report_status="ready"
+        report_failure_category=""
+        report_failure_detail=""
+    fi
+
+    mkdir -p "$(dirname "${candidate_output}")"
+    rm -f "${report_temporary}"
+    umask 077
+    if ! jq -n \
+        --arg status "${report_status}" \
+        --arg recipeId "${recipe_id}" \
+        --arg createdAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+        --arg repository "${source_repository}" \
+        --arg commit "${source_commit}" \
+        --arg workflowRunId "${workflow_run_id}" \
+        --arg reference "${image_ref}" \
+        --arg digest "${candidate_digest}" \
+        --arg immutableReference "${candidate_immutable_reference}" \
+        --arg platform "${platform}" \
+        --arg outputMode "$(
+            if [[ "${mode}" == "push" ]]; then
+                printf '%s' "registry"
+            else
+                printf '%s' "oci"
+            fi
+        )" \
+        --arg imageBuildStatus "${candidate_image_build_status}" \
+        --arg digestStatus "${candidate_digest_status}" \
+        --arg outputQualification "${candidate_output_qualification}" \
+        --arg outputStatus "${candidate_output_status}" \
+        --arg cleanupStatus "${candidate_cleanup_status}" \
+        --arg failureCategory "${report_failure_category}" \
+        --arg failureDetail "${report_failure_detail}" \
+        '{
+            schemaVersion: 1,
+            status: $status,
+            recipeId: $recipeId,
+            createdAt: $createdAt,
+            source: {
+                repository: (
+                    if $repository == "" then null else $repository end
+                ),
+                commit: (if $commit == "" then null else $commit end),
+                workflowRunId: (
+                    if $workflowRunId == ""
+                    then null
+                    else ($workflowRunId | tonumber)
+                    end
+                )
+            },
+            image: {
+                reference: $reference,
+                digest: (if $digest == "" then null else $digest end),
+                immutableReference: (
+                    if $immutableReference == ""
+                    then null
+                    else $immutableReference
+                    end
+                ),
+                platform: $platform,
+                outputMode: $outputMode
+            },
+            qualifications: [
+                {name: "image-build", status: $imageBuildStatus},
+                {name: "buildkit-digest", status: $digestStatus},
+                {name: $outputQualification, status: $outputStatus},
+                {name: "builder-cleanup", status: $cleanupStatus}
+            ],
+            failureCategory: (
+                if $failureCategory == "" then null else $failureCategory end
+            ),
+            failureDetail: (
+                if $failureDetail == "" then null else $failureDetail end
+            )
+        }' > "${report_temporary}"; then
+        rm -f "${report_temporary}"
+        return 1
+    fi
+    chmod 0600 "${report_temporary}"
+    mv -f "${report_temporary}" "${candidate_output}"
+}
+
 cleanup_builder() {
-    local cleanup_timeout_seconds=180
-    local cleanup_deadline=$((SECONDS + cleanup_timeout_seconds))
+    local cleanup_deadline=$((SECONDS + builder_cleanup_timeout_seconds))
     local histories
     local usage
 
@@ -242,6 +447,18 @@ cleanup_on_exit() {
     trap - EXIT
     if ! cleanup_builder; then
         echo "BuildKit cleanup failed; the profile must not reuse this daemon state." >&2
+        candidate_cleanup_status="failed"
+        candidate_failure_category="builder-cleanup-failed"
+        candidate_failure_detail="BuildKit cleanup did not reach an empty state."
+        if ((build_status == 0)); then
+            build_status=1
+        fi
+    else
+        candidate_cleanup_status="passed"
+    fi
+    if [[ -n "${candidate_output}" ]] &&
+        ! write_candidate_report; then
+        echo "Image candidate report could not be written atomically." >&2
         if ((build_status == 0)); then
             build_status=1
         fi
@@ -251,6 +468,13 @@ cleanup_on_exit() {
 
 if ! cleanup_builder; then
     echo "BuildKit preflight cleanup failed; the daemon must not be reused." >&2
+    candidate_cleanup_status="failed"
+    candidate_failure_category="builder-cleanup-failed"
+    candidate_failure_detail="BuildKit cleanup did not reach an empty state."
+    if [[ -n "${candidate_output}" ]] &&
+        ! write_candidate_report; then
+        echo "Image candidate report could not be written atomically." >&2
+    fi
     exit 1
 fi
 trap cleanup_on_exit EXIT
@@ -279,11 +503,16 @@ buildctl "${buildctl_arguments[@]}" build \
     --metadata-file "${metadata_file}" \
     --progress plain
 
+candidate_image_build_status="passed"
+candidate_failure_category="digest-unavailable"
+candidate_failure_detail="BuildKit did not return an immutable image digest."
 digest="$(jq -r '."containerimage.digest" // empty' "${metadata_file}")"
 if [[ ! "${digest}" =~ ^sha256:[0-9a-f]{64}$ ]]; then
     echo "BuildKit did not return an immutable image digest." >&2
     exit 1
 fi
+candidate_digest="${digest}"
+candidate_digest_status="passed"
 
 if [[ "${mode}" == "push" ]]; then
     if [[ "${verify_registry}" == "true" ]]; then
@@ -292,26 +521,47 @@ if [[ "${mode}" == "push" ]]; then
             crane_arguments+=(--insecure)
         fi
         crane_arguments+=("${image_ref}")
-        registry_digest="$(crane "${crane_arguments[@]}")"
+        candidate_failure_category="registry-verification-failed"
+        candidate_failure_detail="Registry digest verification failed."
+        if ! registry_digest="$(crane "${crane_arguments[@]}")"; then
+            echo "Registry digest verification failed." >&2
+            exit 1
+        fi
+        candidate_failure_category="registry-digest-mismatch"
+        candidate_failure_detail="Registry digest did not match BuildKit digest."
         if [[ "${registry_digest}" != "${digest}" ]]; then
             echo "Registry digest '${registry_digest}' does not match BuildKit digest '${digest}'." >&2
             exit 1
         fi
+        candidate_output_status="passed"
     fi
-    printf '%s@%s\n' "${image_ref%:*}" "${digest}"
+    candidate_immutable_reference="${image_ref%:*}@${digest}"
+    candidate_operation_succeeded=true
+    printf '%s\n' "${candidate_immutable_reference}"
 else
-    tarball_digest="$(
+    candidate_failure_category="oci-verification-failed"
+    candidate_failure_detail="OCI output verification failed."
+    if ! tarball_digest="$(
         tar -xOf "${oci_output}" index.json |
             jq -r '.manifests[0].digest // empty'
-    )"
+    )"; then
+        echo "OCI output verification failed." >&2
+        exit 1
+    fi
+    candidate_failure_category="oci-digest-mismatch"
+    candidate_failure_detail="OCI output digest did not match BuildKit digest."
     if [[ "${tarball_digest}" != "${digest}" ]]; then
         echo "OCI output digest '${tarball_digest}' does not match BuildKit digest '${digest}'." >&2
         exit 1
     fi
     digest_blob="blobs/sha256/${digest#sha256:}"
+    candidate_failure_category="oci-manifest-missing"
+    candidate_failure_detail="OCI output omitted its declared manifest blob."
     if ! tar -tf "${oci_output}" | grep -Fqx "${digest_blob}"; then
         echo "OCI output does not contain its declared manifest blob." >&2
         exit 1
     fi
+    candidate_output_status="passed"
+    candidate_operation_succeeded=true
     printf 'oci://%s@%s\n' "${oci_output}" "${digest}"
 fi
