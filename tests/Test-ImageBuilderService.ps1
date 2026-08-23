@@ -183,7 +183,8 @@ Add-Check (
     $helper -match '\$\{usage\}" == "null"' -and
     $helper -match [regex]::Escape(
         'PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS:-180') -and
-    $helper -match 'while \(\(SECONDS < cleanup_deadline\)\)'
+    $helper -match 'while true' -and
+    $helper -match 'if \(\(SECONDS >= cleanup_deadline\)\)'
 ) 'Image-builder helper does not verify bounded empty cache and history state.'
 
 $readyCandidate = @{

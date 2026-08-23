@@ -404,36 +404,27 @@ cleanup_builder() {
     local histories
     local usage
 
-    while ((SECONDS < cleanup_deadline)); do
-        if ! buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null; then
-            sleep 1
-            continue
-        fi
-        if ! buildctl "${buildctl_arguments[@]}" prune --all >/dev/null; then
-            sleep 1
-            continue
-        fi
-        if ! usage="$(
-            buildctl \
-                "${buildctl_arguments[@]}" \
-                du \
-                --format '{{json .}}'
-        )"; then
-            sleep 1
-            continue
-        fi
-        if ! histories="$(
-            buildctl \
-                "${buildctl_arguments[@]}" \
-                debug histories \
-                --format '{{json .}}'
-        )"; then
-            sleep 1
-            continue
-        fi
-        if [[ -z "${histories}" ]] &&
+    while true; do
+        if buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null &&
+            buildctl "${buildctl_arguments[@]}" prune --all >/dev/null &&
+            usage="$(
+                buildctl \
+                    "${buildctl_arguments[@]}" \
+                    du \
+                    --format '{{json .}}'
+            )" &&
+            histories="$(
+                buildctl \
+                    "${buildctl_arguments[@]}" \
+                    debug histories \
+                    --format '{{json .}}'
+            )" &&
+            [[ -z "${histories}" ]] &&
             [[ -z "${usage}" || "${usage}" == "null" ]]; then
             return 0
+        fi
+        if ((SECONDS >= cleanup_deadline)); then
+            break
         fi
         sleep 1
     done

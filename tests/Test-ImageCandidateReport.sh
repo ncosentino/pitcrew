@@ -129,6 +129,7 @@ export PITCREW_TEST_DIGEST="${DIGEST}"
 
 export PITCREW_TEST_CLEANUP_RESULT=failure
 export PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS=1
+DIRTY_STDERR="${TEMP_DIRECTORY}/dirty-candidate.stderr"
 if "${HELPER}" \
     --image-ref registry.example/example/application-ci:dirty \
     --context "${CONTEXT_DIRECTORY}" \
@@ -137,11 +138,15 @@ if "${HELPER}" \
     --output-oci "${OUTPUT_DIRECTORY}/dirty.tar" \
     --candidate-output "${OUTPUT_DIRECTORY}/dirty-candidate.json" \
     --recipe-id application-ci \
-    >/dev/null 2>&1; then
+    >/dev/null 2>"${DIRTY_STDERR}"; then
     fail "Dirty BuildKit preflight returned success."
 fi
 unset PITCREW_TEST_CLEANUP_RESULT
 unset PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS
+if [[ ! -f "${OUTPUT_DIRECTORY}/dirty-candidate.json" ]]; then
+    cat "${DIRTY_STDERR}" >&2
+    fail "Preflight cleanup did not emit a failed candidate report."
+fi
 assert_json \
     "${OUTPUT_DIRECTORY}/dirty-candidate.json" \
     '.status == "failed"
