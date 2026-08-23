@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.15.0') 'The operations plugin minor version was not advanced for explicit missing-manager recovery.'
+Add-Check ($plugin.version -eq '1.16.0') 'The operations plugin minor version was not advanced for support-release qualification.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -402,6 +402,15 @@ Add-Check (
     $remoteDiagnosticsSkill -match '(?m)^### Explicit WinRM' -and
     $remoteDiagnosticsSkill -match '(?m)^### Agent handoff'
 ) 'The remote diagnostics skill does not expose all approved execution paths.'
+Add-Check (
+    $remoteDiagnosticsSkill -match '(?m)^## Support release qualification' -and
+    $remoteDiagnosticsSkill -match 'fresh or exact idempotently resumed enrollment' -and
+    $remoteDiagnosticsSkill -match 'bootstrap-material removal followed by an agent-only restart' -and
+    $remoteDiagnosticsSkill -match 'second accepted relay poll' -and
+    $remoteDiagnosticsSkill -match 'completed signed read-only diagnostic' -and
+    $remoteDiagnosticsSkill -match 'never infer compatibility from package\s+presence or version equality' -and
+    $remoteDiagnosticsSkill -match 'Direct.*, `Ssh`, `WinRM`, and `Package`'
+) 'The remote diagnostics skill can qualify or expand a support release without complete canary evidence.'
 Add-Check (
     $remoteDiagnosticsSkill -match 'Never read `\.env`' -and
     $remoteDiagnosticsSkill -match 'Never add a generic inbound command channel' -and

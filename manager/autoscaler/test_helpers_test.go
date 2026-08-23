@@ -148,6 +148,12 @@ func (s *fakeScaleSetService) generateJIT(
 	}, nil
 }
 
+func (s *fakeScaleSetService) jitCallCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.jitCalls
+}
+
 func (s *fakeScaleSetService) removeRunner(_ context.Context, runnerID int64) error {
 	s.mu.Lock()
 	s.removeCalls = append(s.removeCalls, runnerID)
