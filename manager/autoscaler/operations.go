@@ -13,6 +13,13 @@ const (
 	dockerOperationTimeout   = 25 * time.Second
 	containerMonitorWindow   = time.Minute
 	cleanupOperationTimeout  = 10 * time.Second
+	// containerLivenessReconcileGrace is how long a runner's container
+	// liveness may go unconfirmed (by its own monitor pair or by
+	// reconcileContainerLiveness) before an independent probe is required.
+	// It is a wide multiple of containerMonitorWindow so a healthy monitor
+	// cycle never trips it; it only fires once a monitor pair has stopped
+	// making progress entirely.
+	containerLivenessReconcileGrace = 3 * containerMonitorWindow
 )
 
 type contextOperationResult[T any] struct {

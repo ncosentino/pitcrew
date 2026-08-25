@@ -5712,7 +5712,7 @@ Add-Check (
     $containerSupervision -match [regex]::Escape(
         'probe_monitored_container') -and
     $containerSupervision -match [regex]::Escape(
-        'host_admission_queue_release "${monitored_slot_path##*/}"')
+        'host_admission_queue_release "${finalize_slot_path##*/}"')
 ) 'Fixed worker supervision is not bounded, exactly probed, and release-queued before identity cleanup.'
 Add-Check ($manager -notmatch [regex]::Escape('rm -f "${slot_state_path}/connected"')) 'The connect-marker transition is still opened outside a fresh worker launch.'
 Add-Check ($manager -notmatch 'clearing any leftover managed runners') 'Manager startup still destroys workers left by its predecessor.'
@@ -5851,6 +5851,26 @@ Add-Check (
     $managerDockerfile -match [regex]::Escape(
         '/usr/local/bin/container-supervision.sh')
 ) 'The manager image does not ship the bounded container supervision helper.'
+Add-Check (
+    $manager -match [regex]::Escape(
+        '. "${SCRIPT_DIRECTORY}/slot-registry.sh"') -and
+    $managerDockerfile -match [regex]::Escape(
+        'COPY slot-registry.sh /usr/local/bin/slot-registry.sh') -and
+    ([regex]::Matches(
+        $managerDockerfile,
+        [regex]::Escape('/usr/local/bin/slot-registry.sh')
+    )).Count -ge 2
+) 'The manager image does not ship and mark executable the identity-validated slot registry the manager sources from its installed path.'
+Add-Check (
+    $containerSupervision -match [regex]::Escape(
+        'CONTAINER_MONITOR_GROUP_LEADER_SCRIPT="${SCRIPT_DIRECTORY}/container-monitor-group-leader.sh"') -and
+    $managerDockerfile -match [regex]::Escape(
+        'COPY container-monitor-group-leader.sh /usr/local/bin/container-monitor-group-leader.sh') -and
+    ([regex]::Matches(
+        $managerDockerfile,
+        [regex]::Escape('/usr/local/bin/container-monitor-group-leader.sh')
+    )).Count -ge 2
+) 'The manager image does not ship and mark executable the bounded monitor process-group leader the manager launches from its installed path.'
 Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
 Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'
 Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'

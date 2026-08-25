@@ -6,6 +6,9 @@ ROOT=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 . "${ROOT}/manager/observability.sh"
 . "${ROOT}/manager/registration.sh"
 . "${ROOT}/manager/diagnostics.sh"
+SCRIPT_DIRECTORY="${ROOT}/manager"
+. "${ROOT}/manager/container-supervision.sh"
+. "${ROOT}/manager/slot-registry.sh"
 
 TEMP_DIRECTORY=$(mktemp -d)
 trap 'rm -rf "${TEMP_DIRECTORY}"' EXIT
@@ -1977,5 +1980,117 @@ jq '.hostAdmission.accounting.pendingUnits = null | .hostAdmission.accounting.wi
 assert_false \
     "Available host admission accepted unknown demand accounting." \
     observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+
+SLOT_DIRECTORY="${TEMP_DIRECTORY}/slots"
+mkdir -p "${SLOT_DIRECTORY}"
+start_slot_calls="${TEMP_DIRECTORY}/start-slot-calls.txt"
+: > "${start_slot_calls}"
+start_slot() {
+    printf '%s\t%s\t%s\n' "$1" "$2" "$3" >> "${start_slot_calls}"
+    mkdir -p "$(slot_path "$1")"
+}
+mark_observed_state_dirty() {
+    :
+}
+
+# Two sentinels are needed: slot_supervisor_identity_matches also requires
+# the recorded pid's ppid to equal this caller ($$), which only a genuine
+# child process satisfies. The child sentinel proves the true-positive
+# (matching) case; the orphan sentinel proves a real, unrelated, live pid
+# (the realistic shape of pid reuse) is never trusted, and is safe to reap
+# via remove_slot_registry's wait since it is not this script's own child.
+sh -c 'trap : TERM; while :; do sleep 1; done' >/dev/null 2>&1 &
+sentinel_child_pid=$!
+sentinel_orphan_pid_file="${TEMP_DIRECTORY}/sentinel-orphan.pid"
+(
+    sh -c 'trap : TERM; while :; do sleep 1; done' >/dev/null 2>&1 &
+    echo "$!" > "${sentinel_orphan_pid_file}"
+) &
+wait "$!"
+sentinel_orphan_pid=$(cat "${sentinel_orphan_pid_file}")
+trap '
+    kill -KILL "${sentinel_child_pid}" 2>/dev/null || true
+    kill -KILL "${sentinel_orphan_pid}" 2>/dev/null || true
+    rm -rf "${TEMP_DIRECTORY}"
+' EXIT
+sentinel_child_starttime=$(process_starttime "${sentinel_child_pid}") || fail "Child sentinel process-birth starttime could not be captured."
+[ -n "${sentinel_child_starttime}" ] || fail "Child sentinel process-birth starttime was empty."
+sentinel_orphan_starttime=$(process_starttime "${sentinel_orphan_pid}") || fail "Orphan sentinel process-birth starttime could not be captured."
+[ -n "${sentinel_orphan_starttime}" ] || fail "Orphan sentinel process-birth starttime was empty."
+
+# Matching identity: the recorded pid+starttime are the child sentinel's own
+# real birth identity, so slot_is_running must trust it as the original
+# supervisor.
+matching_slot=$(slot_path "identity-matching")
+mkdir -p "${matching_slot}"
+printf '%s\n' "${sentinel_child_pid}" > "${matching_slot}/pid"
+printf '%s\n' "${sentinel_child_starttime}" > "${matching_slot}/pid-starttime"
+assert_true \
+    "slot_is_running rejected a pid whose recorded starttime matched the live process." \
+    slot_is_running "identity-matching"
+
+# Mismatched identity: a real, live, unrelated pid recorded with a starttime
+# that cannot be its own, simulating the numeric pid having been reused by
+# an unrelated live process after the originally-tracked supervisor exited.
+mismatched_slot=$(slot_path "identity-mismatched")
+mkdir -p "${mismatched_slot}"
+printf '%s\n' "${sentinel_orphan_pid}" > "${mismatched_slot}/pid"
+printf '%s\n' "$((sentinel_orphan_starttime + 1))" > "${mismatched_slot}/pid-starttime"
+assert_false \
+    "slot_is_running trusted a live pid whose recorded starttime did not match." \
+    slot_is_running "identity-mismatched"
+assert_true \
+    "slot_is_running signaled or otherwise disturbed an unrelated live process while classifying a mismatched pid." \
+    kill -0 "${sentinel_orphan_pid}"
+
+# Legacy record: a pid file with no recorded starttime at all must fail
+# closed as stopped, never fall back to trusting kill -0 alone.
+legacy_slot=$(slot_path "identity-legacy")
+mkdir -p "${legacy_slot}"
+printf '%s\n' "${sentinel_orphan_pid}" > "${legacy_slot}/pid"
+assert_false \
+    "slot_is_running trusted a legacy record with no recorded starttime." \
+    slot_is_running "identity-legacy"
+assert_true \
+    "slot_is_running signaled or otherwise disturbed the sentinel while classifying a legacy record." \
+    kill -0 "${sentinel_orphan_pid}"
+rm -rf "${legacy_slot}"
+
+# reconcile_slots-level respawn proof: the mismatched-identity desired slot
+# above must be discarded and respawned; the matching-identity desired slot
+# must be left completely alone.
+reconcile_desired="${TEMP_DIRECTORY}/reconcile-desired.tsv"
+printf 'identity-matching\trepo\ttag\nidentity-mismatched\trepo\ttag\n' > "${reconcile_desired}"
+reconcile_added="${TEMP_DIRECTORY}/reconcile-added.txt"
+reconcile_draining="${TEMP_DIRECTORY}/reconcile-draining.txt"
+reconcile_unchanged="${TEMP_DIRECTORY}/reconcile-unchanged.txt"
+: > "${start_slot_calls}"
+reconcile_slots \
+    "${reconcile_desired}" \
+    "${reconcile_added}" \
+    "${reconcile_draining}" \
+    "${reconcile_unchanged}"
+assert_true \
+    "reconcile_slots did not respawn a desired slot behind a mismatched-identity pid." \
+    grep -Fq "identity-mismatched" "${start_slot_calls}"
+assert_true \
+    "reconcile_slots did not report the respawned mismatched-identity slot as added." \
+    grep -Fqx "identity-mismatched" "${reconcile_added}"
+assert_false \
+    "reconcile_slots respawned a desired slot whose recorded identity still matched its live process." \
+    grep -Fq "identity-matching" "${start_slot_calls}"
+assert_true \
+    "reconcile_slots did not report the untouched matching-identity slot as unchanged." \
+    grep -Fqx "identity-matching" "${reconcile_unchanged}"
+assert_true \
+    "reconcile_slots disturbed the unrelated live sentinel while respawning a mismatched-identity slot." \
+    kill -0 "${sentinel_orphan_pid}"
+assert_true \
+    "reconcile_slots disturbed the still-live matched supervisor while leaving it unchanged." \
+    kill -0 "${sentinel_child_pid}"
+
+kill -KILL "${sentinel_child_pid}" 2>/dev/null || true
+kill -KILL "${sentinel_orphan_pid}" 2>/dev/null || true
+rm -rf "${SLOT_DIRECTORY}"
 
 echo "Manager reconciliation contracts passed: ${ASSERTIONS} assertions."

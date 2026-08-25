@@ -132,6 +132,8 @@ jobs:
           sh -n manager/diagnostics.sh
           sh -n manager/host-admission.sh
           sh -n manager/container-supervision.sh
+          sh -n manager/container-monitor-group-leader.sh
+          sh -n manager/slot-registry.sh
           sh -n manager/reconciliation.sh
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/Test-HostAdmission.sh
