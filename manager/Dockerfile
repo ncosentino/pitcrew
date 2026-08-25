@@ -87,6 +87,8 @@ COPY registration.sh /usr/local/bin/registration.sh
 COPY diagnostics.sh /usr/local/bin/diagnostics.sh
 COPY host-admission.sh /usr/local/bin/host-admission.sh
 COPY container-supervision.sh /usr/local/bin/container-supervision.sh
+COPY container-monitor-group-leader.sh /usr/local/bin/container-monitor-group-leader.sh
+COPY slot-registry.sh /usr/local/bin/slot-registry.sh
 COPY manage-runners.sh /usr/local/bin/manage-runners.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh
 RUN timeout -s TERM -k 1 1 true && \
@@ -98,6 +100,8 @@ RUN timeout -s TERM -k 1 1 true && \
     /usr/local/bin/diagnostics.sh \
     /usr/local/bin/host-admission.sh \
     /usr/local/bin/container-supervision.sh \
+    /usr/local/bin/container-monitor-group-leader.sh \
+    /usr/local/bin/slot-registry.sh \
     /usr/local/bin/reconciliation.sh \
     /usr/local/bin/pitcrew-autoscaler \
     /usr/local/bin/pitcrew-admission

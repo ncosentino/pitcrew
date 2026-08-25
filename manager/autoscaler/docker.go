@@ -86,6 +86,7 @@ type execCommandExecutor struct{}
 
 func (execCommandExecutor) run(ctx context.Context, arguments ...string) ([]byte, error) {
 	command := exec.CommandContext(ctx, "docker", arguments...)
+	configureProcessGroup(command)
 	output, err := command.Output()
 	if err != nil {
 		if ctx.Err() != nil {
@@ -102,6 +103,7 @@ func (execCommandExecutor) stream(
 	onLine func(string),
 ) error {
 	command := exec.CommandContext(ctx, "docker", arguments...)
+	configureProcessGroup(command)
 	reader, writer := io.Pipe()
 	command.Stdout = writer
 	command.Stderr = writer

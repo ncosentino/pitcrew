@@ -41,27 +41,33 @@ const (
 )
 
 type runnerRecord struct {
-	key                 string
-	targetKey           string
-	repository          string
-	runnerName          string
-	runnerID            int64
-	containerID         string
-	container           string
-	containerRunning    bool
-	state               runnerLifecycleState
-	startedAt           time.Time
-	updatedAt           time.Time
-	idleSince           *time.Time
-	jobStartedAt        *time.Time
-	completedAt         *time.Time
-	currentJob          *observedJobContext
-	revision            string
-	stale               bool
-	fenceRetryAt        *time.Time
-	recovered           bool
-	protected           bool
-	registrationRemoved bool
+	key              string
+	targetKey        string
+	repository       string
+	runnerName       string
+	runnerID         int64
+	containerID      string
+	container        string
+	containerRunning bool
+	// containerConfirmedAt is the last time this container's liveness was
+	// independently established: at launch/recovery, by the monitor pair's
+	// own wait/isRunning cycle, or by reconcileContainerLiveness. It is the
+	// sole input to that reconciliation's staleness check, so it must never
+	// be advanced without an actual liveness observation.
+	containerConfirmedAt time.Time
+	state                runnerLifecycleState
+	startedAt            time.Time
+	updatedAt            time.Time
+	idleSince            *time.Time
+	jobStartedAt         *time.Time
+	completedAt          *time.Time
+	currentJob           *observedJobContext
+	revision             string
+	stale                bool
+	fenceRetryAt         *time.Time
+	recovered            bool
+	protected            bool
+	registrationRemoved  bool
 	// hostSlotKey is the host-admission lease slot key acquired before this
 	// worker's JIT config was generated (see host_admission.go). It is empty
 	// when host admission is disabled. Recovery preserves or derives this
@@ -580,6 +586,9 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		operationErrors = append(operationErrors, err)
 	}
 	if err := s.retireStaleRunners(ctx); err != nil {
+		operationErrors = append(operationErrors, err)
+	}
+	if err := s.reconcileContainerLiveness(ctx); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
 	s.mu.Lock()
@@ -1529,20 +1538,21 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 
 	now := s.clock.now().UTC()
 	runner := &runnerRecord{
-		key:              slotKey,
-		targetKey:        s.target.key,
-		repository:       s.target.repository,
-		runnerName:       jit.runnerName,
-		runnerID:         jit.runnerID,
-		containerID:      containerID,
-		container:        containerName,
-		containerRunning: true,
-		state:            runnerStarting,
-		revision:         s.workerRevision,
-		startedAt:        now,
-		updatedAt:        now,
-		hostSlotKey:      hostSlotKey,
-		hostLeaseAdopted: hostAdmissionEnabled,
+		key:                  slotKey,
+		targetKey:            s.target.key,
+		repository:           s.target.repository,
+		runnerName:           jit.runnerName,
+		runnerID:             jit.runnerID,
+		containerID:          containerID,
+		container:            containerName,
+		containerRunning:     true,
+		containerConfirmedAt: now,
+		state:                runnerStarting,
+		revision:             s.workerRevision,
+		startedAt:            now,
+		updatedAt:            now,
+		hostSlotKey:          hostSlotKey,
+		hostLeaseAdopted:     hostAdmissionEnabled,
 	}
 	s.mu.Lock()
 	if s.shuttingDown {
@@ -1870,16 +1880,17 @@ func (s *runnerScaler) insertRecoveredRunner(
 		startedAt = s.clock.now().UTC()
 	}
 	runner := &runnerRecord{
-		key:              container.slotKey,
-		targetKey:        container.targetKey,
-		repository:       s.target.repository,
-		runnerName:       container.runnerName,
-		runnerID:         container.runnerID,
-		containerID:      container.containerID,
-		container:        container.name,
-		containerRunning: true,
-		state:            runnerStarting,
-		revision:         container.revision,
+		key:                  container.slotKey,
+		targetKey:            container.targetKey,
+		repository:           s.target.repository,
+		runnerName:           container.runnerName,
+		runnerID:             container.runnerID,
+		containerID:          container.containerID,
+		container:            container.name,
+		containerRunning:     true,
+		containerConfirmedAt: s.clock.now().UTC(),
+		state:                runnerStarting,
+		revision:             container.revision,
 		stale: container.revision != s.workerRevision &&
 			!(container.revision == "" && s.assumeUnversioned),
 		startedAt:        startedAt,
@@ -2020,6 +2031,64 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 	return errors.Join(operationErrors...)
 }
 
+// reconcileContainerLiveness independently re-verifies exact container
+// existence for any runner whose liveness has gone unconfirmed for
+// containerLivenessReconcileGrace. Correctness must never depend solely on
+// a runner's own monitor pair reaching a terminal branch: a docker CLI
+// process that outlives its bounded cancellation, a manager restart that
+// adopts a runner before confirming it, or any future gap in those paths
+// would otherwise strand that runner's slot and host-admission lease for
+// as long as the manager keeps running. An ambiguous probe changes nothing
+// (fail-closed, retried again once the grace elapses on the next tick);
+// only a proven-absent container reuses handleContainerExitLocked's exact
+// write-ahead cleanup, identical to a normally observed exit.
+func (s *runnerScaler) reconcileContainerLiveness(ctx context.Context) error {
+	now := s.clock.now().UTC()
+	s.mu.Lock()
+	candidates := make([]runnerRecord, 0)
+	for _, runner := range s.runners {
+		if runner.containerID == "" {
+			continue
+		}
+		if now.Sub(runner.containerConfirmedAt) < containerLivenessReconcileGrace {
+			continue
+		}
+		candidates = append(candidates, *runner)
+	}
+	s.mu.Unlock()
+	if len(candidates) == 0 {
+		return nil
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].key < candidates[j].key
+	})
+
+	var operationErrors []error
+	for _, candidate := range candidates {
+		running, err := s.docker.isRunning(ctx, candidate.containerID)
+		if err != nil {
+			operationErrors = append(operationErrors, fmt.Errorf(
+				"reconcile container liveness for %s: %w",
+				candidate.containerID,
+				err,
+			))
+			continue
+		}
+		if running {
+			s.mu.Lock()
+			if current := s.runners[candidate.key]; current != nil &&
+				current.containerID == candidate.containerID {
+				current.containerRunning = true
+				current.containerConfirmedAt = s.clock.now().UTC()
+			}
+			s.mu.Unlock()
+			continue
+		}
+		s.handleContainerExitLocked(candidate.containerID, nil, false)
+	}
+	return errors.Join(operationErrors...)
+}
+
 func (s *runnerScaler) monitorRunner(runner *runnerRecord, since time.Time) {
 	monitorContext, cancelMonitor := context.WithCancel(s.lifecycleContext)
 	go func() {
@@ -2137,6 +2206,7 @@ func (s *runnerScaler) confirmContainerRunning(containerID string) bool {
 		return false
 	}
 	runner.containerRunning = true
+	runner.containerConfirmedAt = s.clock.now().UTC()
 	return true
 }
 
@@ -2235,6 +2305,21 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 		return
 	}
 	defer s.releaseOperation()
+	s.handleContainerExitLocked(containerID, exitCode, true)
+}
+
+// handleContainerExitLocked performs the exact-absence cleanup shared by a
+// monitor pair's own confirmed exit and reconcileContainerLiveness's
+// independent probe. The caller must already hold the operation gate.
+// triggerReconcile is false when the caller (reconcileContainerLiveness,
+// itself running inside reconcileLocked) will have its own capacity
+// comparison run immediately afterward, so this never recurses into
+// reconcileLocked from within reconcileLocked.
+func (s *runnerScaler) handleContainerExitLocked(
+	containerID string,
+	exitCode *int,
+	triggerReconcile bool,
+) {
 	diagnostic := s.captureExitEvidence(containerID, exitCode)
 	s.mu.Lock()
 	runner := s.findRunnerByContainerLocked(containerID)
@@ -2297,7 +2382,7 @@ func (s *runnerScaler) handleContainerExit(containerID string, exitCode *int) {
 	if registrationRecord != nil {
 		s.attemptPendingRegistrationCleanup(*registrationRecord)
 	}
-	if needsReconcile && s.lifecycleContext.Err() == nil {
+	if triggerReconcile && needsReconcile && s.lifecycleContext.Err() == nil {
 		if _, err := s.reconcileLocked(s.lifecycleContext); err != nil {
 			s.onError(fmt.Errorf("restore runner target after container exit: %w", err))
 		}

@@ -11,6 +11,7 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/diagnostics.sh"
 . "${SCRIPT_DIRECTORY}/host-admission.sh"
 . "${SCRIPT_DIRECTORY}/container-supervision.sh"
+. "${SCRIPT_DIRECTORY}/slot-registry.sh"
 
 MANAGER_CONTRACT_VERSION=18
 EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-18}"
@@ -60,6 +61,33 @@ CONTAINER_MONITOR_WINDOW_SECONDS=60
 CONTAINER_MONITOR_PROBE_TIMEOUT_SECONDS=5
 CONTAINER_MONITOR_KILL_AFTER_SECONDS=5
 CONTAINER_MONITOR_RETRY_SECONDS=2
+# A stalled monitor heartbeat is treated as reconcilable after this many
+# seconds of silence; it is a wide multiple of CONTAINER_MONITOR_WINDOW_SECONDS
+# so a healthy monitor cycle (bounded by that window) is never mistaken for one
+# stuck inside an unresponsive docker logs/wait invocation.
+CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS="${PITCREW_CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS:-180}"
+CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS="${PITCREW_CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS:-60}"
+# Bounded settle window a stalled-monitor reconciliation pass allows after
+# signaling a wedged monitor's tracked docker logs/wait process groups (or
+# after escalating to the supervisor process itself) before deciding it must
+# perform the terminal cleanup itself rather than deferring to the monitor's
+# own normal path.
+CONTAINER_MONITOR_UNBLOCK_SECONDS="${PITCREW_CONTAINER_MONITOR_UNBLOCK_SECONDS:-5}"
+# Bounded window the docker-logs/docker-wait process-group leader itself
+# waits, after its own direct child exits, for the rest of its process group
+# to become empty before exiting. This keeps the leader's own pid (the only
+# proof reconciliation has that a recorded process group is still valid)
+# alive for at least as long as the worst-case time before independent
+# reconciliation ever gets a chance to signal it (heartbeat grace, plus one
+# more full reconciliation sweep interval, plus a full TERM+KILL escalation
+# round trip) so a genuinely wedged leader never gives up and exits on its
+# own first, leaving no still-alive pid reconciliation could ever trust.
+CONTAINER_MONITOR_GROUP_DRAIN_SECONDS="${PITCREW_CONTAINER_MONITOR_GROUP_DRAIN_SECONDS:-$((
+    CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS +
+    CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS +
+    (2 * CONTAINER_MONITOR_UNBLOCK_SECONDS) +
+    60
+))}"
 REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
 REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
@@ -163,6 +191,45 @@ case "${REGISTRATION_RECONCILE_INTERVAL}" in
         exit 1
         ;;
 esac
+case "${CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${CONTAINER_MONITOR_UNBLOCK_SECONDS}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_CONTAINER_MONITOR_UNBLOCK_SECONDS must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+case "${CONTAINER_MONITOR_GROUP_DRAIN_SECONDS}" in
+    ''|*[!0-9]*|0)
+        echo "[manager:${PROFILE_ID}] PITCREW_CONTAINER_MONITOR_GROUP_DRAIN_SECONDS must be a positive integer." >&2
+        exit 1
+        ;;
+esac
+# A monitor process-group leader that gives up and exits before independent
+# reconciliation's worst-case detection delay (heartbeat grace plus one more
+# full sweep interval) plus a full TERM+KILL escalation round trip has
+# elapsed leaves reconciliation nothing still-alive left to trust, so a
+# genuinely wedged descendant could never be reached. This is enforced at
+# startup rather than left as an operator footgun.
+REQUIRED_CONTAINER_MONITOR_GROUP_DRAIN_SECONDS=$((
+    CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS +
+    CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS +
+    (2 * CONTAINER_MONITOR_UNBLOCK_SECONDS)
+))
+if [ "${CONTAINER_MONITOR_GROUP_DRAIN_SECONDS}" -lt "${REQUIRED_CONTAINER_MONITOR_GROUP_DRAIN_SECONDS}" ]; then
+    echo "[manager:${PROFILE_ID}] PITCREW_CONTAINER_MONITOR_GROUP_DRAIN_SECONDS (${CONTAINER_MONITOR_GROUP_DRAIN_SECONDS}) must be at least PITCREW_CONTAINER_MONITOR_RECONCILE_GRACE_SECONDS + PITCREW_CONTAINER_MONITOR_RECONCILE_INTERVAL_SECONDS + (2 * PITCREW_CONTAINER_MONITOR_UNBLOCK_SECONDS) (${REQUIRED_CONTAINER_MONITOR_GROUP_DRAIN_SECONDS})." >&2
+    exit 1
+fi
 case "${REGISTRATION_CLEANUP_THRESHOLD}" in
     ''|*[!0-9]*|0)
         echo "[manager:${PROFILE_ID}] PITCREW_REGISTRATION_CLEANUP_THRESHOLD must be a positive integer." >&2
@@ -279,6 +346,7 @@ LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH=0
 LAST_RESOURCE_TELEMETRY_STATUS=""
 LAST_HOST_HARDWARE_SAMPLE_EPOCH=0
 LAST_REGISTRATION_RECONCILE_EPOCH=0
+LAST_CONTAINER_MONITOR_RECONCILE_EPOCH=0
 rand_hex() {
     tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 6
 }
@@ -694,29 +762,6 @@ shutdown() {
     exit 0
 }
 trap shutdown TERM INT
-
-slot_path() {
-    printf '%s/%s' "${SLOT_DIRECTORY}" "$1"
-}
-
-slot_is_running() {
-    candidate_path=$(slot_path "$1")
-    [ -f "${candidate_path}/pid" ] || return 1
-    candidate_pid=$(cat "${candidate_path}/pid")
-    kill -0 "${candidate_pid}" 2>/dev/null
-}
-
-remove_slot_registry() {
-    removed_path=$(slot_path "$1")
-    removed_registry=0
-    [ -d "${removed_path}" ] && removed_registry=1
-    if [ -f "${removed_path}/pid" ]; then
-        removed_pid=$(cat "${removed_path}/pid")
-        wait "${removed_pid}" 2>/dev/null || true
-    fi
-    rm -rf "${removed_path}"
-    [ "${removed_registry}" -eq 1 ] && mark_observed_state_dirty
-}
 
 record_container_image_identity() {
     identity_slot_path="$1"
@@ -1324,7 +1369,7 @@ start_slot() {
         0 \
         0 || true
     run_slot "${started_key}" "${started_repo}" "${started_tag}" &
-    printf '%s\n' "$!" > "${started_path}/pid"
+    record_slot_supervisor_pid "${started_path}" "$!"
 }
 
 start_recovered_slot() {
@@ -1363,7 +1408,7 @@ start_recovered_slot() {
         host_admission_track_adoption "${recovered_key}" || return 1
     fi
     run_slot "${recovered_key}" "${recovered_repo}" "${recovered_tag}" &
-    printf '%s\n' "$!" > "${recovered_path}/pid"
+    record_slot_supervisor_pid "${recovered_path}" "$!"
 }
 
 restore_managed_slots() {
@@ -1525,62 +1570,6 @@ acknowledgement_matches_current() {
             and .generation == $generation
             and .managerContractVersion == $managerContractVersion
         ' "${ACKNOWLEDGEMENT_PATH}" >/dev/null 2>&1
-}
-
-reconcile_slots() {
-    desired_slots_path="$1"
-    added_path="$2"
-    draining_path="$3"
-    unchanged_path="$4"
-    active_keys_path="/tmp/pitcrew-active-keys.$$"
-    undesired_keys_path="/tmp/pitcrew-undesired-keys.$$"
-    : > "${added_path}"
-    : > "${draining_path}"
-    : > "${unchanged_path}"
-
-    tab=$(printf '\t')
-    while IFS="${tab}" read -r desired_key desired_repo desired_tag; do
-        [ -n "${desired_key}" ] || continue
-        [ "${desired_repo}" = "-" ] && desired_repo=""
-        if slot_is_running "${desired_key}"; then
-            desired_drain_path="$(slot_path "${desired_key}")/drain"
-            if [ -f "${desired_drain_path}" ]; then
-                rm -f "${desired_drain_path}"
-                mark_observed_state_dirty
-            fi
-            printf '%s\n' "${desired_key}" >> "${unchanged_path}"
-        else
-            remove_slot_registry "${desired_key}"
-            start_slot "${desired_key}" "${desired_repo}" "${desired_tag}"
-            printf '%s\n' "${desired_key}" >> "${added_path}"
-        fi
-    done < "${desired_slots_path}"
-
-    : > "${active_keys_path}"
-    for active_path in "${SLOT_DIRECTORY}"/*; do
-        [ -d "${active_path}" ] || continue
-        active_key=${active_path##*/}
-        printf '%s\n' "${active_key}" >> "${active_keys_path}"
-    done
-    write_undesired_slot_keys \
-        "${desired_slots_path}" \
-        "${active_keys_path}" \
-        "${undesired_keys_path}"
-    while IFS= read -r active_key; do
-        [ -n "${active_key}" ] || continue
-        active_path=$(slot_path "${active_key}")
-        if slot_is_running "${active_key}"; then
-            if [ ! -f "${active_path}/drain" ]; then
-                : > "${active_path}/drain"
-                mark_observed_state_dirty
-            fi
-            printf '%s\n' "${active_key}" >> "${draining_path}"
-        else
-            remove_slot_registry "${active_key}"
-        fi
-    done < "${undesired_keys_path}"
-
-    rm -f "${active_keys_path}" "${undesired_keys_path}"
 }
 
 persist_accepted_state() {
@@ -1893,6 +1882,7 @@ while [ "${STOPPING}" -eq 0 ]; do
         rm -f "${periodic_added}" "${periodic_draining}" "${periodic_unchanged}"
     fi
     reconcile_runner_registrations
+    reconcile_stalled_container_monitors
     publish_observed_state 0
     sleep "${RECONCILE_INTERVAL}"
 done
