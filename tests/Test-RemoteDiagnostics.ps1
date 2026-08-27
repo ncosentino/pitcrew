@@ -302,6 +302,10 @@ try {
                 @{
                     url = 'https://github.com/example/project'
                     workers = 2
+                },
+                @{
+                    url = 'https://github.com/example/unassigned'
+                    workers = 1
                 })
             replicas = $null
         } | ConvertTo-Json -Depth 20)
@@ -854,6 +858,20 @@ if ($CommandArguments[0] -eq '-Pi') {
         $supportEnvelope.report.verifiedMeasurements.capacity[0].desiredWorkers -eq
             2
     ) 'The support collector read broader profile state instead of the dedicated evidence projection.'
+    $unassignedCapacity = @(
+        $supportEnvelope.report.verifiedMeasurements.capacity |
+            Where-Object {
+                $_.target -eq 'https://github.com/example/unassigned'
+            }
+    )
+    Add-Check (
+        $unassignedCapacity.Count -eq 1 -and
+        $unassignedCapacity[0].desiredWorkers -eq 1 -and
+        $unassignedCapacity[0].observedSlots -eq 0 -and
+        @($unassignedCapacity[0].states).Count -eq 0 -and
+        $null -eq $unassignedCapacity[0].liveWorkers -and
+        $null -eq $unassignedCapacity[0].mismatch
+    ) 'The support collector did not preserve a desired target with no observed slots as bounded unavailable evidence.'
     Add-Check (
         $null -eq $supportEnvelope.report.verifiedMeasurements.capacity[0].liveWorkers -and
         $null -eq $supportEnvelope.report.verifiedMeasurements.capacity[0].mismatch -and
