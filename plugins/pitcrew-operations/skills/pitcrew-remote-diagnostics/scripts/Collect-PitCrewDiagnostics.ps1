@@ -1644,7 +1644,10 @@ function Get-PitCrewCapacityComparison {
             Sort-Object -Unique)
     return @(
         foreach ($key in $keys) {
-            $group = @($observedGroups[$key])
+            $group = @()
+            if ($observedGroups.ContainsKey($key)) {
+                $group = @($observedGroups[$key])
+            }
             $registrationStatuses = @(
                 $group |
                     ForEach-Object {
@@ -1671,7 +1674,11 @@ function Get-PitCrewCapacityComparison {
                 liveWorkers = $live
                 observedSlots = $group.Count
                 registeredWorkers = $registered
-                states = @($group.state)
+                states = @(
+                    $group |
+                        ForEach-Object {
+                            Get-PitCrewProperty $_ 'state'
+                        })
                 scaleSet = Get-PitCrewProperty $targetMap $key
                 mismatch = if (-not $InventoryAvailable) {
                     $null
