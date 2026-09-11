@@ -1,0 +1,106 @@
+name: Automation control canary
+
+on:
+  pull_request:
+    paths:
+      - .github/workflows/automation-control-canary.yml
+
+permissions:
+  contents: read
+
+concurrency:
+  group: automation-control-canary-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  canary:
+    if: github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [automation-control]
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Verify runtime boundary
+        shell: bash
+        run: |
+          set -eu
+          test "$(id -u)" = "1001"
+          test -w "${HOME}"
+          test ! -S /var/run/docker.sock
+          ! command -v docker
+          ! command -v kubectl
+          ! command -v helm
+          ! command -v python3
+          ! command -v pip
+          ! command -v sudo
+          command -v git
+          command -v gh
+          command -v jq
+          command -v pwsh
+          test -x /actions-runner/externals/node20/bin/node
+          test -x /actions-runner/externals/node24/bin/node
+
+      - name: Exercise checkout and Git
+        shell: bash
+        run: |
+          set -eu
+          git rev-parse --is-inside-work-tree | grep -Fx true
+          test -z "$(git status --porcelain)"
+          git check-ref-format --branch automation-control-canary
+          temporary_repository="$(mktemp -d)"
+          trap 'rm -rf "${temporary_repository}"' EXIT
+          git init -q "${temporary_repository}"
+          git -C "${temporary_repository}" config user.name "PitCrew Canary"
+          git -C "${temporary_repository}" config user.email "canary@example.invalid"
+          printf 'canary\n' > "${temporary_repository}/evidence.txt"
+          git -C "${temporary_repository}" add evidence.txt
+          git -C "${temporary_repository}" commit -qm "test: create canary commit"
+          git -C "${temporary_repository}" rev-parse --verify HEAD >/dev/null
+
+      - name: Exercise GitHub REST
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          repository_id="$(gh api "repos/${GITHUB_REPOSITORY}" --jq '.id')"
+          test -n "${repository_id}"
+
+      - name: Exercise GitHub GraphQL
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -eu
+          owner="${GITHUB_REPOSITORY%%/*}"
+          name="${GITHUB_REPOSITORY#*/}"
+          repository="$(
+            gh api graphql \
+              -f query='query($owner:String!,$name:String!){repository(owner:$owner,name:$name){nameWithOwner}}' \
+              -F owner="${owner}" \
+              -F name="${name}" \
+              --jq '.data.repository.nameWithOwner'
+          )"
+          test "${repository}" = "${GITHUB_REPOSITORY}"
+
+      - name: Exercise PowerShell
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $payload = [ordered]@{
+              profile = 'automation-control'
+              status = 'canary'
+          } | ConvertTo-Json | ConvertFrom-Json
+          if ($payload.profile -cne 'automation-control' -or
+              $payload.status -cne 'canary') {
+              throw 'PowerShell JSON round trip failed.'
+          }
+          if (-not (Get-Command git -ErrorAction Stop) -or
+              -not (Get-Command gh -ErrorAction Stop) -or
+              -not (Get-Command jq -ErrorAction Stop)) {
+              throw 'Expected automation-control command is unavailable.'
+          }
