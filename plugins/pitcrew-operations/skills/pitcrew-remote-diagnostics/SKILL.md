@@ -253,11 +253,14 @@ checksum mismatches, package mismatches, unsupported schemas, unredacted root
 paths, and forbidden secret-bearing property names. It correlates preflight,
 connector outage, observed-state, and collection timestamps.
 
-For manager contract 18, the imported diagnosis must contain the validated,
+For manager contract 19, the imported diagnosis must contain the validated,
 bounded host-admission projection: status, namespace, epoch, decision sequence,
 host policy values and fingerprint, profile cost/reservation/borrowing and
-accounting, pending/withheld units, and the last decision. It must also preserve
-fixed or per-target capacity-deficit freshness and reasons.
+accounting, pending/withheld units, allocatable units/workers, theoretical
+maximum units/workers, the current bounded withholding reason, and the last
+decision. Contract 18 remains valid without the contract-19 capacity fields. The
+diagnosis must also preserve fixed or per-target capacity-deficit freshness and
+reasons.
 
 Classify evidence honestly:
 

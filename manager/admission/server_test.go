@@ -79,6 +79,9 @@ func TestServerClientAcquireActivateReleaseOverSocket(t *testing.T) {
 	if err != nil {
 		t.Fatalf("status over socket: %v", err)
 	}
+	if snapshot.ProtocolVersion != CurrentProtocolVersion {
+		t.Fatalf("status omitted negotiated protocol version: %+v", snapshot)
+	}
 	if len(snapshot.Leases) != 1 {
 		t.Fatalf("expected one lease in remote snapshot, got %d", len(snapshot.Leases))
 	}
@@ -117,22 +120,26 @@ func TestServerClientAdoptOverSocket(t *testing.T) {
 	}
 }
 
-func TestProtocolOneRejectsAdoptButStillServesExistingCommands(t *testing.T) {
+func TestPreviousProtocolSupportsExistingCommands(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
 	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
 	_, socketPath := startTestServer(t, coordinator)
 
 	previousClient := NewClient(socketPath).WithSupportedVersions([]int{previousProtocolVersion})
-	if _, err := previousClient.Status(); err != nil {
-		t.Fatalf("protocol one status should remain compatible: %v", err)
+	snapshot, err := previousClient.Status()
+	if err != nil {
+		t.Fatalf("previous protocol status should remain compatible: %v", err)
 	}
-	if _, err := previousClient.Adopt("alpha", "legacy-a"); !errors.Is(err, ErrProtocolMismatch) {
-		t.Fatalf("expected protocol one adoption to fail with ErrProtocolMismatch, got %v", err)
+	if snapshot.ProtocolVersion != previousProtocolVersion {
+		t.Fatalf("previous protocol status reported version %d", snapshot.ProtocolVersion)
+	}
+	if _, err := previousClient.Adopt("alpha", "legacy-a"); err != nil {
+		t.Fatalf("previous protocol adoption should remain compatible: %v", err)
 	}
 }
 
-func TestNewClientNegotiatesOrdinaryCommandsWithProtocolOneServer(t *testing.T) {
+func TestNewClientNegotiatesCommandsWithPreviousProtocolServer(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
 	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
@@ -142,23 +149,23 @@ func TestNewClientNegotiatesOrdinaryCommandsWithProtocolOneServer(t *testing.T) 
 	client := NewClient(socketPath)
 	response, err := client.call(Request{Command: CommandStatus})
 	if err != nil {
-		t.Fatalf("new client status against protocol one server: %v", err)
+		t.Fatalf("new client status against previous protocol server: %v", err)
 	}
 	if response.ProtocolVersion != previousProtocolVersion {
 		t.Fatalf("ordinary command negotiated protocol %d, want %d", response.ProtocolVersion, previousProtocolVersion)
 	}
 	if _, err := client.Acquire("alpha", "slot-a", 1); err != nil {
-		t.Fatalf("new client acquire against protocol one server: %v", err)
+		t.Fatalf("new client acquire against previous protocol server: %v", err)
 	}
-	if _, err := client.Adopt("alpha", "legacy-a"); !errors.Is(err, ErrProtocolMismatch) {
-		t.Fatalf("adopt should fail closed against protocol one server, got %v", err)
+	if _, err := client.Adopt("alpha", "legacy-a"); err != nil {
+		t.Fatalf("adopt against previous protocol server: %v", err)
 	}
-	if err := client.BeginAdoption("alpha"); !errors.Is(err, ErrProtocolMismatch) {
-		t.Fatalf("begin-adoption should fail closed against protocol one server, got %v", err)
+	if err := client.BeginAdoption("alpha"); err != nil {
+		t.Fatalf("begin-adoption against previous protocol server: %v", err)
 	}
 }
 
-func TestProtocolOneClientUsesOrdinaryCommandsAgainstProtocolTwoServer(t *testing.T) {
+func TestPreviousProtocolClientUsesCommandsAgainstCurrentServer(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
 	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
@@ -167,13 +174,34 @@ func TestProtocolOneClientUsesOrdinaryCommandsAgainstProtocolTwoServer(t *testin
 	client := NewClient(socketPath).WithSupportedVersions([]int{previousProtocolVersion})
 	response, err := client.call(Request{Command: CommandStatus})
 	if err != nil {
-		t.Fatalf("protocol one client status against new server: %v", err)
+		t.Fatalf("previous protocol client status against current server: %v", err)
 	}
 	if response.ProtocolVersion != previousProtocolVersion {
 		t.Fatalf("old client negotiated protocol %d, want %d", response.ProtocolVersion, previousProtocolVersion)
 	}
 	if _, err := client.Acquire("alpha", "slot-a", 1); err != nil {
-		t.Fatalf("protocol one client acquire against new server: %v", err)
+		t.Fatalf("previous protocol client acquire against current server: %v", err)
+	}
+}
+
+func TestPreviousProtocolReceivesUmbrellaBudgetError(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	_, socketPath := startTestServer(t, coordinator)
+
+	currentClient := NewClient(socketPath)
+	if _, err := currentClient.Acquire("alpha", "slot-a", 2); err != nil {
+		t.Fatalf("fill budget: %v", err)
+	}
+
+	previousClient := NewClient(socketPath).WithSupportedVersions([]int{previousProtocolVersion})
+	if _, err := previousClient.Acquire("alpha", "slot-b", 1); !errors.Is(err, ErrBudgetExceeded) ||
+		errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("previous protocol did not receive the umbrella budget error: %v", err)
+	}
+	if _, err := currentClient.Acquire("alpha", "slot-c", 1); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("current protocol did not receive the specific budget error: %v", err)
 	}
 }
 

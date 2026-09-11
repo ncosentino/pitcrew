@@ -492,7 +492,10 @@ function ConvertTo-PitCrewRemoteDiagnosticsAdmissionFingerprint {
 }
 
 function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
-    param([AllowNull()][object]$Admission)
+    param(
+        [AllowNull()][object]$Admission,
+        [AllowNull()][Nullable[int]]$ManagerContractVersion
+    )
 
     if ($null -eq $Admission) {
         return $null
@@ -603,8 +606,30 @@ function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
                 'heldUnits',
                 'borrowedUnits',
                 'pendingUnits',
-                'withheldUnits') `
+                'withheldUnits',
+                'allocatableUnits',
+                'allocatableWorkers',
+                'theoreticalMaximumUnits',
+                'theoreticalMaximumWorkers',
+                'withholdingReason') `
             -Context 'Host admission accounting'
+        $capacityFieldNames = @(
+            'allocatableUnits',
+            'allocatableWorkers',
+            'theoreticalMaximumUnits',
+            'theoreticalMaximumWorkers',
+            'withholdingReason')
+        if ($null -ne $ManagerContractVersion -and
+            $ManagerContractVersion -ge 19) {
+            $presentCapacityFields = @(
+                $capacityFieldNames |
+                    Where-Object {
+                        $null -ne $accountingValue.PSObject.Properties[$_]
+                    })
+            if ($presentCapacityFields.Count -ne $capacityFieldNames.Count) {
+                throw 'Contract-19 host admission capacity properties are missing.'
+            }
+        }
         $unitCost = ConvertTo-PitCrewRemoteDiagnosticsInteger `
             -Value (Get-PitCrewRemoteDiagnosticsProperty `
                 $accountingValue `
@@ -662,6 +687,42 @@ function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
                 $accountingValue `
                 'withheldUnits') `
             -Context 'Host admission withheld units'
+        $allocatableUnits = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'allocatableUnits') `
+            -Context 'Host admission allocatable units'
+        $allocatableWorkers = ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'allocatableWorkers') `
+            -Context 'Host admission allocatable workers'
+        $theoreticalMaximumUnits =
+            ConvertTo-PitCrewRemoteDiagnosticsInteger `
+                -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                    $accountingValue `
+                    'theoreticalMaximumUnits') `
+                -Context 'Host admission theoretical maximum units'
+        $theoreticalMaximumWorkers =
+            ConvertTo-PitCrewRemoteDiagnosticsInteger `
+                -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                    $accountingValue `
+                    'theoreticalMaximumWorkers') `
+                -Context 'Host admission theoretical maximum workers'
+        $withholdingReason = ConvertTo-PitCrewRemoteDiagnosticsSafeText `
+            -Value (Get-PitCrewRemoteDiagnosticsProperty `
+                $accountingValue `
+                'withholdingReason') `
+            -Context 'Host admission withholding reason' `
+            -MaximumLength 32
+        if ($null -ne $withholdingReason -and
+            $withholdingReason -notin @(
+                'budget-exhausted',
+                'protected-reservation',
+                'fair-share-contention',
+                'adoption-pending')) {
+            throw 'Host admission withholding reason is invalid.'
+        }
         if ($null -in @(
                 $reservedUnits,
                 $activeUnits,
@@ -682,6 +743,36 @@ function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
                 $pendingUnits -ne $withheldUnits)) {
             throw 'Host admission pending and withheld units are inconsistent.'
         }
+        $capacityValues = @(
+            $allocatableUnits,
+            $allocatableWorkers,
+            $theoreticalMaximumUnits,
+            $theoreticalMaximumWorkers)
+        $capacityValueCount =
+            @($capacityValues | Where-Object { $null -ne $_ }).Count
+        if ($capacityValueCount -ne 0 -and
+            $capacityValueCount -ne $capacityValues.Count) {
+            throw 'Host admission profile capacity is incomplete.'
+        }
+        if ($capacityValueCount -gt 0) {
+            if ($allocatableWorkers -ne
+                [Math]::Floor($allocatableUnits / $unitCost)) {
+                throw 'Host admission allocatable worker count is inconsistent.'
+            }
+            if ($theoreticalMaximumWorkers -ne
+                [Math]::Floor($theoreticalMaximumUnits / $unitCost)) {
+                throw 'Host admission theoretical worker count is inconsistent.'
+            }
+            if ($allocatableUnits -gt $theoreticalMaximumUnits) {
+                throw 'Host admission allocatable units exceed the theoretical maximum.'
+            }
+            if ($null -ne $withholdingReason -and
+                ($allocatableUnits -ne 0 -or $allocatableWorkers -ne 0)) {
+                throw 'Withheld host admission reported allocatable capacity.'
+            }
+        } elseif ($null -ne $withholdingReason) {
+            throw 'Host admission withholding reason lacks capacity evidence.'
+        }
         [PSCustomObject][ordered]@{
             unitCost = $unitCost
             reservedUnits = $reservedUnits
@@ -693,6 +784,11 @@ function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
             borrowedUnits = $borrowedUnits
             pendingUnits = $pendingUnits
             withheldUnits = $withheldUnits
+            allocatableUnits = $allocatableUnits
+            allocatableWorkers = $allocatableWorkers
+            theoreticalMaximumUnits = $theoreticalMaximumUnits
+            theoreticalMaximumWorkers = $theoreticalMaximumWorkers
+            withholdingReason = $withholdingReason
         }
     }
 
@@ -809,6 +905,15 @@ function ConvertTo-PitCrewRemoteDiagnosticsHostAdmission {
             $null -eq $accounting.pendingUnits -or
             $null -eq $accounting.withheldUnits) {
             throw 'Available host admission accounting is incomplete.'
+        }
+        if ($null -ne $ManagerContractVersion -and
+            $ManagerContractVersion -ge 19 -and
+            $null -in @(
+                $accounting.allocatableUnits,
+                $accounting.allocatableWorkers,
+                $accounting.theoreticalMaximumUnits,
+                $accounting.theoreticalMaximumWorkers)) {
+            throw 'Available contract-19 host admission capacity is incomplete.'
         }
     }
 
@@ -1429,10 +1534,15 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
         $pitcrewVersion -notmatch '^[A-Za-z0-9._+/-]{1,128}$') {
         throw 'PitCrew version evidence is invalid.'
     }
+    $managerContractVersion =
+        ConvertTo-PitCrewRemoteDiagnosticsInteger `
+            -Value $observed.managerContractVersion `
+            -Context 'Manager contract version'
     $hostAdmission = ConvertTo-PitCrewRemoteDiagnosticsHostAdmission `
         -Admission (Get-PitCrewRemoteDiagnosticsProperty `
             $observed `
-            'hostAdmission')
+            'hostAdmission') `
+        -ManagerContractVersion $managerContractVersion
     $capacityEvidence =
         ConvertTo-PitCrewRemoteDiagnosticsCapacityEvidence `
             -CapacityEvidence (Get-PitCrewRemoteDiagnosticsProperty `
@@ -1504,10 +1614,7 @@ function ConvertTo-PitCrewRemoteDiagnosticsReportSummary {
                     ConvertTo-PitCrewRemoteDiagnosticsInteger `
                         -Value $observed.drainingSlots `
                         -Context 'Draining slots'
-                managerContractVersion =
-                    ConvertTo-PitCrewRemoteDiagnosticsInteger `
-                        -Value $observed.managerContractVersion `
-                        -Context 'Manager contract version'
+                managerContractVersion = $managerContractVersion
                 workerRevision = if ($null -eq $static.workerRevision) {
                     $null
                 } elseif (
@@ -1797,7 +1904,22 @@ function New-PitCrewRemoteDiagnosticsDiagnosis {
             $null -ne $admission.accounting -and
             ($null -eq $admission.accounting.pendingUnits -or
                 $null -eq $admission.accounting.withheldUnits)
-        $admissionGap = if ($demandIncomplete) {
+        $capacityIncomplete = (
+            $managerContractVersion -ge 19 -and
+            $null -ne $admission.accounting -and
+            $null -in @(
+                $admission.accounting.allocatableUnits,
+                $admission.accounting.allocatableWorkers,
+                $admission.accounting.theoreticalMaximumUnits,
+                $admission.accounting.theoreticalMaximumWorkers)
+        )
+        $admissionGap = if ($capacityIncomplete) {
+            [PSCustomObject][ordered]@{
+                category = 'host-admission-capacity'
+                reason = 'Host admission responded without contract-19 profile capacity evidence.'
+                followUp = 'Complete the supported coordinator-first manager update, then collect a fresh sample.'
+            }
+        } elseif ($demandIncomplete) {
             [PSCustomObject][ordered]@{
                 category = 'host-admission-demand'
                 reason = 'Host admission responded, but current demand accounting was incomplete.'
@@ -1923,6 +2045,9 @@ function New-PitCrewRemoteDiagnosticsDiagnosisMarkdown {
         if ($null -ne $admission.accounting) {
             $null = $builder.AppendLine("- Unit cost / reservation / borrowable: ``$($admission.accounting.unitCost)`` / ``$($admission.accounting.reservedUnits)`` / ``$($admission.accounting.borrowable)``")
             $null = $builder.AppendLine("- Active / provisional / held / borrowed / pending / withheld units: ``$($admission.accounting.activeUnits)`` / ``$($admission.accounting.provisionalUnits)`` / ``$($admission.accounting.heldUnits)`` / ``$($admission.accounting.borrowedUnits)`` / ``$($admission.accounting.pendingUnits)`` / ``$($admission.accounting.withheldUnits)``")
+            $null = $builder.AppendLine("- Allocatable units / workers: ``$($admission.accounting.allocatableUnits)`` / ``$($admission.accounting.allocatableWorkers)``")
+            $null = $builder.AppendLine("- Theoretical maximum units / workers: ``$($admission.accounting.theoreticalMaximumUnits)`` / ``$($admission.accounting.theoreticalMaximumWorkers)``")
+            $null = $builder.AppendLine("- Current withholding reason: ``$($admission.accounting.withholdingReason)``")
         }
     }
     $null = $builder.AppendLine()

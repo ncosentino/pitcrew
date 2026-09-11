@@ -2187,6 +2187,30 @@ try {
                 -Profile $profileConfig `
                 -Generation ([int]$hostGenerationBase + 1)
         if ($candidateHostAdmissionPolicy) {
+            if (
+                $profileConfig.HostAdmission -and
+                $profileConfig.Autoscaling -and
+                $null -ne $profileConfig.Autoscaling.MaximumActiveWorkers
+            ) {
+                $profileAdmissionCapacity =
+                    Get-RunnerHostAdmissionProfileCapacity `
+                        -Policy $candidateHostAdmissionPolicy `
+                        -ProfileName $profileConfig.Name
+                if (
+                    [int]$profileConfig.Autoscaling.MaximumActiveWorkers -gt
+                    $profileAdmissionCapacity.TheoreticalMaximumWorkers
+                ) {
+                    Write-Warning (
+                        "Profile '$($profileConfig.Name)' configures maximumActiveWorkers " +
+                        "$($profileConfig.Autoscaling.MaximumActiveWorkers), but the current " +
+                        "host-admission policy has a theoretical ceiling of " +
+                        "$($profileAdmissionCapacity.TheoreticalMaximumWorkers) workers " +
+                        "($($profileAdmissionCapacity.TheoreticalMaximumUnits) units at " +
+                        "$($profileAdmissionCapacity.WorkerCostUnits) units per worker). " +
+                        'The value is retained because a later reviewed host-policy change may raise the ceiling.'
+                    )
+                }
+            }
             $hostAdmissionPolicyChanged = (
                 -not $currentHostAdmissionPolicy -or
                 (

@@ -338,29 +338,13 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 
 	unitCost := profilePolicy.UnitCost
 	held := c.heldUnitsByProfileLocked()
-	totalHeld := 0
-	for _, units := range held {
-		totalHeld += units
-	}
-	free := c.state.Policy.TotalUnits - totalHeld
-	if free < unitCost {
-		return Lease{}, ErrBudgetExceeded
-	}
-
-	ownRemaining := max(profilePolicy.ReservedUnits-held[profileID], 0)
-	fromReservation := ownRemaining >= unitCost
-	sharedPoolContenders := 0
-	if !fromReservation {
-		protected := c.protectedNonBorrowableLocked(profileID, held)
-		available := free - protected
-		if available < unitCost {
-			return Lease{}, ErrBudgetExceeded
-		}
-		granted, contenders := c.fairTurnLocked(profileID, held, available, unitCost)
-		if !granted {
-			return Lease{}, ErrBudgetExceeded
-		}
-		sharedPoolContenders = contenders
+	sharedPoolContenders, err := c.evaluateAcquireLocked(
+		profileID,
+		profilePolicy,
+		held,
+	)
+	if err != nil {
+		return Lease{}, err
 	}
 
 	sequence := c.state.DecisionSequence + 1
@@ -398,6 +382,42 @@ func (c *Coordinator) Acquire(profileID, slotKey string, pendingDemand int) (lea
 		c.advanceRotationLocked(sharedPoolContenders)
 	}
 	return granted, nil
+}
+
+func (c *Coordinator) evaluateAcquireLocked(
+	profileID string,
+	profilePolicy ProfilePolicy,
+	held map[string]int,
+) (int, error) {
+	totalHeld := 0
+	for _, units := range held {
+		totalHeld += units
+	}
+	free := c.state.Policy.TotalUnits - totalHeld
+	if free < profilePolicy.UnitCost {
+		return 0, ErrBudgetExhausted
+	}
+
+	ownRemaining := max(profilePolicy.ReservedUnits-held[profileID], 0)
+	if ownRemaining >= profilePolicy.UnitCost {
+		return 0, nil
+	}
+
+	protected := c.protectedNonBorrowableLocked(profileID, held)
+	available := free - protected
+	if available < profilePolicy.UnitCost {
+		return 0, ErrProtectedReservation
+	}
+	granted, contenders := c.fairTurnLocked(
+		profileID,
+		held,
+		available,
+		profilePolicy.UnitCost,
+	)
+	if !granted {
+		return 0, ErrFairShareContention
+	}
+	return contenders, nil
 }
 
 // Adopt records an already-running worker as an active lease. Unlike Acquire,
@@ -695,7 +715,7 @@ func (c *Coordinator) recordDecisionLocked(
 		DecidedAtUnixNano: now.UnixNano(),
 	}
 	if !granted && err != nil {
-		decision.FailureCategory = errorCodeForErr(err)
+		decision.FailureCategory = durableDecisionErrorCode(err)
 	}
 	next := c.state.clone()
 	next.LastDecision = &decision
@@ -703,6 +723,13 @@ func (c *Coordinator) recordDecisionLocked(
 		return
 	}
 	c.state = next
+}
+
+func durableDecisionErrorCode(err error) ErrorCode {
+	if errors.Is(err, ErrBudgetExceeded) {
+		return ErrorCodeBudgetExceeded
+	}
+	return errorCodeForErr(err)
 }
 
 // Snapshot is a read-only, deterministically ordered view of the
@@ -726,9 +753,16 @@ func (c *Coordinator) recordDecisionLocked(
 //   - WithheldUnits: the same outstanding unit demand while it remains
 //     ungranted. A successful Acquire consumes one worker from demand before
 //     status can report it.
+//   - AllocatableUnits/Workers: additional current capacity not held or
+//     protected from this profile. A current denied decision reports zero.
+//   - TheoreticalMaximumUnits/Workers: the static policy ceiling after other
+//     profiles' non-borrowable reservations are protected.
+//   - WithholdingReason: the coordinator-owned current denial category for
+//     refreshed pending demand, or nil when demand is not currently denied.
 //   - AvailableUnits (host-wide): EffectiveTotalUnits minus every profile's
 //     HeldUnits, the leftover host budget no profile currently holds.
 type Snapshot struct {
+	ProtocolVersion       int                 `json:"protocolVersion,omitempty"`
 	Namespace             string              `json:"namespace,omitempty"`
 	Epoch                 int64               `json:"epoch"`
 	DecisionSequence      int64               `json:"decisionSequence"`
@@ -750,17 +784,22 @@ type Snapshot struct {
 // applied policy, so its size is always bounded by the policy's own
 // (already-validated) profile count.
 type ProfileAccounting struct {
-	ProfileID                string `json:"profileId"`
-	UnitCost                 int    `json:"unitCost"`
-	ReservedUnits            int    `json:"reservedUnits"`
-	Borrowable               bool   `json:"borrowable"`
-	ProfilePolicyFingerprint string `json:"profilePolicyFingerprint,omitempty"`
-	ActiveUnits              int    `json:"activeUnits"`
-	ProvisionalUnits         int    `json:"provisionalUnits"`
-	HeldUnits                int    `json:"heldUnits"`
-	BorrowedUnits            int    `json:"borrowedUnits"`
-	PendingUnits             *int   `json:"pendingUnits"`
-	WithheldUnits            *int   `json:"withheldUnits"`
+	ProfileID                 string             `json:"profileId"`
+	UnitCost                  int                `json:"unitCost"`
+	ReservedUnits             int                `json:"reservedUnits"`
+	Borrowable                bool               `json:"borrowable"`
+	ProfilePolicyFingerprint  string             `json:"profilePolicyFingerprint,omitempty"`
+	ActiveUnits               int                `json:"activeUnits"`
+	ProvisionalUnits          int                `json:"provisionalUnits"`
+	HeldUnits                 int                `json:"heldUnits"`
+	BorrowedUnits             int                `json:"borrowedUnits"`
+	PendingUnits              *int               `json:"pendingUnits"`
+	WithheldUnits             *int               `json:"withheldUnits"`
+	AllocatableUnits          *int               `json:"allocatableUnits"`
+	AllocatableWorkers        *int               `json:"allocatableWorkers"`
+	TheoreticalMaximumUnits   *int               `json:"theoreticalMaximumUnits"`
+	TheoreticalMaximumWorkers *int               `json:"theoreticalMaximumWorkers"`
+	WithholdingReason         *WithholdingReason `json:"withholdingReason"`
 }
 
 // Status returns a deterministic snapshot of the current durable state.
@@ -799,7 +838,9 @@ func (c *Coordinator) Status() (Snapshot, error) {
 
 	activeHeld := make(map[string]int, len(policy.Profiles))
 	provisionalHeld := make(map[string]int, len(policy.Profiles))
+	heldByProfile := make(map[string]int, len(policy.Profiles))
 	for _, lease := range c.state.Leases {
+		heldByProfile[lease.ProfileID] += lease.Units
 		switch lease.Status {
 		case LeaseActive:
 			activeHeld[lease.ProfileID] += lease.Units
@@ -814,16 +855,26 @@ func (c *Coordinator) Status() (Snapshot, error) {
 		provisional := provisionalHeld[profileID]
 		held := active + provisional
 		totalHeld += held
+		capacity := c.profileCapacityLocked(profileID, heldByProfile)
+		allocatableUnits := capacity.allocatableUnits
+		allocatableWorkers := capacity.allocatableWorkers
+		theoreticalMaximumUnits := capacity.theoreticalMaximumUnits
+		theoreticalMaximumWorkers := capacity.theoreticalMaximumWorkers
 		accounting := ProfileAccounting{
-			ProfileID:                profileID,
-			UnitCost:                 profilePolicy.UnitCost,
-			ReservedUnits:            profilePolicy.ReservedUnits,
-			Borrowable:               profilePolicy.Borrowable,
-			ProfilePolicyFingerprint: profilePolicy.ProfilePolicyFingerprint,
-			ActiveUnits:              active,
-			ProvisionalUnits:         provisional,
-			HeldUnits:                held,
-			BorrowedUnits:            max(held-profilePolicy.ReservedUnits, 0),
+			ProfileID:                 profileID,
+			UnitCost:                  profilePolicy.UnitCost,
+			ReservedUnits:             profilePolicy.ReservedUnits,
+			Borrowable:                profilePolicy.Borrowable,
+			ProfilePolicyFingerprint:  profilePolicy.ProfilePolicyFingerprint,
+			ActiveUnits:               active,
+			ProvisionalUnits:          provisional,
+			HeldUnits:                 held,
+			BorrowedUnits:             max(held-profilePolicy.ReservedUnits, 0),
+			AllocatableUnits:          &allocatableUnits,
+			AllocatableWorkers:        &allocatableWorkers,
+			TheoreticalMaximumUnits:   &theoreticalMaximumUnits,
+			TheoreticalMaximumWorkers: &theoreticalMaximumWorkers,
+			WithholdingReason:         capacity.withholdingReason,
 		}
 		if c.demandKnown[profileID] {
 			pendingUnits := c.demand[profileID] * profilePolicy.UnitCost
@@ -835,6 +886,102 @@ func (c *Coordinator) Status() (Snapshot, error) {
 	}
 	snapshot.AvailableUnits = max(snapshot.EffectiveTotalUnits-totalHeld, 0)
 	return snapshot, nil
+}
+
+type profileCapacity struct {
+	allocatableUnits          int
+	allocatableWorkers        int
+	theoreticalMaximumUnits   int
+	theoreticalMaximumWorkers int
+	withholdingReason         *WithholdingReason
+}
+
+func (c *Coordinator) profileCapacityLocked(
+	profileID string,
+	held map[string]int,
+) profileCapacity {
+	profilePolicy, known := c.state.Policy.profile(profileID)
+	if !known {
+		return profileCapacity{}
+	}
+
+	protectedMaximum := 0
+	totalHeld := 0
+	for _, profile := range c.state.Policy.Profiles {
+		totalHeld += held[profile.ProfileID]
+		if profile.ProfileID != profileID && !profile.Borrowable {
+			protectedMaximum += profile.ReservedUnits
+		}
+	}
+	theoreticalUnits := max(c.state.Policy.TotalUnits-protectedMaximum, 0)
+	currentProtected := c.protectedNonBorrowableLocked(profileID, held)
+	currentFree := max(c.state.Policy.TotalUnits-totalHeld, 0)
+	allocatableUnits := max(currentFree-currentProtected, 0)
+	allocatableUnits = min(
+		allocatableUnits,
+		max(theoreticalUnits-held[profileID], 0),
+	)
+
+	var withholdingReason *WithholdingReason
+	if len(c.state.AdoptionFences) > 0 {
+		allocatableUnits = 0
+	}
+	if c.demandKnown[profileID] && c.demand[profileID] > 0 {
+		if len(c.state.AdoptionFences) == 0 {
+			ownRemaining := min(
+				max(profilePolicy.ReservedUnits-held[profileID], 0),
+				currentFree,
+			)
+			fairAllocatable, _ := c.fairAllocatableUnitsLocked(
+				profileID,
+				held,
+				max(currentFree-currentProtected, 0),
+			)
+			allocatableUnits = min(
+				max(ownRemaining, fairAllocatable),
+				max(theoreticalUnits-held[profileID], 0),
+			)
+		}
+		var reason WithholdingReason
+		var withheld bool
+		if len(c.state.AdoptionFences) > 0 {
+			reason = WithholdingAdoptionPending
+			withheld = true
+		} else if _, err := c.evaluateAcquireLocked(
+			profileID,
+			profilePolicy,
+			held,
+		); err != nil {
+			reason, withheld = withholdingReasonForError(err)
+		}
+		if withheld {
+			withholdingReason = &reason
+			allocatableUnits = 0
+		}
+	}
+
+	return profileCapacity{
+		allocatableUnits:          allocatableUnits,
+		allocatableWorkers:        allocatableUnits / profilePolicy.UnitCost,
+		theoreticalMaximumUnits:   theoreticalUnits,
+		theoreticalMaximumWorkers: theoreticalUnits / profilePolicy.UnitCost,
+		withholdingReason:         withholdingReason,
+	}
+}
+
+func withholdingReasonForError(err error) (WithholdingReason, bool) {
+	switch {
+	case errors.Is(err, ErrBudgetExhausted):
+		return WithholdingBudgetExhausted, true
+	case errors.Is(err, ErrProtectedReservation):
+		return WithholdingProtectedReservation, true
+	case errors.Is(err, ErrFairShareContention):
+		return WithholdingFairShareContention, true
+	case errors.Is(err, ErrAdoptionPending):
+		return WithholdingAdoptionPending, true
+	default:
+		return "", false
+	}
 }
 
 // sweepExpiredLocked removes every provisional lease whose in-process
@@ -952,20 +1099,23 @@ func (c *Coordinator) fairTurnLocked(
 	available int,
 	unitCost int,
 ) (granted bool, contenderCount int) {
+	allocatable, contenderCount := c.fairAllocatableUnitsLocked(
+		profileID,
+		held,
+		available,
+	)
+	return allocatable >= unitCost, contenderCount
+}
+
+func (c *Coordinator) fairAllocatableUnitsLocked(
+	profileID string,
+	held map[string]int,
+	available int,
+) (allocatable int, contenderCount int) {
 	contenders := c.contendersLocked()
 	count := len(contenders)
 	if count == 0 {
-		return available >= unitCost, 0
-	}
-	index := sort.SearchStrings(contenders, profileID)
-	isContender := index < count && contenders[index] == profileID
-
-	if isContender {
-		guarantee := c.guaranteedShareLocked(contenders, index, available)
-		sharedHeld := max(held[profileID]-c.reservedUnitsLocked(profileID), 0)
-		if sharedHeld+unitCost <= guarantee {
-			return true, count
-		}
+		return max(available, 0), 0
 	}
 
 	protected := 0
@@ -979,10 +1129,7 @@ func (c *Coordinator) fairTurnLocked(
 			protected += otherGuarantee - otherShared
 		}
 	}
-	if available-protected >= unitCost {
-		return true, count
-	}
-	return false, count
+	return max(available-protected, 0), count
 }
 
 // contendersLocked returns every policy-known profile with registered

@@ -70,6 +70,21 @@ func mustStatus(t *testing.T, coordinator *Coordinator) Snapshot {
 	return snapshot
 }
 
+func mustProfileAccounting(
+	t *testing.T,
+	snapshot Snapshot,
+	profileID string,
+) ProfileAccounting {
+	t.Helper()
+	for _, accounting := range snapshot.Accounting {
+		if accounting.ProfileID == profileID {
+			return accounting
+		}
+	}
+	t.Fatalf("profile accounting for %q was missing", profileID)
+	return ProfileAccounting{}
+}
+
 func mustInt(t *testing.T, value *int, name string) int {
 	t.Helper()
 	if value == nil {
@@ -205,7 +220,7 @@ func TestNonBorrowableReservationIsProtectedFromOtherProfiles(t *testing.T) {
 			t.Fatalf("expected unreserved unit %d to be admitted: %v", i, err)
 		}
 	}
-	if _, err := coordinator.Acquire("opportunistic", slotName(99), 2); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("opportunistic", slotName(99), 2); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected non-borrowable reservation to block further admission, got %v", err)
 	}
 
@@ -236,13 +251,13 @@ func TestBorrowableReservationParticipatesInSharedPoolButIsNeverPreempted(t *tes
 			t.Fatalf("expected borrower unit %d to be admitted from the shared pool: %v", i, err)
 		}
 	}
-	if _, err := coordinator.Acquire("borrower", slotName(99), 1); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("borrower", slotName(99), 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected budget exhaustion, got %v", err)
 	}
 
 	// The lender's active leases are never preempted even though the lender
 	// now wants its reservation back; it must wait for natural release.
-	if _, err := coordinator.Acquire("lender", "lender-0", 1); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("lender", "lender-0", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected lender to be blocked without preemption, got %v", err)
 	}
 	for i := 0; i < 4; i++ {
@@ -309,7 +324,7 @@ func TestFairnessGuaranteesShareWhenBothProfilesContendSimultaneously(t *testing
 	if _, err := coordinator.Acquire("beta", "beta-0", 5); err != nil {
 		t.Fatalf("expected beta to receive its guaranteed share: %v", err)
 	}
-	if _, err := coordinator.Acquire("alpha", "alpha-1", 5); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("alpha", "alpha-1", 5); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected alpha's second request beyond its share to be rejected, got %v", err)
 	}
 }
@@ -579,7 +594,7 @@ func TestActiveLeasePersistsAcrossRestart(t *testing.T) {
 	}
 
 	// The budget is still fully consumed after restart: no double-admission.
-	if _, err := restarted.Acquire("alpha", "slot-b", 1); err != ErrBudgetExceeded {
+	if _, err := restarted.Acquire("alpha", "slot-b", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected budget to remain exhausted after restart, got %v", err)
 	}
 }
@@ -651,7 +666,7 @@ func TestRestartDiscardsProvisionalLeasesButPreservesActiveLeases(t *testing.T) 
 	}
 	// The active unit is still held: budget is now exactly exhausted again
 	// (active-slot + new-slot == TotalUnits).
-	if _, err := restarted.Acquire("alpha", "third-slot", 1); err != ErrBudgetExceeded {
+	if _, err := restarted.Acquire("alpha", "third-slot", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected budget to be exhausted by active + reclaimed slots, got %v", err)
 	}
 
@@ -748,7 +763,7 @@ func TestReconcileRequiresEvidenceAndProducesTombstone(t *testing.T) {
 	}
 	// Time alone must never release an active lease: no expiry applies.
 	clock.advance(24 * time.Hour)
-	if _, err := coordinator.Acquire("alpha", "slot-b", 1); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("alpha", "slot-b", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected active lease to remain durable after time alone, got %v", err)
 	}
 
@@ -1070,7 +1085,7 @@ func TestReducedBudgetDrainsNaturallyWithoutRevokingActiveLeases(t *testing.T) {
 	}
 
 	// New admission is blocked until the over-committed leases drain.
-	if _, err := coordinator.Acquire("alpha", "slot-d", 1); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("alpha", "slot-d", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected new admission to be blocked under the reduced budget, got %v", err)
 	}
 
@@ -1085,7 +1100,7 @@ func TestReducedBudgetDrainsNaturallyWithoutRevokingActiveLeases(t *testing.T) {
 	if err := coordinator.Release("alpha", "slot-b"); err != nil {
 		t.Fatalf("release: %v", err)
 	}
-	if _, err := coordinator.Acquire("alpha", "slot-d", 1); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("alpha", "slot-d", 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected the still-active remaining lease to fully occupy the reduced budget, got %v", err)
 	}
 	if err := coordinator.Release("alpha", "slot-c"); err != nil {
@@ -1442,7 +1457,7 @@ func TestPolicyValidationAllowsPartialReservationsAcrossProfiles(t *testing.T) {
 			t.Fatalf("expected shared-pool unit %d to be admitted: %v", i, err)
 		}
 	}
-	if _, err := coordinator.Acquire("beta", slotName(99), 1); err != ErrBudgetExceeded {
+	if _, err := coordinator.Acquire("beta", slotName(99), 1); !errors.Is(err, ErrBudgetExceeded) {
 		t.Fatalf("expected the shared pool to be exhausted once alpha's reservation is protected, got %v", err)
 	}
 	for i := 0; i < 2; i++ {
@@ -1976,6 +1991,161 @@ func TestPolicyValidationRejectsOversizedFingerprint(t *testing.T) {
 }
 
 // --- LastDecision bounds -----------------------------------------------------
+
+func TestAcquireClassifiesWithholdingReasons(t *testing.T) {
+	t.Run("budget exhausted", func(t *testing.T) {
+		coordinator := OpenMemory(newManualClock(), time.Minute)
+		mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+		if _, err := coordinator.Acquire("alpha", "slot-0", 2); err != nil {
+			t.Fatalf("fill budget: %v", err)
+		}
+		if _, err := coordinator.Acquire("alpha", "slot-1", 1); !errors.Is(err, ErrBudgetExhausted) {
+			t.Fatalf("expected budget exhaustion, got %v", err)
+		}
+		accounting := mustProfileAccounting(t, mustStatus(t, coordinator), "alpha")
+		if accounting.WithholdingReason == nil ||
+			*accounting.WithholdingReason != WithholdingBudgetExhausted {
+			t.Fatalf("expected budget-exhausted accounting, got %+v", accounting)
+		}
+		if mustInt(t, accounting.AllocatableUnits, "allocatableUnits") != 0 ||
+			mustInt(t, accounting.AllocatableWorkers, "allocatableWorkers") != 0 {
+			t.Fatalf("withheld demand reported allocatable capacity: %+v", accounting)
+		}
+	})
+
+	t.Run("protected reservation", func(t *testing.T) {
+		coordinator := OpenMemory(newManualClock(), time.Minute)
+		mustApplyPolicy(t, coordinator, HostPolicy{
+			Generation: 1,
+			TotalUnits: 3,
+			Profiles: []ProfilePolicy{
+				{ProfileID: "alpha", UnitCost: 1, ReservedUnits: 1, Borrowable: false},
+				{ProfileID: "beta", UnitCost: 1},
+			},
+		})
+		for index := 0; index < 2; index++ {
+			if _, err := coordinator.Acquire("beta", slotName(index), 2-index); err != nil {
+				t.Fatalf("acquire beta shared unit %d: %v", index, err)
+			}
+		}
+		if _, err := coordinator.Acquire("beta", "slot-protected", 1); !errors.Is(err, ErrProtectedReservation) {
+			t.Fatalf("expected protected reservation denial, got %v", err)
+		}
+		accounting := mustProfileAccounting(t, mustStatus(t, coordinator), "beta")
+		if accounting.WithholdingReason == nil ||
+			*accounting.WithholdingReason != WithholdingProtectedReservation {
+			t.Fatalf("expected protected-reservation accounting, got %+v", accounting)
+		}
+	})
+
+	t.Run("fair share contention", func(t *testing.T) {
+		coordinator := OpenMemory(newManualClock(), time.Minute)
+		mustApplyPolicy(t, coordinator, HostPolicy{
+			Generation: 1,
+			TotalUnits: 2,
+			Profiles: []ProfilePolicy{
+				{ProfileID: "alpha", UnitCost: 1},
+				{ProfileID: "beta", UnitCost: 1},
+			},
+		})
+		if err := coordinator.SetDemand("alpha", 2); err != nil {
+			t.Fatalf("set alpha demand: %v", err)
+		}
+		if err := coordinator.SetDemand("beta", 1); err != nil {
+			t.Fatalf("set beta demand: %v", err)
+		}
+		if _, err := coordinator.Acquire("alpha", "alpha-0", 2); err != nil {
+			t.Fatalf("acquire alpha fair share: %v", err)
+		}
+		if _, err := coordinator.Acquire("alpha", "alpha-1", 1); !errors.Is(err, ErrFairShareContention) {
+			t.Fatalf("expected fair-share contention, got %v", err)
+		}
+		accounting := mustProfileAccounting(t, mustStatus(t, coordinator), "alpha")
+		if accounting.WithholdingReason == nil ||
+			*accounting.WithholdingReason != WithholdingFairShareContention {
+			t.Fatalf("expected fair-share accounting, got %+v", accounting)
+		}
+	})
+
+	t.Run("adoption pending", func(t *testing.T) {
+		coordinator := OpenMemory(newManualClock(), time.Minute)
+		mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 2, 1, 0, false))
+		if err := coordinator.BeginAdoption("alpha"); err != nil {
+			t.Fatalf("begin adoption: %v", err)
+		}
+		if err := coordinator.SetDemand("alpha", 1); err != nil {
+			t.Fatalf("set demand: %v", err)
+		}
+		if _, err := coordinator.Acquire("alpha", "alpha-0", 1); !errors.Is(err, ErrAdoptionPending) {
+			t.Fatalf("expected adoption-pending denial, got %v", err)
+		}
+		accounting := mustProfileAccounting(t, mustStatus(t, coordinator), "alpha")
+		if accounting.WithholdingReason == nil ||
+			*accounting.WithholdingReason != WithholdingAdoptionPending ||
+			mustInt(t, accounting.AllocatableUnits, "allocatableUnits") != 0 {
+			t.Fatalf("expected adoption-pending accounting, got %+v", accounting)
+		}
+	})
+}
+
+func TestStatusReportsProfileAllocatableAndTheoreticalCapacity(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 10,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 2, ReservedUnits: 2, Borrowable: false},
+			{ProfileID: "beta", UnitCost: 2, ReservedUnits: 4, Borrowable: false},
+			{ProfileID: "gamma", UnitCost: 2, ReservedUnits: 2, Borrowable: true},
+		},
+	})
+	if _, err := coordinator.Acquire("alpha", "alpha-0", 1); err != nil {
+		t.Fatalf("acquire alpha reservation: %v", err)
+	}
+	if _, err := coordinator.Acquire("beta", "beta-0", 1); err != nil {
+		t.Fatalf("acquire beta reservation: %v", err)
+	}
+
+	accounting := mustProfileAccounting(t, mustStatus(t, coordinator), "alpha")
+	if mustInt(t, accounting.TheoreticalMaximumUnits, "theoreticalMaximumUnits") != 6 ||
+		mustInt(t, accounting.TheoreticalMaximumWorkers, "theoreticalMaximumWorkers") != 3 {
+		t.Fatalf("unexpected theoretical capacity: %+v", accounting)
+	}
+	if mustInt(t, accounting.AllocatableUnits, "allocatableUnits") != 4 ||
+		mustInt(t, accounting.AllocatableWorkers, "allocatableWorkers") != 2 {
+		t.Fatalf("unexpected current allocatable capacity: %+v", accounting)
+	}
+	if accounting.WithholdingReason != nil {
+		t.Fatalf("capacity without denied demand reported a withholding reason: %+v", accounting)
+	}
+}
+
+func TestStatusLimitsAllocatableCapacityToCurrentFairShare(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, HostPolicy{
+		Generation: 1,
+		TotalUnits: 4,
+		Profiles: []ProfilePolicy{
+			{ProfileID: "alpha", UnitCost: 1},
+			{ProfileID: "beta", UnitCost: 1},
+		},
+	})
+	if err := coordinator.SetDemand("alpha", 4); err != nil {
+		t.Fatalf("set alpha demand: %v", err)
+	}
+	if err := coordinator.SetDemand("beta", 4); err != nil {
+		t.Fatalf("set beta demand: %v", err)
+	}
+
+	accounting := mustProfileAccounting(t, mustStatus(t, coordinator), "alpha")
+	if mustInt(t, accounting.AllocatableUnits, "allocatableUnits") != 2 ||
+		mustInt(t, accounting.AllocatableWorkers, "allocatableWorkers") != 2 {
+		t.Fatalf("current fair share did not limit allocatable capacity: %+v", accounting)
+	}
+	if accounting.WithholdingReason != nil {
+		t.Fatalf("an immediately grantable fair share reported withholding: %+v", accounting)
+	}
+}
 
 func TestLastDecisionRecordsGrantedAcquire(t *testing.T) {
 	clock := newManualClock()

@@ -1030,7 +1030,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "18" \
+    "19" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1816,9 +1816,9 @@ assert_true \
     observed_state_is_valid "${legacy_contract_sixteen_state}"
 
 assert_equals \
-    "18" \
+    "19" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
-    "The fixed manager does not declare the contract-eighteen host admission activation."
+    "The fixed manager does not declare the contract-nineteen admission explainability activation."
 
 contract_eighteen_disabled_state="${TEMP_DIRECTORY}/contract-eighteen-disabled-state.json"
 jq '
@@ -1980,6 +1980,54 @@ jq '.hostAdmission.accounting.pendingUnits = null | .hostAdmission.accounting.wi
 assert_false \
     "Available host admission accepted unknown demand accounting." \
     observed_state_is_valid "${invalid_contract_eighteen_accounting}"
+
+contract_nineteen_available_state="${TEMP_DIRECTORY}/contract-nineteen-available-state.json"
+jq '
+    .managerContractVersion = 19
+    | .hostAdmission.accounting.allocatableUnits = 0
+    | .hostAdmission.accounting.allocatableWorkers = 0
+    | .hostAdmission.accounting.theoreticalMaximumUnits = 6
+    | .hostAdmission.accounting.theoreticalMaximumWorkers = 6
+    | .hostAdmission.accounting.withholdingReason = "protected-reservation"
+' "${contract_eighteen_available_state}" > "${contract_nineteen_available_state}"
+assert_true \
+    "Contract-nineteen observed state rejected complete admission explainability." \
+    observed_state_is_valid "${contract_nineteen_available_state}"
+
+invalid_contract_nineteen_accounting="${TEMP_DIRECTORY}/invalid-contract-nineteen-accounting.json"
+jq 'del(.hostAdmission.accounting.allocatableUnits)' \
+    "${contract_nineteen_available_state}" > "${invalid_contract_nineteen_accounting}"
+assert_false \
+    "Contract-nineteen accounting accepted missing allocatable units." \
+    observed_state_is_valid "${invalid_contract_nineteen_accounting}"
+jq '.hostAdmission.accounting.allocatableWorkers = 1' \
+    "${contract_nineteen_available_state}" > "${invalid_contract_nineteen_accounting}"
+assert_false \
+    "Contract-nineteen accounting accepted an inconsistent allocatable worker count." \
+    observed_state_is_valid "${invalid_contract_nineteen_accounting}"
+jq '.hostAdmission.accounting.withholdingReason = "private-profile"' \
+    "${contract_nineteen_available_state}" > "${invalid_contract_nineteen_accounting}"
+assert_false \
+    "Contract-nineteen accounting accepted an unsupported withholding reason." \
+    observed_state_is_valid "${invalid_contract_nineteen_accounting}"
+jq '.hostAdmission.accounting.allocatableUnits = 1 | .hostAdmission.accounting.allocatableWorkers = 1' \
+    "${contract_nineteen_available_state}" > "${invalid_contract_nineteen_accounting}"
+assert_false \
+    "Contract-nineteen accounting reported allocatable capacity while withheld." \
+    observed_state_is_valid "${invalid_contract_nineteen_accounting}"
+
+contract_nineteen_previous_protocol_state="${TEMP_DIRECTORY}/contract-nineteen-previous-protocol-state.json"
+jq '
+    .hostAdmission.status = "degraded"
+    | .hostAdmission.accounting.allocatableUnits = null
+    | .hostAdmission.accounting.allocatableWorkers = null
+    | .hostAdmission.accounting.theoreticalMaximumUnits = null
+    | .hostAdmission.accounting.theoreticalMaximumWorkers = null
+    | .hostAdmission.accounting.withholdingReason = null
+' "${contract_nineteen_available_state}" > "${contract_nineteen_previous_protocol_state}"
+assert_true \
+    "Contract-nineteen accounting rejected explicit degraded protocol-two compatibility." \
+    observed_state_is_valid "${contract_nineteen_previous_protocol_state}"
 
 SLOT_DIRECTORY="${TEMP_DIRECTORY}/slots"
 mkdir -p "${SLOT_DIRECTORY}"

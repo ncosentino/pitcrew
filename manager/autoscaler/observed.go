@@ -106,16 +106,21 @@ type observedUpdate struct {
 // (heldUnits, borrowedUnits, pendingUnits, withheldUnits, and so on); this
 // struct mirrors that vocabulary field-for-field for observed-state.
 type observedHostAdmissionAccounting struct {
-	UnitCost                 int     `json:"unitCost"`
-	ReservedUnits            int     `json:"reservedUnits"`
-	Borrowable               bool    `json:"borrowable"`
-	ProfilePolicyFingerprint *string `json:"profilePolicyFingerprint"`
-	ActiveUnits              int     `json:"activeUnits"`
-	ProvisionalUnits         int     `json:"provisionalUnits"`
-	HeldUnits                int     `json:"heldUnits"`
-	BorrowedUnits            int     `json:"borrowedUnits"`
-	PendingUnits             *int    `json:"pendingUnits"`
-	WithheldUnits            *int    `json:"withheldUnits"`
+	UnitCost                  int     `json:"unitCost"`
+	ReservedUnits             int     `json:"reservedUnits"`
+	Borrowable                bool    `json:"borrowable"`
+	ProfilePolicyFingerprint  *string `json:"profilePolicyFingerprint"`
+	ActiveUnits               int     `json:"activeUnits"`
+	ProvisionalUnits          int     `json:"provisionalUnits"`
+	HeldUnits                 int     `json:"heldUnits"`
+	BorrowedUnits             int     `json:"borrowedUnits"`
+	PendingUnits              *int    `json:"pendingUnits"`
+	WithheldUnits             *int    `json:"withheldUnits"`
+	AllocatableUnits          *int    `json:"allocatableUnits"`
+	AllocatableWorkers        *int    `json:"allocatableWorkers"`
+	TheoreticalMaximumUnits   *int    `json:"theoreticalMaximumUnits"`
+	TheoreticalMaximumWorkers *int    `json:"theoreticalMaximumWorkers"`
+	WithholdingReason         *string `json:"withholdingReason"`
 }
 
 // observedHostAdmissionDecision is a bounded, sanitized last-decision record

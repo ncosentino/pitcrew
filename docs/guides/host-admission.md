@@ -137,10 +137,12 @@ handoff; multiple profile fences compose, survive coordinator restart, and
 clear independently only after the corresponding manager finishes recovery.
 Withheld attempts during that fence carry the bounded `adoption-pending`
 failure category rather than being reported as ordinary budget exhaustion.
-Protocol 1 remains available for ordinary commands during a coordinator-first
-rolling replacement, but adoption and fence operations require protocol 2. A
-new manager connected to a protocol 1 service therefore fails closed before
-starting new workers.
+Protocol 2 remains available during a coordinator-first rolling replacement
+and retains adoption and fence operations. Protocol 3 adds reason-specific
+withholding errors and profile-capacity accounting. A contract-19 manager
+connected briefly to a protocol-2 service keeps lifecycle behavior compatible
+but reports the new capacity evidence as degraded until the coordinator update
+completes.
 
 There is an unavoidable partial-enrollment interval while multiple live
 profiles are applied one at a time. During that interval, do not describe the
@@ -199,22 +201,47 @@ Accounting is profile-scoped:
 - `borrowedUnits` is held capacity beyond this profile's reservation.
 - `pendingUnits` is the latest outstanding worker demand converted to units.
 - `withheldUnits` is that outstanding demand not yet admitted.
+- `allocatableUnits` and `allocatableWorkers` are additional currently unheld
+  capacity available to this profile after protecting other profiles'
+  non-borrowable reservations. A current coordinator denial sets both to zero.
+- `theoreticalMaximumUnits` and `theoreticalMaximumWorkers` are the static
+  policy ceiling after subtracting other profiles' non-borrowable reservations.
+- `withholdingReason` distinguishes `budget-exhausted`,
+  `protected-reservation`, `fair-share-contention`, and `adoption-pending`.
 
 The coordinator's full multi-profile lease ledger is not published. A profile
 view can prove its own held, pending, and withheld units, but it may not identify
 which other profile holds shared capacity.
 
+`allocatableWorkers` is a current profile-scoped measurement, not a promise
+that every listed worker will be granted consecutively. Fair-share rotation and
+new leases can change the next decision. When refreshed demand is already
+withheld, the coordinator publishes zero allocatable capacity together with the
+current reason.
+
 Capacity-deficit reasons remain distinct:
 
 | Reason | Meaning |
 | --- | --- |
-| `host-admission-withheld` | Current demand was denied by host budget, protected reservation, or shared-pool fairness. |
+| `host-admission-withheld` | Current demand was denied by host policy; read `hostAdmission.accounting.withholdingReason` for the coordinator-owned distinction. |
 | `host-admission-degraded` | New admission is blocked by incompatible or stale coordination evidence. |
 | `host-admission-unavailable` | New admission is blocked because the coordinator cannot be used. |
 | `admission-ceiling` | The profile's separate `maximumActiveWorkers` ceiling blocked admission. |
 
 GitHub demand, Docker, JIT, listener, cleanup, and missing-evidence reasons are
 separate signals. Do not relabel them as host-admission failures.
+
+### Unreachable autoscaling maximum
+
+Setup computes each autoscaled profile's theoretical host-admission ceiling
+from the complete candidate policy. It subtracts every other profile's
+non-borrowable reservation from the effective budget, then divides the
+remaining units by this profile's worker cost.
+
+If `maximumActiveWorkers` exceeds that ceiling, setup emits a warning before
+image, Docker, or generated-state mutation. It retains the configured maximum
+because a later reviewed host-wide policy change may make it reachable. The
+warning never uses temporary leases, demand, or fair-share contention.
 
 ## Update policy
 

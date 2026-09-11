@@ -872,6 +872,32 @@
         "withheldUnits": {
           "type": ["integer", "null"],
           "minimum": 0
+        },
+        "allocatableUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "allocatableWorkers": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "theoreticalMaximumUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "theoreticalMaximumWorkers": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "withholdingReason": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "budget-exhausted",
+            "protected-reservation",
+            "fair-share-contention",
+            "adoption-pending"
+          ]
         }
       },
       "allOf": [
@@ -892,9 +918,29 @@
               "withheldUnits": { "type": "integer" }
             }
           }
+        },
+        {
+          "if": {
+            "properties": {
+              "withholdingReason": {
+                "type": "string"
+              }
+            },
+            "required": ["withholdingReason"]
+          },
+          "then": {
+            "properties": {
+              "allocatableUnits": {
+                "const": 0
+              },
+              "allocatableWorkers": {
+                "const": 0
+              }
+            }
+          }
         }
       ],
-      "$comment": "heldUnits equals activeUnits plus provisionalUnits. borrowedUnits equals max(heldUnits - reservedUnits, 0): shared capacity held beyond this profile's own reservation. pendingUnits and withheldUnits are equal outstanding demand in policy units; both are null until demand has been republished after coordinator restart or policy replacement."
+      "$comment": "heldUnits equals activeUnits plus provisionalUnits. borrowedUnits equals max(heldUnits - reservedUnits, 0). Contract 19 adds allocatable units/workers, the static theoretical maximum, and a coordinator-owned withholding reason. pendingUnits and withheldUnits remain null until demand has been republished."
     },
     "hostAdmissionDecision": {
       "type": "object",
@@ -2435,6 +2481,136 @@
         }
       },
       "$comment": "Contract 18 requires a complete, explicit hostAdmission object from both fixed and autoscaled managers. Contract 17 and earlier readers accept the field missing entirely; disabled profiles still publish every field, using null only for values that were never measured."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 19
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "properties": {
+          "hostAdmission": {
+            "allOf": [
+              {
+                "$ref": "#/$defs/hostAdmissionState"
+              },
+              {
+                "properties": {
+                  "accounting": {
+                    "oneOf": [
+                      {
+                        "type": "null"
+                      },
+                      {
+                        "allOf": [
+                          {
+                            "$ref": "#/$defs/hostAdmissionAccounting"
+                          },
+                          {
+                            "required": [
+                              "allocatableUnits",
+                              "allocatableWorkers",
+                              "theoreticalMaximumUnits",
+                              "theoreticalMaximumWorkers",
+                              "withholdingReason"
+                            ],
+                            "oneOf": [
+                              {
+                                "properties": {
+                                  "allocatableUnits": {
+                                    "type": "null"
+                                  },
+                                  "allocatableWorkers": {
+                                    "type": "null"
+                                  },
+                                  "theoreticalMaximumUnits": {
+                                    "type": "null"
+                                  },
+                                  "theoreticalMaximumWorkers": {
+                                    "type": "null"
+                                  },
+                                  "withholdingReason": {
+                                    "type": "null"
+                                  }
+                                }
+                              },
+                              {
+                                "properties": {
+                                  "allocatableUnits": {
+                                    "type": "integer"
+                                  },
+                                  "allocatableWorkers": {
+                                    "type": "integer"
+                                  },
+                                  "theoreticalMaximumUnits": {
+                                    "type": "integer"
+                                  },
+                                  "theoreticalMaximumWorkers": {
+                                    "type": "integer"
+                                  },
+                                  "withholdingReason": {
+                                    "type": ["string", "null"]
+                                  }
+                                }
+                              }
+                            ]
+                          }
+                        ]
+                      }
+                    ]
+                  }
+                },
+                "allOf": [
+                  {
+                    "if": {
+                      "properties": {
+                        "status": {
+                          "const": "available"
+                        }
+                      },
+                      "required": ["status"]
+                    },
+                    "then": {
+                      "properties": {
+                        "accounting": {
+                          "allOf": [
+                            {
+                              "$ref": "#/$defs/hostAdmissionAccounting"
+                            },
+                            {
+                              "properties": {
+                                "allocatableUnits": {
+                                  "type": "integer"
+                                },
+                                "allocatableWorkers": {
+                                  "type": "integer"
+                                },
+                                "theoreticalMaximumUnits": {
+                                  "type": "integer"
+                                },
+                                "theoreticalMaximumWorkers": {
+                                  "type": "integer"
+                                }
+                              }
+                            }
+                          ]
+                        }
+                      }
+                    }
+                  }
+                ]
+              }
+            ]
+          }
+        }
+      },
+      "$comment": "Contract 19 requires profile-scoped allocatable and theoretical capacity plus the bounded coordinator-owned withholding reason. A protocol-2 coordinator remains representable as degraded evidence with null capacity fields during rolling replacement."
     },
     {
       "if": {

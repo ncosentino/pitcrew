@@ -152,7 +152,7 @@ CPU cores, memory bytes, worker counts, or inferred hardware capacity. Built-in
 profiles declare no host-admission policy, and independent-profile behavior remains
 the default.
 
-Manager contract 18 resolves and fingerprints this policy, starts the dedicated
+Manager contract 19 resolves and fingerprints this policy, starts the dedicated
 coordinator through `Setup-Runner.ps1`, and enforces leases for both fixed and
 autoscaled managers. Disabled profiles (no `hostAdmission` manifest entry)
 remain behavior-compatible; they never touch the coordinator.
@@ -170,10 +170,12 @@ namespace until that manager completes its recovered-running-worker adoption
 pass. Fences from multiple profile replacements compose and survive coordinator
 restart; completing one profile does not clear another profile's fence.
 
-Protocol 2 adds adoption and recovery-fence operations. Protocol 2 clients and
-servers continue to negotiate protocol 1 for ordinary lease and status commands
-during coordinator-first rolling replacement. Adoption and fence operations
-require protocol 2 and fail closed against a protocol 1 service.
+Protocol 3 adds reason-specific withholding errors and profile-scoped capacity
+accounting. During coordinator-first rolling replacement, protocol 3 clients
+and servers negotiate protocol 2 with the immediately previous release.
+Protocol 2 retains the umbrella `budget-exceeded` error and omits the new
+capacity fields; a contract-19 manager represents that interval as degraded
+evidence rather than fabricated zero.
 
 Labels, runner groups, and scale sets control GitHub queue eligibility.
 Host-local admission separately controls whether a participating manager may
@@ -187,7 +189,7 @@ Configured reservation alone is not proof of protected headroom.
 
 #### Observed-state telemetry
 
-Once contract 18 is active, `observed-state.json` carries a root-level,
+Starting with contract 18, `observed-state.json` carries a root-level,
 credential-free `hostAdmission` object describing this profile's own admission
 state. Its `status` is one of:
 
@@ -226,12 +228,23 @@ ledger is never published. The published fields use these precise semantics:
   granted them. Positive demand must be refreshed within 30 seconds. Both values
   are `null` until demand is republished after coordinator restart, policy
   replacement, or demand expiry.
+- `allocatableUnits` and `allocatableWorkers` — additional unheld capacity this
+  profile can currently use after protecting other profiles' non-borrowable
+  reservations. When refreshed demand is currently denied, both are zero.
+- `theoreticalMaximumUnits` and `theoreticalMaximumWorkers` — the profile's
+  static ceiling under the configured policy after subtracting other profiles'
+  non-borrowable reservations. Worker counts use whole `unitCost` increments.
+- `withholdingReason` — the coordinator-owned current reason:
+  `budget-exhausted`, `protected-reservation`, `fair-share-contention`, or
+  `adoption-pending`. It is `null` when current demand is not known to be
+  withheld.
 
 Per-target capacity evidence keeps this host result separate from the existing
 profile ceiling. `host-admission-withheld` identifies a target currently denied
-by host budget or fairness; `host-admission-degraded` identifies incompatible
-policy or lease state; and `host-admission-unavailable` identifies a target whose
-new launch is blocked because the coordinator cannot be reached.
+by host policy; `hostAdmission.accounting.withholdingReason` supplies the stable
+coordinator-level distinction. `host-admission-degraded` identifies incompatible
+policy or lease state, and `host-admission-unavailable` identifies a target
+whose new launch is blocked because the coordinator cannot be reached.
 
 `lastDecision` is a single bounded record of this profile's most recent
 admission decision (`sequence`, `command`, `granted`, `failureCategory`,
@@ -320,7 +333,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 18 managers. A profile that
+11 and remain supported by the active contract 19 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -650,7 +663,7 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 18 is active in this release. Both manager modes publish the
+Manager contract 19 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics. Setup fails closed before Docker, image, or generated
 state mutation if a contract ahead of both implementations is selected.
@@ -773,6 +786,20 @@ Docker/JIT/listener failure, which remain reported through their existing,
 unrelated fields. Reading admission status is diagnostics-only. A coordinator
 that cannot be reached never stops an existing worker or changes desired or
 acknowledged state, but it does fail closed for every new worker admission.
+
+### Contract-19 admission explainability
+
+Contract 19 adds profile-scoped allocatable capacity, the policy-derived
+theoretical maximum, and a bounded coordinator-owned withholding reason to
+`hostAdmission.accounting`. Protocol 3 returns the same reason through specific
+acquire error codes while preserving `budget-exceeded` for protocol-2 clients.
+
+`Setup-Runner.ps1` compares an autoscaled profile's configured
+`maximumActiveWorkers` with the theoretical policy ceiling. A higher value
+produces a warning before image, Docker, or generated-state mutation, but is
+retained because a later reviewed host-wide policy change may raise the ceiling.
+Temporary leases, current demand, and fair-share rotation never make the static
+configuration invalid.
 
 ## Capacity reconciliation
 

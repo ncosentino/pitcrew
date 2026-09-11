@@ -311,6 +311,6 @@ func errorResponse(version int, err error) Response {
 		ProtocolVersion: version,
 		Status:          responseStatusError,
 		Error:           err.Error(),
-		ErrorCode:       errorCodeForErr(err),
+		ErrorCode:       errorCodeForErrVersion(err, version),
 	}
 }

@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.17.2') 'The operations plugin patch version was not advanced for desired targets without observed slots.'
+Add-Check ($plugin.version -eq '1.18.0') 'The operations plugin minor version was not advanced for admission explainability.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -420,8 +420,11 @@ Add-Check (
     $remoteDiagnosticsSkill -match '\*\*Hypotheses\*\*'
 ) 'The remote diagnostics skill weakens credential, command-channel, or evidence-separation boundaries.'
 Add-Check (
-    $remoteDiagnosticsSkill -match 'manager contract 18' -and
+    $remoteDiagnosticsSkill -match 'manager contract 19' -and
     $remoteDiagnosticsSkill -match 'pending/withheld units' -and
+    $remoteDiagnosticsSkill -match 'allocatable units/workers' -and
+    $remoteDiagnosticsSkill -match 'theoretical\s+maximum units/workers' -and
+    $remoteDiagnosticsSkill -match 'withholding reason' -and
     $remoteDiagnosticsSkill -match 'Disabled cannot be inferred\s+from null' -and
     $remoteDiagnosticsSkill -match 'abstract policy accounting'
 ) 'The remote diagnostics skill does not classify admission evidence conservatively.'
@@ -429,10 +432,12 @@ Add-Check (
     $remoteCore -match 'ConvertTo-PitCrewRemoteDiagnosticsHostAdmission' -and
     $remoteCore -match 'ConvertTo-PitCrewRemoteDiagnosticsCapacityEvidence' -and
     $remoteCore -match "'adopt'" -and
+    $remoteCore -match 'protected-reservation' -and
+    $remoteCore -match 'fair-share-contention' -and
     $remoteCore -match 'host-admission-withheld' -and
     $remoteCore -match 'host-admission-degraded' -and
     $remoteCore -match 'host-admission-unavailable'
-) 'The remote diagnostics importer does not validate the contract-18 admission surface.'
+) 'The remote diagnostics importer does not validate the contract-19 admission surface.'
 Add-Check (
     $remoteCollector -match 'connector-health\.json' -and
     $remoteCollector -match 'connector-events\.jsonl' -and

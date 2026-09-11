@@ -4,10 +4,10 @@ Set-StrictMode -Version Latest
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerHostAdmissionPolicySchemaVersion = 1
-$script:RunnerManagerContractVersion = 18
+$script:RunnerManagerContractVersion = 19
 $script:RunnerDefinedManagerContractVersion = 11
-$script:RunnerDefinedHostAdmissionContractVersion = 18
-$script:RunnerDefinedDiagnosticsContractVersion = 18
+$script:RunnerDefinedHostAdmissionContractVersion = 19
+$script:RunnerDefinedDiagnosticsContractVersion = 19
 $script:RunnerWorkerRuntimeContractVersion = 3
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384
@@ -256,6 +256,86 @@ function ConvertTo-RunnerHostAdmissionPolicy {
 
 <#
 .SYNOPSIS
+    Computes one profile's static host-admission ceiling.
+
+.DESCRIPTION
+    Uses only the reviewed desired host policy. Non-borrowable reservations
+    belonging to other profiles remain unavailable even when idle; borrowable
+    reservations do not reduce the requesting profile's theoretical ceiling.
+
+.PARAMETER Policy
+    Canonical desired host-admission policy.
+
+.PARAMETER ProfileName
+    Profile whose policy ceiling should be calculated.
+#>
+function Get-RunnerHostAdmissionProfileCapacity {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Policy,
+
+        [Parameter(Mandatory)]
+        [ValidatePattern('^[a-z][a-z0-9-]{0,31}$')]
+        [string]$ProfileName
+    )
+
+    if (
+        -not $Policy.PSObject.Properties['schemaVersion'] -or
+        [int]$Policy.schemaVersion -ne $script:RunnerHostAdmissionPolicySchemaVersion
+    ) {
+        throw "Unsupported host-admission policy schema version '$($Policy.schemaVersion)'."
+    }
+    $effectiveBudgetUnits = [long]$Policy.effectiveBudgetUnits
+    if ($effectiveBudgetUnits -lt 1 -or $effectiveBudgetUnits -gt [int]::MaxValue) {
+        throw 'Host admission effective budget must be between 1 and 2147483647.'
+    }
+
+    $profiles = @($Policy.profiles)
+    $matchingProfiles = @(
+        $profiles |
+            Where-Object { [string]$_.profile -ceq $ProfileName }
+    )
+    if ($matchingProfiles.Count -ne 1) {
+        throw "Host admission policy must contain exactly one profile '$ProfileName'."
+    }
+    $profile = $matchingProfiles[0]
+    $workerCostUnits = [long]$profile.workerCostUnits
+    if ($workerCostUnits -lt 1 -or $workerCostUnits -gt $effectiveBudgetUnits) {
+        throw "Host admission profile '$ProfileName' has an invalid worker cost."
+    }
+
+    [long]$protectedUnits = 0
+    foreach ($other in $profiles) {
+        if (
+            [string]$other.profile -ceq $ProfileName -or
+            [bool]$other.borrowable
+        ) {
+            continue
+        }
+        $reservationUnits = [long]$other.reservationUnits
+        if ($reservationUnits -lt 0 -or $reservationUnits -gt $effectiveBudgetUnits) {
+            throw "Host admission profile '$($other.profile)' has an invalid reservation."
+        }
+        $protectedUnits += $reservationUnits
+    }
+    $theoreticalMaximumUnits = [Math]::Max(
+        $effectiveBudgetUnits - $protectedUnits,
+        0)
+
+    return [PSCustomObject][ordered]@{
+        Profile = $ProfileName
+        WorkerCostUnits = [int]$workerCostUnits
+        EffectiveBudgetUnits = [int]$effectiveBudgetUnits
+        ProtectedNonBorrowableUnits = [int]$protectedUnits
+        TheoreticalMaximumUnits = [int]$theoreticalMaximumUnits
+        TheoreticalMaximumWorkers = [int][Math]::Floor(
+            $theoreticalMaximumUnits / $workerCostUnits)
+    }
+}
+
+<#
+.SYNOPSIS
     Derives stable host-side and container-side admission identities.
 #>
 function New-RunnerHostAdmissionContext {
@@ -283,7 +363,7 @@ function New-RunnerHostAdmissionContext {
         ComposeProjectName = "pitcrew-host-admission-$Namespace"
         VolumeName = "pitcrew-host-admission-$Namespace"
         SocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
-        ProtocolVersion = 2
+        ProtocolVersion = 3
     }
 }
 
