@@ -5,14 +5,18 @@ import (
 	"sort"
 )
 
+// AdmissionExplainabilityProtocolVersion introduced reason-specific acquire
+// errors and profile-scoped capacity accounting.
+const AdmissionExplainabilityProtocolVersion = 3
+
 // CurrentProtocolVersion is the exact wire protocol version this build
 // speaks by default. ADR-0003 requires the service to keep serving the
 // current and immediately previous client protocol during a rolling
 // manager upgrade; ServerSupportedVersions expresses that compatibility
 // window explicitly rather than leaving it implicit in a single constant.
-const CurrentProtocolVersion = 2
+const CurrentProtocolVersion = AdmissionExplainabilityProtocolVersion
 
-const previousProtocolVersion = 1
+const previousProtocolVersion = 2
 
 // ServerSupportedVersions returns the protocol versions this build's server
 // accepts, newest first.
@@ -135,22 +139,25 @@ type Response struct {
 type ErrorCode string
 
 const (
-	ErrorCodeUnknownProfile      ErrorCode = "unknown-profile"
-	ErrorCodeDuplicateLease      ErrorCode = "duplicate-lease"
-	ErrorCodeLeaseNotFound       ErrorCode = "lease-not-found"
-	ErrorCodeLeaseExpired        ErrorCode = "lease-expired"
-	ErrorCodeLeaseNotProvisional ErrorCode = "lease-not-provisional"
-	ErrorCodeBudgetExceeded      ErrorCode = "budget-exceeded"
-	ErrorCodeAdoptionPending     ErrorCode = "adoption-pending"
-	ErrorCodeEvidenceRequired    ErrorCode = "evidence-required"
-	ErrorCodeEvidenceInvalid     ErrorCode = "evidence-invalid"
-	ErrorCodeInvalidPolicy       ErrorCode = "invalid-policy"
-	ErrorCodeInvalidIdentity     ErrorCode = "invalid-identity"
-	ErrorCodeStalePolicy         ErrorCode = "stale-policy"
-	ErrorCodeCorruptState        ErrorCode = "corrupt-state"
-	ErrorCodeRequestTooLarge     ErrorCode = "request-too-large"
-	ErrorCodeMalformedRequest    ErrorCode = "malformed-request"
-	ErrorCodeProtocolMismatch    ErrorCode = "protocol-mismatch"
+	ErrorCodeUnknownProfile       ErrorCode = "unknown-profile"
+	ErrorCodeDuplicateLease       ErrorCode = "duplicate-lease"
+	ErrorCodeLeaseNotFound        ErrorCode = "lease-not-found"
+	ErrorCodeLeaseExpired         ErrorCode = "lease-expired"
+	ErrorCodeLeaseNotProvisional  ErrorCode = "lease-not-provisional"
+	ErrorCodeBudgetExceeded       ErrorCode = "budget-exceeded"
+	ErrorCodeBudgetExhausted      ErrorCode = "budget-exhausted"
+	ErrorCodeProtectedReservation ErrorCode = "protected-reservation"
+	ErrorCodeFairShareContention  ErrorCode = "fair-share-contention"
+	ErrorCodeAdoptionPending      ErrorCode = "adoption-pending"
+	ErrorCodeEvidenceRequired     ErrorCode = "evidence-required"
+	ErrorCodeEvidenceInvalid      ErrorCode = "evidence-invalid"
+	ErrorCodeInvalidPolicy        ErrorCode = "invalid-policy"
+	ErrorCodeInvalidIdentity      ErrorCode = "invalid-identity"
+	ErrorCodeStalePolicy          ErrorCode = "stale-policy"
+	ErrorCodeCorruptState         ErrorCode = "corrupt-state"
+	ErrorCodeRequestTooLarge      ErrorCode = "request-too-large"
+	ErrorCodeMalformedRequest     ErrorCode = "malformed-request"
+	ErrorCodeProtocolMismatch     ErrorCode = "protocol-mismatch"
 )
 
 func (c ErrorCode) valid() bool {
@@ -162,6 +169,9 @@ func (c ErrorCode) valid() bool {
 		ErrorCodeLeaseExpired,
 		ErrorCodeLeaseNotProvisional,
 		ErrorCodeBudgetExceeded,
+		ErrorCodeBudgetExhausted,
+		ErrorCodeProtectedReservation,
+		ErrorCodeFairShareContention,
 		ErrorCodeAdoptionPending,
 		ErrorCodeEvidenceRequired,
 		ErrorCodeEvidenceInvalid,
@@ -184,6 +194,16 @@ func (c ErrorCode) valid() bool {
 // this package does not recognize maps to the empty code, and the client
 // falls back to the free-form message.
 func errorCodeForErr(err error) ErrorCode {
+	return errorCodeForErrVersion(err, CurrentProtocolVersion)
+}
+
+// errorCodeForErrVersion preserves protocol-2 behavior for rolling upgrades:
+// older clients receive the umbrella budget-exceeded code, while protocol 3
+// clients receive the coordinator's exact withholding reason.
+func errorCodeForErrVersion(err error, version int) ErrorCode {
+	if version < AdmissionExplainabilityProtocolVersion && errors.Is(err, ErrBudgetExceeded) {
+		return ErrorCodeBudgetExceeded
+	}
 	switch {
 	case errors.Is(err, ErrDuplicateLease):
 		return ErrorCodeDuplicateLease
@@ -195,6 +215,12 @@ func errorCodeForErr(err error) ErrorCode {
 		return ErrorCodeLeaseExpired
 	case errors.Is(err, ErrLeaseNotProvisional):
 		return ErrorCodeLeaseNotProvisional
+	case errors.Is(err, ErrBudgetExhausted):
+		return ErrorCodeBudgetExhausted
+	case errors.Is(err, ErrProtectedReservation):
+		return ErrorCodeProtectedReservation
+	case errors.Is(err, ErrFairShareContention):
+		return ErrorCodeFairShareContention
 	case errors.Is(err, ErrBudgetExceeded):
 		return ErrorCodeBudgetExceeded
 	case errors.Is(err, ErrAdoptionPending):
@@ -235,6 +261,12 @@ func errForErrorCode(code ErrorCode) error {
 		return ErrLeaseNotProvisional
 	case ErrorCodeBudgetExceeded:
 		return ErrBudgetExceeded
+	case ErrorCodeBudgetExhausted:
+		return ErrBudgetExhausted
+	case ErrorCodeProtectedReservation:
+		return ErrProtectedReservation
+	case ErrorCodeFairShareContention:
+		return ErrFairShareContention
 	case ErrorCodeAdoptionPending:
 		return ErrAdoptionPending
 	case ErrorCodeEvidenceInvalid:

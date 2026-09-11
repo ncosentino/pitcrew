@@ -92,7 +92,7 @@ canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
 Resource policy and the aggregate ceiling were introduced in manager contract
-11 and remain supported by the active contract 18 autoscaler.
+11 and remain supported by the active contract 19 autoscaler.
 
 Contract 18 keeps profile-ceiling and host-admission deficits distinct in
 per-target capacity evidence. `admission-ceiling` remains the in-process
@@ -100,6 +100,11 @@ profile-wide limit, while `host-admission-withheld` and
 `host-admission-degraded` identify host-budget contention and incompatible
 policy or lease state respectively. `host-admission-unavailable` identifies
 coordinator outage.
+
+Contract 19 adds profile-scoped allocatable units/workers, a static theoretical
+maximum, and the coordinator-owned withholding reason. Setup warns when
+`maximumActiveWorkers` exceeds that static policy ceiling without treating
+temporary contention as invalid configuration.
 
 GitHub's assigned-job count remains the only autoscaling demand count.
 Host-local admission is a later start gate: it can withhold a worker requested

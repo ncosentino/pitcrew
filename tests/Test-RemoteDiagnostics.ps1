@@ -315,7 +315,7 @@ try {
             schemaVersion = 1
             status = 'accepted'
             generation = 4
-            managerContractVersion = 18
+            managerContractVersion = 19
             desiredStateHash = ('a' * 64)
             observedAt = '2026-08-07T08:59:55Z'
             desiredSlots = 2
@@ -331,7 +331,7 @@ try {
             workerRevision = ('c' * 64)
             manifest = $null
             configuration = @{
-                managerContractVersion = 18
+                managerContractVersion = 19
                 workerRuntimeContractVersion = 3
                 profile = 'default'
                 image = 'ghcr.io/example/worker:1.0.0'
@@ -355,7 +355,7 @@ try {
         -Path (Join-Path $profileRoot 'observed-state.json') `
         -Content (@{
             schemaVersion = 1
-            managerContractVersion = 18
+            managerContractVersion = 19
             profileId = 'default'
             managerStatus = 'running'
             observedAt = '2026-08-07T09:00:00Z'
@@ -426,6 +426,11 @@ try {
                     borrowedUnits = 0
                     pendingUnits = 2
                     withheldUnits = 2
+                    allocatableUnits = 0
+                    allocatableWorkers = 0
+                    theoreticalMaximumUnits = 6
+                    theoreticalMaximumWorkers = 3
+                    withholdingReason = 'protected-reservation'
                 }
                 lastDecision = @{
                     sequence = 9
@@ -1192,8 +1197,14 @@ if ($CommandArguments[0] -eq '-Pi') {
         $linuxReport.verifiedMeasurements.state.observed.hostAdmission.status -eq
             'available' -and
         $linuxReport.verifiedMeasurements.state.observed.hostAdmission.accounting.withheldUnits -eq
-            2
-    ) 'The collector omitted contract-18 host-admission accounting.'
+            2 -and
+        $linuxReport.verifiedMeasurements.state.observed.hostAdmission.accounting.allocatableWorkers -eq
+            0 -and
+        $linuxReport.verifiedMeasurements.state.observed.hostAdmission.accounting.theoreticalMaximumWorkers -eq
+            3 -and
+        $linuxReport.verifiedMeasurements.state.observed.hostAdmission.accounting.withholdingReason -eq
+            'protected-reservation'
+    ) 'The collector omitted contract-19 host-admission accounting.'
     Add-Check (
         $linuxReport.verifiedMeasurements.state.observed.capacityEvidence.targets[0].reason -eq
             'host-admission-withheld'
@@ -1218,6 +1229,58 @@ if ($CommandArguments[0] -eq '-Pi') {
         $adoptSummary.verifiedMeasurements.state.hostAdmission.lastDecision.command -eq
             'adopt'
     ) 'The strict remote-diagnostics projection rejected an existing-worker adoption decision.'
+    $contract18Report = $linuxReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $contract18Report.verifiedMeasurements.state.observed.managerContractVersion = 18
+    $contract18Report.verifiedMeasurements.state.static.managerContractVersion = 18
+    foreach ($field in @(
+            'allocatableUnits',
+            'allocatableWorkers',
+            'theoreticalMaximumUnits',
+            'theoreticalMaximumWorkers',
+            'withholdingReason')) {
+        $contract18Report.verifiedMeasurements.state.observed.hostAdmission.accounting.PSObject.Properties.Remove(
+            $field)
+    }
+    $contract18Summary =
+        ConvertTo-PitCrewRemoteDiagnosticsReportSummary -Report $contract18Report
+    Add-Check (
+        $contract18Summary.verifiedMeasurements.state.managerContractVersion -eq
+            18 -and
+        $null -eq
+            $contract18Summary.verifiedMeasurements.state.hostAdmission.accounting.allocatableUnits -and
+        $null -eq
+            $contract18Summary.verifiedMeasurements.state.hostAdmission.accounting.withholdingReason
+    ) 'The strict remote-diagnostics projection rejected compatible contract-18 admission evidence.'
+    $missingContract19Reason = $linuxReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $missingContract19Reason.verifiedMeasurements.state.observed.hostAdmission.accounting.PSObject.Properties.Remove(
+        'withholdingReason')
+    Add-ThrowsCheck `
+        -Action {
+            ConvertTo-PitCrewRemoteDiagnosticsReportSummary `
+                -Report $missingContract19Reason |
+                Out-Null
+        } `
+        -ExpectedMessage 'Contract-19 host admission capacity properties are missing.' `
+        -Failure 'Contract-19 diagnostics accepted a missing withholding reason property.'
+    $mixedContract19Capacity = $linuxReport |
+        ConvertTo-Json -Depth 100 |
+        ConvertFrom-Json -Depth 100
+    $mixedContract19Capacity.verifiedMeasurements.state.observed.hostAdmission.status =
+        'degraded'
+    $mixedContract19Capacity.verifiedMeasurements.state.observed.hostAdmission.accounting.allocatableUnits =
+        $null
+    Add-ThrowsCheck `
+        -Action {
+            ConvertTo-PitCrewRemoteDiagnosticsReportSummary `
+                -Report $mixedContract19Capacity |
+                Out-Null
+        } `
+        -ExpectedMessage 'Host admission profile capacity is incomplete.' `
+        -Failure 'Contract-19 diagnostics accepted mixed null and numeric capacity evidence.'
     $privateTarget = 'repo:acme/private-repository'
     $privateRepositoryUrl =
         'https://github.com/acme/private-repository'
@@ -1544,6 +1607,12 @@ if ($CommandArguments[0] -eq '-Pi') {
         $diagnosedAdmission.accounting.reservedUnits -eq 2 -and
         $diagnosedAdmission.accounting.heldUnits -eq 2 -and
         $diagnosedAdmission.accounting.withheldUnits -eq 2 -and
+        $diagnosedAdmission.accounting.allocatableUnits -eq 0 -and
+        $diagnosedAdmission.accounting.allocatableWorkers -eq 0 -and
+        $diagnosedAdmission.accounting.theoreticalMaximumUnits -eq 6 -and
+        $diagnosedAdmission.accounting.theoreticalMaximumWorkers -eq 3 -and
+        $diagnosedAdmission.accounting.withholdingReason -eq
+            'protected-reservation' -and
         $diagnosedAdmission.lastDecision.failureCategory -eq 'budget-exceeded'
     ) 'The imported diagnosis omitted the complete bounded admission contract.'
     Add-Check (

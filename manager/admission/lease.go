@@ -35,10 +35,33 @@ var ErrLeaseNotProvisional = errors.New("admission: lease is not provisional")
 // profile's protected reservation, or losing this round of fair rotation.
 var ErrBudgetExceeded = errors.New("admission: unit budget exceeded")
 
+// ErrBudgetExhausted reports that the effective host budget cannot fit one
+// more worker for the requesting profile.
+var ErrBudgetExhausted = fmt.Errorf("%w: effective host budget exhausted", ErrBudgetExceeded)
+
+// ErrProtectedReservation reports that otherwise-free units remain reserved
+// for another profile whose reservation is not borrowable.
+var ErrProtectedReservation = fmt.Errorf("%w: capacity protected by non-borrowable reservation", ErrBudgetExceeded)
+
+// ErrFairShareContention reports that shared capacity exists, but the current
+// rotating fair-share decision protects another profile's opportunity.
+var ErrFairShareContention = fmt.Errorf("%w: shared capacity withheld by fair-share rotation", ErrBudgetExceeded)
+
 // ErrAdoptionPending reports that one or more profile managers have not yet
 // completed existing-worker adoption. Ordinary acquisition remains blocked
 // host-wide until every durable adoption fence is cleared.
 var ErrAdoptionPending = errors.New("admission: existing-worker adoption pending")
+
+// WithholdingReason is the bounded coordinator-owned explanation for current
+// pending demand that cannot be admitted.
+type WithholdingReason string
+
+const (
+	WithholdingBudgetExhausted      WithholdingReason = "budget-exhausted"
+	WithholdingProtectedReservation WithholdingReason = "protected-reservation"
+	WithholdingFairShareContention  WithholdingReason = "fair-share-contention"
+	WithholdingAdoptionPending      WithholdingReason = "adoption-pending"
+)
 
 // ErrEvidenceRequired reports a Reconcile call without exact retained
 // evidence that the previous worker and registration are absent. Fenced

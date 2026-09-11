@@ -56,6 +56,7 @@ type fakeHostAdmissionClient struct {
 	// statusLastDecision, and statusAccounting let tests shape the
 	// synthetic snapshot Status otherwise builds from current leases.
 	statusErr                error
+	statusProtocolVersion    int
 	statusNamespace          string
 	statusEpoch              int64
 	statusDecisionSequence   int64
@@ -67,14 +68,15 @@ type fakeHostAdmissionClient struct {
 
 func newFakeHostAdmissionClient(budget int) *fakeHostAdmissionClient {
 	return &fakeHostAdmissionClient{
-		capacity:       budget,
-		budget:         budget,
-		leases:         make(map[string]admission.Lease),
-		activateErrs:   make(map[string]error),
-		adoptErrs:      make(map[string]error),
-		renewErrs:      make(map[string]error),
-		releaseErrs:    make(map[string]error),
-		adoptionFences: make(map[string]bool),
+		capacity:              budget,
+		budget:                budget,
+		leases:                make(map[string]admission.Lease),
+		activateErrs:          make(map[string]error),
+		adoptErrs:             make(map[string]error),
+		renewErrs:             make(map[string]error),
+		releaseErrs:           make(map[string]error),
+		adoptionFences:        make(map[string]bool),
+		statusProtocolVersion: admission.CurrentProtocolVersion,
 	}
 }
 
@@ -253,6 +255,7 @@ func (c *fakeHostAdmissionClient) Status() (admission.Snapshot, error) {
 		return admission.Snapshot{}, c.statusErr
 	}
 	snapshot := admission.Snapshot{
+		ProtocolVersion:       c.statusProtocolVersion,
 		Namespace:             c.statusNamespace,
 		Epoch:                 c.statusEpoch,
 		DecisionSequence:      c.statusDecisionSequence,
@@ -1381,8 +1384,22 @@ func TestHostAdmissionFailureClassifierSeparatesPolicyAndTransport(t *testing.T)
 		deficit string
 	}{
 		{
-			name:    "budget",
-			err:     admission.ErrBudgetExceeded,
+			name:    "budget exhausted",
+			err:     admission.ErrBudgetExhausted,
+			outcome: hostAdmissionBudgetDenied,
+			marker:  errHostAdmissionWithheld,
+			deficit: deficitHostAdmissionWithheld,
+		},
+		{
+			name:    "protected reservation",
+			err:     admission.ErrProtectedReservation,
+			outcome: hostAdmissionBudgetDenied,
+			marker:  errHostAdmissionWithheld,
+			deficit: deficitHostAdmissionWithheld,
+		},
+		{
+			name:    "fair share contention",
+			err:     admission.ErrFairShareContention,
 			outcome: hostAdmissionBudgetDenied,
 			marker:  errHostAdmissionWithheld,
 			deficit: deficitHostAdmissionWithheld,
@@ -2102,6 +2119,11 @@ func TestSampleObservedHostAdmissionAvailable(t *testing.T) {
 	client := newFakeHostAdmissionClient(10)
 	pendingUnits := 6
 	withheldUnits := 6
+	allocatableUnits := 0
+	allocatableWorkers := 0
+	theoreticalMaximumUnits := 7
+	theoreticalMaximumWorkers := 3
+	withholdingReason := admission.WithholdingProtectedReservation
 	client.statusNamespace = "ns-a"
 	client.statusEpoch = 3
 	client.statusDecisionSequence = 7
@@ -2109,17 +2131,22 @@ func TestSampleObservedHostAdmissionAvailable(t *testing.T) {
 	client.statusProfileFingerprint = "profile-fingerprint-1"
 	client.statusAccounting = map[string]admission.ProfileAccounting{
 		"profile-a": {
-			ProfileID:                "profile-a",
-			UnitCost:                 2,
-			ReservedUnits:            3,
-			Borrowable:               true,
-			ProfilePolicyFingerprint: "profile-fingerprint-1",
-			ActiveUnits:              4,
-			ProvisionalUnits:         1,
-			HeldUnits:                5,
-			BorrowedUnits:            2,
-			PendingUnits:             &pendingUnits,
-			WithheldUnits:            &withheldUnits,
+			ProfileID:                 "profile-a",
+			UnitCost:                  2,
+			ReservedUnits:             3,
+			Borrowable:                true,
+			ProfilePolicyFingerprint:  "profile-fingerprint-1",
+			ActiveUnits:               4,
+			ProvisionalUnits:          1,
+			HeldUnits:                 5,
+			BorrowedUnits:             2,
+			PendingUnits:              &pendingUnits,
+			WithheldUnits:             &withheldUnits,
+			AllocatableUnits:          &allocatableUnits,
+			AllocatableWorkers:        &allocatableWorkers,
+			TheoreticalMaximumUnits:   &theoreticalMaximumUnits,
+			TheoreticalMaximumWorkers: &theoreticalMaximumWorkers,
+			WithholdingReason:         &withholdingReason,
 		},
 	}
 	client.statusLastDecision = &admission.Decision{
@@ -2146,12 +2173,86 @@ func TestSampleObservedHostAdmissionAvailable(t *testing.T) {
 	}
 	if observed.Accounting.HeldUnits != 5 || observed.Accounting.BorrowedUnits != 2 ||
 		observed.Accounting.PendingUnits == nil || *observed.Accounting.PendingUnits != 6 ||
-		observed.Accounting.WithheldUnits == nil || *observed.Accounting.WithheldUnits != 6 {
+		observed.Accounting.WithheldUnits == nil || *observed.Accounting.WithheldUnits != 6 ||
+		observed.Accounting.AllocatableUnits == nil || *observed.Accounting.AllocatableUnits != 0 ||
+		observed.Accounting.AllocatableWorkers == nil || *observed.Accounting.AllocatableWorkers != 0 ||
+		observed.Accounting.TheoreticalMaximumUnits == nil ||
+		*observed.Accounting.TheoreticalMaximumUnits != 7 ||
+		observed.Accounting.TheoreticalMaximumWorkers == nil ||
+		*observed.Accounting.TheoreticalMaximumWorkers != 3 ||
+		observed.Accounting.WithholdingReason == nil ||
+		*observed.Accounting.WithholdingReason != string(withholdingReason) {
 		t.Fatalf("expected accounting fields to round-trip exactly, got %#v", observed.Accounting)
 	}
 	if observed.LastDecision == nil || observed.LastDecision.Sequence != 7 ||
 		!observed.LastDecision.Granted {
 		t.Fatalf("expected this profile's last decision to be published, got %#v", observed.LastDecision)
+	}
+}
+
+func TestSampleObservedHostAdmissionDegradesForPreviousProtocol(t *testing.T) {
+	pendingUnits := 0
+	withheldUnits := 0
+	client := newFakeHostAdmissionClient(10)
+	client.statusProtocolVersion = admission.CurrentProtocolVersion - 1
+	client.statusNamespace = "ns-a"
+	client.statusHostFingerprint = "host-fingerprint-1"
+	client.statusProfileFingerprint = "profile-fingerprint-1"
+	client.statusAccounting = map[string]admission.ProfileAccounting{
+		"profile-a": {
+			ProfileID:                "profile-a",
+			UnitCost:                 1,
+			ProfilePolicyFingerprint: "profile-fingerprint-1",
+			PendingUnits:             &pendingUnits,
+			WithheldUnits:            &withheldUnits,
+		},
+	}
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+	coordinator.namespace = "ns-a"
+	coordinator.hostFingerprint = "host-fingerprint-1"
+	coordinator.profileFingerprint = "profile-fingerprint-1"
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusDegraded {
+		t.Fatalf("expected previous protocol to report degraded, got %q", observed.Status)
+	}
+	if observed.Accounting == nil ||
+		observed.Accounting.AllocatableUnits != nil ||
+		observed.Accounting.TheoreticalMaximumWorkers != nil ||
+		observed.Accounting.WithholdingReason != nil {
+		t.Fatalf("previous protocol fabricated contract-19 capacity: %#v", observed.Accounting)
+	}
+}
+
+func TestSampleObservedHostAdmissionDegradesForMissingCapacityFields(t *testing.T) {
+	pendingUnits := 0
+	withheldUnits := 0
+	client := newFakeHostAdmissionClient(10)
+	client.statusNamespace = "ns-a"
+	client.statusHostFingerprint = "host-fingerprint-1"
+	client.statusProfileFingerprint = "profile-fingerprint-1"
+	client.statusAccounting = map[string]admission.ProfileAccounting{
+		"profile-a": {
+			ProfileID:                "profile-a",
+			UnitCost:                 1,
+			ProfilePolicyFingerprint: "profile-fingerprint-1",
+			PendingUnits:             &pendingUnits,
+			WithheldUnits:            &withheldUnits,
+		},
+	}
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+	coordinator.namespace = "ns-a"
+	coordinator.hostFingerprint = "host-fingerprint-1"
+	coordinator.profileFingerprint = "profile-fingerprint-1"
+
+	observed := coordinator.sampleObservedHostAdmission()
+	if observed.Status != hostAdmissionStatusDegraded {
+		t.Fatalf("expected missing capacity fields to report degraded, got %q", observed.Status)
+	}
+	if observed.Accounting == nil ||
+		observed.Accounting.AllocatableUnits != nil ||
+		observed.Accounting.TheoreticalMaximumWorkers != nil {
+		t.Fatalf("missing capacity fields became measured zero: %#v", observed.Accounting)
 	}
 }
 

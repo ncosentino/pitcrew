@@ -19,6 +19,9 @@ func TestErrorCodeRoundTripsForKnownSentinels(t *testing.T) {
 		ErrLeaseExpired,
 		ErrLeaseNotProvisional,
 		ErrBudgetExceeded,
+		ErrBudgetExhausted,
+		ErrProtectedReservation,
+		ErrFairShareContention,
 		ErrAdoptionPending,
 		ErrEvidenceInvalid,
 		ErrEvidenceRequired,
@@ -71,18 +74,32 @@ func TestProtocolVersionWindow(t *testing.T) {
 		client[1] != previousProtocolVersion {
 		t.Fatalf("unexpected client protocol versions: %#v", client)
 	}
-	if CommandAdopt.supportedBy(previousProtocolVersion) {
+	if CommandAdopt.supportedBy(1) {
 		t.Fatal("protocol one unexpectedly supports adoption")
 	}
-	if !CommandAdopt.supportedBy(CurrentProtocolVersion) {
-		t.Fatal("current protocol does not support adoption")
+	if !CommandAdopt.supportedBy(previousProtocolVersion) ||
+		!CommandAdopt.supportedBy(CurrentProtocolVersion) {
+		t.Fatal("current and previous protocols must support adoption")
 	}
 	for _, command := range []Command{CommandBeginAdoption, CommandCompleteAdoption} {
-		if command.supportedBy(previousProtocolVersion) {
+		if command.supportedBy(1) {
 			t.Fatalf("protocol one unexpectedly supports %q", command)
 		}
-		if !command.supportedBy(CurrentProtocolVersion) {
-			t.Fatalf("current protocol does not support %q", command)
+		if !command.supportedBy(previousProtocolVersion) ||
+			!command.supportedBy(CurrentProtocolVersion) {
+			t.Fatalf("current and previous protocols must support %q", command)
+		}
+	}
+}
+
+func TestProtocolTwoDowngradesSpecificWithholdingCodes(t *testing.T) {
+	for _, sentinel := range []error{
+		ErrBudgetExhausted,
+		ErrProtectedReservation,
+		ErrFairShareContention,
+	} {
+		if code := errorCodeForErrVersion(sentinel, previousProtocolVersion); code != ErrorCodeBudgetExceeded {
+			t.Fatalf("protocol two mapped %v to %q, want %q", sentinel, code, ErrorCodeBudgetExceeded)
 		}
 	}
 }

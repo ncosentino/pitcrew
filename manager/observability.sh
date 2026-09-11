@@ -166,7 +166,7 @@ observed_state_is_valid() {
                     )
                 end
             );
-        def valid_host_admission_accounting:
+        def valid_host_admission_accounting($manager_contract; $admission_status):
             type == "object"
             and (.unitCost | nonnegative_integer and . > 0)
             and (.reservedUnits | nonnegative_integer)
@@ -194,7 +194,70 @@ observed_state_is_valid() {
                 )
             )
             and (.heldUnits == (.activeUnits + .provisionalUnits))
-            and (.borrowedUnits == ([.heldUnits - .reservedUnits, 0] | max));
+            and (.borrowedUnits == ([.heldUnits - .reservedUnits, 0] | max))
+            and (
+                .allocatableUnits == null
+                or (.allocatableUnits | nonnegative_integer)
+            )
+            and (
+                .allocatableWorkers == null
+                or (.allocatableWorkers | nonnegative_integer)
+            )
+            and (
+                .theoreticalMaximumUnits == null
+                or (.theoreticalMaximumUnits | nonnegative_integer)
+            )
+            and (
+                .theoreticalMaximumWorkers == null
+                or (.theoreticalMaximumWorkers | nonnegative_integer)
+            )
+            and (
+                .withholdingReason == null
+                or .withholdingReason == "budget-exhausted"
+                or .withholdingReason == "protected-reservation"
+                or .withholdingReason == "fair-share-contention"
+                or .withholdingReason == "adoption-pending"
+            )
+            and (
+                if $manager_contract >= 19 then
+                    has("allocatableUnits")
+                    and has("allocatableWorkers")
+                    and has("theoreticalMaximumUnits")
+                    and has("theoreticalMaximumWorkers")
+                    and has("withholdingReason")
+                    and (
+                        (
+                            $admission_status == "degraded"
+                            and .allocatableUnits == null
+                            and .allocatableWorkers == null
+                            and .theoreticalMaximumUnits == null
+                            and .theoreticalMaximumWorkers == null
+                            and .withholdingReason == null
+                        )
+                        or (
+                            (.allocatableUnits | nonnegative_integer)
+                            and (.allocatableWorkers | nonnegative_integer)
+                            and (.theoreticalMaximumUnits | nonnegative_integer)
+                            and (.theoreticalMaximumWorkers | nonnegative_integer)
+                            and (
+                                .allocatableWorkers
+                                == ((.allocatableUnits / .unitCost) | floor)
+                            )
+                            and (
+                                .theoreticalMaximumWorkers
+                                == ((.theoreticalMaximumUnits / .unitCost) | floor)
+                            )
+                            and .allocatableUnits <= .theoreticalMaximumUnits
+                            and (
+                                .withholdingReason == null
+                                or .allocatableUnits == 0
+                            )
+                        )
+                    )
+                else
+                    true
+                end
+            );
         def valid_host_admission_decision:
             type == "object"
             and (.sequence | nonnegative_integer)
@@ -225,14 +288,16 @@ observed_state_is_valid() {
         # fields. namespace is required whenever host admission is
         # configured (every status except "disabled"), independent of
         # whether the coordinator was reachable.
-        def valid_host_admission:
-            type == "object"
-            and (
-                .status == "disabled"
-                or .status == "available"
-                or .status == "degraded"
-                or .status == "unavailable"
-            )
+        def valid_host_admission($manager_contract):
+            . as $admission
+            | (
+                type == "object"
+                and (
+                    .status == "disabled"
+                    or .status == "available"
+                    or .status == "degraded"
+                    or .status == "unavailable"
+                )
             and (
                 .namespace == null
                 or (.namespace | type == "string" and test("^[a-z][a-z0-9-]{0,31}$"))
@@ -253,7 +318,16 @@ observed_state_is_valid() {
                     | type == "string" and test("^[A-Za-z0-9_-]{1,128}$")
                 )
             )
-            and (.accounting == null or (.accounting | valid_host_admission_accounting))
+            and (
+                .accounting == null
+                or (
+                    .accounting
+                    | valid_host_admission_accounting(
+                        $manager_contract;
+                        $admission.status
+                    )
+                )
+            )
             and (.lastDecision == null or (.lastDecision | valid_host_admission_decision))
             and (
                 if .status == "disabled" then
@@ -298,7 +372,8 @@ observed_state_is_valid() {
                     and .effectiveTotalUnits != null
                     and .availableUnits != null
                 end
-            );
+            )
+        );
         def optional_nonnegative_number:
             . == null or (type == "number" and . >= 0);
         def optional_percentage:
@@ -862,8 +937,14 @@ observed_state_is_valid() {
             end
         )
         and (
-            .hostAdmission == null
-            or (.hostAdmission | valid_host_admission)
+            . as $state
+            | (
+                $state.hostAdmission == null
+                or (
+                    $state.hostAdmission
+                    | valid_host_admission($state.managerContractVersion)
+                )
+            )
         )
         and (
             if .managerContractVersion >= 18 then

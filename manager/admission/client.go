@@ -252,7 +252,9 @@ func (c *Client) Status() (Snapshot, error) {
 	if response.Snapshot == nil {
 		return Snapshot{}, fmt.Errorf("admission: status response missing snapshot")
 	}
-	return *response.Snapshot, nil
+	snapshot := *response.Snapshot
+	snapshot.ProtocolVersion = response.ProtocolVersion
+	return snapshot, nil
 }
 
 // responseErr reconstructs an error from a wire Response. When the response

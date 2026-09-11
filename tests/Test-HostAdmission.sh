@@ -157,8 +157,8 @@ assert_true \
     "Recovered draining slots do not clear pending host demand before return." \
     grep -Fq 'host_admission_end_wait \' "${manager_source}"
 assert_true \
-    "Fixed admission implementation did not activate manager contract eighteen." \
-    grep -Fq 'MANAGER_CONTRACT_VERSION=18' "${manager_source}"
+    "Fixed admission implementation did not activate manager contract nineteen." \
+    grep -Fq 'MANAGER_CONTRACT_VERSION=19' "${manager_source}"
 
 disabled_calls="${TEMP_DIRECTORY}/disabled-calls.log"
 : > "${disabled_calls}"
@@ -344,6 +344,7 @@ status_snapshot="${TEMP_DIRECTORY}/status-snapshot.json"
 status_output="${TEMP_DIRECTORY}/status-output.json"
 cat > "${status_snapshot}" <<'EOF'
 {
+    "protocolVersion": 3,
     "namespace": "primary",
     "epoch": 3,
     "decisionSequence": 9,
@@ -364,7 +365,12 @@ cat > "${status_snapshot}" <<'EOF'
             "heldUnits": 2,
             "borrowedUnits": 0,
             "pendingUnits": 0,
-            "withheldUnits": 0
+            "withheldUnits": 0,
+            "allocatableUnits": 4,
+            "allocatableWorkers": 2,
+            "theoreticalMaximumUnits": 7,
+            "theoreticalMaximumWorkers": 3,
+            "withholdingReason": null
         }
     ],
     "lastDecision": {
@@ -394,7 +400,15 @@ assert_true \
         "${status_output}" >/dev/null
 assert_true \
     "Available host-admission status did not report this profile's own accounting." \
-    jq -e '.accounting.heldUnits == 2 and .accounting.borrowedUnits == 0' \
+    jq -e '
+        .accounting.heldUnits == 2
+        and .accounting.borrowedUnits == 0
+        and .accounting.allocatableUnits == 4
+        and .accounting.allocatableWorkers == 2
+        and .accounting.theoreticalMaximumUnits == 7
+        and .accounting.theoreticalMaximumWorkers == 3
+        and .accounting.withholdingReason == null
+    ' \
         "${status_output}" >/dev/null
 assert_true \
     "Available host-admission status did not report its own scoped last decision." \
@@ -418,6 +432,64 @@ jq '.adoptionFences = [{"profileId":"other-profile"}]' \
 assert_true \
     "A host-wide adoption fence was reported as available." \
     jq -e '.status == "degraded"' "${status_output}" >/dev/null
+
+previous_protocol_snapshot="${TEMP_DIRECTORY}/status-previous-protocol.json"
+jq '
+    .protocolVersion = 2
+    | del(
+        .accounting[0].allocatableUnits,
+        .accounting[0].allocatableWorkers,
+        .accounting[0].theoreticalMaximumUnits,
+        .accounting[0].theoreticalMaximumWorkers,
+        .accounting[0].withholdingReason
+    )
+' "${status_snapshot}" > "${previous_protocol_snapshot}"
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${previous_protocol_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-a"
+    PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT="profile-fingerprint-a"
+    export \
+        PITCREW_TEST_STATUS_SNAPSHOT \
+        PITCREW_HOST_ADMISSION_HOST_FINGERPRINT \
+        PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Protocol-two coordinator compatibility did not remain explicit degraded evidence." \
+    jq -e '
+        .status == "degraded"
+        and .accounting.allocatableUnits == null
+        and .accounting.allocatableWorkers == null
+        and .accounting.theoreticalMaximumUnits == null
+        and .accounting.theoreticalMaximumWorkers == null
+        and .accounting.withholdingReason == null
+    ' "${status_output}" >/dev/null
+
+missing_capacity_snapshot="${TEMP_DIRECTORY}/status-missing-capacity.json"
+jq 'del(.accounting[0].allocatableUnits)' \
+    "${status_snapshot}" > "${missing_capacity_snapshot}"
+(
+    PITCREW_TEST_STATUS_SNAPSHOT="${missing_capacity_snapshot}"
+    PITCREW_HOST_ADMISSION_HOST_FINGERPRINT="host-fingerprint-a"
+    PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT="profile-fingerprint-a"
+    export \
+        PITCREW_TEST_STATUS_SNAPSHOT \
+        PITCREW_HOST_ADMISSION_HOST_FINGERPRINT \
+        PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT
+    . "${ROOT}/manager/host-admission.sh"
+    host_admission_status "${status_output}"
+)
+assert_true \
+    "Protocol-three status with missing capacity did not degrade without fabricating zero." \
+    jq -e '
+        .status == "degraded"
+        and .accounting.allocatableUnits == null
+        and .accounting.allocatableWorkers == null
+        and .accounting.theoreticalMaximumUnits == null
+        and .accounting.theoreticalMaximumWorkers == null
+        and .accounting.withholdingReason == null
+    ' "${status_output}" >/dev/null
 
 (
     PITCREW_TEST_STATUS_SNAPSHOT="${status_snapshot}"

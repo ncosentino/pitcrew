@@ -424,6 +424,18 @@ host_admission_status() {
             (.accounting // [] | map(select(.profileId == $profile)) | .[0]) as $own
             | ($own != null) as $known
             | (
+                $known
+                and ($own | has("allocatableUnits"))
+                and ($own | has("allocatableWorkers"))
+                and ($own | has("theoreticalMaximumUnits"))
+                and ($own | has("theoreticalMaximumWorkers"))
+                and ($own | has("withholdingReason"))
+                and ($own.allocatableUnits | type == "number")
+                and ($own.allocatableWorkers | type == "number")
+                and ($own.theoreticalMaximumUnits | type == "number")
+                and ($own.theoreticalMaximumWorkers | type == "number")
+            ) as $capacityComplete
+            | (
                 (
                     (.namespace // "") != $namespace
                 )
@@ -440,6 +452,8 @@ host_admission_status() {
                 or ((.capacityUnits // 0) <= 0)
                 or (.safetyMarginUnits == null)
                 or ($known and ($own.pendingUnits == null or $own.withheldUnits == null))
+                or ((.protocolVersion // 0) < 3)
+                or (((.protocolVersion // 0) >= 3) and ($capacityComplete | not))
                 or ($known | not)
             ) as $degraded
             | (.lastDecision // null) as $decision
@@ -481,7 +495,37 @@ host_admission_status() {
                         heldUnits: $own.heldUnits,
                         borrowedUnits: $own.borrowedUnits,
                         pendingUnits: $own.pendingUnits,
-                        withheldUnits: $own.withheldUnits
+                        withheldUnits: $own.withheldUnits,
+                        allocatableUnits: (
+                            if (.protocolVersion // 0) >= 3 and $capacityComplete
+                            then ($own.allocatableUnits // null)
+                            else null
+                            end
+                        ),
+                        allocatableWorkers: (
+                            if (.protocolVersion // 0) >= 3 and $capacityComplete
+                            then ($own.allocatableWorkers // null)
+                            else null
+                            end
+                        ),
+                        theoreticalMaximumUnits: (
+                            if (.protocolVersion // 0) >= 3 and $capacityComplete
+                            then ($own.theoreticalMaximumUnits // null)
+                            else null
+                            end
+                        ),
+                        theoreticalMaximumWorkers: (
+                            if (.protocolVersion // 0) >= 3 and $capacityComplete
+                            then ($own.theoreticalMaximumWorkers // null)
+                            else null
+                            end
+                        ),
+                        withholdingReason: (
+                            if (.protocolVersion // 0) >= 3 and $capacityComplete
+                            then ($own.withholdingReason // null)
+                            else null
+                            end
+                        )
                     } else null end
                 ),
                 lastDecision: $ownDecision

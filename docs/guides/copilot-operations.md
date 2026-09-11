@@ -183,10 +183,12 @@ acknowledged, and observed capacity plus any scale-set statistics already in
 observed state, including their freshness. It never issues a credentialed GitHub
 query to fill that gap; missing evidence is reported as missing.
 
-For manager contract 18, the same report projects the complete bounded
+For manager contract 19, the same report projects the complete bounded
 `hostAdmission` status, namespace, epoch, decision sequence, host policy,
 profile cost and reservation, borrowing mode, active/provisional/held/borrowed
-accounting, pending and withheld demand, and last decision. It keeps
+accounting, pending and withheld demand, allocatable units/workers, theoretical
+maximum units/workers, the current withholding reason, and last decision.
+Contract 18 remains valid without the new capacity fields. The report keeps
 `host-admission-withheld`, `host-admission-degraded`, and
 `host-admission-unavailable` distinct from profile ceilings and provisioning
 failures. `unavailable` and stale demand remain missing evidence, never zero.

@@ -302,6 +302,18 @@ func classifyHostAdmissionFailure(err error) (hostAdmissionOutcome, error) {
 
 func hostAdmissionFailureDetails(err error) (string, string, string) {
 	switch {
+	case errors.Is(err, admission.ErrBudgetExhausted):
+		return deficitHostAdmissionWithheld,
+			reasonCapacityCeiling,
+			"effective host-admission budget cannot fit another worker"
+	case errors.Is(err, admission.ErrProtectedReservation):
+		return deficitHostAdmissionWithheld,
+			reasonCapacityCeiling,
+			"capacity is protected by another profile's non-borrowable reservation"
+	case errors.Is(err, admission.ErrFairShareContention):
+		return deficitHostAdmissionWithheld,
+			reasonCapacityCeiling,
+			"shared capacity is withheld by the current fair-share decision"
 	case errors.Is(err, errHostAdmissionWithheld):
 		return deficitHostAdmissionWithheld,
 			reasonCapacityCeiling,
@@ -386,6 +398,16 @@ func (h *hostAdmissionCoordinator) sampleObservedHostAdmission() observedHostAdm
 	if known && (profile.PendingUnits == nil || profile.WithheldUnits == nil) {
 		degraded = true
 	}
+	supportsCapacityEvidence := known &&
+		(snapshot.ProtocolVersion == 0 ||
+			snapshot.ProtocolVersion >= admission.AdmissionExplainabilityProtocolVersion) &&
+		profile.AllocatableUnits != nil &&
+		profile.AllocatableWorkers != nil &&
+		profile.TheoreticalMaximumUnits != nil &&
+		profile.TheoreticalMaximumWorkers != nil
+	if !supportsCapacityEvidence {
+		degraded = true
+	}
 	if snapshot.CapacityUnits <= 0 {
 		degraded = true
 	}
@@ -417,7 +439,7 @@ func (h *hostAdmissionCoordinator) sampleObservedHostAdmission() observedHostAdm
 		observed.SafetyMarginUnits = &safetyMarginUnits
 	}
 	if known {
-		observed.Accounting = &observedHostAdmissionAccounting{
+		accounting := &observedHostAdmissionAccounting{
 			UnitCost:                 profile.UnitCost,
 			ReservedUnits:            profile.ReservedUnits,
 			Borrowable:               profile.Borrowable,
@@ -429,6 +451,17 @@ func (h *hostAdmissionCoordinator) sampleObservedHostAdmission() observedHostAdm
 			PendingUnits:             profile.PendingUnits,
 			WithheldUnits:            profile.WithheldUnits,
 		}
+		if supportsCapacityEvidence {
+			accounting.AllocatableUnits = profile.AllocatableUnits
+			accounting.AllocatableWorkers = profile.AllocatableWorkers
+			accounting.TheoreticalMaximumUnits = profile.TheoreticalMaximumUnits
+			accounting.TheoreticalMaximumWorkers = profile.TheoreticalMaximumWorkers
+			if profile.WithholdingReason != nil {
+				reason := string(*profile.WithholdingReason)
+				accounting.WithholdingReason = &reason
+			}
+		}
+		observed.Accounting = accounting
 	}
 	if decision := snapshot.LastDecision; decision != nil && decision.ProfileID == h.profileID {
 		observed.LastDecision = &observedHostAdmissionDecision{

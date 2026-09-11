@@ -87,7 +87,7 @@ Count what is actually running and compare it with what each layer believes.
 
 ## Host-admission evidence
 
-For manager contract 18, project the complete root-level `hostAdmission`
+For manager contract 19, project the complete root-level `hostAdmission`
 object from `observed-state.json` without querying or changing the coordinator:
 
 - `status`, `namespace`, `epoch`, and `decisionSequence`
@@ -96,8 +96,12 @@ object from `observed-state.json` without querying or changing the coordinator:
 - `hostPolicyFingerprint`
 - accounting `unitCost`, `reservedUnits`, `borrowable`,
   `profilePolicyFingerprint`, `activeUnits`, `provisionalUnits`, `heldUnits`,
-  `borrowedUnits`, `pendingUnits`, and `withheldUnits`
+  `borrowedUnits`, `pendingUnits`, `withheldUnits`, `allocatableUnits`,
+  `allocatableWorkers`, `theoreticalMaximumUnits`,
+  `theoreticalMaximumWorkers`, and `withholdingReason`
 - the bounded `lastDecision`
+
+Contract 18 remains valid without the contract-19 capacity and reason fields.
 
 Also project `capacityEvidence.fixed` and every
 `capacityEvidence.targets[]` entry, including freshness, local and eligibility

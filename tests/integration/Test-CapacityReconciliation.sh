@@ -210,7 +210,7 @@ start_legacy_compose() {
         PITCREW_SESSION_OWNER="${LEGACY_PROFILE_NAME}" \
         PITCREW_ASSUME_UNVERSIONED_CURRENT="0" \
         PITCREW_STATE_DIR=".pitcrew-state/${LEGACY_PROFILE_NAME}" \
-        PITCREW_MANAGER_CONTRACT_VERSION="18" \
+        PITCREW_MANAGER_CONTRACT_VERSION="19" \
             docker compose \
                 --file docker-compose.yml \
                 --project-name "${LEGACY_COMPOSE_PROJECT}" \
@@ -385,8 +385,8 @@ done
     echo "Observed state did not publish the configured PID policy." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${LEGACY_OBSERVED_STATE}")" -eq 18 ] || {
-    echo "Direct Compose observed state did not report manager contract version eighteen." >&2
+[ "$(jq -r '.managerContractVersion' "${LEGACY_OBSERVED_STATE}")" -eq 19 ] || {
+    echo "Direct Compose observed state did not report manager contract version nineteen." >&2
     exit 1
 }
 [ "$(jq -r '.hostAdmission.status' "${LEGACY_OBSERVED_STATE}")" = "disabled" ] || {
@@ -421,8 +421,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 18 ] || {
-    echo "Observed state did not report manager contract version eighteen." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 19 ] || {
+    echo "Observed state did not report manager contract version nineteen." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {
