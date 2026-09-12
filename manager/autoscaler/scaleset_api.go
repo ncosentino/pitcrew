@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/actions/scaleset"
 	"github.com/actions/scaleset/listener"
@@ -53,6 +54,7 @@ type scaleSetService interface {
 		runnerName string,
 	) (runnerReference, bool, error)
 	removeRunner(ctx context.Context, runnerID int64) error
+	checkRegistrationAccess(ctx context.Context) error
 	openSession(
 		ctx context.Context,
 		scaleSetID int,
@@ -87,11 +89,27 @@ func (f githubScaleSetServiceFactory) newService(
 	if err != nil {
 		return nil, fmt.Errorf("create scale-set client for %s: %w", registrationURL, err)
 	}
-	return &githubScaleSetService{client: client}, nil
+	registrationAccessEndpoint, err := githubRunnerRegistrationAccessEndpoint(registrationURL)
+	if err != nil {
+		return nil, err
+	}
+	return &githubScaleSetService{
+		client:                     client,
+		accessToken:                f.accessToken,
+		registrationAccessEndpoint: registrationAccessEndpoint,
+		httpClient: &http.Client{
+			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+				return http.ErrUseLastResponse
+			},
+		},
+	}, nil
 }
 
 type githubScaleSetService struct {
-	client *scaleset.Client
+	client                     *scaleset.Client
+	accessToken                string
+	registrationAccessEndpoint string
+	httpClient                 *http.Client
 }
 
 func (s *githubScaleSetService) ensureScaleSet(
@@ -214,6 +232,16 @@ func (s *githubScaleSetService) removeRunner(
 	runnerID int64,
 ) error {
 	return s.client.RemoveRunner(ctx, runnerID)
+}
+
+func (s *githubScaleSetService) checkRegistrationAccess(ctx context.Context) error {
+	return checkGitHubRunnerRegistrationAccess(
+		ctx,
+		s.httpClient,
+		githubAPIBaseURL,
+		s.registrationAccessEndpoint,
+		s.accessToken,
+	)
 }
 
 func (s *githubScaleSetService) findRunnerByName(

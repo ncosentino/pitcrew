@@ -404,6 +404,21 @@ and the profile reports eligible capacity separately from running containers.
 Fixed managers replace only exact workers that remain missing or offline and
 not busy across repeated server-side observations.
 
+Every non-pause setup operation validates the stored administration credential
+against each configured target before changing Docker or generated state.
+Running fixed and autoscaled managers repeat that same bounded
+registration-token authorization check every five minutes, including targets
+whose configured capacity is zero. The returned short-lived token is validated
+in memory and discarded; the probe does not register or remove a runner, alter
+demand, or interrupt an active worker.
+
+If a stored credential is revoked or loses required runner-administration
+permission, `subsystemHealth.github` remains `degraded` and reports
+`registration-token-request` with `authorization-failed` until a later probe
+succeeds. Repeated failures progress to `unavailable`; provider rate limiting,
+a missing target, and a timeout remain distinct reasons. Other successful
+GitHub operations cannot conceal the outstanding credential failure.
+
 The contract-11 schema adds the configured resource policy, immutable image
 identity, cumulative network and block-I/O counters, exit diagnostics, an
 aggregate autoscaling ceiling, timestamped GitHub scale-set statistics, and
@@ -685,7 +700,9 @@ Manager contract 20 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics and adding contract-20 journal aggregation. Setup fails
 closed before Docker, image, or generated state mutation if a contract ahead
-of both implementations is selected.
+of both implementations is selected. Periodic credential-health checks reuse
+the existing contract-12 GitHub health and operation vocabulary, so they do not
+require another contract revision.
 
 ### Contract-14 runner correlation
 

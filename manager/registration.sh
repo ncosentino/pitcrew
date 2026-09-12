@@ -33,6 +33,111 @@ github_runner_endpoint() {
     esac
 }
 
+write_github_runner_registration_access_targets() {
+    desired_state_path="$1"
+    output_path="$2"
+    temporary_path="${output_path}.$$"
+    repositories_path="${output_path}.$$.repositories"
+    : > "${temporary_path}"
+    [ -f "${desired_state_path}" ] || {
+        mv -f "${temporary_path}" "${output_path}"
+        return
+    }
+
+    scope=$(jq -r '.scope // ""' "${desired_state_path}" 2>/dev/null) || {
+        rm -f "${temporary_path}" "${repositories_path}"
+        return 1
+    }
+    case "${scope}" in
+        repo)
+            if ! jq -r '.repositories[]?.url // empty' \
+                "${desired_state_path}" > "${repositories_path}"; then
+                rm -f "${temporary_path}" "${repositories_path}"
+                return 1
+            fi
+            while IFS= read -r repository; do
+                [ -n "${repository}" ] || continue
+                endpoint=$(github_runner_endpoint repo "${repository}" "" "") || {
+                    rm -f "${temporary_path}" "${repositories_path}"
+                    return 1
+                }
+                target_hash=$(printf '%s' "${endpoint}" | sha256sum | awk '{ print $1 }')
+                printf '%s\t%s/registration-token\n' \
+                    "${target_hash}" \
+                    "${endpoint}" >> "${temporary_path}"
+            done < "${repositories_path}"
+            rm -f "${repositories_path}"
+            ;;
+        org|ent)
+            endpoint=$(github_runner_endpoint \
+                "${scope}" \
+                "" \
+                "${ORG_NAME:-}" \
+                "${ENTERPRISE_NAME:-}") || {
+                    rm -f "${temporary_path}" "${repositories_path}"
+                    return 1
+                }
+            target_hash=$(printf '%s' "${endpoint}" | sha256sum | awk '{ print $1 }')
+            printf '%s\t%s/registration-token\n' \
+                "${target_hash}" \
+                "${endpoint}" >> "${temporary_path}"
+            ;;
+        *)
+            rm -f "${temporary_path}" "${repositories_path}"
+            return 1
+            ;;
+    esac
+    mv -f "${temporary_path}" "${output_path}"
+}
+
+check_github_runner_registration_access() {
+    endpoint="$1"
+    access_token="$2"
+    response_timeout="${3:-5}"
+    [ -n "${access_token}" ] || return 3
+    registration_cli="${PITCREW_GITHUB_RUNNER_CLI:-/usr/local/bin/pitcrew-autoscaler}"
+    [ -x "${registration_cli}" ] || return 1
+    ACCESS_TOKEN="${access_token}" \
+        "${registration_cli}" check-github-runner-access \
+            --endpoint "${endpoint}" \
+            --timeout-seconds "${response_timeout}" \
+            >/dev/null 2>&1
+}
+
+github_runner_registration_access_failure_reason() {
+    case "$1" in
+        3|7|8) printf 'authorization-failed' ;;
+        4) printf 'not-found' ;;
+        5) printf 'rate-limited' ;;
+        6) printf 'timeout' ;;
+        *) printf 'unknown' ;;
+    esac
+}
+
+github_runner_registration_access_failure_evidence() {
+    case "$1" in
+        3) printf 'Stored runner credential was rejected' ;;
+        4) printf 'Runner registration target was not found or is excluded from credential access' ;;
+        5) printf 'Runner credential authorization check was rate limited' ;;
+        6) printf 'Runner credential authorization check timed out' ;;
+        7) printf 'Stored runner credential lacks runner administration permission' ;;
+        8) printf 'Stored runner credential requires organization authorization' ;;
+        *) printf 'Stored runner credential authorization check failed' ;;
+    esac
+}
+
+github_runner_registration_access_failure_priority() {
+    case "$1" in
+        8) printf '1' ;;
+        7) printf '2' ;;
+        3) printf '3' ;;
+        4) printf '4' ;;
+        5) printf '5' ;;
+        6) printf '6' ;;
+        *) printf '7' ;;
+    esac
+}
+
 fetch_github_runner_inventory() {
     output_path="$1"
     endpoint="$2"

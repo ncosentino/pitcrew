@@ -46,6 +46,22 @@ demand plus the warm idle floor, and `activeSlots` is the live container count.
 A `degraded` status or non-empty `lastError` identifies scale-set, JIT
 configuration, or Docker provisioning failures.
 
+Inspect `$state.subsystemHealth.github` when a profile still has a healthy
+message session but new runner-administration operations fail. A
+`registration-token-request` failure with reason `authorization-failed` means
+the stored credential was rejected or no longer has the required permission.
+`rate-limited`, `not-found`, `timeout`, and `unknown` preserve other provider
+outcomes without exposing the request, response, target URL, or credential.
+The sanitized evidence distinguishes a rejected credential (GitHub HTTP 401,
+which does not distinguish expiration from revocation), missing runner
+administration permission, required organization authorization when GitHub
+sets its SSO header, and a target that is missing or excluded from credential
+access. GitHub deliberately makes the last case ambiguous through HTTP 404.
+PitCrew checks every configured target every five minutes and keeps this health
+failure visible until an exact recheck succeeds. Updating the stored credential
+through the profile's complete reviewed setup command restores health without
+stopping active workers.
+
 For a contract-18 profile, inspect host admission and per-target capacity
 evidence separately:
 
