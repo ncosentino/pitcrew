@@ -468,7 +468,7 @@ client status > "${recovery_status}"
     fail "Recovery did not retain exactly the surviving worker lease."
 [ "$(jq '[.tombstones[] | select(.profileId == "restart-recovery" and .slotKey == "orphan-slot")] | length' "${recovery_status}")" -eq 1 ] ||
     fail "Recovery did not tombstone the exact absent worker lease."
-[ "$(jq '[.adoptionFences[] | select(.profileId == "restart-recovery")] | length' "${recovery_status}")" -eq 0 ] ||
+[ "$(jq '[(.adoptionFences // [])[] | select(.profileId == "restart-recovery")] | length' "${recovery_status}")" -eq 0 ] ||
     fail "Recovery fence remained after every durable lease was accounted."
 docker rm -f "${RECOVERY_SURVIVOR}" >/dev/null
 release_slot restart-recovery survivor-slot
