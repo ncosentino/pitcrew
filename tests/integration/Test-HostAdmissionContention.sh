@@ -442,6 +442,13 @@ done
 
 stop_coordinator
 docker stop --time 2 "${RECOVERY_ORPHAN}" >/dev/null
+removal_deadline=$((SECONDS + 10))
+while [ "${SECONDS}" -lt "${removal_deadline}" ]; do
+    if ! docker container inspect "${RECOVERY_ORPHAN}" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
 if docker container inspect "${RECOVERY_ORPHAN}" >/dev/null 2>&1; then
     fail "Synthetic daemon-loss fixture retained the orphan worker."
 fi
