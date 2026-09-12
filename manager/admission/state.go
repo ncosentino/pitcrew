@@ -13,9 +13,9 @@ import (
 // stateSchemaVersion is the durable-state schema this coordinator writes.
 // Load upgrades the immediately previous schema; every other version fails
 // closed rather than guessing compatibility.
-const stateSchemaVersion = 2
+const stateSchemaVersion = 3
 
-const previousStateSchemaVersion = 1
+const previousStateSchemaVersion = 2
 
 // ErrCorruptState reports durable state that cannot be safely trusted:
 // invalid JSON, an unsupported schema version, or an internally
@@ -70,7 +70,12 @@ func (s durableState) clone() durableState {
 		cloned.Tombstones[key] = tombstone
 	}
 	for key, fence := range s.AdoptionFences {
-		cloned.AdoptionFences[key] = fence
+		clonedFence := fence
+		clonedFence.PendingLeaseKeys = append(
+			make([]string, 0, len(fence.PendingLeaseKeys)),
+			fence.PendingLeaseKeys...,
+		)
+		cloned.AdoptionFences[key] = clonedFence
 	}
 	if s.LastDecision != nil {
 		decision := *s.LastDecision
@@ -112,6 +117,15 @@ func (s durableState) validate() error {
 		if lease.ProfileID == "" || lease.SlotKey == "" || lease.Units < 1 {
 			return fmt.Errorf("%w: lease %q is incomplete", ErrCorruptState, key)
 		}
+		if lease.RegistrationName != "" {
+			if err := validateRegistrationName(lease.RegistrationName); err != nil {
+				return fmt.Errorf(
+					"%w: lease %q has an invalid registration name",
+					ErrCorruptState,
+					key,
+				)
+			}
+		}
 		if lease.Status != LeaseProvisional && lease.Status != LeaseActive {
 			return fmt.Errorf(
 				"%w: lease %q has unsupported status %q",
@@ -150,6 +164,42 @@ func (s durableState) validate() error {
 				ErrCorruptState,
 				profileID,
 			)
+		}
+		if fence.PendingLeaseKeys == nil {
+			return fmt.Errorf(
+				"%w: adoption fence profile %q is missing pending lease keys",
+				ErrCorruptState,
+				profileID,
+			)
+		}
+		seenPending := make(map[string]struct{}, len(fence.PendingLeaseKeys))
+		for _, slotKey := range fence.PendingLeaseKeys {
+			if err := validateSlotKey(slotKey); err != nil {
+				return fmt.Errorf(
+					"%w: adoption fence profile %q has an invalid pending lease key",
+					ErrCorruptState,
+					profileID,
+				)
+			}
+			if _, duplicate := seenPending[slotKey]; duplicate {
+				return fmt.Errorf(
+					"%w: adoption fence profile %q has duplicate pending lease key %q",
+					ErrCorruptState,
+					profileID,
+					slotKey,
+				)
+			}
+			seenPending[slotKey] = struct{}{}
+			key := leaseKey{profileID: profileID, slotKey: slotKey}.String()
+			lease, exists := s.Leases[key]
+			if !exists || lease.Status != LeaseActive {
+				return fmt.Errorf(
+					"%w: adoption fence profile %q references a non-active lease %q",
+					ErrCorruptState,
+					profileID,
+					slotKey,
+				)
+			}
 		}
 	}
 	for key := range s.Leases {
@@ -246,6 +296,10 @@ func (f *fileStore) Load() (durableState, bool, error) {
 		return durableState{}, false, fmt.Errorf("%w: %v", ErrCorruptState, err)
 	}
 	if state.SchemaVersion == previousStateSchemaVersion {
+		for profileID, fence := range state.AdoptionFences {
+			fence.PendingLeaseKeys = activeLeaseSlotKeys(state.Leases, profileID)
+			state.AdoptionFences[profileID] = fence
+		}
 		state.SchemaVersion = stateSchemaVersion
 	}
 	if state.Leases == nil {

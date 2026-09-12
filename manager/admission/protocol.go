@@ -9,25 +9,39 @@ import (
 // errors and profile-scoped capacity accounting.
 const AdmissionExplainabilityProtocolVersion = 3
 
+// RegistrationBindingProtocolVersion introduced durable exact GitHub runner
+// identity on host-admission leases.
+const RegistrationBindingProtocolVersion = 4
+
 // CurrentProtocolVersion is the exact wire protocol version this build
 // speaks by default. ADR-0003 requires the service to keep serving the
-// current and immediately previous client protocol during a rolling
-// manager upgrade; ServerSupportedVersions expresses that compatibility
-// window explicitly rather than leaving it implicit in a single constant.
-const CurrentProtocolVersion = AdmissionExplainabilityProtocolVersion
+// current and compatible earlier client protocols during a rolling manager
+// upgrade; ServerSupportedVersions expresses that compatibility window
+// explicitly rather than leaving it implicit in a single constant.
+const CurrentProtocolVersion = RegistrationBindingProtocolVersion
 
-const previousProtocolVersion = 2
+const previousProtocolVersion = AdmissionExplainabilityProtocolVersion
+
+const releasedCompatibilityProtocolVersion = 2
 
 // ServerSupportedVersions returns the protocol versions this build's server
 // accepts, newest first.
 func ServerSupportedVersions() []int {
-	return []int{CurrentProtocolVersion, previousProtocolVersion}
+	return []int{
+		CurrentProtocolVersion,
+		previousProtocolVersion,
+		releasedCompatibilityProtocolVersion,
+	}
 }
 
 // ClientSupportedVersions returns the protocol versions this build's client
 // can speak, newest first.
 func ClientSupportedVersions() []int {
-	return []int{CurrentProtocolVersion, previousProtocolVersion}
+	return []int{
+		CurrentProtocolVersion,
+		previousProtocolVersion,
+		releasedCompatibilityProtocolVersion,
+	}
 }
 
 // NegotiateProtocolVersion picks the highest protocol version both the
@@ -57,6 +71,7 @@ const (
 	CommandApplyPolicy      Command = "apply-policy"
 	CommandSetDemand        Command = "set-demand"
 	CommandAcquire          Command = "acquire"
+	CommandBindRegistration Command = "bind-registration"
 	CommandAdopt            Command = "adopt"
 	CommandBeginAdoption    Command = "begin-adoption"
 	CommandCompleteAdoption Command = "complete-adoption"
@@ -84,6 +99,8 @@ func (c Command) supportedBy(version int) bool {
 	switch c {
 	case CommandAdopt, CommandBeginAdoption, CommandCompleteAdoption:
 		return version >= 2
+	case CommandBindRegistration:
+		return version >= RegistrationBindingProtocolVersion
 	case CommandApplyPolicy,
 		CommandSetDemand,
 		CommandAcquire,
@@ -99,10 +116,23 @@ func (c Command) supportedBy(version int) bool {
 }
 
 func (c Command) minimumProtocolVersion() int {
-	if c.supportedBy(previousProtocolVersion) {
-		return previousProtocolVersion
+	switch c {
+	case CommandBindRegistration:
+		return RegistrationBindingProtocolVersion
+	case CommandAdopt, CommandBeginAdoption, CommandCompleteAdoption:
+		return releasedCompatibilityProtocolVersion
+	case CommandApplyPolicy,
+		CommandSetDemand,
+		CommandAcquire,
+		CommandRenew,
+		CommandActivate,
+		CommandRelease,
+		CommandReconcile,
+		CommandStatus:
+		return 1
+	default:
+		return CurrentProtocolVersion
 	}
-	return CurrentProtocolVersion
 }
 
 // Request is the exact, versioned wire envelope a client sends to the
@@ -114,6 +144,7 @@ type Request struct {
 	Command          Command     `json:"command"`
 	ProfileID        string      `json:"profileId,omitempty"`
 	SlotKey          string      `json:"slotKey,omitempty"`
+	RegistrationName string      `json:"registrationName,omitempty"`
 	PendingDemand    int         `json:"pendingDemand,omitempty"`
 	Evidence         string      `json:"evidence,omitempty"`
 	Policy           *HostPolicy `json:"policy,omitempty"`

@@ -252,6 +252,54 @@ func TestJournalRespectsCapacityAndSizeBudget(t *testing.T) {
 	}
 }
 
+func TestJournalRetainsUnresolvedRecoveryAcrossAdmissionFailures(t *testing.T) {
+	recorder, _, _ := newTestRecorder(t)
+	recorder.record(diagnosticsObservation{
+		subsystem: subsystemRecovery,
+		operation: operationManagerStart,
+		outcome:   outcomeBlocked,
+		reason:    reasonInvalidState,
+		evidence:  "orphaned host admission lease reconciliation is pending",
+	})
+	for attempt := 0; attempt < journalCapacity+5; attempt++ {
+		recorder.record(diagnosticsObservation{
+			subsystem: subsystemAdmission,
+			operation: operationAdmissionReserve,
+			target:    fmt.Sprintf("repo-one-%d", attempt),
+			outcome:   outcomeBlocked,
+			reason:    reasonCapacityCeiling,
+			evidence:  "host admission withheld worker activation",
+		})
+	}
+	journal := recorder.journal()
+	foundPending := false
+	for _, event := range journal.Events {
+		if event.Subsystem == subsystemRecovery &&
+			event.Outcome == outcomeBlocked {
+			foundPending = true
+			break
+		}
+	}
+	if !foundPending {
+		t.Fatal("repeated admission failures evicted unresolved recovery evidence")
+	}
+
+	recorder.record(diagnosticsObservation{
+		subsystem: subsystemRecovery,
+		operation: operationManagerStart,
+		outcome:   outcomeRecovered,
+		reason:    reasonRecovered,
+		evidence:  "orphaned host admission lease reconciliation completed",
+	})
+	journal = recorder.journal()
+	for _, event := range journal.Events {
+		if event.Subsystem == subsystemRecovery &&
+			event.Outcome == outcomeBlocked {
+			t.Fatal("resolved recovery evidence remained protected from normal truncation")
+		}
+	}
+}
+
 // TestSanitizedEvidenceRejectsUnsafeCharacters proves evidence cannot relay
 // URLs, tokens, headers, or raw command output.
 func TestSanitizedEvidenceRejectsUnsafeCharacters(t *testing.T) {

@@ -25,6 +25,14 @@ func (c coordinatorLeaseClient) Acquire(
 	return c.coordinator.Acquire(profileID, slotKey, pendingDemand)
 }
 
+func (c coordinatorLeaseClient) BindRegistration(
+	profileID,
+	slotKey,
+	registrationName string,
+) (admission.Lease, error) {
+	return c.coordinator.BindRegistration(profileID, slotKey, registrationName)
+}
+
 func (c coordinatorLeaseClient) Adopt(profileID, slotKey string) (admission.Lease, error) {
 	return c.coordinator.Adopt(profileID, slotKey)
 }

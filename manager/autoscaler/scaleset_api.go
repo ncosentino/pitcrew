@@ -20,6 +20,12 @@ type jitRunnerConfig struct {
 	encoded    string
 }
 
+type runnerReference struct {
+	id         int64
+	name       string
+	scaleSetID int
+}
+
 type messageSession interface {
 	listener.Client
 	Close(ctx context.Context) error
@@ -42,6 +48,10 @@ type scaleSetService interface {
 		scaleSetID int,
 		runnerName string,
 	) (jitRunnerConfig, error)
+	findRunnerByName(
+		ctx context.Context,
+		runnerName string,
+	) (runnerReference, bool, error)
 	removeRunner(ctx context.Context, runnerID int64) error
 	openSession(
 		ctx context.Context,
@@ -204,6 +214,27 @@ func (s *githubScaleSetService) removeRunner(
 	runnerID int64,
 ) error {
 	return s.client.RemoveRunner(ctx, runnerID)
+}
+
+func (s *githubScaleSetService) findRunnerByName(
+	ctx context.Context,
+	runnerName string,
+) (runnerReference, bool, error) {
+	runner, err := s.client.GetRunnerByName(ctx, runnerName)
+	if err != nil {
+		return runnerReference{}, false, fmt.Errorf(
+			"find runner registration by name: %w",
+			err,
+		)
+	}
+	if runner == nil {
+		return runnerReference{}, false, nil
+	}
+	return runnerReference{
+		id:         int64(runner.ID),
+		name:       runner.Name,
+		scaleSetID: runner.RunnerScaleSetID,
+	}, true, nil
 }
 
 func (s *githubScaleSetService) openSession(

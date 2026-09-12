@@ -65,30 +65,43 @@ func TestErrForErrorCodeIsNilForUnrecognizedOrEmptyCode(t *testing.T) {
 
 func TestProtocolVersionWindow(t *testing.T) {
 	server := ServerSupportedVersions()
-	if len(server) != 2 || server[0] != CurrentProtocolVersion ||
-		server[1] != previousProtocolVersion {
+	if len(server) != 3 ||
+		server[0] != CurrentProtocolVersion ||
+		server[1] != previousProtocolVersion ||
+		server[2] != releasedCompatibilityProtocolVersion {
 		t.Fatalf("unexpected server protocol window: %#v", server)
 	}
 	client := ClientSupportedVersions()
-	if len(client) != 2 || client[0] != CurrentProtocolVersion ||
-		client[1] != previousProtocolVersion {
+	if len(client) != 3 ||
+		client[0] != CurrentProtocolVersion ||
+		client[1] != previousProtocolVersion ||
+		client[2] != releasedCompatibilityProtocolVersion {
 		t.Fatalf("unexpected client protocol versions: %#v", client)
 	}
 	if CommandAdopt.supportedBy(1) {
 		t.Fatal("protocol one unexpectedly supports adoption")
 	}
 	if !CommandAdopt.supportedBy(previousProtocolVersion) ||
+		!CommandAdopt.supportedBy(releasedCompatibilityProtocolVersion) ||
 		!CommandAdopt.supportedBy(CurrentProtocolVersion) {
-		t.Fatal("current and previous protocols must support adoption")
+		t.Fatal("compatible protocols must support adoption")
 	}
 	for _, command := range []Command{CommandBeginAdoption, CommandCompleteAdoption} {
 		if command.supportedBy(1) {
 			t.Fatalf("protocol one unexpectedly supports %q", command)
 		}
 		if !command.supportedBy(previousProtocolVersion) ||
+			!command.supportedBy(releasedCompatibilityProtocolVersion) ||
 			!command.supportedBy(CurrentProtocolVersion) {
-			t.Fatalf("current and previous protocols must support %q", command)
+			t.Fatalf("compatible protocols must support %q", command)
 		}
+	}
+	if CommandBindRegistration.supportedBy(previousProtocolVersion) ||
+		CommandBindRegistration.supportedBy(releasedCompatibilityProtocolVersion) {
+		t.Fatal("earlier protocol unexpectedly supports registration binding")
+	}
+	if !CommandBindRegistration.supportedBy(CurrentProtocolVersion) {
+		t.Fatal("current protocol does not support registration binding")
 	}
 }
 
@@ -98,7 +111,7 @@ func TestProtocolTwoDowngradesSpecificWithholdingCodes(t *testing.T) {
 		ErrProtectedReservation,
 		ErrFairShareContention,
 	} {
-		if code := errorCodeForErrVersion(sentinel, previousProtocolVersion); code != ErrorCodeBudgetExceeded {
+		if code := errorCodeForErrVersion(sentinel, 2); code != ErrorCodeBudgetExceeded {
 			t.Fatalf("protocol two mapped %v to %q, want %q", sentinel, code, ErrorCodeBudgetExceeded)
 		}
 	}

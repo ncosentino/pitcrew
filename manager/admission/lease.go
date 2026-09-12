@@ -98,11 +98,12 @@ const (
 
 // Lease is one exact allocation of abstract units for one profile and slot.
 type Lease struct {
-	ProfileID string      `json:"profileId"`
-	SlotKey   string      `json:"slotKey"`
-	LeaseID   string      `json:"leaseId"`
-	Units     int         `json:"units"`
-	Status    LeaseStatus `json:"status"`
+	ProfileID        string      `json:"profileId"`
+	SlotKey          string      `json:"slotKey"`
+	LeaseID          string      `json:"leaseId"`
+	RegistrationName string      `json:"registrationName,omitempty"`
+	Units            int         `json:"units"`
+	Status           LeaseStatus `json:"status"`
 	// ExpiresAtUnixNano is a bounded, serialized snapshot of the provisional
 	// expiry last computed by the coordinator process that granted or
 	// renewed this lease, for protocol and status reporting only. It is
@@ -175,5 +176,6 @@ type Tombstone struct {
 // AdoptionFence records one policy participant whose replacement manager has
 // not yet completed its recovered-running-worker adoption pass.
 type AdoptionFence struct {
-	ProfileID string `json:"profileId"`
+	ProfileID        string   `json:"profileId"`
+	PendingLeaseKeys []string `json:"pendingLeaseKeys"`
 }

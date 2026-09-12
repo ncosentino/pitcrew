@@ -1338,6 +1338,30 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		)
 		return nil, err
 	}
+	if hostAdmissionEnabled {
+		if err := s.hostAdmission.bindRegistration(
+			hostSlotKey,
+			jit.runnerName,
+		); err != nil {
+			cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
+			cleanupErr := registrationRemovalError(
+				s.api.removeRunner(cleanupContext, jit.runnerID),
+			)
+			cleanupCancel()
+			cleanupErr = errors.Join(
+				cleanupErr,
+				s.releaseHostLeaseOrEnqueue(requestedName, hostSlotKey),
+			)
+			s.setBlocking(
+				deficitHostAdmissionDegraded,
+				"host admission lease could not bind the exact runner registration",
+			)
+			return nil, errors.Join(
+				fmt.Errorf("bind host admission registration: %w", err),
+				cleanupErr,
+			)
+		}
+	}
 
 	slotKey := s.target.key + "-" + strconv.FormatInt(jit.runnerID, 10)
 	containerName := sanitizeIdentifier(jit.runnerName, 63)
@@ -1656,14 +1680,10 @@ func (s *runnerScaler) recover(container recoveredContainer) error {
 // recoverCreated handles a container a prior manager process created but
 // never started (a crash between docker create and docker start). It must
 // never call logs/wait on the container: those Docker calls are undefined
-// for a container that has never run. When host admission is enabled, this
-// first re-acquires the container's recorded lease (idempotent: a lease
-// already active or provisional under this exact slot key is a safe
-// duplicate, and a provisional lease the coordinator's own restart recovery
-// discarded may simply be reacquired, since the container has not started
-// consuming host resources) and then activates it. A denied reacquisition
-// or a failed activation exactly removes the container instead of starting
-// it.
+// for a container that has never run. A retained lease is bound to the exact
+// registration and adopted directly because ordinary Acquire is fenced during
+// manager recovery. If the coordinator discarded an expired provisional
+// lease, the exact unstarted container and registration are discarded instead.
 func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 	hostAdmissionEnabled := s.hostAdmission.enabled()
 	if hostAdmissionEnabled {
@@ -1674,19 +1694,31 @@ func (s *runnerScaler) recoverCreated(container recoveredContainer) error {
 				errors.New("created container has no host admission lease"),
 			)
 		}
-		s.hostAdmission.setTargetDemand(s.target.key, 1)
-		if _, _, err := s.hostAdmission.acquire(s.target.key, container.hostSlotKey); err != nil {
+		if err := s.hostAdmission.bindRegistration(
+			container.hostSlotKey,
+			container.runnerName,
+		); err != nil {
 			return s.discardUnstartedContainer(
 				container,
 				container.hostSlotKey,
-				fmt.Errorf("reacquire recovered host admission lease: %w", err),
+				fmt.Errorf("bind recovered runner registration: %w", err),
 			)
 		}
-		if _, err := s.hostAdmission.activate(container.hostSlotKey); err != nil {
+		if _, err := s.hostAdmission.adopt(container.hostSlotKey); err != nil {
 			return s.discardUnstartedContainer(
 				container,
 				container.hostSlotKey,
-				fmt.Errorf("activate recovered host admission lease: %w", err),
+				fmt.Errorf("adopt recovered host admission lease: %w", err),
+			)
+		}
+		if err := s.hostAdmission.bindRegistration(
+			container.hostSlotKey,
+			container.runnerName,
+		); err != nil {
+			return s.discardUnstartedContainer(
+				container,
+				container.hostSlotKey,
+				fmt.Errorf("confirm recovered runner registration: %w", err),
 			)
 		}
 	}
@@ -1710,7 +1742,36 @@ func (s *runnerScaler) recoverRunning(container recoveredContainer) error {
 		if container.hostSlotKey == "" {
 			container.hostSlotKey = container.runnerName
 		}
-		if _, err := s.hostAdmission.adopt(container.hostSlotKey); err != nil {
+		bindErr := s.hostAdmission.bindRegistration(
+			container.hostSlotKey,
+			container.runnerName,
+		)
+		if errors.Is(bindErr, admission.ErrLeaseNotFound) {
+			if _, err := s.hostAdmission.adopt(container.hostSlotKey); err != nil {
+				s.onError(fmt.Errorf(
+					"adopt host admission lease for running container %s: %w",
+					container.containerID,
+					err,
+				))
+			} else if err := s.hostAdmission.bindRegistration(
+				container.hostSlotKey,
+				container.runnerName,
+			); err != nil {
+				s.onError(fmt.Errorf(
+					"bind host admission registration for running container %s: %w",
+					container.containerID,
+					err,
+				))
+			} else {
+				hostLeaseAdopted = true
+			}
+		} else if bindErr != nil {
+			s.onError(fmt.Errorf(
+				"bind host admission registration for running container %s: %w",
+				container.containerID,
+				bindErr,
+			))
+		} else if _, err := s.hostAdmission.adopt(container.hostSlotKey); err != nil {
 			s.onError(fmt.Errorf(
 				"adopt host admission lease for running container %s: %w",
 				container.containerID,
@@ -1730,6 +1791,7 @@ func (s *runnerScaler) retryPendingHostLeaseAdoptions() (bool, error) {
 	type pendingAdoption struct {
 		runnerKey   string
 		hostSlotKey string
+		runnerName  string
 	}
 	s.mu.Lock()
 	pending := make([]pendingAdoption, 0)
@@ -1740,6 +1802,7 @@ func (s *runnerScaler) retryPendingHostLeaseAdoptions() (bool, error) {
 		pending = append(pending, pendingAdoption{
 			runnerKey:   runner.key,
 			hostSlotKey: runner.hostSlotKey,
+			runnerName:  runner.runnerName,
 		})
 	}
 	s.mu.Unlock()
@@ -1754,6 +1817,19 @@ func (s *runnerScaler) retryPendingHostLeaseAdoptions() (bool, error) {
 				"adopt recovered host admission lease for runner %s: %w",
 				candidate.runnerKey,
 				admission.ErrInvalidIdentity,
+			))
+			continue
+		}
+		bindErr := s.hostAdmission.bindRegistration(
+			candidate.hostSlotKey,
+			candidate.runnerName,
+		)
+		missingLease := errors.Is(bindErr, admission.ErrLeaseNotFound)
+		if bindErr != nil && !missingLease {
+			adoptionErrors = append(adoptionErrors, fmt.Errorf(
+				"bind recovered host admission registration %s: %w",
+				candidate.hostSlotKey,
+				bindErr,
 			))
 			continue
 		}
@@ -1779,6 +1855,19 @@ func (s *runnerScaler) retryPendingHostLeaseAdoptions() (bool, error) {
 		}
 		if !attempted {
 			continue
+		}
+		if missingLease {
+			if err := s.hostAdmission.bindRegistration(
+				candidate.hostSlotKey,
+				candidate.runnerName,
+			); err != nil {
+				adoptionErrors = append(adoptionErrors, fmt.Errorf(
+					"bind newly adopted host admission registration %s: %w",
+					candidate.hostSlotKey,
+					err,
+				))
+				continue
+			}
 		}
 		s.mu.Lock()
 		if runner := s.runners[candidate.runnerKey]; runner != nil &&
@@ -1863,7 +1952,18 @@ func (s *runnerScaler) discardUnstartedContainer(
 	if hostSlotKey != "" {
 		releaseErr = s.releaseHostLeaseOrEnqueue(container.slotKey, hostSlotKey)
 	}
-	return errors.Join(cause, registrationErr, removeErr, releaseErr)
+	cleanupErr := errors.Join(registrationErr, removeErr, releaseErr)
+	if cleanupErr == nil {
+		s.logger.Warn(
+			"Discarded created container during manager recovery",
+			"containerID",
+			container.containerID,
+			"cause",
+			cause,
+		)
+		return nil
+	}
+	return errors.Join(cause, cleanupErr)
 }
 
 // insertRecoveredRunner records the recovered container as a runner and

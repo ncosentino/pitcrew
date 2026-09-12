@@ -137,12 +137,35 @@ handoff; multiple profile fences compose, survive coordinator restart, and
 clear independently only after the corresponding manager finishes recovery.
 Withheld attempts during that fence carry the bounded `adoption-pending`
 failure category rather than being reported as ordinary budget exhaustion.
-Protocol 2 remains available during a coordinator-first rolling replacement
-and retains adoption and fence operations. Protocol 3 adds reason-specific
-withholding errors and profile-capacity accounting. A contract-19 manager
-connected briefly to a protocol-2 service keeps lifecycle behavior compatible
-but reports the new capacity evidence as degraded until the coordinator update
-completes.
+
+The coordinator snapshots every active lease key when adoption begins.
+Completing adoption fails while any key remains unaccounted. Surviving
+containers adopt their exact keys. When Docker no longer contains a worker, the
+manager verifies the corresponding GitHub registration before using the
+existing fenced `Reconcile` operation:
+
+- A protocol-4 lease carries the exact generated runner name.
+- Autoscaled recovery additionally requires the runner to belong to one known
+  current or retiring scale set before deleting it by exact runner ID.
+- A legacy autoscaled lease uses its historical runner-name slot key.
+- A legacy fixed lease has no bound runner name. It reconciles when a complete
+  inventory has no possible slot-pattern match, or deletes exactly one match
+  only when it is offline, not busy, and retains every required profile label.
+  Multiple matches or identity/status mismatch remain ambiguous and fenced.
+
+API errors, incomplete inventory, unknown scale sets, deletion failures, and
+ambiguous legacy candidates never release an active lease. A successfully
+deleted or already-absent exact registration allows the coordinator to record
+a tombstone and free the units.
+
+Protocol 3 introduced reason-specific withholding errors and profile-capacity
+accounting. Protocol 4 adds exact registration binding and adoption
+completeness. The service supports protocols 4, 3, and 2 during a
+coordinator-first rolling replacement. Protocol 2 remains because protocol 3
+was not published independently, preserving direct upgrades from the preceding
+protocol-2 release. Protocol-2 and protocol-3 managers can continue against the
+new service; a protocol-4 manager keeps recovery fenced and refuses new worker
+activation if the older service cannot bind the registration.
 
 There is an unavoidable partial-enrollment interval while multiple live
 profiles are applied one at a time. During that interval, do not describe the
@@ -230,6 +253,13 @@ Capacity-deficit reasons remain distinct:
 
 GitHub demand, Docker, JIT, listener, cleanup, and missing-evidence reasons are
 separate signals. Do not relabel them as host-admission failures.
+
+During replacement-manager recovery, `degraded` can specifically mean an
+adoption fence still owns one or more active lease keys. Autoscaled profiles
+also retain `orphaned host admission lease reconciliation is pending` in
+`autoscaling.lastError`; both manager modes retain a bounded recovery event in
+`operationJournal`. Repeated admission denials do not make the unresolved
+recovery condition healthy.
 
 ### Unreachable autoscaling maximum
 
@@ -394,3 +424,27 @@ the manager handoff and preserves compatible workers:
 `-RecoverManager` is a manager-only operation and is not a coordinator repair.
 If durable coordinator state is unreadable, preserve the evidence and stop;
 do not delete or rewrite state to make admission resume.
+
+### Recovery remains fenced after Docker restart
+
+Signal: Docker has fewer exact profile/slot workers than host admission reports,
+`hostAdmission.status` remains `degraded`, and recovery-pending evidence appears
+in the manager journal or autoscaling error.
+
+Replay the affected profile's complete reviewed setup command with `-Refresh`.
+The replacement manager enumerates exact Docker labels, adopts survivors, and
+checks every remaining snapshotted lease against GitHub. Successful proof
+converges `heldUnits` to retained workers without changing desired capacity.
+
+If the fence remains:
+
+- verify GitHub API access and current observed-state freshness;
+- inspect the bounded recovery evidence for incomplete inventory, unknown
+  scale-set identity, or deletion failure; and
+- for a legacy fixed lease, verify that any remaining candidate is offline,
+  not busy, and still carries the required profile labels; otherwise automatic
+  recovery intentionally preserves it.
+
+Do not delete the coordinator volume, edit its JSON state, lower capacity to
+hide the discrepancy, or release a lease from elapsed time. Preserve the fence
+when worker or registration absence is not proven.

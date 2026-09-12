@@ -3,6 +3,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"sort"
 	"sync"
 
 	"github.com/ncosentino/pitcrew/manager/admission"
@@ -14,6 +15,7 @@ import (
 type hostAdmissionLeaseClient interface {
 	SetDemand(profileID string, pending int) error
 	Acquire(profileID, slotKey string, pendingDemand int) (admission.Lease, error)
+	BindRegistration(profileID, slotKey, registrationName string) (admission.Lease, error)
 	Adopt(profileID, slotKey string) (admission.Lease, error)
 	BeginAdoption(profileID string) error
 	CompleteAdoption(profileID string) error
@@ -204,6 +206,26 @@ func (h *hostAdmissionCoordinator) adopt(slotKey string) (admission.Lease, error
 	return lease, err
 }
 
+func (h *hostAdmissionCoordinator) bindRegistration(
+	slotKey,
+	registrationName string,
+) error {
+	if !h.enabled() {
+		return nil
+	}
+	h.rpcMu.Lock()
+	defer h.rpcMu.Unlock()
+	if _, err := h.client.BindRegistration(
+		h.profileID,
+		slotKey,
+		registrationName,
+	); err != nil {
+		_, classified := classifyHostAdmissionFailure(err)
+		return classified
+	}
+	return nil
+}
+
 func (h *hostAdmissionCoordinator) beginAdoption() error {
 	if !h.enabled() {
 		return nil
@@ -220,6 +242,74 @@ func (h *hostAdmissionCoordinator) completeAdoption() error {
 		return nil
 	}
 	if err := h.client.CompleteAdoption(h.profileID); err != nil {
+		_, classified := classifyHostAdmissionFailure(err)
+		return classified
+	}
+	return nil
+}
+
+func (h *hostAdmissionCoordinator) pendingAdoptionLeases() ([]admission.Lease, error) {
+	if !h.enabled() {
+		return nil, nil
+	}
+	h.rpcMu.Lock()
+	defer h.rpcMu.Unlock()
+	snapshot, err := h.client.Status()
+	if err != nil {
+		_, classified := classifyHostAdmissionFailure(err)
+		return nil, classified
+	}
+	if snapshot.ProtocolVersion != 0 &&
+		snapshot.ProtocolVersion < admission.RegistrationBindingProtocolVersion {
+		return nil, fmt.Errorf(
+			"%w: orphaned lease recovery requires admission protocol %d",
+			errHostAdmissionDegraded,
+			admission.RegistrationBindingProtocolVersion,
+		)
+	}
+	var pending []string
+	for _, fence := range snapshot.AdoptionFences {
+		if fence.ProfileID == h.profileID {
+			pending = append(pending, fence.PendingLeaseKeys...)
+			break
+		}
+	}
+	if len(pending) == 0 {
+		return nil, nil
+	}
+	sort.Strings(pending)
+	leases := make(map[string]admission.Lease)
+	for _, lease := range snapshot.Leases {
+		if lease.ProfileID == h.profileID && lease.Status == admission.LeaseActive {
+			leases[lease.SlotKey] = lease
+		}
+	}
+	result := make([]admission.Lease, 0, len(pending))
+	for _, slotKey := range pending {
+		lease, exists := leases[slotKey]
+		if !exists {
+			return nil, fmt.Errorf(
+				"%w: pending adoption lease %q is missing",
+				errHostAdmissionDegraded,
+				slotKey,
+			)
+		}
+		result = append(result, lease)
+	}
+	return result, nil
+}
+
+func (h *hostAdmissionCoordinator) reconcileAbsent(slotKey string) error {
+	if !h.enabled() {
+		return nil
+	}
+	h.rpcMu.Lock()
+	defer h.rpcMu.Unlock()
+	if err := h.client.Reconcile(
+		h.profileID,
+		slotKey,
+		"worker-and-registration-absent",
+	); err != nil {
 		_, classified := classifyHostAdmissionFailure(err)
 		return classified
 	}

@@ -12,6 +12,7 @@ SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/host-admission.sh"
 . "${SCRIPT_DIRECTORY}/container-supervision.sh"
 . "${SCRIPT_DIRECTORY}/slot-registry.sh"
+. "${SCRIPT_DIRECTORY}/host-admission-recovery.sh"
 
 MANAGER_CONTRACT_VERSION=19
 EXPECTED_CONTRACT_VERSION="${PITCREW_MANAGER_CONTRACT_VERSION:-19}"
@@ -93,6 +94,10 @@ REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
 REGISTRATION_API_TIMEOUT=5
 REGISTRATION_INVENTORY_DIRECTORY="/tmp/pitcrew-registration-inventory"
+HOST_ADMISSION_RECOVERY_DIRECTORY="/tmp/pitcrew-host-admission-recovery"
+HOST_ADMISSION_RECOVERY_PENDING=0
+HOST_ADMISSION_RECOVERY_NEXT_EPOCH=0
+HOST_ADMISSION_LAST_RECOVERY_STATE=""
 SLOT_DIRECTORY="/tmp/pitcrew-slots"
 CURRENT_DESIRED_SLOTS="/tmp/pitcrew-current-desired-slots.tsv"
 PENDING_ACKNOWLEDGEMENT="/tmp/pitcrew-pending-acknowledgement.json"
@@ -813,23 +818,37 @@ run_slot() {
             if host_admission_enabled; then
                 if [ "${recovered_status}" = "created" ]; then
                     while [ ! -f "${slot_state_path}/drain" ]; do
-                        host_admission_acquire \
-                            "${slot_state_path}" \
-                            "${slot_key}" \
-                            "${SLOT_DIRECTORY}"
-                        admission_status=$?
-                        if [ "${admission_status}" -eq 0 ] &&
-                            host_admission_activate \
-                                "${slot_state_path}" \
-                                "${slot_key}" &&
-                            docker start "${recovered_id}" >/dev/null 2>&1; then
-                            recovered_status="running"
+                        if ! docker inspect "${recovered_id}" >/dev/null 2>&1; then
                             break
                         fi
-                        if [ "${admission_status}" -eq 0 ]; then
-                            host_admission_release_or_queue \
+                        host_admission_bind_registration \
+                            "${slot_key}" \
+                            "${recovered_name}"
+                        binding_status=$?
+                        if [ "${binding_status}" -eq 0 ] &&
+                            host_admission_adopt \
+                                "${slot_state_path}" \
+                                "${slot_key}" &&
+                            host_admission_bind_registration \
+                                "${slot_key}" \
+                                "${recovered_name}"; then
+                            if docker start "${recovered_id}" >/dev/null 2>&1; then
+                                recovered_status="running"
+                                host_admission_finish_tracked_adoption "${slot_key}"
+                            else
+                                docker rm --force "${recovered_id}" >/dev/null 2>&1 || true
+                                host_admission_release_or_queue \
+                                    "${slot_state_path}" \
+                                    "${slot_key}" || true
+                            fi
+                            break
+                        fi
+                        if [ "${binding_status}" -eq 4 ]; then
+                            docker rm --force "${recovered_id}" >/dev/null 2>&1 || true
+                            host_admission_reconcile_absent \
                                 "${slot_state_path}" \
                                 "${slot_key}" || true
+                            break
                         fi
                         sleep 2
                     done
@@ -843,7 +862,8 @@ run_slot() {
                     host_admission_adopt_running \
                         "${slot_state_path}" \
                         "${slot_key}" \
-                        "${recovered_id}" &
+                        "${recovered_id}" \
+                        "${recovered_name}" &
                     recovered_adoption_pid=$!
                 fi
             fi
@@ -924,6 +944,22 @@ run_slot() {
             fi
         fi
         name="${PREFIX}-${tag}-$(date +%s)-$(rand_hex)"
+        if host_admission_enabled &&
+            ! host_admission_bind_registration "${slot_key}" "${name}"; then
+            host_admission_release_or_queue \
+                "${slot_state_path}" \
+                "${slot_key}" || true
+            write_slot_runtime_state \
+                "${slot_state_path}" \
+                "${OBSERVED_STATE_DIRTY}" \
+                "backoff" \
+                "" \
+                "${failures}" \
+                2 || true
+            echo "[slot ${slot_key}] host admission could not bind the exact runner registration" >&2
+            sleep 2
+            continue
+        fi
         echo "[slot ${slot_key}] starting fresh ephemeral runner: ${name} -> ${repo:-<scope>}"
         : > "${log_path}"
         reset_slot_connect_marker "${slot_state_path}"
@@ -1404,7 +1440,9 @@ start_recovered_slot() {
     if [ "${recovered_desired}" != "1" ]; then
         : > "${recovered_path}/drain"
     fi
-    if [ "${recovered_status}" = "running" ]; then
+    if host_admission_enabled &&
+        { [ "${recovered_status}" = "running" ] ||
+            [ "${recovered_status}" = "created" ]; }; then
         host_admission_track_adoption "${recovered_key}" || return 1
     fi
     run_slot "${recovered_key}" "${recovered_repo}" "${recovered_tag}" &
@@ -1804,9 +1842,13 @@ fi
 while host_admission_adoption_pending; do
     sleep 1
 done
-if ! host_admission_complete_adoption; then
-    echo "[manager:${PROFILE_ID}] could not clear the recovery admission barrier" >&2
-    exit 1
+if ! reconcile_orphaned_host_admission_leases ||
+    ! host_admission_complete_adoption; then
+    echo "[manager:${PROFILE_ID}] host admission recovery remains fenced; preserving current workers" >&2
+    HOST_ADMISSION_RECOVERY_PENDING=1
+    HOST_ADMISSION_RECOVERY_NEXT_EPOCH=$(( $(date +%s) + REGISTRATION_RECONCILE_INTERVAL ))
+else
+    HOST_ADMISSION_RECOVERY_PENDING=0
 fi
 adopted_slot_count=0
 for adopted_slot_path in "${SLOT_DIRECTORY}"/*; do
@@ -1858,6 +1900,19 @@ publish_observed_state 1
 
 while [ "${STOPPING}" -eq 0 ]; do
     host_admission_retry_releases || true
+    if [ "${HOST_ADMISSION_RECOVERY_PENDING}" -eq 1 ]; then
+        recovery_now=$(date +%s)
+        if [ "${recovery_now}" -ge "${HOST_ADMISSION_RECOVERY_NEXT_EPOCH}" ]; then
+            if reconcile_orphaned_host_admission_leases &&
+                host_admission_complete_adoption; then
+                HOST_ADMISSION_RECOVERY_PENDING=0
+                HOST_ADMISSION_RECOVERY_NEXT_EPOCH=0
+                mark_observed_state_dirty
+            else
+                HOST_ADMISSION_RECOVERY_NEXT_EPOCH=$((recovery_now + REGISTRATION_RECONCILE_INTERVAL))
+            fi
+        fi
+    fi
     process_desired_state
     if [ -f "${PENDING_ACKNOWLEDGEMENT}" ]; then
         publish_pending_acknowledgement || true

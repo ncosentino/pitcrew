@@ -431,6 +431,26 @@ func (d *dockerCLI) readLogs(ctx context.Context, containerID string) ([]string,
 
 func (d *dockerCLI) stopAndRemove(ctx context.Context, containerID string) error {
 	if _, err := d.executor.run(ctx, "rm", "--force", containerID); err != nil {
+		output, probeErr := d.executor.run(
+			ctx,
+			"ps",
+			"--all",
+			"--quiet",
+			"--no-trunc",
+			"--filter", "id="+containerID,
+		)
+		if probeErr == nil {
+			found := false
+			for _, existingID := range strings.Fields(string(output)) {
+				if existingID == containerID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				return nil
+			}
+		}
 		return fmt.Errorf("stop and remove container %s: %w", containerID, err)
 	}
 	return nil

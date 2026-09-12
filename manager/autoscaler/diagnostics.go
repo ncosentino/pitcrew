@@ -284,7 +284,7 @@ func (r *diagnosticsRecorder) restore() {
 		highest = max(highest, event.Sequence)
 	}
 	for len(retained) > journalCapacity {
-		retained = retained[1:]
+		retained = dropOldestJournalEvent(retained)
 		dropped++
 	}
 	r.events = retained
@@ -427,9 +427,39 @@ func (r *diagnosticsRecorder) failureCountLocked(kind string) int {
 func (r *diagnosticsRecorder) appendLocked(event managerEvent) {
 	r.events = append(r.events, event)
 	for len(r.events) > journalCapacity {
-		r.events = r.events[1:]
+		r.events = dropOldestJournalEvent(r.events)
 		r.droppedEvents++
 	}
+}
+
+func dropOldestJournalEvent(events []managerEvent) []managerEvent {
+	if len(events) == 0 {
+		return events
+	}
+	dropIndex := 0
+	if unresolvedRecoveryEventIndex(events) == 0 && len(events) > 1 {
+		dropIndex = 1
+	}
+	return append(events[:dropIndex], events[dropIndex+1:]...)
+}
+
+func unresolvedRecoveryEventIndex(events []managerEvent) int {
+	for index := len(events) - 1; index >= 0; index-- {
+		event := events[index]
+		if event.Subsystem != subsystemRecovery {
+			continue
+		}
+		if event.Outcome == outcomeRecovered {
+			return -1
+		}
+		if event.Outcome == outcomeBlocked ||
+			event.Outcome == outcomeFailed ||
+			event.Outcome == outcomeTimedOut ||
+			event.Outcome == outcomeRetry {
+			return index
+		}
+	}
+	return -1
 }
 
 // updateHealthLocked folds one observation into the relevant subsystem summary
@@ -572,7 +602,7 @@ func (r *diagnosticsRecorder) journal() managerOperationJournal {
 		if err == nil && len(encoded) <= journalMaximumBytes {
 			break
 		}
-		events = events[1:]
+		events = dropOldestJournalEvent(events)
 		dropped++
 	}
 

@@ -120,6 +120,34 @@ func TestServerClientAdoptOverSocket(t *testing.T) {
 	}
 }
 
+func TestServerClientBindsRegistrationOverSocket(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	_, socketPath := startTestServer(t, coordinator)
+	client := NewClient(socketPath)
+
+	if _, err := client.Acquire("alpha", "slot-a", 1); err != nil {
+		t.Fatalf("acquire over socket: %v", err)
+	}
+	bound, err := client.BindRegistration("alpha", "slot-a", "runner-alpha-1")
+	if err != nil {
+		t.Fatalf("bind registration over socket: %v", err)
+	}
+	if bound.RegistrationName != "runner-alpha-1" {
+		t.Fatalf("wire binding omitted the exact registration name: %+v", bound)
+	}
+
+	previousClient := NewClient(socketPath).WithSupportedVersions([]int{previousProtocolVersion})
+	if _, err := previousClient.BindRegistration(
+		"alpha",
+		"slot-a",
+		"runner-alpha-1",
+	); !errors.Is(err, ErrProtocolMismatch) {
+		t.Fatalf("previous protocol accepted registration binding: %v", err)
+	}
+}
+
 func TestPreviousProtocolSupportsExistingCommands(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
@@ -165,6 +193,29 @@ func TestNewClientNegotiatesCommandsWithPreviousProtocolServer(t *testing.T) {
 	}
 }
 
+func TestNewClientNegotiatesReleasedProtocolTwoServer(t *testing.T) {
+	clock := newManualClock()
+	coordinator := OpenMemory(clock, time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	server, socketPath := startTestServer(t, coordinator)
+	server.supportedVersions = []int{releasedCompatibilityProtocolVersion}
+
+	client := NewClient(socketPath)
+	if _, err := client.Acquire("alpha", "slot-a", 1); err != nil {
+		t.Fatalf("new client acquire against protocol-two server: %v", err)
+	}
+	if _, err := client.Adopt("alpha", "legacy-a"); err != nil {
+		t.Fatalf("new client adoption against protocol-two server: %v", err)
+	}
+	if _, err := client.BindRegistration(
+		"alpha",
+		"slot-a",
+		"runner-alpha-1",
+	); !errors.Is(err, ErrProtocolMismatch) {
+		t.Fatalf("protocol-two server accepted registration binding: %v", err)
+	}
+}
+
 func TestPreviousProtocolClientUsesCommandsAgainstCurrentServer(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
@@ -182,9 +233,16 @@ func TestPreviousProtocolClientUsesCommandsAgainstCurrentServer(t *testing.T) {
 	if _, err := client.Acquire("alpha", "slot-a", 1); err != nil {
 		t.Fatalf("previous protocol client acquire against current server: %v", err)
 	}
+
+	releasedClient := NewClient(socketPath).WithSupportedVersions(
+		[]int{releasedCompatibilityProtocolVersion},
+	)
+	if _, err := releasedClient.Adopt("alpha", "legacy-a"); err != nil {
+		t.Fatalf("protocol-two client adoption against current server: %v", err)
+	}
 }
 
-func TestPreviousProtocolReceivesUmbrellaBudgetError(t *testing.T) {
+func TestPreviousProtocolRetainsSpecificBudgetError(t *testing.T) {
 	clock := newManualClock()
 	coordinator := OpenMemory(clock, time.Minute)
 	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
@@ -196,9 +254,15 @@ func TestPreviousProtocolReceivesUmbrellaBudgetError(t *testing.T) {
 	}
 
 	previousClient := NewClient(socketPath).WithSupportedVersions([]int{previousProtocolVersion})
-	if _, err := previousClient.Acquire("alpha", "slot-b", 1); !errors.Is(err, ErrBudgetExceeded) ||
+	if _, err := previousClient.Acquire("alpha", "slot-b", 1); !errors.Is(err, ErrBudgetExhausted) {
+		t.Fatalf("previous protocol did not retain the specific budget error: %v", err)
+	}
+	releasedClient := NewClient(socketPath).WithSupportedVersions(
+		[]int{releasedCompatibilityProtocolVersion},
+	)
+	if _, err := releasedClient.Acquire("alpha", "slot-c", 1); !errors.Is(err, ErrBudgetExceeded) ||
 		errors.Is(err, ErrBudgetExhausted) {
-		t.Fatalf("previous protocol did not receive the umbrella budget error: %v", err)
+		t.Fatalf("protocol-two client did not receive the umbrella budget error: %v", err)
 	}
 	if _, err := currentClient.Acquire("alpha", "slot-c", 1); !errors.Is(err, ErrBudgetExhausted) {
 		t.Fatalf("current protocol did not receive the specific budget error: %v", err)

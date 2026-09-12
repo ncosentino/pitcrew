@@ -21,6 +21,10 @@ var profileIDPattern = regexp.MustCompile(`^[a-z][a-z0-9-]{0,31}$`)
 // ever be mistaken for a second path segment.
 var slotKeyPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$`)
 
+var registrationNamePattern = regexp.MustCompile(
+	`^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$`,
+)
+
 // validateProfileID rejects a ProfileID that does not match the public
 // profile identity contract: empty, oversized, or containing any character
 // outside the pattern (including "/", uppercase letters, or a non-letter
@@ -47,6 +51,18 @@ func validateSlotKey(slotKey string) error {
 			ErrInvalidIdentity,
 			slotKey,
 			slotKeyPattern.String(),
+		)
+	}
+	return nil
+}
+
+func validateRegistrationName(registrationName string) error {
+	if !registrationNamePattern.MatchString(registrationName) {
+		return fmt.Errorf(
+			"%w: registration name %q must match %s",
+			ErrInvalidIdentity,
+			registrationName,
+			registrationNamePattern.String(),
 		)
 	}
 	return nil

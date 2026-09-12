@@ -11,9 +11,14 @@ import (
 	"sort"
 	"sync"
 	"time"
+
+	"github.com/ncosentino/pitcrew/manager/admission"
 )
 
-const managerShutdownTimeout = 50 * time.Second
+const (
+	managerShutdownTimeout             = 50 * time.Second
+	hostAdmissionRecoveryRetryInterval = 30 * time.Second
+)
 
 type autoscalerManager struct {
 	cfg                          config
@@ -26,31 +31,34 @@ type autoscalerManager struct {
 	admission                    *admissionController
 	hostAdmission                *hostAdmissionCoordinator
 	hostAdmissionAdoptionPending bool
+	hostAdmissionRecoveryRetryAt time.Time
 	diagnostics                  *diagnosticsRecorder
 
-	controllers          map[string]*targetController
-	retiring             map[string]*targetController
-	pending              map[string]pendingScaleSet
-	recovered            map[string][]recoveredContainer
-	retirementRecords    map[string]retirementRecord
-	retirementGeneration int
-	current              *parsedDesiredState
-	applied              *parsedDesiredState
-	ackPrevious          desiredState
-	ackPending           bool
+	controllers           map[string]*targetController
+	retiring              map[string]*targetController
+	pending               map[string]pendingScaleSet
+	orphanRecoveryTargets map[string]hostAdmissionRecoveryTarget
+	recovered             map[string][]recoveredContainer
+	retirementRecords     map[string]retirementRecord
+	retirementGeneration  int
+	current               *parsedDesiredState
+	applied               *parsedDesiredState
+	ackPrevious           desiredState
+	ackPending            bool
 
-	managerStatus     string
-	desiredStatus     string
-	lastDocumentHash  string
-	lastError         error
-	observedError     error
-	latestResources   resourceSample
-	resourcesSampled  bool
-	resourcesAt       time.Time
-	resourceInventory string
-	latestHardware    hostHardwareInventory
-	hardwareLoaded    bool
-	hardwareAt        time.Time
+	managerStatus              string
+	desiredStatus              string
+	lastDocumentHash           string
+	lastError                  error
+	observedError              error
+	hostAdmissionRecoveryError error
+	latestResources            resourceSample
+	resourcesSampled           bool
+	resourcesAt                time.Time
+	resourceInventory          string
+	latestHardware             hostHardwareInventory
+	hardwareLoaded             bool
+	hardwareAt                 time.Time
 
 	dirty                  chan struct{}
 	errors                 chan error
@@ -106,6 +114,7 @@ func newAutoscalerManager(
 		controllers:            make(map[string]*targetController),
 		retiring:               make(map[string]*targetController),
 		pending:                make(map[string]pendingScaleSet),
+		orphanRecoveryTargets:  make(map[string]hostAdmissionRecoveryTarget),
 		recovered:              make(map[string][]recoveredContainer),
 		retirementRecords:      make(map[string]retirementRecord),
 		managerStatus:          "starting",
@@ -143,9 +152,6 @@ func (m *autoscalerManager) run(ctx context.Context) error {
 	}
 	if err := m.scanRecovered(ctx); err != nil {
 		return err
-	}
-	if err := m.completeHostAdmissionAdoptionIfReady(); err != nil {
-		return fmt.Errorf("complete empty host admission recovery pass: %w", err)
 	}
 	if err := m.restoreLastValid(); err != nil {
 		return err
@@ -192,6 +198,7 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 		cycleSucceeded = false
 		m.recordCycleError("Desired-capacity reconciliation failed", err)
 	}
+	adoptionWasPending := m.hostAdmissionAdoptionPending
 	if m.current != nil {
 		if err := m.ensureRetirementStateCurrent(); err != nil {
 			cycleSucceeded = false
@@ -201,14 +208,31 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 			cycleSucceeded = false
 			m.recordCycleError("Desired target reconciliation failed", err)
 		}
-		if err := m.reconcileRetirements(ctx); err != nil {
+		if err := m.reconcileRetirementsWithFinalization(
+			ctx,
+			!m.hostAdmissionAdoptionPending,
+		); err != nil {
 			cycleSucceeded = false
 			m.recordCycleError("Retiring target reconciliation failed", err)
 		}
 	}
-	if err := m.completeHostAdmissionAdoptionIfReady(); err != nil {
+	recoveryErr := m.completeHostAdmissionAdoptionIfReady(ctx)
+	if recoveryErr != nil {
 		cycleSucceeded = false
-		m.recordCycleError("Host admission recovery fence completion failed", err)
+		m.logger.Error(
+			"Host admission recovery fence completion failed",
+			"error",
+			recoveryErr,
+		)
+	}
+	m.updateHostAdmissionRecoveryState()
+	if adoptionWasPending &&
+		!m.hostAdmissionAdoptionPending &&
+		m.current != nil {
+		if err := m.reconcileRetirements(ctx); err != nil {
+			cycleSucceeded = false
+			m.recordCycleError("Retiring target finalization failed", err)
+		}
 	}
 	if m.processListenerFailures() {
 		cycleSucceeded = false
@@ -242,7 +266,9 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 	m.tryPublishObserved()
 }
 
-func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady() error {
+func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady(
+	ctx context.Context,
+) error {
 	if !m.hostAdmissionAdoptionPending {
 		return nil
 	}
@@ -259,11 +285,252 @@ func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady() error {
 			return nil
 		}
 	}
+	pending, err := m.hostAdmission.pendingAdoptionLeases()
+	if err != nil {
+		return err
+	}
+	if len(pending) > 0 &&
+		m.current != nil &&
+		!m.hostAdmissionRecoveryTargetsReady() {
+		return nil
+	}
+	now := time.Now()
+	if m.clock != nil {
+		now = m.clock.now()
+	}
+	if !m.hostAdmissionRecoveryRetryAt.IsZero() &&
+		now.Before(m.hostAdmissionRecoveryRetryAt) {
+		return nil
+	}
+	if err := m.reconcileOrphanedHostAdmissionLeases(ctx, pending); err != nil {
+		m.hostAdmissionRecoveryRetryAt = now.Add(
+			hostAdmissionRecoveryRetryInterval,
+		)
+		return err
+	}
 	if err := m.hostAdmission.completeAdoption(); err != nil {
+		m.hostAdmissionRecoveryRetryAt = now.Add(
+			hostAdmissionRecoveryRetryInterval,
+		)
 		return err
 	}
 	m.hostAdmissionAdoptionPending = false
+	m.hostAdmissionRecoveryRetryAt = time.Time{}
 	return nil
+}
+
+func (m *autoscalerManager) hostAdmissionRecoveryTargetsReady() bool {
+	targets, err := buildTargetSpecs(m.current.state, m.cfg)
+	if err != nil {
+		return false
+	}
+	for _, target := range targets {
+		if m.controllers[target.key] == nil {
+			return false
+		}
+	}
+	for key, record := range m.retirementRecords {
+		if record.RetireAtGeneration > m.current.state.Generation {
+			continue
+		}
+		if m.retiring[key] == nil && m.orphanRecoveryTargets[key].api == nil {
+			return false
+		}
+	}
+	return true
+}
+
+func (m *autoscalerManager) updateHostAdmissionRecoveryState() {
+	if m.hostAdmissionAdoptionPending {
+		if m.hostAdmissionRecoveryError == nil {
+			m.diagnostics.record(diagnosticsObservation{
+				subsystem: subsystemRecovery,
+				operation: operationManagerStart,
+				outcome:   outcomeBlocked,
+				reason:    reasonInvalidState,
+				evidence:  "orphaned host admission lease reconciliation is pending",
+			})
+		}
+		m.hostAdmissionRecoveryError = errors.New(
+			"orphaned host admission lease reconciliation is pending",
+		)
+		return
+	}
+	if m.hostAdmissionRecoveryError != nil {
+		m.diagnostics.record(diagnosticsObservation{
+			subsystem: subsystemRecovery,
+			operation: operationManagerStart,
+			outcome:   outcomeRecovered,
+			reason:    reasonRecovered,
+			evidence:  "orphaned host admission lease reconciliation completed",
+		})
+	}
+	m.hostAdmissionRecoveryError = nil
+}
+
+type hostAdmissionRecoveryTarget struct {
+	key             string
+	registrationURL string
+	scaleSetID      int
+	api             scaleSetService
+}
+
+func (m *autoscalerManager) reconcileOrphanedHostAdmissionLeases(
+	ctx context.Context,
+	pending []admission.Lease,
+) error {
+	if len(pending) == 0 {
+		return nil
+	}
+	targets := m.hostAdmissionRecoveryTargets()
+	if len(targets) == 0 {
+		return errors.New(
+			"host admission has unaccounted active leases but no scale-set target can verify registration absence",
+		)
+	}
+
+	var recoveryErrors []error
+	for _, lease := range pending {
+		registrationName := lease.RegistrationName
+		if registrationName == "" {
+			registrationName = lease.SlotKey
+		}
+		target, runner, found, findErr := findOrphanedRunnerRegistration(
+			ctx,
+			targets,
+			registrationName,
+		)
+		if findErr != nil {
+			recoveryErrors = append(recoveryErrors, findErr)
+			continue
+		}
+		if found {
+			if err := registrationRemovalError(
+				target.api.removeRunner(ctx, runner.id),
+			); err != nil {
+				recoveryErrors = append(recoveryErrors, fmt.Errorf(
+					"remove exact orphaned runner registration: %w",
+					err,
+				))
+				continue
+			}
+		}
+		if err := m.hostAdmission.reconcileAbsent(lease.SlotKey); err != nil {
+			recoveryErrors = append(recoveryErrors, fmt.Errorf(
+				"reconcile proven-absent host admission lease: %w",
+				err,
+			))
+			continue
+		}
+	}
+	return errors.Join(recoveryErrors...)
+}
+
+func (m *autoscalerManager) hostAdmissionRecoveryTargets() []hostAdmissionRecoveryTarget {
+	byKey := make(map[string]hostAdmissionRecoveryTarget)
+	for key, controller := range m.controllers {
+		target := controller.snapshot().target
+		byKey[key] = hostAdmissionRecoveryTarget{
+			key:             key,
+			registrationURL: target.registrationURL,
+			scaleSetID:      controller.handle.id,
+			api:             controller.api,
+		}
+	}
+	for key, controller := range m.retiring {
+		target := controller.snapshot().target
+		byKey[key] = hostAdmissionRecoveryTarget{
+			key:             key,
+			registrationURL: target.registrationURL,
+			scaleSetID:      controller.handle.id,
+			api:             controller.api,
+		}
+	}
+	for key, target := range m.orphanRecoveryTargets {
+		byKey[key] = target
+	}
+	keys := make([]string, 0, len(byKey))
+	for key := range byKey {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	targets := make([]hostAdmissionRecoveryTarget, 0, len(keys))
+	for _, key := range keys {
+		targets = append(targets, byKey[key])
+	}
+	return targets
+}
+
+func findOrphanedRunnerRegistration(
+	ctx context.Context,
+	targets []hostAdmissionRecoveryTarget,
+	registrationName string,
+) (hostAdmissionRecoveryTarget, runnerReference, bool, error) {
+	type recoveryScope struct {
+		api       scaleSetService
+		scaleSets map[int]hostAdmissionRecoveryTarget
+	}
+	scopesByURL := make(map[string]*recoveryScope)
+	var scopes []*recoveryScope
+	for _, target := range targets {
+		scopeKey := target.registrationURL
+		if scopeKey == "" {
+			scopeKey = "\x00" + target.key
+		}
+		scope := scopesByURL[scopeKey]
+		if scope == nil {
+			scope = &recoveryScope{
+				api:       target.api,
+				scaleSets: make(map[int]hostAdmissionRecoveryTarget),
+			}
+			scopesByURL[scopeKey] = scope
+			scopes = append(scopes, scope)
+		}
+		scope.scaleSets[target.scaleSetID] = target
+	}
+
+	var matchedTarget hostAdmissionRecoveryTarget
+	var matched runnerReference
+	found := false
+	unknownScaleSet := false
+	for _, scope := range scopes {
+		runner, exists, err := scope.api.findRunnerByName(ctx, registrationName)
+		if err != nil {
+			return hostAdmissionRecoveryTarget{}, runnerReference{}, false, fmt.Errorf(
+				"verify orphaned runner registration absence: %w",
+				err,
+			)
+		}
+		if !exists {
+			continue
+		}
+		if runner.id < 1 ||
+			runner.name != registrationName ||
+			runner.scaleSetID < 1 {
+			return hostAdmissionRecoveryTarget{}, runnerReference{}, false, errors.New(
+				"orphaned runner registration lookup returned an invalid identity",
+			)
+		}
+		if found {
+			return hostAdmissionRecoveryTarget{}, runnerReference{}, false, errors.New(
+				"orphaned runner registration identity is ambiguous across registration scopes",
+			)
+		}
+		found = true
+		target, known := scope.scaleSets[runner.scaleSetID]
+		if !known {
+			unknownScaleSet = true
+			continue
+		}
+		matchedTarget = target
+		matched = runner
+	}
+	if unknownScaleSet {
+		return hostAdmissionRecoveryTarget{}, runnerReference{}, false, errors.New(
+			"orphaned runner registration belongs to an unknown scale set",
+		)
+	}
+	return matchedTarget, matched, found && !unknownScaleSet, nil
 }
 
 func (m *autoscalerManager) recordCycleError(message string, err error) {
@@ -558,6 +825,7 @@ func (m *autoscalerManager) reconcileDesiredTargets(ctx context.Context) error {
 	var targetErrors []error
 	for _, target := range targets {
 		desired[target.key] = target
+		delete(m.orphanRecoveryTargets, target.key)
 		if controller := m.retiring[target.key]; controller != nil {
 			if controller.closed() {
 				delete(m.retiring, target.key)
@@ -670,11 +938,19 @@ func (m *autoscalerManager) startDesiredController(
 	}
 	m.controllers[target.key] = controller
 	delete(m.pending, target.key)
+	delete(m.orphanRecoveryTargets, target.key)
 	delete(m.recovered, target.key)
 	return nil
 }
 
 func (m *autoscalerManager) reconcileRetirements(ctx context.Context) error {
+	return m.reconcileRetirementsWithFinalization(ctx, true)
+}
+
+func (m *autoscalerManager) reconcileRetirementsWithFinalization(
+	ctx context.Context,
+	allowFinalization bool,
+) error {
 	if m.current == nil {
 		return nil
 	}
@@ -706,6 +982,9 @@ func (m *autoscalerManager) reconcileRetirements(ctx context.Context) error {
 				continue
 			}
 			if controller == nil {
+				if !allowFinalization {
+					continue
+				}
 				records := cloneRetirementRecords(m.retirementRecords)
 				delete(records, key)
 				if err := m.persistRetirements(
@@ -720,9 +999,11 @@ func (m *autoscalerManager) reconcileRetirements(ctx context.Context) error {
 					continue
 				}
 				delete(m.restarts, key)
+				delete(m.orphanRecoveryTargets, key)
 				continue
 			}
 			m.retiring[key] = controller
+			delete(m.orphanRecoveryTargets, key)
 			delete(m.recovered, key)
 		}
 		if err := controller.beginRetirement(ctx); err != nil {
@@ -734,6 +1015,9 @@ func (m *autoscalerManager) reconcileRetirements(ctx context.Context) error {
 			continue
 		}
 		if controller.runnerCount() != 0 {
+			continue
+		}
+		if !allowFinalization {
 			continue
 		}
 		if err := controller.closeSession(ctx); err != nil {
@@ -771,6 +1055,7 @@ func (m *autoscalerManager) reconcileRetirements(ctx context.Context) error {
 		}
 		delete(m.retiring, key)
 		delete(m.restarts, key)
+		delete(m.orphanRecoveryTargets, key)
 	}
 	return errors.Join(retirementErrors...)
 }
@@ -780,6 +1065,7 @@ func (m *autoscalerManager) startRetiringController(
 	record retirementRecord,
 ) (*targetController, error) {
 	target := record.targetSpec()
+	delete(m.orphanRecoveryTargets, target.key)
 	api, err := m.factory.newService(target.registrationURL)
 	if err != nil {
 		return nil, fmt.Errorf("create service for retiring target %s: %w", target.key, err)
@@ -798,6 +1084,11 @@ func (m *autoscalerManager) startRetiringController(
 				"retiring target %s has recovered containers but no scale set",
 				target.key,
 			)
+		}
+		m.orphanRecoveryTargets[target.key] = hostAdmissionRecoveryTarget{
+			key:             target.key,
+			registrationURL: target.registrationURL,
+			api:             api,
 		}
 		return nil, nil
 	}
@@ -823,6 +1114,7 @@ func (m *autoscalerManager) startRetiringController(
 	if err != nil {
 		return nil, fmt.Errorf("start retiring target %s: %w", target.key, err)
 	}
+	delete(m.orphanRecoveryTargets, target.key)
 	return controller, nil
 }
 
@@ -952,7 +1244,11 @@ func (m *autoscalerManager) publishObserved() error {
 		observedCurrent,
 		m.desiredStatus,
 		snapshots,
-		errors.Join(m.lastError, m.observedError),
+		errors.Join(
+			m.hostAdmissionRecoveryError,
+			m.lastError,
+			m.observedError,
+		),
 		m.clock.now(),
 	)
 	state.Autoscaling.ScaleSetCount += len(m.pending)
@@ -1641,6 +1937,7 @@ func (m *autoscalerManager) shutdown() error {
 	clear(m.controllers)
 	clear(m.retiring)
 	clear(m.pending)
+	clear(m.orphanRecoveryTargets)
 	m.lastError = errors.Join(shutdownErrors...)
 	m.managerStatus = "stopped"
 	if err := m.publishObserved(); err != nil {

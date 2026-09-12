@@ -13,6 +13,13 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "delete-github-runner" {
+		if err := runGitHubRunnerDelete(os.Args[2:]); err != nil {
+			fmt.Fprintf(os.Stderr, "pitcrew autoscaler delete-github-runner: %v\n", err)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := loadConfig(os.LookupEnv, runtime.GOARCH)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pitcrew autoscaler configuration error: %v\n", err)

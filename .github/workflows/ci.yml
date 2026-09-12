@@ -131,6 +131,7 @@ jobs:
           sh -n manager/registration.sh
           sh -n manager/diagnostics.sh
           sh -n manager/host-admission.sh
+          sh -n manager/host-admission-recovery.sh
           sh -n manager/container-supervision.sh
           sh -n manager/container-monitor-group-leader.sh
           sh -n manager/slot-registry.sh

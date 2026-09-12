@@ -16,7 +16,6 @@ RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w" \
     -o /out/pitcrew-autoscaler \
     .
-
 # pitcrew-admission is the versioned server/CLI-client binary for the
 # host-local admission coordinator (ADR-0003). Only the binary is built and
 # copied here; runtime entrypoint and Compose wiring are added by later
@@ -86,6 +85,7 @@ COPY observability.sh /usr/local/bin/observability.sh
 COPY registration.sh /usr/local/bin/registration.sh
 COPY diagnostics.sh /usr/local/bin/diagnostics.sh
 COPY host-admission.sh /usr/local/bin/host-admission.sh
+COPY host-admission-recovery.sh /usr/local/bin/host-admission-recovery.sh
 COPY container-supervision.sh /usr/local/bin/container-supervision.sh
 COPY container-monitor-group-leader.sh /usr/local/bin/container-monitor-group-leader.sh
 COPY slot-registry.sh /usr/local/bin/slot-registry.sh
@@ -99,6 +99,7 @@ RUN timeout -s TERM -k 1 1 true && \
     /usr/local/bin/registration.sh \
     /usr/local/bin/diagnostics.sh \
     /usr/local/bin/host-admission.sh \
+    /usr/local/bin/host-admission-recovery.sh \
     /usr/local/bin/container-supervision.sh \
     /usr/local/bin/container-monitor-group-leader.sh \
     /usr/local/bin/slot-registry.sh \
