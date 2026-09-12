@@ -553,6 +553,21 @@ observed_state_is_valid() {
             and (.managerInstanceId | type == "string" and length > 0 and length <= 128)
             and (.observedAt | type == "string" and length > 0)
             and (
+                .firstObservedAt == null
+                or (.firstObservedAt | type == "string" and length > 0)
+            )
+            and (
+                .lastObservedAt == null
+                or (.lastObservedAt | type == "string" and length > 0)
+            )
+            and (
+                .occurrenceCount == null
+                or (
+                    .occurrenceCount
+                    | nonnegative_integer and . >= 1 and . <= 2147483647
+                )
+            )
+            and (
                 .subsystem as $subsystem
                 | [
                     "docker", "registration", "scale-set-session", "listener", "jit",
@@ -974,6 +989,19 @@ observed_state_is_valid() {
                 and (.operationJournal | valid_operation_journal)
                 and (.subsystemHealth | valid_subsystem_health)
                 and (.capacityEvidence | valid_capacity_evidence)
+                and (
+                    if .managerContractVersion >= 20 then
+                        all(.operationJournal.events[];
+                            has("firstObservedAt")
+                            and has("lastObservedAt")
+                            and has("occurrenceCount")
+                            and .observedAt == .lastObservedAt
+                            and .firstObservedAt <= .lastObservedAt
+                        )
+                    else
+                        true
+                    end
+                )
                 and (
                     if .autoscaling == null then
                         .capacityEvidence.fixed != null

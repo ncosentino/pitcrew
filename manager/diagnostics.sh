@@ -7,6 +7,8 @@
 
 DIAGNOSTIC_JOURNAL_CAPACITY=32
 DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384
+DIAGNOSTIC_JOURNAL_SCHEMA_VERSION=2
+DIAGNOSTIC_PREVIOUS_JOURNAL_SCHEMA_VERSION=1
 DIAGNOSTIC_EVIDENCE_MAXIMUM_LENGTH=160
 DIAGNOSTIC_SLOW_OPERATION_MILLISECONDS=5000
 DIAGNOSTIC_UNAVAILABLE_FAILURES=3
@@ -73,7 +75,10 @@ diagnostic_journal_state_is_valid() {
         def nonnegative_integer:
             type == "number" and . >= 0 and floor == .;
         type == "object"
-        and .schemaVersion == 1
+        and (
+            .schemaVersion == 2
+            or .schemaVersion == 1
+        )
         and (.status == "current" or .status == "truncated" or .status == "unavailable")
         and (.capacity | type == "number" and . >= 1 and . <= 64 and floor == .)
         and (.highestSequence == null or (.highestSequence | nonnegative_integer and . >= 1))
@@ -90,6 +95,14 @@ diagnostic_event_is_valid() {
         and (.sequence | nonnegative_integer and . >= 1)
         and (.managerInstanceId | type == "string" and length > 0 and length <= 128)
         and (.observedAt | type == "string" and length > 0)
+        and (.firstObservedAt | type == "string" and length > 0)
+        and (.lastObservedAt | type == "string" and length > 0)
+        and .observedAt == .lastObservedAt
+        and .firstObservedAt <= .lastObservedAt
+        and (
+            .occurrenceCount
+            | nonnegative_integer and . >= 1 and . <= 2147483647
+        )
         and (.subsystem | type == "string")
         and (.operation | type == "string")
         and (.target == null or (.target | type == "string" and length > 0 and length <= 128))
@@ -287,11 +300,31 @@ diagnostics_initialize() {
 
     retained_path="${journal_path}.$$.events"
     : > "${retained_path}"
+    journal_schema=$(jq -r '.schemaVersion' "${journal_path}")
     jq -c '.events[]?' "${journal_path}" 2>/dev/null |
         while IFS= read -r journal_event; do
             [ -n "${journal_event}" ] || continue
-            printf '%s' "${journal_event}" | diagnostic_event_is_valid || continue
-            printf '%s\n' "${journal_event}" >> "${retained_path}"
+            if [ "${journal_schema}" -eq "${DIAGNOSTIC_PREVIOUS_JOURNAL_SCHEMA_VERSION}" ]; then
+                normalized_event=$(
+                    printf '%s' "${journal_event}" |
+                        jq -c '
+                            .firstObservedAt = (
+                                .firstObservedAt // .observedAt
+                            )
+                            | .lastObservedAt = (
+                                .lastObservedAt // .observedAt
+                            )
+                            | .occurrenceCount = (
+                                .occurrenceCount // 1
+                            )
+                        ' 2>/dev/null
+                ) || continue
+            else
+                normalized_event="${journal_event}"
+            fi
+            printf '%s' "${normalized_event}" |
+                diagnostic_event_is_valid || continue
+            printf '%s\n' "${normalized_event}" >> "${retained_path}"
         done
     persisted_events=$(jq -r '.events | length' "${journal_path}" 2>/dev/null || echo 0)
     retained_events=$(awk 'END { print NR + 0 }' "${retained_path}")
@@ -303,8 +336,63 @@ diagnostics_initialize() {
         --argjson discarded "${discarded_events}" \
         --slurpfile events "${retained_path}" \
         '
+            def same_scope($left; $right):
+                $left.subsystem == $right.subsystem
+                and $left.operation == $right.operation
+                and $left.target == $right.target;
+            def coalescible_outcome($event):
+                $event.outcome == "failed"
+                or $event.outcome == "timed-out"
+                or $event.outcome == "blocked"
+                or $event.outcome == "retry-scheduled"
+                or $event.outcome == "unknown";
+            def merge_event($retained; $event):
+                (
+                    $retained
+                    | to_entries
+                    | map(select(same_scope(.value; $event)))
+                    | last
+                ) as $scoped
+                | if (
+                    $scoped != null
+                    and coalescible_outcome($event)
+                    and $scoped.value.outcome == $event.outcome
+                    and $scoped.value.reason == $event.reason
+                ) then
+                    (
+                        [
+                            $retained
+                            | to_entries[]
+                            | select(.key != $scoped.key)
+                            | .value
+                        ] + [
+                            $event + {
+                                firstObservedAt: (
+                                    $scoped.value.firstObservedAt
+                                    // $scoped.value.observedAt
+                                ),
+                                occurrenceCount: (
+                                    [
+                                        (
+                                            ($scoped.value.occurrenceCount // 1)
+                                            + ($event.occurrenceCount // 1)
+                                        ),
+                                        2147483647
+                                    ] | min
+                                )
+                            }
+                        ]
+                    )
+                else
+                    $retained + [$event]
+                end;
+            def coalesce_events:
+                reduce .[] as $event ([];
+                    merge_event(.; $event)
+                );
             .capacity = $capacity
-            | .events = $events
+            | .schemaVersion = 2
+            | .events = ($events | sort_by(.sequence) | coalesce_events)
             | .droppedEvents = (.droppedEvents + $discarded)
             | .highestSequence = (
                 [.highestSequence // 0, ((.events | map(.sequence)) + [0] | max)] | max
@@ -348,7 +436,7 @@ diagnostic_write_empty_journal() {
         --argjson capacity "${DIAGNOSTIC_JOURNAL_CAPACITY}" \
         --argjson droppedEvents "${empty_dropped}" \
         '{
-            schemaVersion: 1,
+            schemaVersion: 2,
             status: $status,
             capacity: $capacity,
             highestSequence: null,
@@ -509,12 +597,7 @@ record_manager_event() {
         fi
         case "${event_outcome}" in
             failed|timed-out|blocked|retry-scheduled)
-                # Repeated identical failures stay bounded instead of filling
-                # the window with the same evidence.
-                if [ "${event_failures_after}" -le "${DIAGNOSTIC_UNAVAILABLE_FAILURES}" ] ||
-                    [ $((event_failures_after % 10)) -eq 0 ]; then
-                    event_journal=1
-                fi
+                event_journal=1
                 ;;
         esac
         if [ -n "${event_duration}" ] &&
@@ -636,25 +719,84 @@ diagnostic_append_journal_event() {
         --arg reason "${append_reason}" \
         --arg evidence "${append_evidence}" \
         '
-            ((.highestSequence // 0) + 1) as $sequence
+            (if $target == "" then null else $target end) as $eventTarget
+            | (.events // []) as $events
+            | (
+                $events
+                | to_entries
+                | map(select(
+                    .value.subsystem == $subsystem
+                    and .value.operation == $operation
+                    and .value.target == $eventTarget
+                ))
+                | last
+            ) as $scoped
+            | (
+                $scoped != null
+                and (
+                    $outcome == "failed"
+                    or $outcome == "timed-out"
+                    or $outcome == "blocked"
+                    or $outcome == "retry-scheduled"
+                    or $outcome == "unknown"
+                )
+                and $scoped.value.outcome == $outcome
+                and $scoped.value.reason == $reason
+            ) as $coalesce
+            | (
+                if $coalesce then $scoped.value else null end
+            ) as $previous
+            | ((.highestSequence // 0) + 1) as $sequence
+            | .schemaVersion = 2
             | .highestSequence = $sequence
-            | .events += [{
-                sequence: $sequence,
-                managerInstanceId: $managerInstanceId,
-                observedAt: $observedAt,
-                subsystem: $subsystem,
-                operation: $operation,
-                target: (if $target == "" then null else $target end),
-                outcome: $outcome,
-                durationMilliseconds: (
-                    if $duration == "" then null else ($duration | tonumber) end
-                ),
-                attempt: $attempt,
-                consecutiveFailures: $consecutiveFailures,
-                retryAt: (if $retryAt == "" then null else $retryAt end),
-                reason: $reason,
-                evidence: (if $evidence == "" then null else $evidence end)
-            }]
+            | .events = (
+                (
+                    if $coalesce then
+                        [
+                            $events
+                            | to_entries[]
+                            | select(.key != $scoped.key)
+                            | .value
+                        ]
+                    else
+                        $events
+                    end
+                ) + [{
+                    sequence: $sequence,
+                    managerInstanceId: $managerInstanceId,
+                    observedAt: $observedAt,
+                    firstObservedAt: (
+                        if $coalesce then
+                            ($previous.firstObservedAt // $previous.observedAt)
+                        else
+                            $observedAt
+                        end
+                    ),
+                    lastObservedAt: $observedAt,
+                    occurrenceCount: (
+                        if $coalesce then
+                            [
+                                (($previous.occurrenceCount // 1) + 1),
+                                2147483647
+                            ] | min
+                        else
+                            1
+                        end
+                    ),
+                    subsystem: $subsystem,
+                    operation: $operation,
+                    target: $eventTarget,
+                    outcome: $outcome,
+                    durationMilliseconds: (
+                        if $duration == "" then null else ($duration | tonumber) end
+                    ),
+                    attempt: $attempt,
+                    consecutiveFailures: $consecutiveFailures,
+                    retryAt: (if $retryAt == "" then null else $retryAt end),
+                    reason: $reason,
+                    evidence: (if $evidence == "" then null else $evidence end)
+                }]
+            )
             | .status = (
                 if .droppedEvents > 0 then "truncated" else "current" end
             )

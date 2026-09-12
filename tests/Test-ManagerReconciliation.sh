@@ -1032,7 +1032,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "19" \
+    "20" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -1306,6 +1306,7 @@ docker_health_state="${diagnostics_directory}/subsystem-docker.json"
 github_health_state="${diagnostics_directory}/subsystem-github.json"
 assert_true "Operation diagnostics could not be initialized." \
     diagnostics_initialize "${diagnostics_directory}" manager-instance-a
+assert_equals "2" "$(jq -r '.schemaVersion' "${journal_state}")" "A fresh journal did not use private schema two."
 assert_equals "current" "$(jq -r '.status' "${journal_state}")" "A fresh operation journal was not reported as current."
 assert_equals "0" "$(jq -r '.events | length' "${journal_state}")" "A fresh operation journal retained events."
 assert_equals "unknown" "$(jq -r '.state' "${docker_health_state}")" "A manager without Docker evidence claimed Docker health."
@@ -1314,6 +1315,13 @@ assert_equals "unknown" "$(jq -r '.state' "${github_health_state}")" "A manager 
 record_manager_event "${diagnostics_directory}" manager-instance-a \
     telemetry telemetry-sample "" succeeded 40 none "" || true
 assert_equals "1" "$(jq -r '.events | length' "${journal_state}")" "The first Docker success was not journaled as a state transition."
+assert_true \
+    "A new journal event omitted aggregate timestamps or occurrence count." \
+    json_condition_holds "${journal_state}" '
+        .events[0].firstObservedAt == .events[0].observedAt
+        and .events[0].lastObservedAt == .events[0].observedAt
+        and .events[0].occurrenceCount == 1
+    '
 assert_equals "healthy" "$(jq -r '.state' "${docker_health_state}")" "A successful Docker operation did not report healthy."
 record_manager_event "${diagnostics_directory}" manager-instance-a \
     telemetry telemetry-sample "" succeeded 40 none "" || true
@@ -1327,6 +1335,17 @@ assert_equals "2" "$(jq -r '.events | length' "${journal_state}")" "A Docker tim
 assert_equals "timed-out" "$(jq -r '.events[-1].outcome' "${journal_state}")" "A Docker timeout lost its outcome."
 assert_equals "degraded" "$(jq -r '.state' "${docker_health_state}")" "A failed Docker operation did not degrade Docker health."
 assert_equals "1" "$(jq -r '.consecutiveFailures' "${docker_health_state}")" "A failed Docker operation lost its failure count."
+sleep 1
+record_manager_event "${diagnostics_directory}" manager-instance-a \
+    docker docker-inspect "" timed-out 5000 timeout "Managed worker discovery exceeded its deadline" || true
+assert_equals "2" "$(jq -r '.events | length' "${journal_state}")" "Equivalent Docker timeouts were not coalesced."
+assert_equals "2" "$(jq -r '.events[-1].occurrenceCount' "${journal_state}")" "Coalesced Docker timeouts lost their occurrence count."
+assert_true \
+    "Coalesced Docker timeouts lost their first/last observation range." \
+    json_condition_holds "${journal_state}" '
+        .events[-1].firstObservedAt != .events[-1].lastObservedAt
+        and .events[-1].observedAt == .events[-1].lastObservedAt
+    '
 
 record_manager_event "${diagnostics_directory}" manager-instance-a \
     worker-launch worker-launch repo-example-000001 retry-scheduled "" retry-backoff \
@@ -1378,10 +1397,126 @@ assert_equals \
     "$(jq -r '.events | length' "${journal_state}")" \
     "Adoption duplicated journal events."
 
+storm_diagnostics_directory="${TEMP_DIRECTORY}/storm-diagnostics"
+storm_journal="${storm_diagnostics_directory}/journal.json"
+assert_true "Failure-storm diagnostics could not be initialized." \
+    diagnostics_initialize "${storm_diagnostics_directory}" storm-manager-a
+record_manager_event "${storm_diagnostics_directory}" storm-manager-a \
+    worker-exit worker-exit runner-causal failed "" unknown \
+    "Worker exit could not release its host lease" || true
+storm_events=0
+while [ "${storm_events}" -lt 40 ]; do
+    record_manager_event "${storm_diagnostics_directory}" storm-manager-a \
+        admission admission-reserve target-a blocked "" capacity-ceiling \
+        "Host admission withheld worker activation" || true
+    record_manager_event "${storm_diagnostics_directory}" storm-manager-a \
+        worker-launch worker-launch target-a failed "" unknown \
+        "Worker launch remained blocked" || true
+    storm_events=$((storm_events + 1))
+done
+assert_equals "3" "$(jq -r '.events | length' "${storm_journal}")" "Repeated failure pairs displaced causal journal evidence."
+assert_equals "current" "$(jq -r '.status' "${storm_journal}")" "Coalesced failure pairs incorrectly truncated the journal."
+assert_equals "0" "$(jq -r '.droppedEvents' "${storm_journal}")" "Coalesced observations were counted as dropped evidence."
+assert_equals "worker-exit" "$(jq -r '.events[0].operation' "${storm_journal}")" "Failure storm evicted the causal worker-exit event."
+assert_true \
+    "Failure storm did not retain bounded occurrence aggregates." \
+    json_condition_holds "${storm_journal}" '
+        [.events[1].occurrenceCount, .events[2].occurrenceCount]
+        | all(. == 40)
+    '
+assert_true "Coalesced failure evidence did not survive manager restart." \
+    diagnostics_initialize "${storm_diagnostics_directory}" storm-manager-b
+assert_true \
+    "Manager restart lost coalesced occurrence metadata." \
+    json_condition_holds "${storm_journal}" '
+        [.events[] | select(
+            .operation == "admission-reserve"
+            or .operation == "worker-launch"
+        ) | .occurrenceCount]
+        | length == 2
+        and all(. == 40)
+    '
+diagnostics_directory="${TEMP_DIRECTORY}/diagnostics"
+
+legacy_diagnostics_directory="${TEMP_DIRECTORY}/legacy-diagnostics"
+legacy_journal="${legacy_diagnostics_directory}/journal.json"
+mkdir -p "${legacy_diagnostics_directory}"
+cat > "${legacy_journal}" <<'EOF'
+{
+  "schemaVersion": 1,
+  "status": "current",
+  "capacity": 32,
+  "highestSequence": 3,
+  "droppedEvents": 0,
+  "events": [
+    {
+      "sequence": 1,
+      "managerInstanceId": "legacy-manager",
+      "observedAt": "2026-07-27T00:00:00Z",
+      "subsystem": "cleanup",
+      "operation": "registration-cleanup",
+      "target": null,
+      "outcome": "retry-scheduled",
+      "durationMilliseconds": null,
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "retryAt": "2026-07-27T00:00:30Z",
+      "reason": "retry-backoff",
+      "evidence": "Registration cleanup remains pending"
+    },
+    {
+      "sequence": 2,
+      "managerInstanceId": "legacy-manager",
+      "observedAt": "2026-07-27T00:00:10Z",
+      "subsystem": "worker-exit",
+      "operation": "worker-exit",
+      "target": "runner-causal",
+      "outcome": "failed",
+      "durationMilliseconds": null,
+      "attempt": 1,
+      "consecutiveFailures": 0,
+      "retryAt": null,
+      "reason": "unknown",
+      "evidence": "Worker exit could not release its host lease"
+    },
+    {
+      "sequence": 3,
+      "managerInstanceId": "legacy-manager",
+      "observedAt": "2026-07-27T00:00:20Z",
+      "subsystem": "cleanup",
+      "operation": "registration-cleanup",
+      "target": null,
+      "outcome": "retry-scheduled",
+      "durationMilliseconds": null,
+      "attempt": 2,
+      "consecutiveFailures": 0,
+      "retryAt": "2026-07-27T00:00:50Z",
+      "reason": "retry-backoff",
+      "evidence": "Registration cleanup remains pending"
+    }
+  ]
+}
+EOF
+assert_true "Legacy journal schema could not be migrated." \
+    diagnostics_initialize "${legacy_diagnostics_directory}" manager-migrated
+assert_equals "2" "$(jq -r '.schemaVersion' "${legacy_journal}")" "Legacy journal did not advance to private schema two."
+assert_true \
+    "Legacy journal event did not receive aggregate defaults." \
+    json_condition_holds "${legacy_journal}" '
+        [.events[] | select(.operation == "registration-cleanup")] as $cleanup
+        | ($cleanup | length) == 1
+        and $cleanup[0].firstObservedAt == "2026-07-27T00:00:00Z"
+        and $cleanup[0].lastObservedAt == "2026-07-27T00:00:20Z"
+        and $cleanup[0].occurrenceCount == 2
+        and any(.events[]; .operation == "worker-exit")
+        and .droppedEvents == 0
+    '
+diagnostics_directory="${TEMP_DIRECTORY}/diagnostics"
+
 journal_events_bounded=0
 while [ "${journal_events_bounded}" -lt 40 ]; do
     record_manager_event "${diagnostics_directory}" manager-instance-b \
-        reconciliation desired-state-apply "" succeeded "" none "Accepted a new desired capacity generation" || true
+        reconciliation desired-state-apply "generation-${journal_events_bounded}" succeeded "" none "Accepted a new desired capacity generation" || true
     journal_events_bounded=$((journal_events_bounded + 1))
 done
 assert_equals "32" "$(jq -r '.events | length' "${journal_state}")" "The operation journal exceeded its retained window."
@@ -1818,9 +1953,9 @@ assert_true \
     observed_state_is_valid "${legacy_contract_sixteen_state}"
 
 assert_equals \
-    "19" \
+    "20" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
-    "The fixed manager does not declare the contract-nineteen admission explainability activation."
+    "The fixed manager does not declare the active contract twenty."
 
 contract_eighteen_disabled_state="${TEMP_DIRECTORY}/contract-eighteen-disabled-state.json"
 jq '

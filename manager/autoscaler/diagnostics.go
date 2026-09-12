@@ -23,6 +23,7 @@ const (
 	evidenceMaximumRunes = 160
 	identityMaximumRunes = 128
 	subsystemFailureBand = 3
+	maxOccurrenceCount   = 2147483647
 )
 
 // Journal subsystems.
@@ -84,38 +85,42 @@ const (
 
 // Journal reasons.
 const (
-	reasonNone                 = "none"
-	reasonDockerUnavailable    = "docker-unavailable"
-	reasonDockerFailed         = "docker-failed"
-	reasonTimeout              = "timeout"
-	reasonRateLimited          = "rate-limited"
-	reasonAuthorizationFailed  = "authorization-failed"
-	reasonNotFound             = "not-found"
-	reasonConflict             = "conflict"
-	reasonInvalidState         = "invalid-state"
-	reasonCapacityCeiling      = "capacity-ceiling"
-	reasonRetryBackoff         = "retry-backoff"
-	reasonCancelled            = "cancelled"
-	reasonRecovered            = "recovered"
-	reasonUnknown              = "unknown"
-	subsystemHealthy           = "healthy"
-	subsystemDegraded          = "degraded"
-	subsystemUnavailable       = "unavailable"
-	subsystemUnknown           = "unknown"
-	journalStatusCurrent       = "current"
-	journalStatusTruncated     = "truncated"
-	journalStatusUnavailable   = "unavailable"
-	diagnosticsSchemaVersion   = 1
-	diagnosticsJournalFileName = "operation-journal.json"
+	reasonNone                       = "none"
+	reasonDockerUnavailable          = "docker-unavailable"
+	reasonDockerFailed               = "docker-failed"
+	reasonTimeout                    = "timeout"
+	reasonRateLimited                = "rate-limited"
+	reasonAuthorizationFailed        = "authorization-failed"
+	reasonNotFound                   = "not-found"
+	reasonConflict                   = "conflict"
+	reasonInvalidState               = "invalid-state"
+	reasonCapacityCeiling            = "capacity-ceiling"
+	reasonRetryBackoff               = "retry-backoff"
+	reasonCancelled                  = "cancelled"
+	reasonRecovered                  = "recovered"
+	reasonUnknown                    = "unknown"
+	subsystemHealthy                 = "healthy"
+	subsystemDegraded                = "degraded"
+	subsystemUnavailable             = "unavailable"
+	subsystemUnknown                 = "unknown"
+	journalStatusCurrent             = "current"
+	journalStatusTruncated           = "truncated"
+	journalStatusUnavailable         = "unavailable"
+	diagnosticsSchemaVersion         = 2
+	previousDiagnosticsSchemaVersion = 1
+	diagnosticsJournalFileName       = "operation-journal.json"
 )
 
-// managerEvent is one bounded, sanitized record of a manager operation or state
-// transition. Its identity is the profile plus the durable sequence, so a
-// connector can deduplicate across manager restarts and hot swaps.
+// managerEvent is one bounded, sanitized operation episode. Equivalent
+// observations coalesce into its occurrence range; its latest durable sequence
+// remains the connector deduplication identity across manager hot swaps.
 type managerEvent struct {
 	Sequence             int     `json:"sequence"`
 	ManagerInstanceID    string  `json:"managerInstanceId"`
 	ObservedAt           string  `json:"observedAt"`
+	FirstObservedAt      string  `json:"firstObservedAt"`
+	LastObservedAt       string  `json:"lastObservedAt"`
+	OccurrenceCount      int     `json:"occurrenceCount"`
 	Subsystem            string  `json:"subsystem"`
 	Operation            string  `json:"operation"`
 	Target               *string `json:"target"`
@@ -267,21 +272,35 @@ func (r *diagnosticsRecorder) restore() {
 		r.mu.Unlock()
 		return
 	}
-	retained := make([]managerEvent, 0, len(document.Events))
+	if document.SchemaVersion != diagnosticsSchemaVersion &&
+		document.SchemaVersion != previousDiagnosticsSchemaVersion {
+		r.restoreFailed = true
+		r.droppedEvents++
+		r.mu.Unlock()
+		return
+	}
+	migrateLegacyEvents :=
+		document.SchemaVersion == previousDiagnosticsSchemaVersion
+	validEvents := make([]managerEvent, 0, len(document.Events))
 	dropped := max(document.DroppedEvents, 0)
+	highest := max(document.HighestSequence, 0)
 	for _, event := range document.Events {
+		if migrateLegacyEvents {
+			event = normalizeManagerEvent(event)
+		}
+		highest = max(highest, event.Sequence)
 		if !validJournalEvent(event) {
 			dropped++
 			continue
 		}
-		retained = append(retained, event)
+		validEvents = append(validEvents, event)
 	}
-	sort.SliceStable(retained, func(i, j int) bool {
-		return retained[i].Sequence < retained[j].Sequence
+	sort.SliceStable(validEvents, func(i, j int) bool {
+		return validEvents[i].Sequence < validEvents[j].Sequence
 	})
-	highest := max(document.HighestSequence, 0)
-	for _, event := range retained {
-		highest = max(highest, event.Sequence)
+	retained := make([]managerEvent, 0, len(validEvents))
+	for _, event := range validEvents {
+		retained = coalesceJournalEvent(retained, event)
 	}
 	for len(retained) > journalCapacity {
 		retained = dropOldestJournalEvent(retained)
@@ -315,10 +334,32 @@ func validJournalEvent(event managerEvent) bool {
 		event.Reason == "" {
 		return false
 	}
-	if _, err := time.Parse(time.RFC3339, event.ObservedAt); err != nil {
+	observedAt, observedErr := time.Parse(time.RFC3339, event.ObservedAt)
+	firstObservedAt, firstErr := time.Parse(time.RFC3339, event.FirstObservedAt)
+	lastObservedAt, lastErr := time.Parse(time.RFC3339, event.LastObservedAt)
+	if observedErr != nil ||
+		firstErr != nil ||
+		lastErr != nil ||
+		event.OccurrenceCount < 1 ||
+		event.OccurrenceCount > maxOccurrenceCount ||
+		firstObservedAt.After(lastObservedAt) ||
+		!observedAt.Equal(lastObservedAt) {
 		return false
 	}
 	return true
+}
+
+func normalizeManagerEvent(event managerEvent) managerEvent {
+	if event.FirstObservedAt == "" {
+		event.FirstObservedAt = event.ObservedAt
+	}
+	if event.LastObservedAt == "" {
+		event.LastObservedAt = event.ObservedAt
+	}
+	if event.OccurrenceCount == 0 {
+		event.OccurrenceCount = 1
+	}
+	return event
 }
 
 // record observes one completed operation. Successes update health summaries
@@ -381,6 +422,9 @@ func (r *diagnosticsRecorder) buildEventLocked(
 		Sequence:          r.highestSequence,
 		ManagerInstanceID: boundedIdentity(r.instanceID),
 		ObservedAt:        now.UTC().Format(time.RFC3339),
+		FirstObservedAt:   now.UTC().Format(time.RFC3339),
+		LastObservedAt:    now.UTC().Format(time.RFC3339),
+		OccurrenceCount:   1,
 		Subsystem:         observation.subsystem,
 		Operation:         observation.operation,
 		Target:            optionalIdentity(observation.target),
@@ -425,11 +469,83 @@ func (r *diagnosticsRecorder) failureCountLocked(kind string) int {
 }
 
 func (r *diagnosticsRecorder) appendLocked(event managerEvent) {
-	r.events = append(r.events, event)
+	r.events = coalesceJournalEvent(r.events, event)
 	for len(r.events) > journalCapacity {
 		r.events = dropOldestJournalEvent(r.events)
 		r.droppedEvents++
 	}
+}
+
+func coalesceJournalEvent(
+	events []managerEvent,
+	event managerEvent,
+) []managerEvent {
+	event = normalizeManagerEvent(event)
+	index := coalescibleJournalEventIndex(events, event)
+	if index < 0 {
+		return append(events, event)
+	}
+	previous := normalizeManagerEvent(events[index])
+	event.FirstObservedAt = previous.FirstObservedAt
+	event.OccurrenceCount = boundedOccurrenceSum(
+		previous.OccurrenceCount,
+		event.OccurrenceCount,
+	)
+	events = append(events[:index], events[index+1:]...)
+	return append(events, event)
+}
+
+func boundedOccurrenceSum(left, right int) int {
+	if left >= maxOccurrenceCount ||
+		right >= maxOccurrenceCount-left {
+		return maxOccurrenceCount
+	}
+	return left + right
+}
+
+func coalescibleJournalEventIndex(
+	events []managerEvent,
+	event managerEvent,
+) int {
+	if !journalOutcomeCoalescible(event.Outcome) {
+		return -1
+	}
+	for index := len(events) - 1; index >= 0; index-- {
+		previous := events[index]
+		if !sameJournalEventScope(previous, event) {
+			continue
+		}
+		if previous.Outcome == event.Outcome &&
+			previous.Reason == event.Reason {
+			return index
+		}
+		return -1
+	}
+	return -1
+}
+
+func journalOutcomeCoalescible(outcome string) bool {
+	switch outcome {
+	case outcomeFailed,
+		outcomeTimedOut,
+		outcomeBlocked,
+		outcomeRetry,
+		outcomeUnknownResult:
+		return true
+	default:
+		return false
+	}
+}
+
+func sameJournalEventScope(left, right managerEvent) bool {
+	if left.Subsystem != right.Subsystem ||
+		left.Operation != right.Operation {
+		return false
+	}
+	if left.Target == nil || right.Target == nil {
+		return left.Target == nil && right.Target == nil
+	}
+	return *left.Target == *right.Target
 }
 
 func dropOldestJournalEvent(events []managerEvent) []managerEvent {

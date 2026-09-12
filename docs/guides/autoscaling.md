@@ -92,7 +92,7 @@ canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
 Resource policy and the aggregate ceiling were introduced in manager contract
-11 and remain supported by the active contract 19 autoscaler.
+11 and remain supported by the active contract 20 autoscaler.
 
 Contract 18 keeps profile-ceiling and host-admission deficits distinct in
 per-target capacity evidence. `admission-ceiling` remains the in-process
@@ -133,7 +133,10 @@ observed state so operators can tell an idle pool apart from a stuck one:
   reconciliation ticks are not recorded. Events carry a stable sequence and
   observer identity so connectors can deduplicate them, and the journal survives
   a manager restart, so a Docker or listener failure that preceded recovery is
-  still visible.
+  still visible. Contract 20 coalesces equivalent failure-like observations
+  within one operation/target episode and reports their first and last
+  observation times plus a bounded occurrence count. Successful transitions
+  remain distinct; a changed outcome or reason also starts a new episode.
 - `subsystemHealth` summarizes Docker and GitHub operations as `healthy`,
   `degraded`, `unavailable`, or `unknown`, with the last success, last failure,
   and consecutive failure count. A subsystem that has not been observed stays

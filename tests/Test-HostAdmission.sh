@@ -166,8 +166,8 @@ assert_true \
     "Recovered draining slots do not clear pending host demand before return." \
     grep -Fq 'host_admission_end_wait \' "${manager_source}"
 assert_true \
-    "Fixed admission implementation did not activate manager contract nineteen." \
-    grep -Fq 'MANAGER_CONTRACT_VERSION=19' "${manager_source}"
+    "Fixed admission implementation did not activate manager contract twenty." \
+    grep -Fq 'MANAGER_CONTRACT_VERSION=20' "${manager_source}"
 
 disabled_calls="${TEMP_DIRECTORY}/disabled-calls.log"
 : > "${disabled_calls}"
