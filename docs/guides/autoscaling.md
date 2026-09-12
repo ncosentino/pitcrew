@@ -140,7 +140,11 @@ observed state so operators can tell an idle pool apart from a stuck one:
 - `subsystemHealth` summarizes Docker and GitHub operations as `healthy`,
   `degraded`, `unavailable`, or `unknown`, with the last success, last failure,
   and consecutive failure count. A subsystem that has not been observed stays
-  `unknown` rather than reporting a fabricated success.
+  `unknown` rather than reporting a fabricated success. The manager also
+  validates its stored runner-administration credential against every target
+  every five minutes. An authorization failure remains projected here until
+  that exact check later succeeds; a healthy scale-set message session or
+  another successful GitHub operation cannot mask it.
 - `capacityEvidence` reports per-target deficits against the target's current
   activation target, never the configured maximum, so a healthy pool below its
   ceiling is never presented as an unmet health target. Local Docker worker
@@ -159,6 +163,14 @@ Docker error output, job output, or environment values; evidence is reduced to a
 short, sanitized summary. Diagnostics are best-effort: a corrupt or unwritable
 journal is reported through the journal status and never stops scaling, removes
 workers, or discards retirement, cleanup, or accepted capacity state.
+
+The periodic credential probe requests a short-lived registration token because
+that is the least disruptive check of the write permission PitCrew actually
+needs. A read-only runner inventory request would not detect a credential that
+retained read permission but lost registration permission. PitCrew validates
+the response in memory, discards it immediately, rejects redirects, bounds the
+request and response, and never changes workers, scale-set demand, or runner
+registrations as part of the check.
 
 ## Compatibility
 
@@ -223,4 +235,7 @@ start forty workers without matching demand.
 
 The manager retains the administration credential. JIT workers receive only
 their one-time encoded configuration and never receive `ACCESS_TOKEN`. Only the
-manager mounts the Docker socket.
+manager mounts the Docker socket. Periodic authorization checks pass the
+credential to the bounded manager helper through its environment rather than a
+command-line argument, and neither the generated token nor provider response is
+logged or published.

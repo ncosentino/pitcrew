@@ -312,6 +312,10 @@ func (s *instrumentedScaleSetService) generateJIT(
 	return config, err
 }
 
+func (s *instrumentedScaleSetService) checkRegistrationAccess(ctx context.Context) error {
+	return s.inner.checkRegistrationAccess(ctx)
+}
+
 func (s *instrumentedScaleSetService) findRunnerByName(
 	ctx context.Context,
 	runnerName string,

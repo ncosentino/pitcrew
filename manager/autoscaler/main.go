@@ -20,6 +20,13 @@ func main() {
 		}
 		return
 	}
+	if len(os.Args) > 1 && os.Args[1] == "check-github-runner-access" {
+		err := runGitHubRunnerAccessCheck(os.Args[2:])
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "pitcrew autoscaler GitHub runner access check failed")
+		}
+		os.Exit(githubRunnerAccessExitCode(err))
+	}
 	cfg, err := loadConfig(os.LookupEnv, runtime.GOARCH)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pitcrew autoscaler configuration error: %v\n", err)

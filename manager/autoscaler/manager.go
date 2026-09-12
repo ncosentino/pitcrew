@@ -18,6 +18,7 @@ import (
 const (
 	managerShutdownTimeout             = 50 * time.Second
 	hostAdmissionRecoveryRetryInterval = 30 * time.Second
+	registrationAccessCheckInterval    = 5 * time.Minute
 )
 
 type autoscalerManager struct {
@@ -52,6 +53,7 @@ type autoscalerManager struct {
 	lastError                  error
 	observedError              error
 	hostAdmissionRecoveryError error
+	registrationAccessHealth   registrationAccessHealthState
 	latestResources            resourceSample
 	resourcesSampled           bool
 	resourcesAt                time.Time
@@ -86,6 +88,22 @@ type pendingScaleSet struct {
 type restartState struct {
 	at       time.Time
 	attempts int
+}
+
+type registrationAccessHealthState struct {
+	observedAt          time.Time
+	nextCheckAt         time.Time
+	consecutiveFailures int
+	reason              string
+	evidence            string
+	failed              bool
+	observed            bool
+}
+
+type registrationAccessTarget struct {
+	key string
+	api scaleSetService
+	err error
 }
 
 func newAutoscalerManager(
@@ -250,6 +268,7 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 	if m.detectStoppedListeners() {
 		cycleSucceeded = false
 	}
+	m.checkRegistrationAccessIfDue(ctx)
 	if m.current != nil {
 		if m.currentConfigurationCoherent() {
 			applied := *m.current
@@ -264,6 +283,130 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 		m.lastError = nil
 	}
 	m.tryPublishObserved()
+}
+
+func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
+	now := m.clock.now()
+	if !m.registrationAccessHealth.nextCheckAt.IsZero() &&
+		now.Before(m.registrationAccessHealth.nextCheckAt) {
+		return
+	}
+
+	targets := make(map[string]registrationAccessTarget, len(m.controllers)+len(m.retiring))
+	for key, controller := range m.retiring {
+		targets[key] = registrationAccessTarget{key: key, api: controller.api}
+	}
+	for key, controller := range m.controllers {
+		targets[key] = registrationAccessTarget{key: key, api: controller.api}
+	}
+	for key, pending := range m.pending {
+		targets[key] = registrationAccessTarget{key: key, api: pending.api}
+	}
+	if m.current != nil {
+		desiredTargets, err := buildTargetSpecs(m.current.state, m.cfg)
+		if err != nil {
+			targets["desired-state"] = registrationAccessTarget{
+				key: "desired-state",
+				err: err,
+			}
+		} else {
+			for _, target := range desiredTargets {
+				if _, exists := targets[target.key]; exists {
+					continue
+				}
+				api, createErr := m.factory.newService(target.registrationURL)
+				targets[target.key] = registrationAccessTarget{
+					key: target.key,
+					api: api,
+					err: createErr,
+				}
+			}
+		}
+	}
+	if len(targets) == 0 {
+		return
+	}
+
+	keys := make([]string, 0, len(targets))
+	for key := range targets {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	results := make([]error, len(keys))
+	var wait sync.WaitGroup
+	for index, key := range keys {
+		target := targets[key]
+		if target.err != nil {
+			results[index] = target.err
+			continue
+		}
+		if target.api == nil {
+			results[index] = errGitHubRunnerResponse
+			continue
+		}
+		wait.Add(1)
+		go func(resultIndex int, api scaleSetService) {
+			defer wait.Done()
+			results[resultIndex] = api.checkRegistrationAccess(ctx)
+		}(index, target.api)
+	}
+	wait.Wait()
+
+	observedAt := m.clock.now()
+	previouslyFailed := m.registrationAccessHealth.failed
+	m.registrationAccessHealth.observed = true
+	m.registrationAccessHealth.observedAt = observedAt
+	m.registrationAccessHealth.nextCheckAt = observedAt.Add(registrationAccessCheckInterval)
+	var failures []error
+	for index, err := range results {
+		if err == nil {
+			continue
+		}
+		failures = append(failures, err)
+		m.logger.Warn(
+			"Stored runner credential check failed",
+			"targetKey",
+			keys[index],
+			"reason",
+			classifyFailure(err),
+		)
+	}
+
+	observation := diagnosticsObservation{
+		subsystem:  subsystemRegistration,
+		operation:  operationRegistrationTokenCall,
+		outcome:    outcomeSucceeded,
+		reason:     reasonNone,
+		healthKind: healthNone,
+	}
+	if len(failures) == 0 {
+		m.registrationAccessHealth.failed = false
+		m.registrationAccessHealth.reason = reasonNone
+		m.registrationAccessHealth.evidence = ""
+		m.registrationAccessHealth.consecutiveFailures = 0
+		if previouslyFailed {
+			observation.outcome = outcomeRecovered
+			observation.reason = reasonRecovered
+			observation.evidence = "stored runner credential authorization recovered"
+		}
+		m.diagnostics.record(observation)
+		return
+	}
+
+	joined := errors.Join(failures...)
+	m.registrationAccessHealth.failed = true
+	m.registrationAccessHealth.reason = classifyFailure(joined)
+	m.registrationAccessHealth.evidence = githubRunnerRegistrationAccessFailureEvidence(joined)
+	m.registrationAccessHealth.consecutiveFailures = min(
+		m.registrationAccessHealth.consecutiveFailures+1,
+		1000,
+	)
+	retryAt := m.registrationAccessHealth.nextCheckAt
+	observation.outcome = failureOutcome(joined)
+	observation.reason = m.registrationAccessHealth.reason
+	observation.evidence = m.registrationAccessHealth.evidence
+	observation.retryAt = &retryAt
+	m.diagnostics.record(observation)
 }
 
 func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady(
@@ -1327,6 +1470,7 @@ func (m *autoscalerManager) applyDiagnostics(
 	}
 	journal := m.diagnostics.journal()
 	health := m.diagnostics.subsystemHealth()
+	m.applyRegistrationAccessHealth(&health)
 	evidence := buildCapacityEvidence(
 		snapshots,
 		m.targetCapacityConditions(),
@@ -1336,6 +1480,31 @@ func (m *autoscalerManager) applyDiagnostics(
 	state.OperationJournal = &journal
 	state.SubsystemHealth = &health
 	state.CapacityEvidence = &evidence
+}
+
+func (m *autoscalerManager) applyRegistrationAccessHealth(health *managerSubsystemHealth) {
+	state := m.registrationAccessHealth
+	if health == nil || !state.observed || !state.failed {
+		return
+	}
+
+	observedAt := state.observedAt.UTC().Format(time.RFC3339)
+	retryAt := state.nextCheckAt.UTC().Format(time.RFC3339)
+	evidence := state.evidence
+	summaryState := subsystemDegraded
+	if state.consecutiveFailures >= subsystemFailureBand {
+		summaryState = subsystemUnavailable
+	}
+	health.GitHub.State = summaryState
+	health.GitHub.ObservedAt = observedAt
+	health.GitHub.ConsecutiveFailures = state.consecutiveFailures
+	health.GitHub.RetryAt = &retryAt
+	health.GitHub.LastFailure = &subsystemOperationEvidence{
+		Operation:  operationRegistrationTokenCall,
+		ObservedAt: observedAt,
+		Reason:     state.reason,
+		Evidence:   &evidence,
+	}
 }
 
 // targetCapacityConditions reports the manager-owned blocking state for each

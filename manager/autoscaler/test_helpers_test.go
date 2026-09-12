@@ -51,27 +51,29 @@ func (r *eventRecorder) snapshot() []string {
 }
 
 type fakeScaleSetService struct {
-	mu               sync.Mutex
-	nextRunnerID     int64
-	jitCalls         int
-	generateErrors   []error
-	generateStarted  chan struct{}
-	generateContinue <-chan struct{}
-	removeCalls      []int64
-	removeErrors     map[int64]error
-	removeStarted    chan struct{}
-	removeContinue   <-chan struct{}
-	runnersByName    map[string]runnerReference
-	findRunnerErrors map[string]error
-	findRunnerCalls  map[string]int
-	events           *eventRecorder
-	ensureHandle     scaleSetHandle
-	ensureCalls      int
-	ensureErrors     []error
-	deletedScaleSet  []int
-	scaleSetExists   bool
-	openSessionCalls int
-	sessionFactory   func() messageSession
+	mu                       sync.Mutex
+	nextRunnerID             int64
+	jitCalls                 int
+	generateErrors           []error
+	generateStarted          chan struct{}
+	generateContinue         <-chan struct{}
+	removeCalls              []int64
+	removeErrors             map[int64]error
+	removeStarted            chan struct{}
+	removeContinue           <-chan struct{}
+	runnersByName            map[string]runnerReference
+	findRunnerErrors         map[string]error
+	findRunnerCalls          map[string]int
+	events                   *eventRecorder
+	ensureHandle             scaleSetHandle
+	ensureCalls              int
+	ensureErrors             []error
+	registrationAccessErrors []error
+	registrationAccessCalls  int
+	deletedScaleSet          []int
+	scaleSetExists           bool
+	openSessionCalls         int
+	sessionFactory           func() messageSession
 }
 
 func newFakeScaleSetService(events *eventRecorder) *fakeScaleSetService {
@@ -205,6 +207,18 @@ func (s *fakeScaleSetService) removeRunner(_ context.Context, runnerID int64) er
 	if s.events != nil {
 		s.events.add(fmt.Sprintf("api-remove-%d", runnerID))
 	}
+	return err
+}
+
+func (s *fakeScaleSetService) checkRegistrationAccess(context.Context) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.registrationAccessCalls++
+	if len(s.registrationAccessErrors) == 0 {
+		return nil
+	}
+	err := s.registrationAccessErrors[0]
+	s.registrationAccessErrors = s.registrationAccessErrors[1:]
 	return err
 }
 

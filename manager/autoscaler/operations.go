@@ -204,6 +204,14 @@ func (s *boundedScaleSetService) removeRunner(
 	)
 }
 
+func (s *boundedScaleSetService) checkRegistrationAccess(ctx context.Context) error {
+	return runContextError(
+		ctx,
+		scaleSetOperationTimeout,
+		s.inner.checkRegistrationAccess,
+	)
+}
+
 func (s *boundedScaleSetService) openSession(
 	ctx context.Context,
 	scaleSetID int,

@@ -863,6 +863,12 @@ func classifyFailure(err error) string {
 	switch {
 	case err == nil:
 		return reasonNone
+	case errors.Is(err, errGitHubRunnerAuthorization):
+		return reasonAuthorizationFailed
+	case errors.Is(err, errGitHubRunnerRateLimited):
+		return reasonRateLimited
+	case errors.Is(err, errGitHubRunnerNotFound):
+		return reasonNotFound
 	case errors.Is(err, context.DeadlineExceeded):
 		return reasonTimeout
 	case errors.Is(err, context.Canceled):

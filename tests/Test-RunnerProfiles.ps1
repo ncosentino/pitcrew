@@ -4853,6 +4853,18 @@ try {
             -Failure 'Setup accepted a rejected stored registration token.'
         $rejectedTokenCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check (-not ($rejectedTokenCommands -match 'compose.*down')) 'A rejected stored token stopped the selected profile.'
+
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Refresh `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'stored token does not have runner registration access' `
+            -Failure 'An unchanged refresh accepted a rejected stored registration token.'
+        $rejectedRefreshCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (-not ($rejectedRefreshCommands -match 'compose.*down')) 'A rejected refresh stopped the selected profile.'
         Remove-Item Env:\PITCREW_TEST_REJECT_TOKEN -ErrorAction SilentlyContinue
 
         Set-TestCapacityAcknowledgement `

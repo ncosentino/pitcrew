@@ -574,6 +574,62 @@ assert_false \
     "test-token" \
     1
 
+registration_access_targets="${TEMP_DIRECTORY}/registration-access-targets.tsv"
+write_github_runner_registration_access_targets \
+    "${state_paused}" \
+    "${registration_access_targets}"
+assert_equals \
+    "1" \
+    "$(wc -l < "${registration_access_targets}" | tr -d ' ')" \
+    "A zero-capacity repository lost its credential-health target."
+assert_equals \
+    "/repos/example/project/actions/runners/registration-token" \
+    "$(cut -f2 "${registration_access_targets}")" \
+    "The credential-health target did not use the registration-token endpoint."
+
+fake_access_cli="${TEMP_DIRECTORY}/pitcrew-autoscaler"
+access_cli_log="${TEMP_DIRECTORY}/access-cli.log"
+cat > "${fake_access_cli}" <<'EOF'
+#!/bin/sh
+[ "${ACCESS_TOKEN:-}" = "test-token" ] || exit 1
+printf '%s\n' "$*" > "${PITCREW_TEST_ACCESS_LOG}"
+exit "${PITCREW_TEST_ACCESS_EXIT:-0}"
+EOF
+chmod +x "${fake_access_cli}"
+PITCREW_GITHUB_RUNNER_CLI="${fake_access_cli}" \
+PITCREW_TEST_ACCESS_LOG="${access_cli_log}" \
+    check_github_runner_registration_access \
+        "/repos/example/project/actions/runners/registration-token" \
+        "test-token" \
+        1
+assert_false \
+    "The stored runner credential was passed on the command line." \
+    grep -q "test-token" "${access_cli_log}"
+assert_equals \
+    "authorization-failed" \
+    "$(github_runner_registration_access_failure_reason 3)" \
+    "HTTP authorization loss was not classified."
+assert_equals \
+    "not-found" \
+    "$(github_runner_registration_access_failure_reason 4)" \
+    "A missing registration target was not classified."
+assert_equals \
+    "rate-limited" \
+    "$(github_runner_registration_access_failure_reason 5)" \
+    "A rate-limited registration check was not classified."
+assert_equals \
+    "timeout" \
+    "$(github_runner_registration_access_failure_reason 6)" \
+    "A timed-out registration check was not classified."
+assert_equals \
+    "authorization-failed" \
+    "$(github_runner_registration_access_failure_reason 7)" \
+    "Missing runner-administration permission was not classified."
+assert_equals \
+    "Stored runner credential requires organization authorization" \
+    "$(github_runner_registration_access_failure_evidence 8)" \
+    "Required organization authorization lost its safe evidence category."
+
 fake_docker_directory="${TEMP_DIRECTORY}/fake-docker"
 collected_resources="${TEMP_DIRECTORY}/collected-resources.json"
 partial_resources="${TEMP_DIRECTORY}/partial-resources.json"
@@ -1572,6 +1628,56 @@ assert_true \
     "The published subsystem summary exposed unexpected fields." \
     json_condition_holds "${diagnostics_health_projection}" \
         '[.docker, .github] | all(keys == ["consecutiveFailures", "lastFailure", "lastSuccess", "observedAt", "retryAt", "state"])' 
+
+access_health_directory="${TEMP_DIRECTORY}/access-health"
+access_health_projection="${TEMP_DIRECTORY}/access-health-projection.json"
+mkdir -p "${access_health_directory}"
+diagnostics_initialize "${access_health_directory}" access-health-manager
+record_manager_event "${access_health_directory}" access-health-manager \
+    scale-set-session message-poll "" succeeded 10 none "" || true
+record_manager_event "${access_health_directory}" access-health-manager \
+    registration registration-token-request "" failed 10 authorization-failed \
+    "Stored runner credential authorization failed" "2026-08-30T12:05:00Z" none || true
+assert_equals \
+    "healthy" \
+    "$(jq -r '.state' "${access_health_directory}/health-github.json")" \
+    "A credential-only journal event incorrectly replaced independent GitHub health."
+REGISTRATION_ACCESS_HEALTH_STATUS="failed"
+REGISTRATION_ACCESS_HEALTH_REASON="authorization-failed"
+REGISTRATION_ACCESS_HEALTH_EVIDENCE="Stored runner credential lacks runner administration permission"
+REGISTRATION_ACCESS_HEALTH_FAILURES=1
+REGISTRATION_ACCESS_HEALTH_OBSERVED_AT="2026-08-30T12:00:00Z"
+REGISTRATION_ACCESS_HEALTH_RETRY_AT="2026-08-30T12:05:00Z"
+render_subsystem_health "${access_health_directory}" "${access_health_projection}"
+assert_equals \
+    "degraded" \
+    "$(jq -r '.github.state' "${access_health_projection}")" \
+    "Stored credential authorization loss did not degrade published GitHub health."
+assert_equals \
+    "authorization-failed" \
+    "$(jq -r '.github.lastFailure.reason' "${access_health_projection}")" \
+    "Published credential health lost its provider classification."
+assert_equals \
+    "Stored runner credential lacks runner administration permission" \
+    "$(jq -r '.github.lastFailure.evidence' "${access_health_projection}")" \
+    "Published credential health lost its safe provider evidence."
+record_manager_event "${access_health_directory}" access-health-manager \
+    scale-set-session message-poll "" succeeded 10 none "" || true
+render_subsystem_health "${access_health_directory}" "${access_health_projection}"
+assert_equals \
+    "degraded" \
+    "$(jq -r '.github.state' "${access_health_projection}")" \
+    "An unrelated GitHub success concealed stored credential authorization loss."
+REGISTRATION_ACCESS_HEALTH_STATUS="healthy"
+REGISTRATION_ACCESS_HEALTH_REASON="none"
+REGISTRATION_ACCESS_HEALTH_EVIDENCE=""
+REGISTRATION_ACCESS_HEALTH_FAILURES=0
+REGISTRATION_ACCESS_HEALTH_RETRY_AT=""
+render_subsystem_health "${access_health_directory}" "${access_health_projection}"
+assert_equals \
+    "healthy" \
+    "$(jq -r '.github.state' "${access_health_projection}")" \
+    "A successful credential recheck did not restore published GitHub health."
 
 capacity_slots_json="${TEMP_DIRECTORY}/capacity-slots.json"
 cat > "${capacity_slots_json}" <<'EOF'

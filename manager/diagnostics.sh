@@ -507,7 +507,9 @@ diagnostic_enforce_journal_budget() {
 
 # Records one manager operation: it updates the subsystem summary and appends a
 # journal entry for failures, retries, recovery, state transitions, and unusually
-# slow operations. Ordinary successful reconciliation is not journaled.
+# slow operations. The optional health mode "none" records independent evidence
+# whose health is overlaid separately. Ordinary successful reconciliation is not
+# journaled.
 record_manager_event() {
     event_directory="$1"
     event_instance_id="$2"
@@ -519,6 +521,7 @@ record_manager_event() {
     event_reason="$8"
     event_evidence="$9"
     event_retry_at="${10:-}"
+    event_health_mode="${11:-auto}"
 
     [ -n "${event_directory}" ] || return 1
     [ -d "${event_directory}" ] || return 1
@@ -540,6 +543,12 @@ record_manager_event() {
     event_status=0
 
     event_health_key=$(diagnostic_health_key "${event_subsystem}")
+    if [ "${event_health_mode}" = "none" ]; then
+        event_health_key=""
+    elif [ "${event_health_mode}" != "auto" ]; then
+        diagnostic_release_lock "${event_directory}"
+        return 1
+    fi
     event_failures_before=0
     event_state_before="unknown"
     event_journal=1
@@ -873,6 +882,46 @@ render_subsystem_health() {
         }' > "${health_temporary}"; then
         rm -f "${health_temporary}" "${health_unknown}"
         return 1
+    fi
+    if [ "${REGISTRATION_ACCESS_HEALTH_STATUS:-unknown}" = "failed" ]; then
+        health_registration_temporary="${health_output}.$$.registration"
+        health_registration_state="degraded"
+        if [ "${REGISTRATION_ACCESS_HEALTH_FAILURES:-0}" -ge "${DIAGNOSTIC_UNAVAILABLE_FAILURES}" ]; then
+            health_registration_state="unavailable"
+        fi
+        if ! jq \
+            --arg state "${health_registration_state}" \
+            --arg observedAt "${REGISTRATION_ACCESS_HEALTH_OBSERVED_AT:-}" \
+            --arg retryAt "${REGISTRATION_ACCESS_HEALTH_RETRY_AT:-}" \
+            --arg reason "${REGISTRATION_ACCESS_HEALTH_REASON:-unknown}" \
+            --arg evidence "${REGISTRATION_ACCESS_HEALTH_EVIDENCE:-Stored runner credential authorization failed}" \
+            --argjson consecutiveFailures "${REGISTRATION_ACCESS_HEALTH_FAILURES:-1}" \
+            '
+                .github.state = $state
+                | .github.observedAt = $observedAt
+                | .github.consecutiveFailures = $consecutiveFailures
+                | .github.retryAt = (if $retryAt == "" then null else $retryAt end)
+                | .github.lastFailure = {
+                    operation: "registration-token-request",
+                    observedAt: $observedAt,
+                    durationMilliseconds: null,
+                    reason: $reason,
+                    evidence: $evidence
+                }
+            ' "${health_temporary}" > "${health_registration_temporary}"; then
+            rm -f \
+                "${health_temporary}" \
+                "${health_registration_temporary}" \
+                "${health_unknown}"
+            return 1
+        fi
+        if ! mv -f "${health_registration_temporary}" "${health_temporary}"; then
+            rm -f \
+                "${health_temporary}" \
+                "${health_registration_temporary}" \
+                "${health_unknown}"
+            return 1
+        fi
     fi
     rm -f "${health_unknown}"
     if ! mv -f "${health_temporary}" "${health_output}"; then

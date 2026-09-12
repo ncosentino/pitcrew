@@ -90,10 +90,12 @@ CONTAINER_MONITOR_GROUP_DRAIN_SECONDS="${PITCREW_CONTAINER_MONITOR_GROUP_DRAIN_S
     60
 ))}"
 REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
+REGISTRATION_ACCESS_RECONCILE_INTERVAL=300
 REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
 REGISTRATION_API_TIMEOUT=5
 REGISTRATION_INVENTORY_DIRECTORY="/tmp/pitcrew-registration-inventory"
+REGISTRATION_ACCESS_DIRECTORY="/tmp/pitcrew-registration-access"
 HOST_ADMISSION_RECOVERY_DIRECTORY="/tmp/pitcrew-host-admission-recovery"
 HOST_ADMISSION_RECOVERY_PENDING=0
 HOST_ADMISSION_RECOVERY_NEXT_EPOCH=0
@@ -351,6 +353,13 @@ LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH=0
 LAST_RESOURCE_TELEMETRY_STATUS=""
 LAST_HOST_HARDWARE_SAMPLE_EPOCH=0
 LAST_REGISTRATION_RECONCILE_EPOCH=0
+LAST_REGISTRATION_ACCESS_RECONCILE_EPOCH=0
+REGISTRATION_ACCESS_HEALTH_STATUS="unknown"
+REGISTRATION_ACCESS_HEALTH_REASON="unknown"
+REGISTRATION_ACCESS_HEALTH_EVIDENCE=""
+REGISTRATION_ACCESS_HEALTH_FAILURES=0
+REGISTRATION_ACCESS_HEALTH_OBSERVED_AT=""
+REGISTRATION_ACCESS_HEALTH_RETRY_AT=""
 LAST_CONTAINER_MONITOR_RECONCILE_EPOCH=0
 rand_hex() {
     tr -dc 'a-f0-9' < /dev/urandom 2>/dev/null | head -c 6
@@ -1172,7 +1181,164 @@ registration_endpoint_for_slot() {
         "${ENTERPRISE_NAME:-}"
 }
 
+reconcile_runner_registration_access() {
+    registration_access_now=$(date +%s)
+    if [ $((registration_access_now - LAST_REGISTRATION_ACCESS_RECONCILE_EPOCH)) \
+        -lt "${REGISTRATION_ACCESS_RECONCILE_INTERVAL}" ]; then
+        return
+    fi
+    LAST_REGISTRATION_ACCESS_RECONCILE_EPOCH="${registration_access_now}"
+    rm -rf "${REGISTRATION_ACCESS_DIRECTORY}"
+    mkdir -p "${REGISTRATION_ACCESS_DIRECTORY}"
+    access_targets_path="${REGISTRATION_ACCESS_DIRECTORY}/targets.tsv"
+    if ! write_github_runner_registration_access_targets \
+        "${ACCEPTED_STATE_PATH}" \
+        "${access_targets_path}"; then
+        REGISTRATION_ACCESS_HEALTH_STATUS="failed"
+        REGISTRATION_ACCESS_HEALTH_REASON="invalid-state"
+        REGISTRATION_ACCESS_HEALTH_EVIDENCE="Stored runner credential authorization targets could not be resolved"
+        REGISTRATION_ACCESS_HEALTH_FAILURES=$((REGISTRATION_ACCESS_HEALTH_FAILURES + 1))
+        [ "${REGISTRATION_ACCESS_HEALTH_FAILURES}" -le 1000 ] ||
+            REGISTRATION_ACCESS_HEALTH_FAILURES=1000
+        REGISTRATION_ACCESS_HEALTH_OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        REGISTRATION_ACCESS_HEALTH_RETRY_AT=$(
+            diagnostic_retry_timestamp "${REGISTRATION_ACCESS_RECONCILE_INTERVAL}"
+        )
+        record_manager_diagnostic \
+            registration \
+            registration-token-request \
+            "" \
+            failed \
+            "" \
+            invalid-state \
+            "${REGISTRATION_ACCESS_HEALTH_EVIDENCE}" \
+            "${REGISTRATION_ACCESS_HEALTH_RETRY_AT}" \
+            none
+        mark_observed_state_dirty
+        return
+    fi
+
+    access_targets=$(count_lines "${access_targets_path}")
+    if [ "${access_targets}" -eq 0 ]; then
+        if [ "${REGISTRATION_ACCESS_HEALTH_STATUS}" != "unknown" ]; then
+            REGISTRATION_ACCESS_HEALTH_STATUS="unknown"
+            REGISTRATION_ACCESS_HEALTH_REASON="unknown"
+            REGISTRATION_ACCESS_HEALTH_EVIDENCE=""
+            REGISTRATION_ACCESS_HEALTH_FAILURES=0
+            REGISTRATION_ACCESS_HEALTH_OBSERVED_AT=""
+            REGISTRATION_ACCESS_HEALTH_RETRY_AT=""
+            mark_observed_state_dirty
+        fi
+        return
+    fi
+
+    access_started_epoch=$(date +%s)
+    access_pids=""
+    tab=$(printf '\t')
+    while IFS="${tab}" read -r target_hash endpoint; do
+        [ -n "${target_hash}" ] || continue
+        (
+            access_result=0
+            check_github_runner_registration_access \
+                "${endpoint}" \
+                "${ACCESS_TOKEN:-}" \
+                "${REGISTRATION_API_TIMEOUT}" || access_result=$?
+            if [ "${access_result}" -eq 0 ]; then
+                : > "${REGISTRATION_ACCESS_DIRECTORY}/${target_hash}.ok"
+            else
+                printf '%s\n' "${access_result}" \
+                    > "${REGISTRATION_ACCESS_DIRECTORY}/${target_hash}.error"
+            fi
+        ) &
+        access_pids="${access_pids} $!"
+    done < "${access_targets_path}"
+    for access_pid in ${access_pids}; do
+        wait "${access_pid}" 2>/dev/null || true
+    done
+
+    access_failures=0
+    access_successes=0
+    access_failure_code=1
+    access_failure_priority=7
+    for access_success in "${REGISTRATION_ACCESS_DIRECTORY}"/*.ok; do
+        [ -f "${access_success}" ] || continue
+        access_successes=$((access_successes + 1))
+    done
+    for access_error in "${REGISTRATION_ACCESS_DIRECTORY}"/*.error; do
+        [ -f "${access_error}" ] || continue
+        access_failures=$((access_failures + 1))
+        candidate_code=$(cat "${access_error}")
+        candidate_priority=$(
+            github_runner_registration_access_failure_priority \
+                "${candidate_code}"
+        )
+        if [ "${candidate_priority}" -lt "${access_failure_priority}" ]; then
+            access_failure_code="${candidate_code}"
+            access_failure_priority="${candidate_priority}"
+        fi
+    done
+    if [ $((access_successes + access_failures)) -lt "${access_targets}" ]; then
+        access_failures=$((access_targets - access_successes))
+    fi
+
+    previous_access_status="${REGISTRATION_ACCESS_HEALTH_STATUS}"
+    REGISTRATION_ACCESS_HEALTH_OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+    REGISTRATION_ACCESS_HEALTH_RETRY_AT=$(
+        diagnostic_retry_timestamp "${REGISTRATION_ACCESS_RECONCILE_INTERVAL}"
+    )
+    if [ "${access_failures}" -gt 0 ]; then
+        access_reason=$(
+            github_runner_registration_access_failure_reason \
+                "${access_failure_code}"
+        )
+        access_evidence=$(
+            github_runner_registration_access_failure_evidence \
+                "${access_failure_code}"
+        )
+        REGISTRATION_ACCESS_HEALTH_STATUS="failed"
+        REGISTRATION_ACCESS_HEALTH_REASON="${access_reason}"
+        REGISTRATION_ACCESS_HEALTH_EVIDENCE="${access_evidence}"
+        if [ "${previous_access_status}" = "failed" ]; then
+            REGISTRATION_ACCESS_HEALTH_FAILURES=$((REGISTRATION_ACCESS_HEALTH_FAILURES + 1))
+        else
+            REGISTRATION_ACCESS_HEALTH_FAILURES=1
+        fi
+        [ "${REGISTRATION_ACCESS_HEALTH_FAILURES}" -le 1000 ] ||
+            REGISTRATION_ACCESS_HEALTH_FAILURES=1000
+        record_manager_diagnostic \
+            registration \
+            registration-token-request \
+            "" \
+            failed \
+            "$(elapsed_milliseconds "${access_started_epoch}")" \
+            "${access_reason}" \
+            "${access_evidence}" \
+            "${REGISTRATION_ACCESS_HEALTH_RETRY_AT}" \
+            none
+    else
+        REGISTRATION_ACCESS_HEALTH_STATUS="healthy"
+        REGISTRATION_ACCESS_HEALTH_REASON="none"
+        REGISTRATION_ACCESS_HEALTH_EVIDENCE=""
+        REGISTRATION_ACCESS_HEALTH_FAILURES=0
+        REGISTRATION_ACCESS_HEALTH_RETRY_AT=""
+        if [ "${previous_access_status}" = "failed" ]; then
+            record_manager_diagnostic \
+                registration \
+                registration-token-request \
+                "" \
+                recovered \
+                "$(elapsed_milliseconds "${access_started_epoch}")" \
+                recovered \
+                "Stored runner credential authorization recovered" \
+                "" \
+                none
+        fi
+    fi
+    mark_observed_state_dirty
+}
+
 reconcile_runner_registrations() {
+    reconcile_runner_registration_access
     registration_now=$(date +%s)
     if [ $((registration_now - LAST_REGISTRATION_RECONCILE_EPOCH)) -lt "${REGISTRATION_RECONCILE_INTERVAL}" ]; then
         return
@@ -1244,6 +1410,7 @@ reconcile_runner_registrations() {
     for inventory_pid in ${inventory_pids}; do
         wait "${inventory_pid}" 2>/dev/null || true
     done
+
     inventory_targets=$(count_lines "${targets_path}")
     inventory_failures=0
     for inventory_error in "${REGISTRATION_INVENTORY_DIRECTORY}"/*.error; do
