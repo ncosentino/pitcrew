@@ -117,6 +117,12 @@ jobs:
           go-version-file: manager/autoscaler/go.mod
           cache-dependency-path: manager/autoscaler/go.sum
 
+      - name: Run admission coordinator tests
+        working-directory: manager/admission
+        run: |
+          go test ./...
+          go vet ./...
+
       - name: Run autoscaler tests
         working-directory: manager/autoscaler
         run: |

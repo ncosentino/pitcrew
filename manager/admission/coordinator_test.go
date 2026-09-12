@@ -1410,6 +1410,51 @@ func TestCompleteAdoptionRejectsUnaccountedActiveLease(t *testing.T) {
 	}
 }
 
+func TestStatusSerializesAccountedAdoptionFenceWithEmptyPendingKeys(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	if _, err := coordinator.Adopt("alpha", "slot-a"); err != nil {
+		t.Fatalf("seed active lease: %v", err)
+	}
+	if err := coordinator.BeginAdoption("alpha"); err != nil {
+		t.Fatalf("begin adoption: %v", err)
+	}
+	if _, err := coordinator.Adopt("alpha", "slot-a"); err != nil {
+		t.Fatalf("account for surviving lease: %v", err)
+	}
+
+	snapshot := mustStatus(t, coordinator)
+	if len(snapshot.AdoptionFences) != 1 {
+		t.Fatalf("expected one adoption fence, got %+v", snapshot.AdoptionFences)
+	}
+	if snapshot.AdoptionFences[0].PendingLeaseKeys == nil {
+		t.Fatal("accounted adoption fence exposed null pending lease keys")
+	}
+	if len(snapshot.AdoptionFences[0].PendingLeaseKeys) != 0 {
+		t.Fatalf(
+			"accounted adoption fence retained pending keys: %+v",
+			snapshot.AdoptionFences[0],
+		)
+	}
+
+	encoded, err := json.Marshal(snapshot)
+	if err != nil {
+		t.Fatalf("marshal status: %v", err)
+	}
+	var document struct {
+		AdoptionFences []struct {
+			PendingLeaseKeys json.RawMessage `json:"pendingLeaseKeys"`
+		} `json:"adoptionFences"`
+	}
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		t.Fatalf("unmarshal status: %v", err)
+	}
+	if len(document.AdoptionFences) != 1 ||
+		string(document.AdoptionFences[0].PendingLeaseKeys) != "[]" {
+		t.Fatalf("accounted adoption fence did not serialize an empty list: %s", encoded)
+	}
+}
+
 func TestAdoptionFenceSpansProfilesTargetsAndRestart(t *testing.T) {
 	directory := t.TempDir()
 	clock := newManualClock()

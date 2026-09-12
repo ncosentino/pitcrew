@@ -469,6 +469,13 @@ client reconcile \
     --slot orphan-slot \
     --evidence worker-and-registration-absent \
     >/dev/null
+client status > "${recovery_status}"
+jq -e '
+    .adoptionFences[]
+    | select(.profileId == "restart-recovery")
+    | (.pendingLeaseKeys | type == "array" and length == 0)
+' "${recovery_status}" >/dev/null ||
+    fail "Accounted adoption fence serialized null instead of an empty pending-key list."
 client complete-adoption --profile restart-recovery >/dev/null
 client status > "${recovery_status}"
 [ "$(jq '[.leases[] | select(.profileId == "restart-recovery" and .status == "active")] | length' "${recovery_status}")" -eq 1 ] ||

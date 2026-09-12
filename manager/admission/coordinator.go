@@ -927,7 +927,11 @@ func (c *Coordinator) Status() (Snapshot, error) {
 	}
 	for _, key := range sortedStateKeys(c.state.AdoptionFences) {
 		fence := c.state.AdoptionFences[key]
-		fence.PendingLeaseKeys = append([]string(nil), fence.PendingLeaseKeys...)
+		// Protocol 4 distinguishes an accounted empty list from legacy null.
+		fence.PendingLeaseKeys = append(
+			make([]string, 0, len(fence.PendingLeaseKeys)),
+			fence.PendingLeaseKeys...,
+		)
 		snapshot.AdoptionFences = append(snapshot.AdoptionFences, fence)
 	}
 	if c.state.LastDecision != nil {

@@ -5918,8 +5918,17 @@ $emptyFenceFunction = $setupAst.Find(
     },
     $true
 )
-if ($null -ne $emptyFenceFunction) {
+$adoptionFenceWaitFunction = $setupAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Wait-RunnerHostAdmissionAdoptionConvergence'
+    },
+    $true
+)
+if ($null -ne $emptyFenceFunction -and $null -ne $adoptionFenceWaitFunction) {
     Invoke-Expression $emptyFenceFunction.Extent.Text
+    Invoke-Expression $adoptionFenceWaitFunction.Extent.Text
     $script:testHostAdmissionStatus = [PSCustomObject]@{
         adoptionFences = @(
             [PSCustomObject]@{
@@ -6008,6 +6017,48 @@ if ($null -ne $emptyFenceFunction) {
         $migratedEmptyFenceResult.pendingLeaseCount -eq 0 -and
         $script:testHostAdmissionCalls -contains 'complete-adoption'
     ) 'A migrated empty adoption fence was not completed from authoritative durable state.'
+    $script:testHostAdmissionCalls.Clear()
+    $script:testHostAdmissionStatus.adoptionFences[0].pendingLeaseKeys = @('slot-a')
+    $script:testHostAdmissionStatus.leases = @(
+        [PSCustomObject]@{
+            profileId = 'profile-a'
+            slotKey = 'slot-a'
+            status = 'active'
+        }
+    )
+    $pendingFenceTimedOut = $false
+    try {
+        Wait-RunnerHostAdmissionAdoptionConvergence `
+            -AdmissionConfig ([PSCustomObject]@{
+                HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+            }) `
+            -ProfileName 'profile-a' `
+            -TimeoutSeconds 0 `
+            -PollIntervalMilliseconds 1
+    } catch {
+        $pendingFenceTimedOut = (
+            $_.Exception.Message -match
+                'did not converge.*1 pending lease\(s\).*active workers were preserved'
+        )
+    }
+    Add-Check $pendingFenceTimedOut 'A manager refresh could report success while its adoption fence remained pending.'
+
+    $script:testHostAdmissionStatus.adoptionFences[0].pendingLeaseKeys = @()
+    $convergedFenceResult = @(
+        Wait-RunnerHostAdmissionAdoptionConvergence `
+            -AdmissionConfig ([PSCustomObject]@{
+                HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+            }) `
+            -ProfileName 'profile-a' `
+            -TimeoutSeconds 0 `
+            -PollIntervalMilliseconds 1
+    )[-1]
+    Add-Check (
+        $convergedFenceResult.cleared -and
+        $script:testHostAdmissionCalls -contains 'complete-adoption'
+    ) 'A manager refresh did not complete an accounted empty adoption fence.'
+
+    $script:testHostAdmissionStatus.adoptionFences[0].pendingLeaseKeys = $null
     $script:testHostAdmissionStatus.leases = @(
         [PSCustomObject]@{
             profileId = 'profile-a'
@@ -6042,10 +6093,11 @@ if ($null -ne $emptyFenceFunction) {
     }
     Add-Check $unavailableEvidenceRetained 'An unavailable coordinator was treated as authoritative zero pending leases.'
     Remove-Item Function:\Complete-RunnerHostAdmissionEmptyAdoptionFence -Force
+    Remove-Item Function:\Wait-RunnerHostAdmissionAdoptionConvergence -Force
     Remove-Item Function:\Wait-RunnerHostAdmissionReady -Force
     Remove-Item Function:\Invoke-RunnerHostAdmissionClient -Force
 } else {
-    Add-Check $false 'The empty adoption-fence reconciliation helper is missing.'
+    Add-Check $false 'The adoption-fence reconciliation helpers are missing.'
 }
 $exampleEnvironment = Get-Content -LiteralPath (Join-Path $runnerRoot '.env.example') -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
@@ -6171,6 +6223,10 @@ Add-Check (
     $setupSource -match
         '(?s)\} else \{\s*\$acknowledgement = Wait-RunnerCapacityAcknowledgement.*?Capacity unchanged.*?if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence'
 ) 'Unchanged accepted capacity acknowledgements do not reconcile adoption fences.'
+Add-Check (
+    $setupSource -match
+        '(?s)--force-recreate.*?Wait-RunnerCapacityAcknowledgement.*?Wait-RunnerHostAdmissionAdoptionConvergence'
+) 'Manager replacement can report success before host-admission adoption converges.'
 Add-Check (
     $setupSource -match
         [regex]::Escape(
