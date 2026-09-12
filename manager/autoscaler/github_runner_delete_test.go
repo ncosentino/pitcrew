@@ -10,7 +10,7 @@ import (
 	"time"
 )
 
-func TestDeleteRunnerUsesExactBoundedRequest(t *testing.T) {
+func TestDeleteGitHubRunnerUsesExactBoundedRequest(t *testing.T) {
 	token := "test-token"
 	server := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
@@ -30,7 +30,7 @@ func TestDeleteRunnerUsesExactBoundedRequest(t *testing.T) {
 	defer server.Close()
 
 	client := &http.Client{Timeout: time.Second}
-	if err := deleteRunner(
+	if err := deleteGitHubRunner(
 		context.Background(),
 		client,
 		server.URL,
@@ -42,7 +42,7 @@ func TestDeleteRunnerUsesExactBoundedRequest(t *testing.T) {
 	}
 }
 
-func TestDeleteRunnerTreatsAlreadyAbsentAsSuccess(t *testing.T) {
+func TestDeleteGitHubRunnerTreatsAlreadyAbsentAsSuccess(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
 		_ *http.Request,
@@ -51,7 +51,7 @@ func TestDeleteRunnerTreatsAlreadyAbsentAsSuccess(t *testing.T) {
 	}))
 	defer server.Close()
 
-	if err := deleteRunner(
+	if err := deleteGitHubRunner(
 		context.Background(),
 		server.Client(),
 		server.URL,
@@ -63,7 +63,7 @@ func TestDeleteRunnerTreatsAlreadyAbsentAsSuccess(t *testing.T) {
 	}
 }
 
-func TestDeleteRunnerRejectsRedirectedDeletion(t *testing.T) {
+func TestDeleteGitHubRunnerRejectsRedirectedDeletion(t *testing.T) {
 	var redirected atomic.Bool
 	target := httptest.NewServer(http.HandlerFunc(func(
 		writer http.ResponseWriter,
@@ -87,7 +87,7 @@ func TestDeleteRunnerRejectsRedirectedDeletion(t *testing.T) {
 			return http.ErrUseLastResponse
 		},
 	}
-	err := deleteRunner(
+	err := deleteGitHubRunner(
 		context.Background(),
 		client,
 		source.URL,
@@ -104,7 +104,7 @@ func TestDeleteRunnerRejectsRedirectedDeletion(t *testing.T) {
 	}
 }
 
-func TestDeleteRunnerRejectsUntrustedInputsBeforeHTTP(t *testing.T) {
+func TestDeleteGitHubRunnerRejectsUntrustedInputsBeforeHTTP(t *testing.T) {
 	client := &http.Client{
 		Transport: roundTripperFunc(func(*http.Request) (*http.Response, error) {
 			t.Fatal("invalid input reached HTTP")
@@ -124,7 +124,7 @@ func TestDeleteRunnerRejectsUntrustedInputsBeforeHTTP(t *testing.T) {
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			err := deleteRunner(
+			err := deleteGitHubRunner(
 				context.Background(),
 				client,
 				"https://api.github.test",
@@ -140,9 +140,9 @@ func TestDeleteRunnerRejectsUntrustedInputsBeforeHTTP(t *testing.T) {
 	}
 }
 
-func TestRunDeleteRejectsUnexpectedArguments(t *testing.T) {
+func TestRunGitHubRunnerDeleteRejectsUnexpectedArguments(t *testing.T) {
 	t.Setenv("ACCESS_TOKEN", "test-token")
-	err := runDelete([]string{
+	err := runGitHubRunnerDelete([]string{
 		"--endpoint", "/repos/example/project/actions/runners",
 		"--runner-id", "77",
 		"unexpected",

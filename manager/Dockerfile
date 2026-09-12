@@ -16,12 +16,6 @@ RUN CGO_ENABLED=0 go build \
     -ldflags="-s -w" \
     -o /out/pitcrew-autoscaler \
     .
-RUN CGO_ENABLED=0 go build \
-    -trimpath \
-    -ldflags="-s -w" \
-    -o /out/pitcrew-github-runner \
-    ./cmd/pitcrew-github-runner
-
 # pitcrew-admission is the versioned server/CLI-client binary for the
 # host-local admission coordinator (ADR-0003). Only the binary is built and
 # copied here; runtime entrypoint and Compose wiring are added by later
@@ -48,7 +42,6 @@ FROM alpine:3.22
 COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker
 COPY --from=docker-cli /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
 COPY --from=autoscaler-build /out/pitcrew-autoscaler /usr/local/bin/pitcrew-autoscaler
-COPY --from=autoscaler-build /out/pitcrew-github-runner /usr/local/bin/pitcrew-github-runner
 COPY --from=admission-build /out/pitcrew-admission /usr/local/bin/pitcrew-admission
 
 ARG JQ_VERSION=1.8.2
@@ -111,7 +104,6 @@ RUN timeout -s TERM -k 1 1 true && \
     /usr/local/bin/container-monitor-group-leader.sh \
     /usr/local/bin/slot-registry.sh \
     /usr/local/bin/reconciliation.sh \
-    /usr/local/bin/pitcrew-github-runner \
     /usr/local/bin/pitcrew-autoscaler \
     /usr/local/bin/pitcrew-admission
 

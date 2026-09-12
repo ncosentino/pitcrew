@@ -636,7 +636,7 @@ assert_true \
         "test-token" \
         5
 assert_equals \
-    "delete --endpoint /repos/example/project/actions/runners --runner-id 77 --timeout-seconds 5" \
+    "delete-github-runner --endpoint /repos/example/project/actions/runners --runner-id 77 --timeout-seconds 5" \
     "$(cat "${registration_cli_log}")" \
     "Fixed manager changed the exact runner deletion command."
 

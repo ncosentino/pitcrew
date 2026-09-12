@@ -20,19 +20,8 @@ var runnerEndpointPattern = regexp.MustCompile(
 	`^/(repos/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+|orgs/[A-Za-z0-9_.-]+|enterprises/[A-Za-z0-9_.-]+)/actions/runners$`,
 )
 
-func main() {
-	if len(os.Args) < 2 || os.Args[1] != "delete" {
-		fmt.Fprintln(os.Stderr, "usage: pitcrew-github-runner delete --endpoint PATH --runner-id ID [--timeout-seconds N]")
-		os.Exit(2)
-	}
-	if err := runDelete(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "pitcrew-github-runner delete: %v\n", err)
-		os.Exit(1)
-	}
-}
-
-func runDelete(args []string) error {
-	flags := flag.NewFlagSet("delete", flag.ContinueOnError)
+func runGitHubRunnerDelete(args []string) error {
+	flags := flag.NewFlagSet("delete-github-runner", flag.ContinueOnError)
 	flags.SetOutput(io.Discard)
 	endpoint := flags.String("endpoint", "", "validated GitHub Actions runner endpoint")
 	runnerID := flags.Int64("runner-id", 0, "exact GitHub runner registration ID")
@@ -61,10 +50,10 @@ func runDelete(args []string) error {
 		time.Duration(*timeoutSeconds)*time.Second,
 	)
 	defer cancel()
-	return deleteRunner(ctx, client, githubAPIBaseURL, *endpoint, *runnerID, token)
+	return deleteGitHubRunner(ctx, client, githubAPIBaseURL, *endpoint, *runnerID, token)
 }
 
-func deleteRunner(
+func deleteGitHubRunner(
 	ctx context.Context,
 	client *http.Client,
 	baseURL string,

@@ -202,10 +202,10 @@ remove_github_runner_registration() {
     case "${runner_id}" in
         ''|*[!0-9]*|0) return 1 ;;
     esac
-    registration_cli="${PITCREW_GITHUB_RUNNER_CLI:-/usr/local/bin/pitcrew-github-runner}"
+    registration_cli="${PITCREW_GITHUB_RUNNER_CLI:-/usr/local/bin/pitcrew-autoscaler}"
     [ -x "${registration_cli}" ] || return 1
     ACCESS_TOKEN="${access_token}" \
-        "${registration_cli}" delete \
+        "${registration_cli}" delete-github-runner \
             --endpoint "${endpoint}" \
             --runner-id "${runner_id}" \
             --timeout-seconds "${response_timeout}"

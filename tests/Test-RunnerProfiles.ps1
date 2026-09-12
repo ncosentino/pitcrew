@@ -39,10 +39,11 @@ $containerSupervisionPath = Join-Path $runnerRoot 'manager' 'container-supervisi
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
 $autoscalerHardwarePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'hardware.go'
 $githubRunnerHelperPath = Join-Path `
-    $runnerRoot 'manager' 'autoscaler' 'cmd' 'pitcrew-github-runner' 'main.go'
+    $runnerRoot 'manager' 'autoscaler' 'github_runner_delete.go'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
 $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
+$registrationPath = Join-Path $runnerRoot 'manager' 'registration.sh'
 $hostAdmissionRecoveryPath = Join-Path `
     $runnerRoot 'manager' 'host-admission-recovery.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
@@ -338,6 +339,7 @@ $requiredPaths = @(
     $managerDockerfilePath,
     $observabilityPath,
     $diagnosticsPath,
+    $registrationPath,
     $hostAdmissionRecoveryPath,
     $reconciliationPath,
     $composePath,
@@ -5816,6 +5818,7 @@ $setupSource = Get-Content -LiteralPath $setupPath -Raw -Encoding UTF8
 $functionsSource = Get-Content -LiteralPath $functionsPath -Raw -Encoding UTF8
 $observability = Get-Content -LiteralPath $observabilityPath -Raw -Encoding UTF8
 $diagnostics = Get-Content -LiteralPath $diagnosticsPath -Raw -Encoding UTF8
+$registration = Get-Content -LiteralPath $registrationPath -Raw -Encoding UTF8
 $compose = Get-Content -LiteralPath $composePath -Raw -Encoding UTF8
 $hostAdmissionCompose = Get-Content `
     -LiteralPath $hostAdmissionComposePath `
@@ -5877,10 +5880,11 @@ Add-Check ($managerDockerfile -match 'FROM golang:1\.25\.3-alpine AS autoscaler-
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=autoscaler-build /out/pitcrew-autoscaler /usr/local/bin/pitcrew-autoscaler')) 'The manager runtime does not include the scale-set autoscaler.'
 Add-Check (
     $managerDockerfile -match [regex]::Escape(
-        '-o /out/pitcrew-github-runner') -and
-    $managerDockerfile -match [regex]::Escape(
-        'COPY --from=autoscaler-build /out/pitcrew-github-runner /usr/local/bin/pitcrew-github-runner')
-) 'The manager runtime does not include the bounded GitHub runner deletion helper.'
+        '-o /out/pitcrew-autoscaler') -and
+    $registration -match [regex]::Escape(
+        '/usr/local/bin/pitcrew-autoscaler') -and
+    $registration -match [regex]::Escape('delete-github-runner')
+) 'The manager runtime does not expose bounded runner deletion through the autoscaler binary.'
 Add-Check ($managerDockerfile -match 'FROM alpine:3\.22') 'The manager runtime is not based on minimal Alpine.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker')) 'The manager runtime does not copy only the Docker client binary.'
 Add-Check ($managerDockerfile -match 'ARG JQ_VERSION=1\.8\.2') 'The manager does not pin its jq release.'
