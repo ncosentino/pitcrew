@@ -5930,12 +5930,8 @@ if ($null -ne $emptyFenceFunction -and $null -ne $adoptionFenceWaitFunction) {
     Invoke-Expression $emptyFenceFunction.Extent.Text
     Invoke-Expression $adoptionFenceWaitFunction.Extent.Text
     $script:testHostAdmissionStatus = [PSCustomObject]@{
-        adoptionFences = @(
-            [PSCustomObject]@{
-                profileId = 'profile-a'
-                pendingLeaseKeys = @()
-            }
-        )
+        protocolVersion = 4
+        leases = @()
     }
     $script:testHostAdmissionCalls = [System.Collections.Generic.List[string]]::new()
     function Wait-RunnerHostAdmissionReady {
@@ -5948,8 +5944,34 @@ if ($null -ne $emptyFenceFunction -and $null -ne $adoptionFenceWaitFunction) {
             [string[]]$ClientArguments,
             [object]$InputObject
         )
-    $script:testHostAdmissionCalls.Add($ClientArguments[0]) | Out-Null
+        $script:testHostAdmissionCalls.Add($ClientArguments[0]) | Out-Null
     }
+    $omittedFenceResult = @(
+        & {
+            Set-StrictMode -Version Latest
+            Wait-RunnerHostAdmissionAdoptionConvergence `
+                -AdmissionConfig ([PSCustomObject]@{
+                    HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+                }) `
+                -ProfileName 'profile-a' `
+                -TimeoutSeconds 0 `
+                -PollIntervalMilliseconds 1
+        }
+    )[-1]
+    Add-Check (
+        -not $omittedFenceResult.present -and
+        -not $omittedFenceResult.cleared -and
+        $omittedFenceResult.pendingLeaseCount -eq 0 -and
+        $script:testHostAdmissionCalls.Count -eq 0
+    ) 'An omitted zero-fence status failed strict-mode adoption convergence.'
+
+    $script:testHostAdmissionStatus |
+        Add-Member -NotePropertyName adoptionFences -NotePropertyValue @(
+            [PSCustomObject]@{
+                profileId = 'profile-a'
+                pendingLeaseKeys = @()
+            }
+        )
     $emptyFenceResult = @(
     Complete-RunnerHostAdmissionEmptyAdoptionFence `
     -AdmissionConfig ([PSCustomObject]@{

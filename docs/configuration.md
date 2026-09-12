@@ -174,8 +174,10 @@ Protocol 3 adds reason-specific withholding errors and profile-scoped capacity
 accounting. Protocol 4 adds exact runner-registration binding and a durable
 list of active lease keys that a replacement manager must adopt or reconcile
 before its fence can clear. Coordinator status always represents that list as
-an array; an accounted fence uses `[]`, never `null`. A compatible manager
-replacement waits for its profile fence to clear after desired-state
+an array; an accounted fence uses `[]`, never `null`. The top-level
+`adoptionFences` property is omitted when no profile is fenced, and consumers
+treat that omission as an empty collection. A compatible manager replacement
+waits for its profile fence to clear after desired-state
 acknowledgement. If bounded recovery cannot converge, setup returns a failure
 while leaving the replacement manager and active workers running. The
 coordinator serves protocols 4, 3, and 2.
