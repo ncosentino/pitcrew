@@ -5970,6 +5970,77 @@ if ($null -ne $emptyFenceFunction) {
         $pendingFenceResult.pendingLeaseCount -eq 1 -and
         $script:testHostAdmissionCalls.Count -eq 0
     ) 'A pending adoption lease was not preserved as explicit degraded evidence.'
+    $script:testHostAdmissionCalls.Clear()
+    $script:testHostAdmissionStatus.adoptionFences[0].pendingLeaseKeys = $null
+    $script:testHostAdmissionStatus | Add-Member -NotePropertyName leases -NotePropertyValue @(
+        [PSCustomObject]@{
+            profileId = 'profile-a'
+            slotKey = 'slot-a'
+            status = 'active'
+        }
+    ) -Force
+    $migratedPendingFenceResult = @(
+        Complete-RunnerHostAdmissionEmptyAdoptionFence `
+        -AdmissionConfig ([PSCustomObject]@{
+            HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+        }) `
+        -ProfileName 'profile-a'
+    )[-1]
+    Add-Check (
+        $migratedPendingFenceResult.present -and
+        -not $migratedPendingFenceResult.cleared -and
+        $migratedPendingFenceResult.pendingLeaseCount -eq 1 -and
+        $script:testHostAdmissionCalls.Count -eq 0
+    ) 'A migrated adoption fence with an active durable lease was cleared.'
+
+    $script:testHostAdmissionCalls.Clear()
+    $script:testHostAdmissionStatus.leases = @()
+    $migratedEmptyFenceResult = @(
+        Complete-RunnerHostAdmissionEmptyAdoptionFence `
+        -AdmissionConfig ([PSCustomObject]@{
+            HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+        }) `
+        -ProfileName 'profile-a'
+    )[-1]
+    Add-Check (
+        $migratedEmptyFenceResult.present -and
+        $migratedEmptyFenceResult.cleared -and
+        $migratedEmptyFenceResult.pendingLeaseCount -eq 0 -and
+        $script:testHostAdmissionCalls -contains 'complete-adoption'
+    ) 'A migrated empty adoption fence was not completed from authoritative durable state.'
+    $script:testHostAdmissionStatus.leases = @(
+        [PSCustomObject]@{
+            profileId = 'profile-a'
+            status = 'active'
+        }
+    )
+    $malformedLeaseRejected = $false
+    try {
+        Complete-RunnerHostAdmissionEmptyAdoptionFence `
+            -AdmissionConfig ([PSCustomObject]@{
+                HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+            }) `
+            -ProfileName 'profile-a'
+    } catch {
+        $malformedLeaseRejected = $true
+    }
+    Add-Check $malformedLeaseRejected 'A malformed authoritative active lease inventory was accepted.'
+    $script:testHostAdmissionStatus.leases = @()
+    function Wait-RunnerHostAdmissionReady {
+        param([PSCustomObject]$AdmissionConfig)
+        throw 'coordinator unavailable'
+    }
+    $unavailableEvidenceRetained = $false
+    try {
+        Complete-RunnerHostAdmissionEmptyAdoptionFence `
+            -AdmissionConfig ([PSCustomObject]@{
+                HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+            }) `
+            -ProfileName 'profile-a'
+    } catch {
+        $unavailableEvidenceRetained = $true
+    }
+    Add-Check $unavailableEvidenceRetained 'An unavailable coordinator was treated as authoritative zero pending leases.'
     Remove-Item Function:\Complete-RunnerHostAdmissionEmptyAdoptionFence -Force
     Remove-Item Function:\Wait-RunnerHostAdmissionReady -Force
     Remove-Item Function:\Invoke-RunnerHostAdmissionClient -Force
@@ -6090,12 +6161,16 @@ Add-Check (
 ) 'Setup does not establish the durable host-wide adoption fence before manager handoff.'
 Add-Check (
     $setupSource -match
-        '(?s)Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pendingLeaseKeys.*?complete-adoption'
-) 'Capacity-only host-admission updates do not safely clear an empty adoption fence.'
+        '(?s)Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pendingLeaseKeys.*?leases.*?complete-adoption'
+) 'Capacity-only host-admission updates do not safely clear an empty adoption fence from durable state.'
 Add-Check (
     $setupSource -match
-        '(?s)if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pending lease\(s\)'
-) 'Capacity-only host-admission updates do not retain explicit degraded evidence for pending leases.'
+        '(?s)if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pending lease\(s\).*?Capacity unchanged.*?Complete-RunnerHostAdmissionEmptyAdoptionFence'
+) 'Changed and unchanged accepted capacity updates do not retain explicit degraded adoption evidence.'
+Add-Check (
+    $setupSource -match
+        '(?s)\} else \{\s*\$acknowledgement = Wait-RunnerCapacityAcknowledgement.*?Capacity unchanged.*?if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence'
+) 'Unchanged accepted capacity acknowledgements do not reconcile adoption fences.'
 Add-Check (
     $setupSource -match
         [regex]::Escape(

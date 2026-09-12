@@ -768,11 +768,39 @@ function Complete-RunnerHostAdmissionEmptyAdoptionFence {
     }
 
     $fence = $fences[0]
-    if (-not $fence.PSObject.Properties['pendingLeaseKeys'] -or
-        $null -eq $fence.pendingLeaseKeys) {
-        throw "Host-admission adoption fence for profile '$ProfileName' has no validated pending lease evidence."
+    if (-not $fence.PSObject.Properties['pendingLeaseKeys']) {
+        throw "Host-admission adoption fence for profile '$ProfileName' has no pending lease evidence."
     }
-    $pendingLeaseCount = @($fence.pendingLeaseKeys).Count
+    if ($null -eq $fence.pendingLeaseKeys) {
+        if (
+            -not $status.PSObject.Properties['leases'] -or
+            $null -eq $status.leases -or
+            $status.leases -isnot [System.Array]
+        ) {
+            throw "Host-admission adoption fence for profile '$ProfileName' has no authoritative lease inventory."
+        }
+        $profileLeases = @($status.leases | Where-Object {
+            $_.PSObject.Properties['profileId'] -and
+            [string]$_.profileId -ceq $ProfileName
+        })
+        if (@($profileLeases | Where-Object {
+                $_.PSObject.Properties['status'] -and
+                [string]$_.status -ceq 'active' -and
+                (
+                    -not $_.PSObject.Properties['slotKey'] -or
+                    [string]::IsNullOrWhiteSpace([string]$_.slotKey)
+                )
+            }).Count -gt 0) {
+            throw "Host-admission adoption fence for profile '$ProfileName' has an invalid authoritative lease inventory."
+        }
+        $pendingLeases = @($profileLeases | Where-Object {
+            $_.PSObject.Properties['status'] -and
+            [string]$_.status -ceq 'active'
+        })
+        $pendingLeaseCount = $pendingLeases.Count
+    } else {
+        $pendingLeaseCount = @($fence.pendingLeaseKeys).Count
+    }
     if ($pendingLeaseCount -gt 0) {
         return [PSCustomObject][ordered]@{
             present = $true
@@ -2518,6 +2546,22 @@ try {
                 Write-Host "[done] Autoscaling maximum unchanged at $total worker(s): $([int]$acknowledgement.activeSlots) active; manager restart not required."
             } else {
                 Write-Host "[done] Capacity unchanged: 0 added, 0 draining, $total unchanged; manager restart not required."
+            }
+            if ($hostAdmissionContext) {
+                $adoptionFence = Complete-RunnerHostAdmissionEmptyAdoptionFence `
+                    -AdmissionConfig $admissionServiceConfig `
+                    -ProfileName $profileConfig.Name
+                if (
+                    $adoptionFence.present -and
+                    -not $adoptionFence.cleared
+                ) {
+                    Write-Warning (
+                        "Host-admission adoption remains degraded for profile " +
+                        "'$($profileConfig.Name)' with " +
+                        "$($adoptionFence.pendingLeaseCount) pending lease(s); " +
+                        'manager-only recovery remains required.'
+                    )
+                }
             }
         }
         return
