@@ -752,8 +752,15 @@ function Complete-RunnerHostAdmissionEmptyAdoptionFence {
     )
 
     $status = Wait-RunnerHostAdmissionReady -AdmissionConfig $AdmissionConfig
+    $adoptionFencesProperty =
+        $status.PSObject.Properties['adoptionFences']
+    $adoptionFences = if ($null -eq $adoptionFencesProperty) {
+        @()
+    } else {
+        @($adoptionFencesProperty.Value)
+    }
     $fences = @(
-        @($status.adoptionFences) |
+        $adoptionFences |
             Where-Object { [string]$_.profileId -ceq $ProfileName }
     )
     if ($fences.Count -eq 0) {
