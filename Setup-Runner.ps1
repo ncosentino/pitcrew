@@ -826,6 +826,45 @@ function Complete-RunnerHostAdmissionEmptyAdoptionFence {
     }
 }
 
+function Wait-RunnerHostAdmissionAdoptionConvergence {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig,
+
+        [Parameter(Mandatory)]
+        [string]$ProfileName,
+
+        [ValidateRange(0, 300)]
+        [int]$TimeoutSeconds = 60,
+
+        [ValidateRange(1, 5000)]
+        [int]$PollIntervalMilliseconds = 250
+    )
+
+    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
+    $pendingLeaseCount = 0
+    do {
+        $fence = Complete-RunnerHostAdmissionEmptyAdoptionFence `
+            -AdmissionConfig $AdmissionConfig `
+            -ProfileName $ProfileName
+        if (-not $fence.present -or $fence.cleared) {
+            return $fence
+        }
+        $pendingLeaseCount = [int]$fence.pendingLeaseCount
+        if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {
+            break
+        }
+        Start-Sleep -Milliseconds $PollIntervalMilliseconds
+    } while ($true)
+
+    throw (
+        "Host-admission adoption for profile '$ProfileName' did not converge " +
+        "within $TimeoutSeconds seconds; $pendingLeaseCount pending lease(s) " +
+        'remain. The replacement manager remains running and active workers ' +
+        'were preserved.'
+    )
+}
+
 function Stop-RunnerProfile {
     param(
         [Parameter(Mandatory)]
@@ -2918,6 +2957,13 @@ try {
                 -Generation $nextGeneration `
                 -TimeoutSeconds $managerAcknowledgementTimeoutSeconds `
                 -MinimumManagerContractVersion $profileConfig.ManagerContractVersion
+            if ($profileConfig.HostAdmission) {
+                Wait-RunnerHostAdmissionAdoptionConvergence `
+                    -AdmissionConfig $admissionServiceConfig `
+                    -ProfileName $profileConfig.Name `
+                    -TimeoutSeconds $managerAcknowledgementTimeoutSeconds |
+                        Out-Null
+            }
         }
     }
     catch {

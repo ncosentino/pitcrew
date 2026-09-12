@@ -228,6 +228,16 @@ assert_true \
         and .[0].registrationName == "control-runner-1"
     ' "${pending_inventory}" >/dev/null
 
+accounted_snapshot="${TEMP_DIRECTORY}/accounted-adoption-snapshot.json"
+jq '.adoptionFences[0].pendingLeaseKeys = []' \
+    "${pending_snapshot}" > "${accounted_snapshot}"
+PITCREW_TEST_STATUS_SNAPSHOT="${accounted_snapshot}"
+export PITCREW_TEST_STATUS_SNAPSHOT
+host_admission_pending_lease_inventory "${pending_inventory}"
+assert_true \
+    "An accounted adoption fence did not expose an empty pending inventory." \
+    jq -e 'type == "array" and length == 0' "${pending_inventory}" >/dev/null
+
 malformed_pending_snapshot="${TEMP_DIRECTORY}/malformed-pending-adoption-snapshot.json"
 jq '.leases = []' "${pending_snapshot}" > "${malformed_pending_snapshot}"
 PITCREW_TEST_STATUS_SNAPSHOT="${malformed_pending_snapshot}"

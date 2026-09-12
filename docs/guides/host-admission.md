@@ -144,6 +144,15 @@ containers adopt their exact keys. When Docker no longer contains a worker, the
 manager verifies the corresponding GitHub registration before using the
 existing fenced `Reconcile` operation:
 
+Protocol-4 status always exposes `pendingLeaseKeys` as an array. An empty `[]`
+means every snapshotted lease has been accounted and allows exact-profile
+completion. `null` is invalid or legacy evidence; it requires authoritative
+lease reconstruction and remains fail-closed when that evidence is unavailable.
+Setup waits for this convergence after a compatible manager replacement and
+does not print a successful completion while that profile still owns a fence.
+If the bounded wait expires, the replacement manager and active workers remain
+running for diagnosis.
+
 - A protocol-4 lease carries the exact generated runner name.
 - Autoscaled recovery additionally requires the runner to belong to one known
   current or retiring scale set before deleting it by exact runner ID.
