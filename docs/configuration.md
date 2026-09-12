@@ -152,7 +152,7 @@ CPU cores, memory bytes, worker counts, or inferred hardware capacity. Built-in
 profiles declare no host-admission policy, and independent-profile behavior remains
 the default.
 
-Manager contract 19 resolves and fingerprints this policy, starts the dedicated
+Active manager contract 20 resolves and fingerprints this policy, starts the dedicated
 coordinator through `Setup-Runner.ps1`, and enforces leases for both fixed and
 autoscaled managers. Disabled profiles (no `hostAdmission` manifest entry)
 remain behavior-compatible; they never touch the coordinator.
@@ -336,7 +336,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 19 managers. A profile that
+11 and remain supported by the active contract 20 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -513,6 +513,9 @@ observations, so contract-10 and contract-11 readers are unaffected.
         "sequence": 45,
         "managerInstanceId": "manager-instance-b",
         "observedAt": "2026-07-26T12:00:00Z",
+        "firstObservedAt": "2026-07-26T11:59:00Z",
+        "lastObservedAt": "2026-07-26T12:00:00Z",
+        "occurrenceCount": 4,
         "subsystem": "worker-launch",
         "operation": "worker-launch",
         "target": "repo-example-000001",
@@ -583,9 +586,19 @@ sequence and treat `managerInstanceId` as the observer rather than the identity
 of the event. The journal retains failures, state transitions, retries, and
 recovery instead of every reconciliation pass.
 
-Journal limits are strict and enforced: at most 64 retained events, at most 160
-characters of sanitized `evidence` per event, and at most 16384 serialized
-bytes. `subsystem`, `operation`, `outcome`, and `reason` are closed
+Contract 20 coalesces repeated equivalent failure, timeout, blocked, retry, or
+unknown observations within one causal episode. Equivalence uses subsystem,
+operation, target, outcome, and reason.
+`firstObservedAt` records the beginning of the episode, `lastObservedAt` and
+the compatibility `observedAt` field record its latest occurrence, and
+`occurrenceCount` records how many observations the aggregate represents. A
+changed outcome or reason for the same operation and target starts a new
+episode, so recovery remains a separate transition. Legacy contract-19 events
+are normalized to one occurrence when a contract-20 manager restores them.
+
+Journal limits are strict and enforced: at most 64 retained aggregate events,
+at most 160 characters of sanitized `evidence` per event, and at most 16384
+serialized bytes. `subsystem`, `operation`, `outcome`, and `reason` are closed
 vocabularies; a manager that needs a new value needs a new contract version.
 `evidence` excludes `:`, `/`, `@`, `?`, `=`, and `&`, so tokens, URLs, HTTP
 bodies, environment values, JIT payloads, job output, and raw Docker or GitHub
@@ -597,7 +610,9 @@ discarded older, malformed, or oversized entries (`truncated`, which requires a
 nonzero `droppedEvents`) and from a journal the manager could not read or
 restore (`unavailable`, which reports no events). A discarded journal never
 discards otherwise valid observed state. An empty `events` array with status
-`current` means no notable event has occurred.
+`current` means no notable event has occurred. Coalescing does not increment
+`droppedEvents`; that counter remains reserved for evidence that was genuinely
+discarded.
 
 Subsystem summaries describe operations PitCrew itself performed. They are not
 a claim that the host, Docker daemon, network, or GitHub service is healthy.
@@ -666,10 +681,11 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 19 is active in this release. Both manager modes publish the
+Manager contract 20 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
-diagnostic semantics. Setup fails closed before Docker, image, or generated
-state mutation if a contract ahead of both implementations is selected.
+diagnostic semantics and adding contract-20 journal aggregation. Setup fails
+closed before Docker, image, or generated state mutation if a contract ahead
+of both implementations is selected.
 
 ### Contract-14 runner correlation
 
@@ -736,13 +752,15 @@ The fixed shell manager keeps the journal, the Docker summary, and the GitHub
 summary under `diagnostics/` inside the profile state directory and
 writes each file atomically, so an ordinary manager restart or handoff
 preserves the preceding causal sequence without replaying events. The retained
-window is bounded to 32 events and a bounded serialized size; older events are
-dropped into `droppedEvents` and the journal reports `truncated`. A corrupt or
-unreadable journal degrades only the journal, and a failed diagnostic write
-never stops a worker, changes cleanup selectors, or discards desired state.
+window is bounded to 32 aggregate events and a bounded serialized size; older
+events are dropped into `droppedEvents` and the journal reports `truncated`.
+A corrupt or unreadable journal degrades only the journal, and a failed
+diagnostic write never stops a worker, changes cleanup selectors, or discards
+desired state.
 Healthy reconciliation is not journaled: the fixed manager records state
 transitions, failures, retry scheduling, recovery, and unusually slow
-operations rather than every loop.
+operations rather than every loop. Repeated equivalent failures update one
+aggregate event instead of displacing earlier causal lifecycle evidence.
 
 The projection contains no registration token, environment values, job logs,
 container identity, or Docker socket details. Resource usage does not identify

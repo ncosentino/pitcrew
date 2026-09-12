@@ -51,7 +51,7 @@ $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $hostAdmissionComposePath = Join-Path $runnerRoot 'host-admission.compose.yml'
 $hostAdmissionManagerComposePath = Join-Path $runnerRoot 'host-admission.manager.compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 19
+$activeManagerContractVersion = 20
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 $digestWorkerImage = 'ghcr.io/example/runner@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
@@ -1053,6 +1053,16 @@ $journalV12 = [PSCustomObject][ordered]@{
             evidence = $null
         }
     )
+}
+foreach ($event in $journalV12.events) {
+    $event |
+        Add-Member -NotePropertyName firstObservedAt `
+            -NotePropertyValue $event.observedAt
+    $event |
+        Add-Member -NotePropertyName lastObservedAt `
+            -NotePropertyValue $event.observedAt
+    $event |
+        Add-Member -NotePropertyName occurrenceCount -NotePropertyValue 1
 }
 $subsystemHealthV12 = [PSCustomObject][ordered]@{
     docker = [PSCustomObject][ordered]@{
@@ -2352,6 +2362,59 @@ Add-Check (
     ) | Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract nineteen rejected complete admission explainability evidence.'
 
+$legacyJournalV19 = (
+    (
+        New-RunnerHostAdmissionSchemaFixture `
+            -ManagerContractVersion 19 `
+            -HostAdmission $availableHostAdmissionV19
+    ) | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+)
+foreach ($event in $legacyJournalV19.operationJournal.events) {
+    $event.PSObject.Properties.Remove('firstObservedAt')
+    $event.PSObject.Properties.Remove('lastObservedAt')
+    $event.PSObject.Properties.Remove('occurrenceCount')
+}
+Add-Check (
+    ($legacyJournalV19 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract nineteen rejected legacy unaggregated journal events.'
+
+$missingJournalAggregateV20 = (
+    $legacyJournalV19 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$missingJournalAggregateV20.managerContractVersion = 20
+Add-Check (-not (
+    ($missingJournalAggregateV20 | ConvertTo-Json -Depth 20) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract twenty accepted a journal event without aggregate fields.'
+
+$completeJournalAggregateV20 = (
+    New-RunnerHostAdmissionSchemaFixture `
+        -ManagerContractVersion 20 `
+        -HostAdmission $availableHostAdmissionV19
+)
+Add-Check (
+    ($completeJournalAggregateV20 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twenty rejected complete journal aggregation evidence.'
+
+$invalidOccurrenceCountV20 = (
+    $completeJournalAggregateV20 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidOccurrenceCountV20.operationJournal.events[0].occurrenceCount = 0
+Add-Check (-not (
+    ($invalidOccurrenceCountV20 | ConvertTo-Json -Depth 20) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract twenty accepted a zero journal occurrence count.'
+
 $missingAllocatableV19 = (
     $availableHostAdmissionV19 |
         ConvertTo-Json -Depth 20 |
@@ -2709,14 +2772,14 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 19) 'The setup contract does not activate the admission-explainability manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 20) 'The setup contract does not activate the journal-aggregation manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
     $defaultProfile.DefinedHostAdmissionContractVersion -eq 19
 ) 'The setup contract does not expose the defined host-admission contract.'
 Add-Check (
-    $defaultProfile.DefinedDiagnosticsContractVersion -eq 19
-) 'The setup contract does not expose the defined zero-capacity manager contract.'
+    $defaultProfile.DefinedDiagnosticsContractVersion -eq 20
+) 'The setup contract does not expose the defined journal-aggregation contract.'
 $implementedContract = Get-RunnerImplementedManagerContract -RootPath $runnerRoot
 Add-Check (
     $implementedContract.Fixed -eq $defaultProfile.ManagerContractVersion -and
@@ -3137,7 +3200,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=19$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -4427,7 +4490,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=19$') 'Fixed setup did not activate manager contract 19.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'Fixed setup did not activate manager contract 20.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -4447,7 +4510,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=19$') 'Autoscaled setup did not activate manager contract 19.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'Autoscaled setup did not activate manager contract 20.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -4617,7 +4680,7 @@ try {
         ) 'Missing-manager recovery attempted a manager or profile shutdown path.'
         Add-Check (
             $missingManagerAck.generation -eq 1 -and
-            $missingManagerAck.managerContractVersion -eq 19
+            $missingManagerAck.managerContractVersion -eq 20
         ) 'Missing-manager recovery did not require a fresh current-contract acknowledgement.'
 
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
@@ -6053,12 +6116,12 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_S
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_RUNTIME_DEVICES: ${PITCREW_WORKER_RUNTIME_DEVICES:-}')) 'Compose does not pass the typed worker-device contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_SHM_SIZE_BYTES: ${PITCREW_WORKER_SHM_SIZE_BYTES:-}')) 'Compose does not pass the shared-memory contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-19}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-20}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_HOST_PROC_PATH: /host/proc')) 'Manager containers do not use the fixed host-proc telemetry path.'
 Add-Check ($compose -match [regex]::Escape('/proc:/host/proc:ro')) 'Manager containers do not mount Docker-host proc read-only.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
 Add-Check ($compose -notmatch '/host/proc:.+runner') 'Compose appears to expose Docker-host proc to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=19$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

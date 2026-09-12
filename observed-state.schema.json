@@ -1397,6 +1397,21 @@
           "type": "string",
           "format": "date-time"
         },
+        "firstObservedAt": {
+          "type": "string",
+          "format": "date-time",
+          "$comment": "First occurrence represented by this coalesced event."
+        },
+        "lastObservedAt": {
+          "type": "string",
+          "format": "date-time",
+          "$comment": "Latest occurrence represented by this coalesced event; equals observedAt."
+        },
+        "occurrenceCount": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 2147483647
+        },
         "subsystem": {
           "$ref": "#/$defs/managerEventSubsystem"
         },
@@ -2611,6 +2626,36 @@
         }
       },
       "$comment": "Contract 19 requires profile-scoped allocatable and theoretical capacity plus the bounded coordinator-owned withholding reason. A protocol-2 coordinator remains representable as degraded evidence with null capacity fields during rolling replacement."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 20
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operationJournal": {
+            "properties": {
+              "events": {
+                "items": {
+                  "required": [
+                    "firstObservedAt",
+                    "lastObservedAt",
+                    "occurrenceCount"
+                  ]
+                }
+              }
+            }
+          }
+        }
+      },
+      "$comment": "Contract 20 coalesces equivalent journal observations into bounded first/last timestamps and an occurrence count while preserving the existing event fields."
     },
     {
       "if": {

@@ -51,7 +51,10 @@ func TestJournalRetainsFailuresAndSkipsRoutineSuccess(t *testing.T) {
 		event.Outcome != outcomeFailed ||
 		event.Reason != reasonDockerFailed ||
 		event.Sequence != 1 ||
-		event.ManagerInstanceID != "instance-one" {
+		event.ManagerInstanceID != "instance-one" ||
+		event.FirstObservedAt != event.ObservedAt ||
+		event.LastObservedAt != event.ObservedAt ||
+		event.OccurrenceCount != 1 {
 		t.Fatalf("journal lost failure evidence: %#v", event)
 	}
 	if journal.HighestSequence == nil || *journal.HighestSequence != 1 {
@@ -69,14 +72,21 @@ func TestJournalRetainsFailuresAndSkipsRoutineSuccess(t *testing.T) {
 // TestSubsystemHealthTracksDegradationAndRecovery proves repeated failures
 // escalate and that recovery is journaled once.
 func TestSubsystemHealthTracksDegradationAndRecovery(t *testing.T) {
-	recorder, _, _ := newTestRecorder(t)
+	recorder, _, clock := newTestRecorder(t)
 	for attempt := 0; attempt < subsystemFailureBand; attempt++ {
 		recorder.record(failureObservation(operationDockerRun, reasonDockerFailed))
+		clock.advance(time.Second)
 	}
 	if state := recorder.subsystemHealth().Docker; state.State != subsystemUnavailable ||
 		state.ConsecutiveFailures != subsystemFailureBand ||
 		state.LastFailure == nil {
 		t.Fatalf("repeated Docker failures did not report unavailable: %#v", state)
+	}
+	failures := recorder.journal()
+	if len(failures.Events) != 1 ||
+		failures.Events[0].OccurrenceCount != subsystemFailureBand ||
+		failures.Events[0].FirstObservedAt == failures.Events[0].LastObservedAt {
+		t.Fatalf("equivalent failures were not coalesced: %#v", failures)
 	}
 	recorder.record(diagnosticsObservation{
 		subsystem:  subsystemDocker,
@@ -96,6 +106,99 @@ func TestSubsystemHealthTracksDegradationAndRecovery(t *testing.T) {
 	last := journal.Events[len(journal.Events)-1]
 	if last.Outcome != outcomeRecovered || last.Reason != reasonRecovered {
 		t.Fatalf("recovery was not journaled: %#v", last)
+	}
+}
+
+func TestJournalCoalescesInterleavedFailureStorms(t *testing.T) {
+	recorder, _, clock := newTestRecorder(t)
+	recorder.record(diagnosticsObservation{
+		subsystem: subsystemWorkerExit,
+		operation: operationWorkerExit,
+		target:    "runner-causal",
+		outcome:   outcomeFailed,
+		reason:    reasonUnknown,
+		evidence:  "worker exit could not release its host lease",
+	})
+	for attempt := 0; attempt < journalCapacity+20; attempt++ {
+		clock.advance(time.Second)
+		recorder.record(diagnosticsObservation{
+			subsystem: subsystemAdmission,
+			operation: operationAdmissionReserve,
+			target:    "target-a",
+			outcome:   outcomeBlocked,
+			reason:    reasonCapacityCeiling,
+			evidence:  "host admission withheld worker activation",
+		})
+		recorder.record(diagnosticsObservation{
+			subsystem: subsystemWorkerLaunch,
+			operation: operationWorkerLaunch,
+			target:    "target-a",
+			outcome:   outcomeFailed,
+			reason:    reasonUnknown,
+			evidence:  "worker launch remained blocked",
+		})
+	}
+
+	journal := recorder.journal()
+	if journal.Status != journalStatusCurrent ||
+		journal.DroppedEvents != 0 ||
+		len(journal.Events) != 3 {
+		t.Fatalf("failure storm displaced causal evidence: %#v", journal)
+	}
+	if journal.Events[0].Operation != operationWorkerExit {
+		t.Fatalf("causal worker-exit evidence was not retained: %#v", journal.Events)
+	}
+	for _, event := range journal.Events[1:] {
+		if event.OccurrenceCount != journalCapacity+20 ||
+			event.FirstObservedAt == event.LastObservedAt {
+			t.Fatalf("failure storm was not aggregated: %#v", event)
+		}
+	}
+}
+
+func TestJournalOutcomeChangeStartsNewEpisode(t *testing.T) {
+	recorder, _, clock := newTestRecorder(t)
+	recorder.record(failureObservation(operationDockerRun, reasonDockerFailed))
+	clock.advance(time.Second)
+	recorder.record(failureObservation(operationDockerRun, reasonDockerFailed))
+	clock.advance(time.Second)
+	recorder.record(diagnosticsObservation{
+		subsystem:  subsystemDocker,
+		operation:  operationDockerRun,
+		outcome:    outcomeSucceeded,
+		reason:     reasonNone,
+		healthKind: healthDocker,
+	})
+	clock.advance(time.Second)
+	recorder.record(failureObservation(operationDockerRun, reasonDockerFailed))
+
+	journal := recorder.journal()
+	if len(journal.Events) != 3 ||
+		journal.Events[0].OccurrenceCount != 2 ||
+		journal.Events[1].Outcome != outcomeRecovered ||
+		journal.Events[2].OccurrenceCount != 1 {
+		t.Fatalf("outcome transition did not bound coalescing: %#v", journal)
+	}
+}
+
+func TestJournalKeepsSuccessfulTransitionsDistinct(t *testing.T) {
+	recorder, _, clock := newTestRecorder(t)
+	for attempt := 0; attempt < 2; attempt++ {
+		recorder.record(diagnosticsObservation{
+			subsystem: subsystemReconciliation,
+			operation: operationDesiredStateApply,
+			outcome:   outcomeSucceeded,
+			reason:    reasonNone,
+			evidence:  "accepted a new desired capacity generation",
+		})
+		clock.advance(time.Second)
+	}
+
+	journal := recorder.journal()
+	if len(journal.Events) != 2 ||
+		journal.Events[0].OccurrenceCount != 1 ||
+		journal.Events[1].OccurrenceCount != 1 {
+		t.Fatalf("successful transitions were incorrectly coalesced: %#v", journal)
 	}
 }
 
@@ -139,6 +242,59 @@ func TestJournalSurvivesManagerRestart(t *testing.T) {
 	}
 }
 
+func TestJournalRestoresCoalescedAndLegacyEvents(t *testing.T) {
+	recorder, directory, clock := newTestRecorder(t)
+	recorder.record(failureObservation(operationDockerRun, reasonDockerFailed))
+	clock.advance(time.Second)
+	recorder.record(failureObservation(operationDockerRun, reasonDockerFailed))
+
+	path := filepath.Join(directory, diagnosticsJournalFileName)
+	var document journalDocument
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(data, &document); err != nil {
+		t.Fatal(err)
+	}
+	document.SchemaVersion = previousDiagnosticsSchemaVersion
+	document.Events = append(document.Events, managerEvent{
+		Sequence:          document.HighestSequence + 1,
+		ManagerInstanceID: "legacy-instance",
+		ObservedAt:        "2026-07-20T12:00:02Z",
+		Subsystem:         subsystemCleanup,
+		Operation:         operationRegistrationCleanup,
+		Outcome:           outcomeRetry,
+		Reason:            reasonRetryBackoff,
+	})
+	document.HighestSequence++
+	data, err = json.MarshalIndent(document, "", "  ")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	restarted := newDiagnosticsRecorder(directory, "instance-two", clock)
+	restarted.restore()
+	journal := restarted.journal()
+	if len(journal.Events) != 3 {
+		t.Fatalf("restart lost aggregate or legacy evidence: %#v", journal)
+	}
+	aggregate := journal.Events[0]
+	if aggregate.OccurrenceCount != 2 ||
+		aggregate.FirstObservedAt == aggregate.LastObservedAt {
+		t.Fatalf("restart lost coalesced event metadata: %#v", aggregate)
+	}
+	legacy := journal.Events[1]
+	if legacy.OccurrenceCount != 1 ||
+		legacy.FirstObservedAt != legacy.ObservedAt ||
+		legacy.LastObservedAt != legacy.ObservedAt {
+		t.Fatalf("legacy event was not normalized during restore: %#v", legacy)
+	}
+}
+
 // TestJournalCorruptionIsContained proves a corrupt journal is discarded
 // without destroying live state or failing the manager.
 func TestJournalCorruptionIsContained(t *testing.T) {
@@ -169,7 +325,7 @@ func TestJournalCorruptionIsContained(t *testing.T) {
 func TestJournalDropsMalformedPersistedEntries(t *testing.T) {
 	directory := projectTestDirectory(t)
 	document := journalDocument{
-		SchemaVersion:   diagnosticsSchemaVersion,
+		SchemaVersion:   previousDiagnosticsSchemaVersion,
 		HighestSequence: 2,
 		Events: []managerEvent{
 			{Sequence: 0, ManagerInstanceID: "", Operation: ""},
@@ -184,6 +340,7 @@ func TestJournalDropsMalformedPersistedEntries(t *testing.T) {
 			},
 		},
 	}
+
 	data, err := json.MarshalIndent(document, "", "  ")
 	if err != nil {
 		t.Fatal(err)
@@ -203,6 +360,71 @@ func TestJournalDropsMalformedPersistedEntries(t *testing.T) {
 	}
 	if journal.Status != journalStatusTruncated || journal.DroppedEvents != 1 {
 		t.Fatalf("malformed entry was not counted as dropped: %#v", journal)
+	}
+}
+
+func TestJournalUnsupportedSchemaIsUnavailable(t *testing.T) {
+	directory := projectTestDirectory(t)
+	document := journalDocument{SchemaVersion: 99}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(directory, diagnosticsJournalFileName),
+		data,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newDiagnosticsRecorder(directory, "instance-two", nil)
+	recorder.restore()
+	journal := recorder.journal()
+	if journal.Status != journalStatusUnavailable ||
+		journal.DroppedEvents != 1 ||
+		len(journal.Events) != 0 {
+		t.Fatalf("unsupported journal schema did not fail closed: %#v", journal)
+	}
+}
+
+func TestJournalRejectsInvalidSchemaTwoAggregate(t *testing.T) {
+	directory := projectTestDirectory(t)
+	document := journalDocument{
+		SchemaVersion:   diagnosticsSchemaVersion,
+		HighestSequence: 1,
+		Events: []managerEvent{{
+			Sequence:          1,
+			ManagerInstanceID: "instance-one",
+			ObservedAt:        "2026-07-20T12:00:00Z",
+			FirstObservedAt:   "2026-07-20T12:00:00Z",
+			LastObservedAt:    "2026-07-20T12:00:00Z",
+			OccurrenceCount:   0,
+			Subsystem:         subsystemDocker,
+			Operation:         operationDockerRun,
+			Outcome:           outcomeFailed,
+			Reason:            reasonDockerFailed,
+		}},
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(directory, diagnosticsJournalFileName),
+		data,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newDiagnosticsRecorder(directory, "instance-two", nil)
+	recorder.restore()
+	journal := recorder.journal()
+	if journal.Status != journalStatusTruncated ||
+		journal.DroppedEvents != 1 ||
+		len(journal.Events) != 0 {
+		t.Fatalf("invalid schema-two aggregate was not discarded: %#v", journal)
 	}
 }
 
