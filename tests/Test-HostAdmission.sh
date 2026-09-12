@@ -46,17 +46,20 @@ shift
 profile=""
 slot=""
 demand=""
+runner_name=""
 while [ "$#" -gt 0 ]; do
     case "$1" in
         --profile) profile="$2"; shift 2 ;;
         --slot) slot="$2"; shift 2 ;;
         --demand) demand="$2"; shift 2 ;;
+        --runner-name) runner_name="$2"; shift 2 ;;
         --socket) shift 2 ;;
         --evidence) shift 2 ;;
         *) shift ;;
     esac
 done
-printf '%s|%s|%s|%s\n' "${command}" "${profile}" "${slot}" "${demand}" \
+printf '%s|%s|%s|%s|%s\n' \
+    "${command}" "${profile}" "${slot}" "${demand}" "${runner_name}" \
     >> "${PITCREW_TEST_ADMISSION_CALLS}"
 case "${command}:${PITCREW_TEST_ADMISSION_MODE:-success}" in
     acquire:withheld) exit 3 ;;
@@ -145,6 +148,12 @@ assert_true \
     "Fixed manager recovery does not establish a coordinator adoption fence." \
     grep -Fq 'host_admission_begin_adoption' "${manager_source}"
 assert_true \
+    "Fixed manager does not bind exact runner registration identity to leases." \
+    grep -Fq 'host_admission_bind_registration' "${manager_source}"
+assert_true \
+    "Fixed manager does not reconcile coordinator leases absent from Docker." \
+    grep -Fq 'reconcile_orphaned_host_admission_leases' "${manager_source}"
+assert_true \
     "Fixed manager recovery clears the coordinator fence before tracked adoptions finish." \
     grep -Fq 'while host_admission_adoption_pending' "${manager_source}"
 assert_true \
@@ -180,6 +189,54 @@ assert_false \
     "Disabled host admission invoked the coordinator client." \
     test -s "${disabled_calls}"
 
+host_admission_bind_registration "control-1" "control-runner-1"
+assert_true \
+    "Registration binding did not carry the exact profile, lease, and runner name." \
+    grep -Fq 'bind-registration|control|control-1||control-runner-1' \
+        "${admission_calls}"
+
+pending_snapshot="${TEMP_DIRECTORY}/pending-adoption-snapshot.json"
+cat > "${pending_snapshot}" <<'EOF'
+{
+  "adoptionFences": [
+    {
+      "profileId": "control",
+      "pendingLeaseKeys": ["control-1"]
+    }
+  ],
+  "leases": [
+    {
+      "profileId": "control",
+      "slotKey": "control-1",
+      "leaseId": "lease-1",
+      "registrationName": "control-runner-1",
+      "units": 2,
+      "status": "active"
+    }
+  ]
+}
+EOF
+pending_inventory="${TEMP_DIRECTORY}/pending-adoption-inventory.json"
+PITCREW_TEST_STATUS_SNAPSHOT="${pending_snapshot}"
+export PITCREW_TEST_STATUS_SNAPSHOT
+host_admission_pending_lease_inventory "${pending_inventory}"
+assert_true \
+    "Pending adoption inventory omitted the exact lease and registration binding." \
+    jq -e '
+        length == 1
+        and .[0].slotKey == "control-1"
+        and .[0].registrationName == "control-runner-1"
+    ' "${pending_inventory}" >/dev/null
+
+malformed_pending_snapshot="${TEMP_DIRECTORY}/malformed-pending-adoption-snapshot.json"
+jq '.leases = []' "${pending_snapshot}" > "${malformed_pending_snapshot}"
+PITCREW_TEST_STATUS_SNAPSHOT="${malformed_pending_snapshot}"
+export PITCREW_TEST_STATUS_SNAPSHOT
+assert_false \
+    "Pending adoption inventory accepted a fence without its active lease." \
+    host_admission_pending_lease_inventory "${pending_inventory}"
+unset PITCREW_TEST_STATUS_SNAPSHOT
+
 assert_true \
     "Host-admission environment rejected a complete manager configuration." \
     host_admission_configuration_is_valid
@@ -205,7 +262,7 @@ assert_true \
 host_admission_begin_wait "${admission_slot}" "${admission_slots}"
 assert_true \
     "Waiting fixed slot did not publish one unit of pending demand." \
-    grep -Fqx 'set-demand|control||1' "${admission_calls}"
+    grep -Fqx 'set-demand|control||1|' "${admission_calls}"
 assert_true \
     "Fixed slot could not acquire a synthetic host-admission lease." \
     host_admission_acquire "${admission_slot}" "control-1" "${admission_slots}"
@@ -241,11 +298,16 @@ assert_true \
         "${admission_slot}" \
         "control-1" \
         "legacy-container" \
+        "legacy-runner" \
         0
 assert_equals \
     "2" \
     "$(grep -c '^adopt|control|control-1|' "${admission_calls}")" \
     "Fixed running-worker adoption did not retry the same deterministic slot identity."
+assert_true \
+    "Fixed running-worker adoption did not bind its exact registration name." \
+    grep -Fq 'bind-registration|control|control-1||legacy-runner' \
+        "${admission_calls}"
 assert_true \
     "Fixed running-worker adoption did not persist an active lease." \
     jq -e '.slotKey == "control-1" and .status == "active"' \
@@ -344,7 +406,7 @@ status_snapshot="${TEMP_DIRECTORY}/status-snapshot.json"
 status_output="${TEMP_DIRECTORY}/status-output.json"
 cat > "${status_snapshot}" <<'EOF'
 {
-    "protocolVersion": 3,
+    "protocolVersion": 4,
     "namespace": "primary",
     "epoch": 3,
     "decisionSequence": 9,
@@ -551,5 +613,264 @@ assert_true \
         and .accounting == null
         and .lastDecision == null
     ' "${status_output}" >/dev/null
+
+. "${ROOT}/manager/registration.sh"
+. "${ROOT}/manager/host-admission-recovery.sh"
+
+registration_cli="${TEMP_DIRECTORY}/pitcrew-github-runner"
+registration_cli_log="${TEMP_DIRECTORY}/registration-cli.log"
+cat > "${registration_cli}" <<'EOF'
+#!/bin/sh
+[ "${ACCESS_TOKEN:-}" = "test-token" ] || exit 1
+printf '%s\n' "$*" > "${PITCREW_TEST_REGISTRATION_CLI_LOG}"
+EOF
+chmod +x "${registration_cli}"
+PITCREW_GITHUB_RUNNER_CLI="${registration_cli}"
+PITCREW_TEST_REGISTRATION_CLI_LOG="${registration_cli_log}"
+export PITCREW_GITHUB_RUNNER_CLI PITCREW_TEST_REGISTRATION_CLI_LOG
+assert_true \
+    "Fixed manager could not invoke the bounded runner deletion helper." \
+    remove_github_runner_registration \
+        "/repos/example/project/actions/runners" \
+        77 \
+        "test-token" \
+        5
+assert_equals \
+    "delete --endpoint /repos/example/project/actions/runners --runner-id 77 --timeout-seconds 5" \
+    "$(cat "${registration_cli_log}")" \
+    "Fixed manager changed the exact runner deletion command."
+
+HOST_ADMISSION_RECOVERY_DIRECTORY="${TEMP_DIRECTORY}/host-admission-recovery"
+HOST_ADMISSION_LAST_RECOVERY_STATE=""
+CURRENT_DESIRED_SLOTS="${TEMP_DIRECTORY}/desired-slots.tsv"
+LABELS="control,general-purpose"
+PREFIX="testhost"
+RUNNER_SCOPE="repo"
+ACCESS_TOKEN="test-token"
+REGISTRATION_API_TIMEOUT=5
+printf 'repo-key\thttps://github.com/example/project\tproject-1\n' \
+    > "${CURRENT_DESIRED_SLOTS}"
+export \
+    HOST_ADMISSION_RECOVERY_DIRECTORY \
+    HOST_ADMISSION_LAST_RECOVERY_STATE \
+    CURRENT_DESIRED_SLOTS \
+    LABELS \
+    PREFIX \
+    RUNNER_SCOPE \
+    ACCESS_TOKEN \
+    REGISTRATION_API_TIMEOUT
+
+registration_endpoint_for_slot() {
+    printf '/repos/example/project/actions/runners\n'
+}
+slot_path() {
+    printf '%s/slot-%s\n' "${TEMP_DIRECTORY}" "$1"
+}
+record_manager_diagnostic() {
+    :
+}
+mark_observed_state_dirty() {
+    :
+}
+fetch_github_runner_inventory() {
+    [ "${PITCREW_TEST_FETCH_FAILURE:-0}" = "0" ] || return 1
+    cp "${PITCREW_TEST_RECOVERY_INVENTORY}" "$1"
+}
+remove_github_runner_registration() {
+    [ "${PITCREW_TEST_REMOVE_FAILURE:-0}" = "0" ] || return 1
+    printf '%s\n' "$2" >> "${PITCREW_TEST_REMOVED_REGISTRATIONS}"
+    [ "${PITCREW_TEST_REMOVE_STALE:-0}" = "0" ] || return 0
+    temporary="${PITCREW_TEST_RECOVERY_INVENTORY}.$$"
+    jq \
+        --argjson runnerId "$2" \
+        '
+            .runners = [.runners[] | select(.id != $runnerId)]
+            | .totalCount = (.runners | length)
+        ' "${PITCREW_TEST_RECOVERY_INVENTORY}" > "${temporary}"
+    mv -f "${temporary}" "${PITCREW_TEST_RECOVERY_INVENTORY}"
+}
+
+recovery_snapshot="${TEMP_DIRECTORY}/recovery-snapshot.json"
+cat > "${recovery_snapshot}" <<'EOF'
+{
+  "adoptionFences": [
+    {
+      "profileId": "control",
+      "pendingLeaseKeys": ["repo-key"]
+    }
+  ],
+  "leases": [
+    {
+      "profileId": "control",
+      "slotKey": "repo-key",
+      "leaseId": "lease-recovery",
+      "registrationName": "testhost-project-1-123-abcdef",
+      "units": 1,
+      "status": "active"
+    }
+  ]
+}
+EOF
+recovery_inventory="${TEMP_DIRECTORY}/recovery-inventory.json"
+removed_registrations="${TEMP_DIRECTORY}/removed-registrations.log"
+PITCREW_TEST_STATUS_SNAPSHOT="${recovery_snapshot}"
+PITCREW_TEST_RECOVERY_INVENTORY="${recovery_inventory}"
+PITCREW_TEST_REMOVED_REGISTRATIONS="${removed_registrations}"
+export \
+    PITCREW_TEST_STATUS_SNAPSHOT \
+    PITCREW_TEST_RECOVERY_INVENTORY \
+    PITCREW_TEST_REMOVED_REGISTRATIONS
+
+printf '{"totalCount":0,"runners":[]}\n' > "${recovery_inventory}"
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_true \
+    "A bound lease with no registration was not reconciled." \
+    reconcile_orphaned_host_admission_leases
+assert_true \
+    "Absent registration recovery did not reconcile the exact lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+assert_false \
+    "Absent registration recovery attempted a runner deletion." \
+    test -s "${removed_registrations}"
+
+PITCREW_TEST_FETCH_FAILURE=1
+: > "${admission_calls}"
+assert_false \
+    "Incomplete GitHub inventory released an active lease." \
+    reconcile_orphaned_host_admission_leases
+assert_false \
+    "Incomplete GitHub inventory reconciled the active lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+PITCREW_TEST_FETCH_FAILURE=0
+
+printf '%s\n' \
+    '{"totalCount":1,"runners":[{"id":77,"name":"testhost-project-1-123-abcdef","status":"offline","busy":false,"labels":["control","general-purpose"]}]}' \
+    > "${recovery_inventory}"
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_true \
+    "A bound orphaned registration was not removed and reconciled." \
+    reconcile_orphaned_host_admission_leases
+assert_equals \
+    "77" \
+    "$(cat "${removed_registrations}")" \
+    "Recovery removed the wrong runner registration."
+assert_true \
+    "Registration removal did not reconcile the exact lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+
+printf '%s\n' \
+    '{"totalCount":1,"runners":[{"id":77,"name":"testhost-project-1-123-abcdef","status":"offline","busy":false,"labels":["control","general-purpose"]}]}' \
+    > "${recovery_inventory}"
+PITCREW_TEST_REMOVE_FAILURE=1
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_false \
+    "Failed exact registration removal released an active lease." \
+    reconcile_orphaned_host_admission_leases
+assert_false \
+    "Failed exact registration removal reconciled the active lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+PITCREW_TEST_REMOVE_FAILURE=0
+
+PITCREW_TEST_REMOVE_STALE=1
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_false \
+    "A registration still present after deletion released an active lease." \
+    reconcile_orphaned_host_admission_leases
+assert_false \
+    "Stale post-deletion inventory reconciled the active lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+PITCREW_TEST_REMOVE_STALE=0
+
+legacy_recovery_snapshot="${TEMP_DIRECTORY}/legacy-recovery-snapshot.json"
+jq 'del(.leases[0].registrationName)' \
+    "${recovery_snapshot}" > "${legacy_recovery_snapshot}"
+printf '%s\n' \
+    '{"totalCount":1,"runners":[{"id":88,"name":"testhost-project-1-456-abcdef","status":"offline","busy":false,"labels":["control","general-purpose"]}]}' \
+    > "${recovery_inventory}"
+PITCREW_TEST_STATUS_SNAPSHOT="${legacy_recovery_snapshot}"
+export PITCREW_TEST_STATUS_SNAPSHOT
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_true \
+    "Unique offline legacy registration was not removed and reconciled." \
+    reconcile_orphaned_host_admission_leases
+assert_equals \
+    "88" \
+    "$(cat "${removed_registrations}")" \
+    "Legacy recovery removed the wrong runner registration."
+assert_true \
+    "Legacy exact registration removal did not reconcile the lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+
+printf '%s\n' \
+    '{"totalCount":1,"runners":[{"id":88,"name":"testhost-project-1-456-abcdef","status":"offline","busy":false,"labels":["mutated-label"]}]}' \
+    > "${recovery_inventory}"
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_false \
+    "Legacy registration with mutable labels released an active lease." \
+    reconcile_orphaned_host_admission_leases
+assert_false \
+    "Legacy ambiguous recovery removed a non-bound registration." \
+    test -s "${removed_registrations}"
+assert_false \
+    "Legacy ambiguous recovery reconciled the active lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+
+printf '%s\n' \
+    '{"totalCount":1,"runners":[{"id":88,"name":"testhost-project-1-456-abcdef","status":"online","busy":true,"labels":["control","general-purpose"]}]}' \
+    > "${recovery_inventory}"
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_false \
+    "Busy legacy registration was removed during recovery." \
+    reconcile_orphaned_host_admission_leases
+assert_false \
+    "Busy legacy recovery invoked registration deletion." \
+    test -s "${removed_registrations}"
+assert_false \
+    "Busy legacy recovery reconciled the active lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+
+printf '{"totalCount":0,"runners":[]}\n' > "${recovery_inventory}"
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_true \
+    "Legacy lease with no possible registration was not reconciled." \
+    reconcile_orphaned_host_admission_leases
+assert_false \
+    "Legacy absence recovery attempted an unbound registration deletion." \
+    test -s "${removed_registrations}"
+assert_true \
+    "Legacy absence recovery did not reconcile the exact lease." \
+    grep -Fq 'reconcile|control|repo-key||' "${admission_calls}"
+
+default_legacy_snapshot="${TEMP_DIRECTORY}/default-legacy-recovery-snapshot.json"
+jq '
+    .adoptionFences[0].profileId = "default"
+    | .leases[0].profileId = "default"
+' "${legacy_recovery_snapshot}" > "${default_legacy_snapshot}"
+PROFILE_ID="default"
+LABELS="general-purpose"
+PITCREW_TEST_STATUS_SNAPSHOT="${default_legacy_snapshot}"
+printf '%s\n' \
+    '{"totalCount":1,"runners":[{"id":99,"name":"testhost-project-1-789-abcdef","status":"offline","busy":false,"labels":["general-purpose"]}]}' \
+    > "${recovery_inventory}"
+: > "${admission_calls}"
+: > "${removed_registrations}"
+assert_true \
+    "Default-profile legacy registration did not use its canonical label." \
+    reconcile_orphaned_host_admission_leases
+assert_equals \
+    "99" \
+    "$(cat "${removed_registrations}")" \
+    "Default-profile recovery removed the wrong runner registration."
+assert_true \
+    "Default-profile recovery did not reconcile the exact lease." \
+    grep -Fq 'reconcile|default|repo-key||' "${admission_calls}"
 
 echo "Host admission contracts passed: ${ASSERTIONS} assertions."

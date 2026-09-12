@@ -264,7 +264,10 @@ func (c *Coordinator) BeginAdoption(profileID string) error {
 	}
 	next := c.state.clone()
 	next.Epoch++
-	next.AdoptionFences[profileID] = AdoptionFence{ProfileID: profileID}
+	next.AdoptionFences[profileID] = AdoptionFence{
+		ProfileID:        profileID,
+		PendingLeaseKeys: activeLeaseSlotKeys(next.Leases, profileID),
+	}
 	if err := c.store.Save(next); err != nil {
 		return err
 	}
@@ -280,8 +283,16 @@ func (c *Coordinator) CompleteAdoption(profileID string) error {
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if _, exists := c.state.AdoptionFences[profileID]; !exists {
+	fence, exists := c.state.AdoptionFences[profileID]
+	if !exists {
 		return nil
+	}
+	if len(fence.PendingLeaseKeys) > 0 {
+		return fmt.Errorf(
+			"%w: %d active lease(s) remain unaccounted",
+			ErrAdoptionPending,
+			len(fence.PendingLeaseKeys),
+		)
 	}
 	next := c.state.clone()
 	next.Epoch++
@@ -420,6 +431,50 @@ func (c *Coordinator) evaluateAcquireLocked(
 	return contenders, nil
 }
 
+// BindRegistration stores the exact bounded GitHub runner name associated
+// with a live lease. It changes no capacity and is idempotent for the same
+// binding; conflicting rebinding fails closed.
+func (c *Coordinator) BindRegistration(
+	profileID,
+	slotKey,
+	registrationName string,
+) (Lease, error) {
+	if err := validateLeaseIdentity(profileID, slotKey); err != nil {
+		return Lease{}, err
+	}
+	if err := validateRegistrationName(registrationName); err != nil {
+		return Lease{}, fmt.Errorf("%w: registration name is invalid", err)
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if _, err := c.sweepExpiredLocked(c.clock.Now()); err != nil {
+		return Lease{}, err
+	}
+	key := leaseKey{profileID: profileID, slotKey: slotKey}.String()
+	existing, exists := c.state.Leases[key]
+	if !exists {
+		return Lease{}, ErrLeaseNotFound
+	}
+	if existing.RegistrationName == registrationName {
+		return existing, nil
+	}
+	if existing.RegistrationName != "" {
+		return Lease{}, fmt.Errorf(
+			"%w: lease registration name is already bound",
+			ErrInvalidIdentity,
+		)
+	}
+	existing.RegistrationName = registrationName
+	next := c.state.clone()
+	next.DecisionSequence++
+	next.Leases[key] = existing
+	if err := c.store.Save(next); err != nil {
+		return Lease{}, err
+	}
+	c.state = next
+	return existing, nil
+}
+
 // Adopt records an already-running worker as an active lease. Unlike Acquire,
 // it never rejects the worker for lack of budget because that host usage
 // already exists. Existing active leases are returned unchanged, while an
@@ -445,6 +500,13 @@ func (c *Coordinator) Adopt(profileID, slotKey string) (lease Lease, err error) 
 	key := leaseKey{profileID: profileID, slotKey: slotKey}
 	existing, exists := c.state.Leases[key.String()]
 	if exists && existing.Status == LeaseActive {
+		next := c.state.clone()
+		if markLeaseAccountedForAdoption(&next, profileID, slotKey) {
+			if err = c.store.Save(next); err != nil {
+				return Lease{}, err
+			}
+			c.state = next
+		}
 		return existing, nil
 	}
 
@@ -469,6 +531,7 @@ func (c *Coordinator) Adopt(profileID, slotKey string) (lease Lease, err error) 
 	next.DecisionSequence = sequence
 	delete(next.Tombstones, key.String())
 	next.Leases[key.String()] = lease
+	markLeaseAccountedForAdoption(&next, profileID, slotKey)
 	if err = c.store.Save(next); err != nil {
 		return Lease{}, err
 	}
@@ -657,6 +720,7 @@ func (c *Coordinator) tombstoneLocked(
 	next := c.state.clone()
 	next.DecisionSequence = sequence
 	delete(next.Leases, key)
+	markLeaseAccountedForAdoption(&next, profileID, slotKey)
 	next.Tombstones[key] = Tombstone{
 		ProfileID: profileID,
 		SlotKey:   slotKey,
@@ -672,6 +736,39 @@ func (c *Coordinator) tombstoneLocked(
 	c.state = next
 	delete(c.provisionalDeadlines, key)
 	return nil
+}
+
+func activeLeaseSlotKeys(leases map[string]Lease, profileID string) []string {
+	keys := make([]string, 0)
+	for _, lease := range leases {
+		if lease.ProfileID == profileID && lease.Status == LeaseActive {
+			keys = append(keys, lease.SlotKey)
+		}
+	}
+	sort.Strings(keys)
+	return keys
+}
+
+func markLeaseAccountedForAdoption(
+	state *durableState,
+	profileID string,
+	slotKey string,
+) bool {
+	fence, exists := state.AdoptionFences[profileID]
+	if !exists || len(fence.PendingLeaseKeys) == 0 {
+		return false
+	}
+	index := sort.SearchStrings(fence.PendingLeaseKeys, slotKey)
+	if index >= len(fence.PendingLeaseKeys) ||
+		fence.PendingLeaseKeys[index] != slotKey {
+		return false
+	}
+	fence.PendingLeaseKeys = append(
+		fence.PendingLeaseKeys[:index],
+		fence.PendingLeaseKeys[index+1:]...,
+	)
+	state.AdoptionFences[profileID] = fence
+	return true
 }
 
 // Decision is a bounded, sanitized record of the single most recent lease
@@ -829,7 +926,9 @@ func (c *Coordinator) Status() (Snapshot, error) {
 		snapshot.Tombstones = append(snapshot.Tombstones, c.state.Tombstones[key])
 	}
 	for _, key := range sortedStateKeys(c.state.AdoptionFences) {
-		snapshot.AdoptionFences = append(snapshot.AdoptionFences, c.state.AdoptionFences[key])
+		fence := c.state.AdoptionFences[key]
+		fence.PendingLeaseKeys = append([]string(nil), fence.PendingLeaseKeys...)
+		snapshot.AdoptionFences = append(snapshot.AdoptionFences, fence)
 	}
 	if c.state.LastDecision != nil {
 		decision := *c.state.LastDecision

@@ -169,6 +169,28 @@ func (s *boundedScaleSetService) generateJIT(
 	)
 }
 
+func (s *boundedScaleSetService) findRunnerByName(
+	ctx context.Context,
+	runnerName string,
+) (runnerReference, bool, error) {
+	type findResult struct {
+		runner runnerReference
+		exists bool
+	}
+	result, err := runContextOperation(
+		ctx,
+		scaleSetOperationTimeout,
+		func(operationContext context.Context) (findResult, error) {
+			runner, exists, findErr := s.inner.findRunnerByName(
+				operationContext,
+				runnerName,
+			)
+			return findResult{runner: runner, exists: exists}, findErr
+		},
+	)
+	return result.runner, result.exists, err
+}
+
 func (s *boundedScaleSetService) removeRunner(
 	ctx context.Context,
 	runnerID int64,

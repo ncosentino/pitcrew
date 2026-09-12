@@ -337,10 +337,10 @@ cat > "${runner_inventory}" <<'EOF'
 {
   "totalCount": 4,
   "runners": [
-    {"name":"runner-idle","status":"online","busy":false},
-    {"name":"runner-busy","status":"online","busy":true},
-    {"name":"runner-offline","status":"offline","busy":false},
-    {"name":"runner-offline-busy","status":"offline","busy":true}
+    {"id":1,"name":"runner-idle","status":"online","busy":false,"labels":["general-purpose"]},
+    {"id":2,"name":"runner-busy","status":"online","busy":true,"labels":["general-purpose"]},
+    {"id":3,"name":"runner-offline","status":"offline","busy":false,"labels":["general-purpose"]},
+    {"id":4,"name":"runner-offline-busy","status":"offline","busy":true,"labels":["general-purpose"]}
   ]
 }
 EOF
@@ -373,8 +373,8 @@ cat > "${ambiguous_runner_inventory}" <<'EOF'
 {
   "totalCount": 2,
   "runners": [
-    {"name":"duplicate-runner","status":"offline","busy":false},
-    {"name":"duplicate-runner","status":"offline","busy":false}
+    {"id":1,"name":"duplicate-runner","status":"offline","busy":false,"labels":["general-purpose"]},
+    {"id":2,"name":"duplicate-runner","status":"offline","busy":false,"labels":["general-purpose"]}
   ]
 }
 EOF
@@ -515,7 +515,7 @@ done
 [ "${authorization}" = "Authorization: Bearer test-token" ] || exit 1
 if [ "${PITCREW_TEST_INCOMPLETE_INVENTORY:-0}" = "1" ]; then
     printf '%s\n' \
-        '{"total_count":2,"runners":[{"name":"runner-only","status":"online","busy":false}]}' \
+        '{"total_count":2,"runners":[{"id":1,"name":"runner-only","status":"online","busy":false,"labels":[{"name":"general-purpose"}]}]}' \
         > "${output}"
     exit 0
 fi
@@ -526,16 +526,18 @@ case "${url}" in
             runners: [
                 range(0; 100) as $index
                 | {
+                    id: ($index + 1),
                     name: ("runner-" + ($index | tostring)),
                     status: "online",
-                    busy: false
+                    busy: false,
+                    labels: [{name: "general-purpose"}]
                 }
             ]
         }' > "${output}"
         ;;
     *page=2)
         printf '%s\n' \
-            '{"total_count":101,"runners":[{"name":"runner-final","status":"online","busy":true}]}' \
+            '{"total_count":101,"runners":[{"id":101,"name":"runner-final","status":"online","busy":true,"labels":[{"name":"general-purpose"}]}]}' \
             > "${output}"
         ;;
     *)

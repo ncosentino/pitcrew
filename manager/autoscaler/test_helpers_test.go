@@ -61,6 +61,9 @@ type fakeScaleSetService struct {
 	removeErrors     map[int64]error
 	removeStarted    chan struct{}
 	removeContinue   <-chan struct{}
+	runnersByName    map[string]runnerReference
+	findRunnerErrors map[string]error
+	findRunnerCalls  map[string]int
 	events           *eventRecorder
 	ensureHandle     scaleSetHandle
 	ensureCalls      int
@@ -73,11 +76,14 @@ type fakeScaleSetService struct {
 
 func newFakeScaleSetService(events *eventRecorder) *fakeScaleSetService {
 	return &fakeScaleSetService{
-		nextRunnerID:   1,
-		removeErrors:   make(map[int64]error),
-		events:         events,
-		ensureHandle:   scaleSetHandle{id: 42, name: "pitcrew-test"},
-		scaleSetExists: true,
+		nextRunnerID:     1,
+		removeErrors:     make(map[int64]error),
+		runnersByName:    make(map[string]runnerReference),
+		findRunnerErrors: make(map[string]error),
+		findRunnerCalls:  make(map[string]int),
+		events:           events,
+		ensureHandle:     scaleSetHandle{id: 42, name: "pitcrew-test"},
+		scaleSetExists:   true,
 	}
 }
 
@@ -127,6 +133,11 @@ func (s *fakeScaleSetService) generateJIT(
 	id := s.nextRunnerID
 	if err == nil {
 		s.nextRunnerID++
+		s.runnersByName[runnerName] = runnerReference{
+			id:         id,
+			name:       runnerName,
+			scaleSetID: s.ensureHandle.id,
+		}
 	}
 	s.mu.Unlock()
 	if started != nil {
@@ -154,10 +165,31 @@ func (s *fakeScaleSetService) jitCallCount() int {
 	return s.jitCalls
 }
 
+func (s *fakeScaleSetService) findRunnerByName(
+	_ context.Context,
+	runnerName string,
+) (runnerReference, bool, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.findRunnerCalls[runnerName]++
+	if err := s.findRunnerErrors[runnerName]; err != nil {
+		return runnerReference{}, false, err
+	}
+	runner, exists := s.runnersByName[runnerName]
+	return runner, exists, nil
+}
+
 func (s *fakeScaleSetService) removeRunner(_ context.Context, runnerID int64) error {
 	s.mu.Lock()
 	s.removeCalls = append(s.removeCalls, runnerID)
 	err := s.removeErrors[runnerID]
+	if err == nil {
+		for name, runner := range s.runnersByName {
+			if runner.id == runnerID {
+				delete(s.runnersByName, name)
+			}
+		}
+	}
 	started := s.removeStarted
 	continued := s.removeContinue
 	s.mu.Unlock()

@@ -46,6 +46,8 @@ func main() {
 		err = runSetDemand(args)
 	case "acquire":
 		err = runAcquire(args)
+	case "bind-registration":
+		err = runBindRegistration(args)
 	case "adopt":
 		err = runAdopt(args)
 	case "begin-adoption":
@@ -104,6 +106,7 @@ Usage:
   pitcrew-admission apply-policy --socket PATH --policy-file FILE|-
   pitcrew-admission set-demand --socket PATH --profile ID --demand N
   pitcrew-admission acquire --socket PATH --profile ID --slot KEY [--demand N]
+  pitcrew-admission bind-registration --socket PATH --profile ID --slot KEY --runner-name NAME
   pitcrew-admission adopt --socket PATH --profile ID --slot KEY
   pitcrew-admission begin-adoption --socket PATH --profile ID
   pitcrew-admission complete-adoption --socket PATH --profile ID
@@ -201,6 +204,26 @@ func runAcquire(args []string) error {
 	client := admission.NewClient(*socketPath)
 	lease, err := client.Acquire(*profileID, *slotKey, *demand)
 	if err != nil && !errors.Is(err, admission.ErrDuplicateLease) {
+		return err
+	}
+	return printJSON(lease)
+}
+
+func runBindRegistration(args []string) error {
+	flagSet := flag.NewFlagSet("bind-registration", flag.ContinueOnError)
+	socketPath := flagSet.String("socket", "", "Unix domain socket path")
+	profileID := flagSet.String("profile", "", "profile identity")
+	slotKey := flagSet.String("slot", "", "exact slot identity")
+	runnerName := flagSet.String("runner-name", "", "exact GitHub runner name")
+	if err := flagSet.Parse(args); err != nil {
+		return err
+	}
+	if *socketPath == "" || *profileID == "" || *slotKey == "" || *runnerName == "" {
+		return errors.New("--socket, --profile, --slot, and --runner-name are required")
+	}
+	client := admission.NewClient(*socketPath)
+	lease, err := client.BindRegistration(*profileID, *slotKey, *runnerName)
+	if err != nil {
 		return err
 	}
 	return printJSON(lease)

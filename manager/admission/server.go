@@ -260,6 +260,16 @@ func (s *Server) dispatch(request Request) Response {
 			response.Error = err.Error()
 			response.ErrorCode = ErrorCodeDuplicateLease
 		}
+	case CommandBindRegistration:
+		lease, err := s.coordinator.BindRegistration(
+			request.ProfileID,
+			request.SlotKey,
+			request.RegistrationName,
+		)
+		if err != nil {
+			return errorResponse(version, err)
+		}
+		response.Lease = &lease
 	case CommandAdopt:
 		lease, err := s.coordinator.Adopt(request.ProfileID, request.SlotKey)
 		if err != nil {

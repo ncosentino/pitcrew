@@ -6,6 +6,8 @@ RUN_ID="${GITHUB_RUN_ID:-$$}"
 IMAGE="pitcrew-admission-contention:${RUN_ID}"
 VOLUME="pitcrew-admission-contention-${RUN_ID}"
 COORDINATOR="pitcrew-admission-contention-${RUN_ID}"
+RECOVERY_SURVIVOR="pitcrew-admission-survivor-${RUN_ID}"
+RECOVERY_ORPHAN="pitcrew-admission-orphan-${RUN_ID}"
 SOCKET="/var/lib/pitcrew-admission/coordinator.sock"
 TEMP_DIRECTORY=$(mktemp -d)
 GENERATION=0
@@ -20,6 +22,8 @@ cleanup() {
     if [ "${status}" -ne 0 ]; then
         docker logs "${COORDINATOR}" 2>&1 || true
     fi
+    docker rm -f "${RECOVERY_SURVIVOR}" >/dev/null 2>&1 || true
+    docker rm -f "${RECOVERY_ORPHAN}" >/dev/null 2>&1 || true
     docker rm -f "${COORDINATOR}" >/dev/null 2>&1 || true
     docker volume rm "${VOLUME}" >/dev/null 2>&1 || true
     docker image rm -f "${IMAGE}" >/dev/null 2>&1 || true
@@ -380,5 +384,93 @@ expect_exit 5 \
 release_slot fixed-crash active-slot
 autoscaled_acquire_activate autoscaled-crash replacement-slot
 release_slot autoscaled-crash replacement-slot
+
+GENERATION=$((GENERATION + 1))
+recovery_policy="${TEMP_DIRECTORY}/policy-${GENERATION}.json"
+cat > "${recovery_policy}" <<EOF
+{
+  "generation": ${GENERATION},
+  "totalUnits": 2,
+  "namespace": "synthetic",
+  "capacityUnits": 3,
+  "safetyMarginUnits": 1,
+  "hostPolicyFingerprint": "synthetic-host-${GENERATION}",
+  "profiles": [
+    {
+      "profileId": "restart-recovery",
+      "unitCost": 1,
+      "reservedUnits": 0,
+      "borrowable": false,
+      "profilePolicyFingerprint": "restart-recovery-${GENERATION}"
+    }
+  ]
+}
+EOF
+apply_policy "${recovery_policy}"
+
+for recovery_worker in \
+    "${RECOVERY_SURVIVOR}|survivor-slot" \
+    "${RECOVERY_ORPHAN}|orphan-slot"; do
+    IFS='|' read -r recovery_name recovery_slot <<< "${recovery_worker}"
+    docker run \
+        --detach \
+        --rm \
+        --name "${recovery_name}" \
+        --label "ephemeral-managed-runner-profile=restart-recovery" \
+        --label "ephemeral-managed-runner-slot=${recovery_slot}" \
+        --label "pitcrew-host-admission-profile=restart-recovery" \
+        --label "pitcrew-host-admission-slot=${recovery_slot}" \
+        --entrypoint /bin/sh \
+        "${IMAGE}" \
+        -c 'sleep 300' \
+        >/dev/null
+    client acquire \
+        --profile restart-recovery \
+        --slot "${recovery_slot}" \
+        --demand 1 \
+        >/dev/null
+    client bind-registration \
+        --profile restart-recovery \
+        --slot "${recovery_slot}" \
+        --runner-name "${recovery_name}" \
+        >/dev/null
+    client activate \
+        --profile restart-recovery \
+        --slot "${recovery_slot}" \
+        >/dev/null
+done
+
+stop_coordinator
+docker stop --time 2 "${RECOVERY_ORPHAN}" >/dev/null
+if docker container inspect "${RECOVERY_ORPHAN}" >/dev/null 2>&1; then
+    fail "Synthetic daemon-loss fixture retained the orphan worker."
+fi
+start_coordinator
+client begin-adoption --profile restart-recovery >/dev/null
+recovery_status="${TEMP_DIRECTORY}/recovery-status.json"
+client status > "${recovery_status}"
+[ "$(jq -r '.adoptionFences[] | select(.profileId == "restart-recovery") | .pendingLeaseKeys | length' "${recovery_status}")" -eq 2 ] ||
+    fail "Replacement-manager fence did not retain both durable active leases."
+[ "$(docker ps -q --filter 'label=ephemeral-managed-runner-profile=restart-recovery' | wc -l | tr -d ' ')" -eq 1 ] ||
+    fail "Synthetic daemon-loss fixture did not retain exactly one worker."
+
+client adopt --profile restart-recovery --slot survivor-slot >/dev/null
+expect_exit 3 \
+    client complete-adoption --profile restart-recovery
+client reconcile \
+    --profile restart-recovery \
+    --slot orphan-slot \
+    --evidence worker-and-registration-absent \
+    >/dev/null
+client complete-adoption --profile restart-recovery >/dev/null
+client status > "${recovery_status}"
+[ "$(jq '[.leases[] | select(.profileId == "restart-recovery" and .status == "active")] | length' "${recovery_status}")" -eq 1 ] ||
+    fail "Recovery did not retain exactly the surviving worker lease."
+[ "$(jq '[.tombstones[] | select(.profileId == "restart-recovery" and .slotKey == "orphan-slot")] | length' "${recovery_status}")" -eq 1 ] ||
+    fail "Recovery did not tombstone the exact absent worker lease."
+[ "$(jq '[.adoptionFences[] | select(.profileId == "restart-recovery")] | length' "${recovery_status}")" -eq 0 ] ||
+    fail "Recovery fence remained after every durable lease was accounted."
+docker rm -f "${RECOVERY_SURVIVOR}" >/dev/null
+release_slot restart-recovery survivor-slot
 
 echo "Real-Docker host admission contention passed."

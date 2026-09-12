@@ -171,11 +171,14 @@ pass. Fences from multiple profile replacements compose and survive coordinator
 restart; completing one profile does not clear another profile's fence.
 
 Protocol 3 adds reason-specific withholding errors and profile-scoped capacity
-accounting. During coordinator-first rolling replacement, protocol 3 clients
-and servers negotiate protocol 2 with the immediately previous release.
-Protocol 2 retains the umbrella `budget-exceeded` error and omits the new
-capacity fields; a contract-19 manager represents that interval as degraded
-evidence rather than fabricated zero.
+accounting. Protocol 4 adds exact runner-registration binding and a durable
+list of active lease keys that a replacement manager must adopt or reconcile
+before its fence can clear. The coordinator serves protocols 4, 3, and 2.
+Protocol 2 remains in this upgrade window because protocol 3 was not published
+as an independent release, so direct upgrades from the preceding protocol-2
+release remain coordinator-first compatible. A protocol-4 manager fails closed
+with recovery still fenced and no new worker starts if registration binding is
+unavailable.
 
 Labels, runner groups, and scale sets control GitHub queue eligibility.
 Host-local admission separately controls whether a participating manager may
@@ -792,7 +795,9 @@ acknowledged state, but it does fail closed for every new worker admission.
 Contract 19 adds profile-scoped allocatable capacity, the policy-derived
 theoretical maximum, and a bounded coordinator-owned withholding reason to
 `hostAdmission.accounting`. Protocol 3 returns the same reason through specific
-acquire error codes while preserving `budget-exceeded` for protocol-2 clients.
+acquire error codes while protocol 2 retains the umbrella `budget-exceeded`
+code. Protocol 4 retains the contract and adds durable recovery identity
+without changing the observed-state shape.
 
 `Setup-Runner.ps1` compares an autoscaled profile's configured
 `maximumActiveWorkers` with the theoretical policy ceiling. A higher value
@@ -800,6 +805,28 @@ produces a warning before image, Docker, or generated-state mutation, but is
 retained because a later reviewed host-wide policy change may raise the ceiling.
 Temporary leases, current demand, and fair-share rotation never make the static
 configuration invalid.
+
+### Protocol-4 orphaned-lease recovery
+
+Beginning manager adoption snapshots every active lease key for that profile.
+`CompleteAdoption` rejects the handoff while any snapshotted key remains
+unaccounted. A surviving exact Docker container adopts its key. A missing
+container is reconciled only after the manager also proves the exact GitHub
+runner registration absent or removes that exact registration successfully.
+
+New workers bind their generated runner name to the lease before activation.
+Autoscaled recovery also verifies the registration's exact scale-set identity.
+Fixed-profile leases created before protocol 4 have no bound runner name; those
+legacy leases reconcile when a complete GitHub inventory contains no possible
+slot-pattern registration, or when exactly one matching registration is
+offline, not busy, and retains every required profile label so it can be
+deleted by exact runner ID. Multiple candidates, mutable-label mismatch,
+online/busy state, or incomplete API evidence keeps the lease and host-wide
+fence.
+
+While recovery is unresolved, `hostAdmission.status` is `degraded`, new
+admission remains fenced, and the manager publishes a bounded recovery-pending
+diagnostic. Active leases still never expire from elapsed time.
 
 ## Capacity reconciliation
 

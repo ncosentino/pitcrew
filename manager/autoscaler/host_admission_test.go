@@ -127,6 +127,27 @@ func (c *fakeHostAdmissionClient) Acquire(
 	return lease, nil
 }
 
+func (c *fakeHostAdmissionClient) BindRegistration(
+	profileID,
+	slotKey,
+	registrationName string,
+) (admission.Lease, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	key := leaseSlotKey(profileID, slotKey)
+	lease, exists := c.leases[key]
+	if !exists {
+		return admission.Lease{}, admission.ErrLeaseNotFound
+	}
+	if lease.RegistrationName != "" &&
+		lease.RegistrationName != registrationName {
+		return admission.Lease{}, admission.ErrInvalidIdentity
+	}
+	lease.RegistrationName = registrationName
+	c.leases[key] = lease
+	return lease, nil
+}
+
 func (c *fakeHostAdmissionClient) BeginAdoption(profileID string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -489,6 +510,19 @@ func newHostAdmissionTestScalerInDirectory(
 	return scaler, api, docker, clock, hostAdmission, cancel
 }
 
+func TestHostAdmissionRecoveryRequiresProtocolFour(t *testing.T) {
+	client := newFakeHostAdmissionClient(1)
+	client.statusProtocolVersion = admission.AdmissionExplainabilityProtocolVersion
+	coordinator := newHostAdmissionCoordinatorWithClient(client, "profile-a")
+
+	if _, err := coordinator.pendingAdoptionLeases(); !errors.Is(
+		err,
+		errHostAdmissionDegraded,
+	) {
+		t.Fatalf("protocol-three recovery evidence did not fail closed: %v", err)
+	}
+}
+
 // TestHostAdmissionDisabledCoordinatorIsExactNoOp proves a disabled
 // coordinator (nil client, or a nil coordinator pointer) grants unconditionally
 // and never touches a client, preserving "disabled/empty remains exact
@@ -778,17 +812,13 @@ func TestHostAdmissionCreatedContainerRecoveryStartsWithActiveLease(t *testing.T
 }
 
 // TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease proves a
-// created-but-unstarted container whose lease cannot be reacquired (budget
-// exhausted, so a restart-discarded provisional lease cannot be granted
-// again) is removed exactly instead of being started, and its exact GitHub
-// registration is removed alongside the container so no JIT registration is
-// left orphaned.
+// created-but-unstarted container whose recorded lease no longer exists is
+// removed exactly instead of being started, and its exact GitHub registration
+// is removed alongside the container.
 func TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease(t *testing.T) {
 	client := newFakeHostAdmissionClient(0)
 	scaler, api, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
-	// No lease pre-granted and zero budget: reacquisition of "slot-missing"
-	// will fail with admission.ErrBudgetExceeded.
 
 	container := recoveredContainer{
 		containerID: "container-orphaned",
@@ -802,8 +832,8 @@ func TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease(t *testing.T)
 		unstarted:   true,
 		hostSlotKey: "slot-missing",
 	}
-	if err := scaler.recover(container); err == nil {
-		t.Fatal("expected recovery to fail for a rejected lease")
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("exactly discarded created container failed recovery: %v", err)
 	}
 	if len(docker.starts) != 0 {
 		t.Fatal("an unstarted container with a rejected lease was started")
@@ -820,19 +850,14 @@ func TestHostAdmissionCreatedContainerRecoveryRemovesRejectedLease(t *testing.T)
 	}
 }
 
-// TestHostAdmissionCreatedContainerRecoveryReacquiresDiscardedProvisional
-// proves a created-but-unstarted container whose provisional lease was
-// discarded by the host coordinator's own restart (e.g. the coordinator
-// restarted independently of the manager) is successfully reacquired under
-// the exact same slot key when budget is available, and the container is
-// started rather than discarded.
-func TestHostAdmissionCreatedContainerRecoveryReacquiresDiscardedProvisional(t *testing.T) {
+// TestHostAdmissionCreatedContainerRecoveryDiscardsExpiredProvisional proves a
+// coordinator restart that discarded a provisional lease also causes the
+// exact unstarted container and registration to be discarded. Recovery never
+// bypasses its adoption fence by acquiring replacement capacity.
+func TestHostAdmissionCreatedContainerRecoveryDiscardsExpiredProvisional(t *testing.T) {
 	client := newFakeHostAdmissionClient(1)
-	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	scaler, api, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
-	// No lease pre-granted: the coordinator has no memory of this slot, as
-	// if its own restart discarded the provisional lease. Budget is
-	// available, so reacquisition under the same slot key must succeed.
 
 	container := recoveredContainer{
 		containerID: "container-reacquired",
@@ -847,26 +872,24 @@ func TestHostAdmissionCreatedContainerRecoveryReacquiresDiscardedProvisional(t *
 		hostSlotKey: "slot-discarded",
 	}
 	if err := scaler.recover(container); err != nil {
-		t.Fatalf("recovery should reacquire a discarded provisional lease: %v", err)
+		t.Fatalf("discard expired provisional recovery: %v", err)
 	}
-	if len(docker.starts) != 1 || docker.starts[0] != "container-reacquired" {
-		t.Fatalf("reacquired created container was not started: %+v", docker.starts)
+	if len(docker.starts) != 0 {
+		t.Fatalf("expired provisional container was started: %+v", docker.starts)
 	}
-	if len(docker.stopRemove) != 0 {
-		t.Fatal("a container with a successfully reacquired lease was removed instead of started")
+	if len(docker.stopRemove) != 1 ||
+		docker.stopRemove[0] != "container-reacquired" {
+		t.Fatalf("expired provisional container was not removed exactly: %+v", docker.stopRemove)
 	}
-	found := false
-	for _, key := range client.acquireCalls {
-		if key == "profile-a/slot-discarded" {
-			found = true
-		}
+	if len(api.removeCalls) != 1 || api.removeCalls[0] != 104 {
+		t.Fatalf("expired provisional registration was not removed exactly: %+v", api.removeCalls)
 	}
-	if !found {
-		t.Fatal("recovery did not attempt to reacquire the discarded provisional lease")
+	if len(client.acquireCalls) != 0 {
+		t.Fatalf("recovery bypassed the adoption fence with Acquire: %+v", client.acquireCalls)
 	}
 	snapshot := scaler.snapshot()
-	if len(snapshot.runners) != 1 || snapshot.runners[0].hostSlotKey != "slot-discarded" {
-		t.Fatalf("reacquired runner lost its lease identity: %+v", snapshot.runners)
+	if len(snapshot.runners) != 0 {
+		t.Fatalf("discarded provisional was retained as a runner: %+v", snapshot.runners)
 	}
 }
 
@@ -889,8 +912,8 @@ func TestHostAdmissionCreatedContainerRecoveryWithoutLeaseLabelIsRemoved(t *test
 		createdAt:   time.Now().Add(-time.Minute),
 		unstarted:   true,
 	}
-	if err := scaler.recover(container); err == nil {
-		t.Fatal("expected recovery to fail for a missing lease label")
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("exactly discarded unlabeled container failed recovery: %v", err)
 	}
 	if len(docker.starts) != 0 {
 		t.Fatal("an unstarted, unlabeled container was started")
@@ -936,6 +959,15 @@ func TestHostAdmissionActiveLeaseRestartAdoption(t *testing.T) {
 	if !found {
 		t.Fatal("restart adoption did not re-confirm the lease via adopt")
 	}
+	if len(client.acquireCalls) != 0 {
+		t.Fatalf("restart adoption attempted ordinary acquisition: %+v", client.acquireCalls)
+	}
+	client.mu.Lock()
+	bound := client.leases["profile-a/slot-running"].RegistrationName
+	client.mu.Unlock()
+	if bound != "runner-running" {
+		t.Fatalf("restart adoption did not bind the exact registration: %q", bound)
+	}
 }
 
 // TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy proves that
@@ -948,6 +980,7 @@ func TestHostAdmissionActiveLeaseRestartAdoptionFailureSurvivesAsBusy(t *testing
 	client := newFakeHostAdmissionClient(1)
 	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
+	client.preGrant("profile-a", "slot-unconfirmed", true)
 	client.adoptErrs["profile-a/slot-unconfirmed"] =
 		errors.New("dial unix: connection refused")
 
@@ -1960,6 +1993,7 @@ func TestHostAdmissionRunningRecoveryOutagePreservesKeyForLaterRelease(t *testin
 	client := newFakeHostAdmissionClient(1)
 	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
+	client.preGrant("profile-a", "slot-outage", true)
 	client.adoptErrs["profile-a/slot-outage"] =
 		errors.New("dial unix: connection refused")
 
@@ -1982,9 +2016,6 @@ func TestHostAdmissionRunningRecoveryOutagePreservesKeyForLaterRelease(t *testin
 		t.Fatalf("recovered running worker lost its lease identity: %+v", runner)
 	}
 
-	// Now grant the lease so a later exit's release attempt can succeed
-	// exactly, proving the preserved identity is usable.
-	client.preGrant("profile-a", "slot-outage", true)
 	scaler.handleContainerExit(runner.containerID, exitStatus(0))
 
 	if len(client.releaseCalls) != 1 || client.releaseCalls[0] != "profile-a/slot-outage" {
@@ -2017,8 +2048,8 @@ func TestHostAdmissionCreatedRecoveryDiscardRemovesRegistration(t *testing.T) {
 		unstarted:   true,
 		hostSlotKey: "slot-discard",
 	}
-	if err := scaler.recover(container); err == nil {
-		t.Fatal("expected recovery to fail when the lease cannot be reacquired")
+	if err := scaler.recover(container); err != nil {
+		t.Fatalf("exactly discarded created container failed recovery: %v", err)
 	}
 	if len(docker.stopRemove) != 1 || docker.stopRemove[0] != "container-discard" {
 		t.Fatalf("discarded container was not removed exactly: %+v", docker.stopRemove)
@@ -2051,7 +2082,7 @@ func TestHostAdmissionCreatedRecoveryDiscardRegistrationFailureIsRetried(t *test
 		hostSlotKey: "slot-discard-retry",
 	}
 	if err := scaler.recover(container); err == nil {
-		t.Fatal("expected recovery to fail when the lease cannot be reacquired")
+		t.Fatal("expected recovery to fail while registration cleanup is pending")
 	}
 	if scaler.pendingRegistrationCount() != 1 {
 		t.Fatalf("expected the failed registration removal to be retained as pending, got %d", scaler.pendingRegistrationCount())

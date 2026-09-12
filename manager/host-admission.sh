@@ -93,6 +93,78 @@ host_admission_complete_adoption() {
         --profile "${PROFILE_ID}" >/dev/null 2>&1
 }
 
+host_admission_bind_registration() {
+    slot_key="$1"
+    runner_name="$2"
+    host_admission_enabled || return 0
+    host_admission_cli \
+        bind-registration \
+        --profile "${PROFILE_ID}" \
+        --slot "${slot_key}" \
+        --runner-name "${runner_name}" >/dev/null 2>&1
+}
+
+host_admission_pending_lease_inventory() {
+    output_path="$1"
+    host_admission_enabled || {
+        printf '[]\n' > "${output_path}"
+        return 0
+    }
+    temporary="${output_path}.$$"
+    if ! host_admission_cli status 2>/dev/null |
+        jq -e \
+            --arg profile "${PROFILE_ID}" \
+            '
+                (.adoptionFences // []
+                    | map(select(.profileId == $profile))
+                    | .[0]) as $fence
+                | if $fence == null then
+                    []
+                  else
+                    ($fence.pendingLeaseKeys // null) as $pending
+                    | if ($pending | type) != "array"
+                        or (($pending | unique | length) != ($pending | length))
+                        or any($pending[];
+                            type != "string"
+                            or test("^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$") | not)
+                      then error("invalid pending adoption lease keys")
+                      else
+                        [
+                            (.leases // [])[] as $lease
+                            | select(
+                                $lease.profileId == $profile
+                                and $lease.status == "active"
+                                and ($pending | index($lease.slotKey)) != null
+                            )
+                            | {
+                                slotKey: $lease.slotKey,
+                                registrationName: ($lease.registrationName // null)
+                            }
+                        ] as $leases
+                        | if ($leases | length) != ($pending | length)
+                            or (([$leases[].slotKey] | unique | length) != ($leases | length))
+                            or any($leases[];
+                                .registrationName != null
+                                and (
+                                    (.registrationName | type) != "string"
+                                    or (
+                                        .registrationName
+                                        | test("^[A-Za-z0-9][A-Za-z0-9_.-]{0,255}$")
+                                        | not
+                                    )
+                                ))
+                          then error("pending adoption lease inventory is incomplete")
+                          else $leases
+                          end
+                      end
+                  end
+            ' > "${temporary}" 2>/dev/null; then
+        rm -f "${temporary}"
+        return 1
+    fi
+    mv -f "${temporary}" "${output_path}"
+}
+
 host_admission_track_adoption() {
     slot_key="$1"
     adoption_directory="${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY:-}"
@@ -264,14 +336,24 @@ host_admission_adopt_running() {
     slot_state_path="$1"
     slot_key="$2"
     container_id="$3"
-    retry_delay="${4:-2}"
+    runner_name="$4"
+    retry_delay="${5:-2}"
     host_admission_enabled || return 0
 
     while docker inspect \
         --format '{{.State.Running}}' \
         "${container_id}" 2>/dev/null |
         grep -qx 'true'; do
-        if host_admission_adopt "${slot_state_path}" "${slot_key}"; then
+        host_admission_bind_registration "${slot_key}" "${runner_name}"
+        binding_status=$?
+        if [ "${binding_status}" -eq 0 ] &&
+            host_admission_adopt "${slot_state_path}" "${slot_key}"; then
+            host_admission_finish_tracked_adoption "${slot_key}"
+            return 0
+        fi
+        if [ "${binding_status}" -eq 4 ] &&
+            host_admission_adopt "${slot_state_path}" "${slot_key}" &&
+            host_admission_bind_registration "${slot_key}" "${runner_name}"; then
             host_admission_finish_tracked_adoption "${slot_key}"
             return 0
         fi

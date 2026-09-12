@@ -64,9 +64,13 @@ fetch_github_runner_inventory() {
             and (.total_count | type == "number" and . >= 0 and floor == .)
             and (.runners | type == "array")
             and all(.runners[];
-                (.name | type == "string" and length > 0)
+                (.id | type == "number" and . > 0 and floor == .)
+                and (.name | type == "string" and length > 0)
                 and (.status == "online" or .status == "offline")
-                and (.busy | type == "boolean"))
+                and (.busy | type == "boolean")
+                and (.labels | type == "array")
+                and all(.labels[];
+                    (.name | type == "string" and length > 0)))
         ' "${response_path}" >/dev/null 2>&1; then
             rm -f "${records_path}" "${response_path}" "${temporary_path}"
             return 1
@@ -78,7 +82,13 @@ fetch_github_runner_inventory() {
             rm -f "${records_path}" "${response_path}" "${temporary_path}"
             return 1
         fi
-        jq -c '.runners[] | {name, status, busy}' \
+        jq -c '.runners[] | {
+            id,
+            name,
+            status,
+            busy,
+            labels: [.labels[].name]
+        }' \
             "${response_path}" >> "${records_path}" || {
                 rm -f "${records_path}" "${response_path}" "${temporary_path}"
                 return 1
@@ -131,9 +141,13 @@ classify_github_runner_registration() {
         and (.totalCount == (.runners | length))
         and (([.runners[].name] | unique | length) == (.runners | length))
         and all(.runners[];
-            (.name | type == "string" and length > 0)
+            (.id | type == "number" and . > 0 and floor == .)
+            and (.name | type == "string" and length > 0)
             and (.status == "online" or .status == "offline")
-            and (.busy | type == "boolean"))
+            and (.busy | type == "boolean")
+            and (.labels | type == "array")
+            and all(.labels[];
+                type == "string" and length > 0))
     ' "${inventory_path}" >/dev/null 2>&1; then
         printf 'unknown\tunknown\t0\n'
         return
@@ -177,6 +191,24 @@ classify_github_runner_registration() {
     else
         printf 'disconnected\tunknown\t1\n'
     fi
+}
+
+remove_github_runner_registration() {
+    endpoint="$1"
+    runner_id="$2"
+    access_token="$3"
+    response_timeout="${4:-5}"
+    [ -n "${access_token}" ] || return 1
+    case "${runner_id}" in
+        ''|*[!0-9]*|0) return 1 ;;
+    esac
+    registration_cli="${PITCREW_GITHUB_RUNNER_CLI:-/usr/local/bin/pitcrew-github-runner}"
+    [ -x "${registration_cli}" ] || return 1
+    ACCESS_TOKEN="${access_token}" \
+        "${registration_cli}" delete \
+            --endpoint "${endpoint}" \
+            --runner-id "${runner_id}" \
+            --timeout-seconds "${response_timeout}"
 }
 
 registration_evidence_count() {

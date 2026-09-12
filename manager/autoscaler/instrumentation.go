@@ -312,6 +312,30 @@ func (s *instrumentedScaleSetService) generateJIT(
 	return config, err
 }
 
+func (s *instrumentedScaleSetService) findRunnerByName(
+	ctx context.Context,
+	runnerName string,
+) (runnerReference, bool, error) {
+	startedAt := time.Now()
+	runner, found, err := s.inner.findRunnerByName(ctx, runnerName)
+	duration := time.Since(startedAt)
+	observation := diagnosticsObservation{
+		subsystem:  subsystemRegistration,
+		operation:  operationRegistrationCleanup,
+		outcome:    outcomeSucceeded,
+		reason:     reasonNone,
+		duration:   &duration,
+		healthKind: healthGitHub,
+	}
+	if err != nil {
+		observation.outcome = failureOutcome(err)
+		observation.reason = classifyFailure(err)
+		observation.evidence = "exact runner registration lookup failed"
+	}
+	s.diagnostics.record(observation)
+	return runner, found, err
+}
+
 func (s *instrumentedScaleSetService) removeRunner(
 	ctx context.Context,
 	runnerID int64,

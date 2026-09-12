@@ -1054,6 +1054,49 @@ func TestUnsupportedSchemaVersionFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSchemaTwoAdoptionFenceMigratesPendingActiveLeases(t *testing.T) {
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "admission-state.json")
+	document := `{"schemaVersion":2,"epoch":1,"decisionSequence":1,` +
+		`"policy":{"generation":1,"totalUnits":1,"profiles":[{"profileId":"alpha","unitCost":1,"reservedUnits":0,"borrowable":false}]},` +
+		`"leases":{"alpha/slot-a":{"profileId":"alpha","slotKey":"slot-a","leaseId":"alpha/slot-a#1","units":1,"status":"active","grantedAtSequence":1,"activatedAtSequence":1}},` +
+		`"tombstones":{},"adoptionFences":{"alpha":{"profileId":"alpha"}}}`
+	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
+		t.Fatalf("seed schema-two state: %v", err)
+	}
+	coordinator, err := OpenFile(directory, newManualClock(), time.Minute)
+	if err != nil {
+		t.Fatalf("migrate schema-two state: %v", err)
+	}
+	snapshot := mustStatus(t, coordinator)
+	if len(snapshot.AdoptionFences) != 1 ||
+		len(snapshot.AdoptionFences[0].PendingLeaseKeys) != 1 ||
+		snapshot.AdoptionFences[0].PendingLeaseKeys[0] != "slot-a" {
+		t.Fatalf("schema-two fence did not recover pending active leases: %+v", snapshot)
+	}
+	if err := coordinator.CompleteAdoption("alpha"); !errors.Is(err, ErrAdoptionPending) {
+		t.Fatalf("migrated unaccounted lease did not remain fenced: %v", err)
+	}
+}
+
+func TestSchemaThreeAdoptionFenceRequiresPendingLeaseKeys(t *testing.T) {
+	directory := t.TempDir()
+	statePath := filepath.Join(directory, "admission-state.json")
+	document := `{"schemaVersion":3,"epoch":1,"decisionSequence":0,` +
+		`"policy":{"generation":1,"totalUnits":1,"profiles":[{"profileId":"alpha","unitCost":1,"reservedUnits":0,"borrowable":false}]},` +
+		`"leases":{},"tombstones":{},"adoptionFences":{"alpha":{"profileId":"alpha"}}}`
+	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
+		t.Fatalf("seed schema-three state: %v", err)
+	}
+	if _, err := OpenFile(
+		directory,
+		newManualClock(),
+		time.Minute,
+	); !errors.Is(err, ErrCorruptState) {
+		t.Fatalf("schema-three fence without pending keys did not fail closed: %v", err)
+	}
+}
+
 // --- Reduced budget natural drain --------------------------------------------
 
 func TestReducedBudgetDrainsNaturallyWithoutRevokingActiveLeases(t *testing.T) {
@@ -1204,6 +1247,166 @@ func TestAdoptPromotesExistingProvisionalLease(t *testing.T) {
 	}
 	if active.LeaseID != provisional.LeaseID || active.Status != LeaseActive {
 		t.Fatalf("adopt did not promote the existing lease exactly: provisional=%+v active=%+v", provisional, active)
+	}
+}
+
+func TestBindRegistrationPersistsExactIdentity(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open coordinator: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	if _, err := coordinator.Acquire("alpha", "slot-a", 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	bound, err := coordinator.BindRegistration("alpha", "slot-a", "runner-alpha-1")
+	if err != nil {
+		t.Fatalf("bind registration: %v", err)
+	}
+	if bound.RegistrationName != "runner-alpha-1" {
+		t.Fatalf("registration binding was not returned: %+v", bound)
+	}
+	if _, err := coordinator.BindRegistration(
+		"alpha",
+		"slot-a",
+		"runner-alpha-1",
+	); err != nil {
+		t.Fatalf("idempotent binding failed: %v", err)
+	}
+	if _, err := coordinator.BindRegistration(
+		"alpha",
+		"slot-a",
+		"runner-alpha-2",
+	); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("conflicting binding did not fail closed: %v", err)
+	}
+	if _, err := coordinator.Activate("alpha", "slot-a"); err != nil {
+		t.Fatalf("activate bound lease: %v", err)
+	}
+
+	restarted, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("restart coordinator: %v", err)
+	}
+	snapshot := mustStatus(t, restarted)
+	if len(snapshot.Leases) != 1 ||
+		snapshot.Leases[0].LeaseID != bound.LeaseID ||
+		snapshot.Leases[0].RegistrationName != "runner-alpha-1" {
+		t.Fatalf("active lease did not retain its registration binding: %+v", snapshot)
+	}
+}
+
+func TestBindRegistrationAllowsNamesLongerThanLeaseKeys(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open coordinator: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	if _, err := coordinator.Acquire("alpha", "slot-a", 1); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+
+	registrationName := strings.Repeat("r", 200)
+	bound, err := coordinator.BindRegistration("alpha", "slot-a", registrationName)
+	if err != nil {
+		t.Fatalf("bind long registration name: %v", err)
+	}
+	if bound.RegistrationName != registrationName {
+		t.Fatalf("long registration name was not preserved: %+v", bound)
+	}
+}
+
+func TestFailedRegistrationBindingDoesNotAccountForAdoption(t *testing.T) {
+	coordinator := OpenMemory(newManualClock(), time.Minute)
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	if _, err := coordinator.Adopt("alpha", "slot-a"); err != nil {
+		t.Fatalf("seed active lease: %v", err)
+	}
+	if _, err := coordinator.BindRegistration(
+		"alpha",
+		"slot-a",
+		"runner-original",
+	); err != nil {
+		t.Fatalf("bind original registration: %v", err)
+	}
+	if err := coordinator.BeginAdoption("alpha"); err != nil {
+		t.Fatalf("begin adoption: %v", err)
+	}
+	if _, err := coordinator.BindRegistration(
+		"alpha",
+		"slot-a",
+		"runner-conflict",
+	); !errors.Is(err, ErrInvalidIdentity) {
+		t.Fatalf("conflicting binding did not fail closed: %v", err)
+	}
+	snapshot := mustStatus(t, coordinator)
+	if len(snapshot.AdoptionFences) != 1 ||
+		len(snapshot.AdoptionFences[0].PendingLeaseKeys) != 1 ||
+		snapshot.AdoptionFences[0].PendingLeaseKeys[0] != "slot-a" {
+		t.Fatalf("failed registration binding cleared adoption state: %+v", snapshot)
+	}
+}
+
+func TestCompleteAdoptionRejectsUnaccountedActiveLease(t *testing.T) {
+	directory := t.TempDir()
+	clock := newManualClock()
+	coordinator, err := OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("open coordinator: %v", err)
+	}
+	mustApplyPolicy(t, coordinator, singleProfilePolicy("alpha", 1, 1, 0, false))
+	if _, err := coordinator.Adopt("alpha", "orphaned-slot"); err != nil {
+		t.Fatalf("seed active lease: %v", err)
+	}
+	if err := coordinator.BeginAdoption("alpha"); err != nil {
+		t.Fatalf("begin adoption: %v", err)
+	}
+	started := mustStatus(t, coordinator)
+	if err := coordinator.BeginAdoption("alpha"); err != nil {
+		t.Fatalf("repeat adoption begin: %v", err)
+	}
+	repeated := mustStatus(t, coordinator)
+	if repeated.Epoch != started.Epoch ||
+		len(repeated.AdoptionFences) != 1 ||
+		len(repeated.AdoptionFences[0].PendingLeaseKeys) != 1 {
+		t.Fatalf("repeated adoption begin changed the durable fence: %+v", repeated)
+	}
+	coordinator, err = OpenFile(directory, clock, time.Minute)
+	if err != nil {
+		t.Fatalf("restart coordinator: %v", err)
+	}
+
+	if err := coordinator.CompleteAdoption("alpha"); !errors.Is(err, ErrAdoptionPending) {
+		t.Fatalf("expected an unaccounted active lease to keep adoption fenced, got %v", err)
+	}
+	snapshot := mustStatus(t, coordinator)
+	if len(snapshot.AdoptionFences) != 1 ||
+		len(snapshot.AdoptionFences[0].PendingLeaseKeys) != 1 ||
+		snapshot.AdoptionFences[0].PendingLeaseKeys[0] != "orphaned-slot" {
+		t.Fatalf("unaccounted lease cleared the adoption fence: %+v", snapshot)
+	}
+	if len(snapshot.Leases) != 1 || snapshot.Leases[0].SlotKey != "orphaned-slot" {
+		t.Fatalf("unaccounted lease was changed during failed completion: %+v", snapshot)
+	}
+	snapshot.AdoptionFences[0].PendingLeaseKeys[0] = "mutated-by-caller"
+	unchanged := mustStatus(t, coordinator)
+	if unchanged.AdoptionFences[0].PendingLeaseKeys[0] != "orphaned-slot" {
+		t.Fatalf("status exposed mutable adoption state: %+v", unchanged)
+	}
+
+	if err := coordinator.Reconcile(
+		"alpha",
+		"orphaned-slot",
+		"worker-and-registration-absent",
+	); err != nil {
+		t.Fatalf("reconcile proven-absent lease: %v", err)
+	}
+	if err := coordinator.CompleteAdoption("alpha"); err != nil {
+		t.Fatalf("complete adoption after reconciliation: %v", err)
 	}
 }
 
@@ -2323,7 +2526,7 @@ func TestLastDecisionPersistsAcrossRestart(t *testing.T) {
 func TestDurableStateValidationRejectsNonLeaseDecisionCommand(t *testing.T) {
 	directory := t.TempDir()
 	statePath := filepath.Join(directory, "admission-state.json")
-	document := `{"schemaVersion":1,"epoch":0,"decisionSequence":1,` +
+	document := `{"schemaVersion":2,"epoch":0,"decisionSequence":1,` +
 		`"policy":{"generation":0,"totalUnits":0,"profiles":null},"leases":{},"tombstones":{},` +
 		`"lastDecision":{"sequence":1,"command":"status","granted":true,"decidedAtUnixNano":1}}`
 	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
@@ -2340,7 +2543,7 @@ func TestDurableStateValidationRejectsNonLeaseDecisionCommand(t *testing.T) {
 func TestDurableStateValidationRejectsNegativeLastDecisionSequence(t *testing.T) {
 	directory := t.TempDir()
 	statePath := filepath.Join(directory, "admission-state.json")
-	document := `{"schemaVersion":1,"epoch":0,"decisionSequence":1,` +
+	document := `{"schemaVersion":2,"epoch":0,"decisionSequence":1,` +
 		`"policy":{"generation":0,"totalUnits":0,"profiles":null},"leases":{},"tombstones":{},` +
 		`"lastDecision":{"sequence":-1,"command":"acquire","granted":true,"decidedAtUnixNano":1}}`
 	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
@@ -2358,7 +2561,7 @@ func TestDurableStateValidationRejectsNegativeLastDecisionSequence(t *testing.T)
 func TestAbsentLastDecisionRemainsValidForOlderDocuments(t *testing.T) {
 	directory := t.TempDir()
 	statePath := filepath.Join(directory, "admission-state.json")
-	document := `{"schemaVersion":1,"epoch":0,"decisionSequence":0,` +
+	document := `{"schemaVersion":2,"epoch":0,"decisionSequence":0,` +
 		`"policy":{"generation":0,"totalUnits":0,"profiles":null},"leases":{},"tombstones":{}}`
 	if err := writeFileAtomically(statePath, []byte(document)); err != nil {
 		t.Fatalf("seed state: %v", err)

@@ -92,6 +92,20 @@ coordinator policy, and confirm observed state is current. Reapply the complete
 profile command through `Setup-Runner.ps1`; do not edit generated fingerprints
 or coordinator state.
 
+If degradation follows a Docker daemon restart and held units exceed exact
+profile/slot worker evidence, inspect `operationJournal` and, for autoscaled
+profiles, `autoscaling.lastError`. An
+`orphaned host admission lease reconciliation is pending` condition means the
+replacement manager has preserved the host-wide fence while it verifies
+missing workers against GitHub.
+
+Replay the affected profile's complete reviewed setup command with `-Refresh`.
+The manager adopts surviving exact-label containers and reconciles a missing
+lease only after the exact registration is absent or has been removed. API
+failure, unknown scale-set identity, or a possible legacy fixed registration
+keeps the lease fenced. Do not edit coordinator state, delete its volume, or
+release active leases based on age.
+
 ## Host-admission budget is exhausted
 
 Positive withheld units, fewer available units than one worker cost, and a

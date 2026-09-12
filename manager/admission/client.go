@@ -136,6 +136,31 @@ func (c *Client) Acquire(profileID, slotKey string, pendingDemand int) (Lease, e
 	return *response.Lease, result
 }
 
+// BindRegistration durably associates one live lease with the exact GitHub
+// runner name the owning manager will start under that lease.
+func (c *Client) BindRegistration(
+	profileID,
+	slotKey,
+	registrationName string,
+) (Lease, error) {
+	response, err := c.call(Request{
+		Command:          CommandBindRegistration,
+		ProfileID:        profileID,
+		SlotKey:          slotKey,
+		RegistrationName: registrationName,
+	})
+	if err != nil {
+		return Lease{}, err
+	}
+	if err := responseErr(response); err != nil {
+		return Lease{}, err
+	}
+	if response.Lease == nil {
+		return Lease{}, fmt.Errorf("admission: bind-registration response missing lease")
+	}
+	return *response.Lease, nil
+}
+
 // Adopt records an already-running worker as an active lease without applying
 // ordinary Acquire budget enforcement. It is idempotent for an existing
 // profile/slot lease so manager recovery can safely retry after ambiguous

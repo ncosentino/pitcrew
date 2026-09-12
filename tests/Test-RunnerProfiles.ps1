@@ -38,9 +38,13 @@ $managerEntrypointPath = Join-Path $runnerRoot 'manager' 'entrypoint.sh'
 $containerSupervisionPath = Join-Path $runnerRoot 'manager' 'container-supervision.sh'
 $autoscalerModulePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'go.mod'
 $autoscalerHardwarePath = Join-Path $runnerRoot 'manager' 'autoscaler' 'hardware.go'
+$githubRunnerHelperPath = Join-Path `
+    $runnerRoot 'manager' 'autoscaler' 'cmd' 'pitcrew-github-runner' 'main.go'
 $managerDockerfilePath = Join-Path $runnerRoot 'manager' 'Dockerfile'
 $observabilityPath = Join-Path $runnerRoot 'manager' 'observability.sh'
 $diagnosticsPath = Join-Path $runnerRoot 'manager' 'diagnostics.sh'
+$hostAdmissionRecoveryPath = Join-Path `
+    $runnerRoot 'manager' 'host-admission-recovery.sh'
 $reconciliationPath = Join-Path $runnerRoot 'manager' 'reconciliation.sh'
 $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $hostAdmissionComposePath = Join-Path $runnerRoot 'host-admission.compose.yml'
@@ -330,9 +334,11 @@ $requiredPaths = @(
     $containerSupervisionPath,
     $autoscalerModulePath,
     $autoscalerHardwarePath,
+    $githubRunnerHelperPath,
     $managerDockerfilePath,
     $observabilityPath,
     $diagnosticsPath,
+    $hostAdmissionRecoveryPath,
     $reconciliationPath,
     $composePath,
     $hostAdmissionComposePath,
@@ -3370,7 +3376,7 @@ try {
         ) -and
         $admissionProfile.HostAdmissionVolumeName -ceq 'pitcrew-host-admission-primary' -and
         $admissionProfile.HostAdmissionComposeProjectName -ceq 'pitcrew-host-admission-primary' -and
-        $admissionProfile.HostAdmissionProtocolVersion -eq 3 -and
+        $admissionProfile.HostAdmissionProtocolVersion -eq 4 -and
         $admissionProfile.HostAdmissionSocketPath -ceq
             '/var/lib/pitcrew-admission/coordinator.sock'
     ) 'External profile did not derive stable host-admission state and runtime identities.'
@@ -5869,6 +5875,12 @@ Add-Check ($manager -match [regex]::Escape('rm -f "${OBSERVED_STATE_DIRTY}"')) '
 Add-Check ($managerDockerfile -match 'FROM docker:28-cli AS docker-cli') 'The manager does not isolate the Docker client build stage.'
 Add-Check ($managerDockerfile -match 'FROM golang:1\.25\.3-alpine AS autoscaler-build') 'The manager does not pin the autoscaler Go build stage.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=autoscaler-build /out/pitcrew-autoscaler /usr/local/bin/pitcrew-autoscaler')) 'The manager runtime does not include the scale-set autoscaler.'
+Add-Check (
+    $managerDockerfile -match [regex]::Escape(
+        '-o /out/pitcrew-github-runner') -and
+    $managerDockerfile -match [regex]::Escape(
+        'COPY --from=autoscaler-build /out/pitcrew-github-runner /usr/local/bin/pitcrew-github-runner')
+) 'The manager runtime does not include the bounded GitHub runner deletion helper.'
 Add-Check ($managerDockerfile -match 'FROM alpine:3\.22') 'The manager runtime is not based on minimal Alpine.'
 Add-Check ($managerDockerfile -match [regex]::Escape('COPY --from=docker-cli /usr/local/bin/docker /usr/local/bin/docker')) 'The manager runtime does not copy only the Docker client binary.'
 Add-Check ($managerDockerfile -match 'ARG JQ_VERSION=1\.8\.2') 'The manager does not pin its jq release.'
@@ -5877,6 +5889,12 @@ Add-Check ($managerDockerfile -match 'JQ_SHA256_ARM64=[0-9a-f]{64}') 'The manage
 Add-Check ($managerDockerfile -match [regex]::Escape('sha256sum -c -')) 'The manager does not verify the downloaded jq binary.'
 Add-Check ($managerDockerfile -match 'until wget') 'The manager does not retry transient jq download failures.'
 Add-Check ($managerDockerfile -notmatch 'apk add') 'The manager still resolves jq through a mutable Alpine package repository.'
+Add-Check (
+    $manager -match [regex]::Escape(
+        '. "${SCRIPT_DIRECTORY}/host-admission-recovery.sh"') -and
+    $managerDockerfile -match [regex]::Escape(
+        'COPY host-admission-recovery.sh /usr/local/bin/host-admission-recovery.sh')
+) 'The fixed manager does not ship and load orphaned lease recovery.'
 Add-Check ($managerDockerfile -match [regex]::Escape('ENTRYPOINT ["/usr/local/bin/entrypoint.sh"]')) 'The manager image does not use the mode-selecting entrypoint.'
 Add-Check (
     $hostAdmissionCompose -match '(?m)^  admission-coordinator:\r?$' -and
@@ -5886,6 +5904,8 @@ Add-Check (
         [regex]::Escape('/var/lib/pitcrew-admission/coordinator.sock') -and
     $hostAdmissionCompose -match
         'pitcrew-host-admission-namespace: \$\{PITCREW_HOST_ADMISSION_NAMESPACE\}' -and
+    $hostAdmissionCompose -match
+        'pitcrew-host-admission-protocol-version: \$\{PITCREW_HOST_ADMISSION_PROTOCOL_VERSION:-4\}' -and
     ([regex]::Matches(
         $hostAdmissionCompose,
         'pitcrew-host-admission-namespace: \$\{PITCREW_HOST_ADMISSION_NAMESPACE\}'
