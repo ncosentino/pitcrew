@@ -742,6 +742,62 @@ function Publish-RunnerHostAdmissionPolicy {
     return $acknowledgement
 }
 
+function Complete-RunnerHostAdmissionEmptyAdoptionFence {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$AdmissionConfig,
+
+        [Parameter(Mandatory)]
+        [string]$ProfileName
+    )
+
+    $status = Wait-RunnerHostAdmissionReady -AdmissionConfig $AdmissionConfig
+    $fences = @(
+        @($status.adoptionFences) |
+            Where-Object { [string]$_.profileId -ceq $ProfileName }
+    )
+    if ($fences.Count -eq 0) {
+        return [PSCustomObject][ordered]@{
+            present = $false
+            cleared = $false
+            pendingLeaseCount = 0
+        }
+    }
+    if ($fences.Count -ne 1) {
+        throw "Host-admission status contains multiple adoption fences for profile '$ProfileName'."
+    }
+
+    $fence = $fences[0]
+    if (-not $fence.PSObject.Properties['pendingLeaseKeys'] -or
+        $null -eq $fence.pendingLeaseKeys) {
+        throw "Host-admission adoption fence for profile '$ProfileName' has no validated pending lease evidence."
+    }
+    $pendingLeaseCount = @($fence.pendingLeaseKeys).Count
+    if ($pendingLeaseCount -gt 0) {
+        return [PSCustomObject][ordered]@{
+            present = $true
+            cleared = $false
+            pendingLeaseCount = $pendingLeaseCount
+        }
+    }
+
+    Invoke-RunnerHostAdmissionClient `
+        -AdmissionConfig $AdmissionConfig `
+        -ClientArguments @(
+            'complete-adoption',
+            '--socket',
+            $AdmissionConfig.HostAdmissionSocketPath,
+            '--profile',
+            $ProfileName
+        ) `
+        -InputObject $null | Out-Null
+    return [PSCustomObject][ordered]@{
+        present = $true
+        cleared = $true
+        pendingLeaseCount = 0
+    }
+}
+
 function Stop-RunnerProfile {
     param(
         [Parameter(Mandatory)]
@@ -2432,6 +2488,22 @@ try {
                 Write-Host "[done] Autoscaling maximum updated to $total worker(s): $active active, minimum idle $minimumIdle; manager restart not required."
             } else {
                 Write-Host "[done] Capacity-only change: adding $added worker(s), draining $draining worker(s), $unchanged unchanged; manager restart not required."
+            }
+            if ($hostAdmissionContext) {
+                $adoptionFence = Complete-RunnerHostAdmissionEmptyAdoptionFence `
+                    -AdmissionConfig $admissionServiceConfig `
+                    -ProfileName $profileConfig.Name
+                if (
+                    $adoptionFence.present -and
+                    -not $adoptionFence.cleared
+                ) {
+                    Write-Warning (
+                        "Host-admission adoption remains degraded for profile " +
+                        "'$($profileConfig.Name)' with " +
+                        "$($adoptionFence.pendingLeaseCount) pending lease(s); " +
+                        'manager-only recovery remains required.'
+                    )
+                }
             }
         } else {
             $acknowledgement = Wait-RunnerCapacityAcknowledgement `
