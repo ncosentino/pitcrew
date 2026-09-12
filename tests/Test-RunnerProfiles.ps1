@@ -5891,6 +5891,79 @@ $hostAdmissionManagerCompose = Get-Content `
     -LiteralPath $hostAdmissionManagerComposePath `
     -Raw `
     -Encoding UTF8
+$setupTokens = $null
+$setupParseErrors = $null
+$setupAst = [System.Management.Automation.Language.Parser]::ParseInput(
+    $setupSource,
+    [ref]$setupTokens,
+    [ref]$setupParseErrors
+)
+$emptyFenceFunction = $setupAst.Find(
+    {
+        param($node)
+        $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and
+            $node.Name -eq 'Complete-RunnerHostAdmissionEmptyAdoptionFence'
+    },
+    $true
+)
+if ($null -ne $emptyFenceFunction) {
+    Invoke-Expression $emptyFenceFunction.Extent.Text
+    $script:testHostAdmissionStatus = [PSCustomObject]@{
+        adoptionFences = @(
+            [PSCustomObject]@{
+                profileId = 'profile-a'
+                pendingLeaseKeys = @()
+            }
+        )
+    }
+    $script:testHostAdmissionCalls = [System.Collections.Generic.List[string]]::new()
+    function Wait-RunnerHostAdmissionReady {
+        param([PSCustomObject]$AdmissionConfig)
+        return $script:testHostAdmissionStatus
+    }
+    function Invoke-RunnerHostAdmissionClient {
+        param(
+            [PSCustomObject]$AdmissionConfig,
+            [string[]]$ClientArguments,
+            [object]$InputObject
+        )
+    $script:testHostAdmissionCalls.Add($ClientArguments[0]) | Out-Null
+    }
+    $emptyFenceResult = @(
+    Complete-RunnerHostAdmissionEmptyAdoptionFence `
+    -AdmissionConfig ([PSCustomObject]@{
+        HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+    }) `
+    -ProfileName 'profile-a'
+    )[-1]
+    Add-Check (
+        $emptyFenceResult.present -and
+        $emptyFenceResult.cleared -and
+        $emptyFenceResult.pendingLeaseCount -eq 0 -and
+        $script:testHostAdmissionCalls -contains 'complete-adoption'
+    ) 'An empty adoption fence was not completed after a converged capacity update.'
+
+    $script:testHostAdmissionCalls.Clear()
+    $script:testHostAdmissionStatus.adoptionFences[0].pendingLeaseKeys = @('slot-a')
+    $pendingFenceResult = @(
+        Complete-RunnerHostAdmissionEmptyAdoptionFence `
+        -AdmissionConfig ([PSCustomObject]@{
+            HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+        }) `
+        -ProfileName 'profile-a'
+    )[-1]
+    Add-Check (
+        $pendingFenceResult.present -and
+        -not $pendingFenceResult.cleared -and
+        $pendingFenceResult.pendingLeaseCount -eq 1 -and
+        $script:testHostAdmissionCalls.Count -eq 0
+    ) 'A pending adoption lease was not preserved as explicit degraded evidence.'
+    Remove-Item Function:\Complete-RunnerHostAdmissionEmptyAdoptionFence -Force
+    Remove-Item Function:\Wait-RunnerHostAdmissionReady -Force
+    Remove-Item Function:\Invoke-RunnerHostAdmissionClient -Force
+} else {
+    Add-Check $false 'The empty adoption-fence reconciliation helper is missing.'
+}
 $exampleEnvironment = Get-Content -LiteralPath (Join-Path $runnerRoot '.env.example') -Raw -Encoding UTF8
 $routing = Get-Content -LiteralPath $routingPath -Raw -Encoding UTF8
 Add-Check ($manager -match [regex]::Escape('MANAGED_LABEL="${MANAGED_LABEL_KEY}=${PROFILE_ID}"')) 'The manager cleanup label is not profile-specific.'
@@ -6003,6 +6076,14 @@ Add-Check (
     $setupSource -match
         '(?s)Publish-RunnerHostAdmissionPolicy.*?begin-adoption.*?Stop-RunnerManagerForHandoff'
 ) 'Setup does not establish the durable host-wide adoption fence before manager handoff.'
+Add-Check (
+    $setupSource -match
+        '(?s)Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pendingLeaseKeys.*?complete-adoption'
+) 'Capacity-only host-admission updates do not safely clear an empty adoption fence.'
+Add-Check (
+    $setupSource -match
+        '(?s)if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pending lease\(s\)'
+) 'Capacity-only host-admission updates do not retain explicit degraded evidence for pending leases.'
 Add-Check (
     $setupSource -match
         [regex]::Escape(
