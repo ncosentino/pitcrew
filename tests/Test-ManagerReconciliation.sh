@@ -1640,7 +1640,7 @@ record_manager_event "${access_health_directory}" access-health-manager \
     "Stored runner credential authorization failed" "2026-08-30T12:05:00Z" none || true
 assert_equals \
     "healthy" \
-    "$(jq -r '.state' "${access_health_directory}/health-github.json")" \
+    "$(jq -r '.state' "${access_health_directory}/subsystem-github.json")" \
     "A credential-only journal event incorrectly replaced independent GitHub health."
 REGISTRATION_ACCESS_HEALTH_STATUS="failed"
 REGISTRATION_ACCESS_HEALTH_REASON="authorization-failed"
