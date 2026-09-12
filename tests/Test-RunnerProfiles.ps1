@@ -6025,6 +6025,22 @@ if ($null -ne $emptyFenceFunction) {
         $malformedLeaseRejected = $true
     }
     Add-Check $malformedLeaseRejected 'A malformed authoritative active lease inventory was accepted.'
+    $script:testHostAdmissionStatus.leases = @()
+    function Wait-RunnerHostAdmissionReady {
+        param([PSCustomObject]$AdmissionConfig)
+        throw 'coordinator unavailable'
+    }
+    $unavailableEvidenceRetained = $false
+    try {
+        Complete-RunnerHostAdmissionEmptyAdoptionFence `
+            -AdmissionConfig ([PSCustomObject]@{
+                HostAdmissionSocketPath = '/var/lib/pitcrew-admission/coordinator.sock'
+            }) `
+            -ProfileName 'profile-a'
+    } catch {
+        $unavailableEvidenceRetained = $true
+    }
+    Add-Check $unavailableEvidenceRetained 'An unavailable coordinator was treated as authoritative zero pending leases.'
     Remove-Item Function:\Complete-RunnerHostAdmissionEmptyAdoptionFence -Force
     Remove-Item Function:\Wait-RunnerHostAdmissionReady -Force
     Remove-Item Function:\Invoke-RunnerHostAdmissionClient -Force
@@ -6151,6 +6167,10 @@ Add-Check (
     $setupSource -match
         '(?s)if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence.*?pending lease\(s\).*?Capacity unchanged.*?Complete-RunnerHostAdmissionEmptyAdoptionFence'
 ) 'Changed and unchanged accepted capacity updates do not retain explicit degraded adoption evidence.'
+Add-Check (
+    $setupSource -match
+        '(?s)\} else \{\s*\$acknowledgement = Wait-RunnerCapacityAcknowledgement.*?Capacity unchanged.*?if \(\$hostAdmissionContext\).*?Complete-RunnerHostAdmissionEmptyAdoptionFence'
+) 'Unchanged accepted capacity acknowledgements do not reconcile adoption fences.'
 Add-Check (
     $setupSource -match
         [regex]::Escape(
