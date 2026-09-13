@@ -39,13 +39,11 @@ coordinator_id() {
 }
 
 coordinator_status() {
-    coordinator=$(coordinator_id)
-    [ -n "${coordinator}" ] &&
-        [ "$(printf '%s\n' "${coordinator}" | wc -l | tr -d ' ')" -eq 1 ] ||
-        return 1
-    docker exec \
-        "${coordinator}" \
-        /usr/local/bin/pitcrew-admission \
+    docker run \
+        --rm \
+        --mount "type=volume,src=pitcrew-host-admission-${NAMESPACE},dst=/var/lib/pitcrew-admission" \
+        --entrypoint /usr/local/bin/pitcrew-admission \
+        "ephemeral-runner-manager:host-admission" \
         status \
         --socket "${SOCKET}"
 }
@@ -77,6 +75,16 @@ wait_for_initial_state() {
         fi
         sleep 1
     done
+    echo "Acknowledgement:" >&2
+    cat "${ACKNOWLEDGEMENT}" >&2 2>/dev/null || true
+    echo "Observed state:" >&2
+    cat "${OBSERVED_STATE}" >&2 2>/dev/null || true
+    echo "Manager containers:" >&2
+    docker ps --filter "label=${MANAGER_LABEL}" >&2 || true
+    echo "Worker containers:" >&2
+    docker ps --filter "label=${WORKER_LABEL}" >&2 || true
+    echo "Coordinator status:" >&2
+    coordinator_status >&2 2>/dev/null || true
     fail "Initial fixed profile did not reach a healthy one-worker state."
 }
 
