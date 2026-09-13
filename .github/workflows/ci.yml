@@ -65,8 +65,6 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       report_b64: ${{ steps.coverage.outputs.report_b64 }}
-    env:
-      COVERAGE_DIRECTORY: ${{ runner.temp }}/pitcrew-coverage
     steps:
       - name: Checkout
         uses: actions/checkout@v6
@@ -133,14 +131,16 @@ jobs:
       - name: Run admission coordinator tests
         working-directory: manager/admission
         run: |
-          mkdir -p "$COVERAGE_DIRECTORY"
-          go test -covermode=atomic -coverprofile="$COVERAGE_DIRECTORY/admission.out" ./...
+          coverage_directory="$RUNNER_TEMP/pitcrew-coverage"
+          mkdir -p "$coverage_directory"
+          go test -covermode=atomic -coverprofile="$coverage_directory/admission.out" ./...
           go vet ./...
 
       - name: Run autoscaler tests
         working-directory: manager/autoscaler
         run: |
-          go test -covermode=atomic -coverprofile="$COVERAGE_DIRECTORY/autoscaler.out" ./...
+          coverage_directory="$RUNNER_TEMP/pitcrew-coverage"
+          go test -covermode=atomic -coverprofile="$coverage_directory/autoscaler.out" ./...
           go vet ./...
 
       - name: Report Go coverage
@@ -151,13 +151,14 @@ jobs:
             ${{ github.event.pull_request.base.sha || github.event.before || '' }}
           HEAD_SHA: ${{ github.sha }}
         run: |
-          $reportPath = Join-Path $env:COVERAGE_DIRECTORY 'coverage.md'
+          $coverageDirectory = Join-Path $env:RUNNER_TEMP 'pitcrew-coverage'
+          $reportPath = Join-Path $coverageDirectory 'coverage.md'
           $changedArguments = @{}
           if (
             $env:BASE_SHA -and
             $env:BASE_SHA -notmatch '^0+$'
           ) {
-            $changedFilesPath = Join-Path $env:COVERAGE_DIRECTORY 'changed.txt'
+            $changedFilesPath = Join-Path $coverageDirectory 'changed.txt'
             $changedFiles = @(
               git diff --name-only "$env:BASE_SHA...$env:HEAD_SHA" -- `
                 manager/admission manager/autoscaler
@@ -175,9 +176,9 @@ jobs:
           & ./scripts/coverage/New-GoCoverageReport.ps1 `
             -ProjectRoot $PWD `
             -AdmissionProfile (
-              Join-Path $env:COVERAGE_DIRECTORY 'admission.out') `
+              Join-Path $coverageDirectory 'admission.out') `
             -AutoscalerProfile (
-              Join-Path $env:COVERAGE_DIRECTORY 'autoscaler.out') `
+              Join-Path $coverageDirectory 'autoscaler.out') `
             -OutputPath $reportPath `
             @changedArguments
 

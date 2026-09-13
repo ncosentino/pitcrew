@@ -193,6 +193,10 @@ func Scale() int {
 
     $workflow = Get-Content -LiteralPath $workflowPath -Raw -Encoding UTF8
     Add-Check (
+        $workflow -notmatch
+            '(?m)^\s{6}COVERAGE_DIRECTORY:\s*\$\{\{\s*runner\.'
+    ) 'CI uses the runner context in a job-level coverage environment value.'
+    Add-Check (
         $workflow -match
             'go test -covermode=atomic -coverprofile=.*admission' -and
         $workflow -match
