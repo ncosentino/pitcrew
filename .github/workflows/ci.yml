@@ -63,9 +63,15 @@ jobs:
       needs.validation-plan.outputs.scope == 'full' ||
       needs.validation-plan.outputs.scope == 'subset'
     runs-on: ubuntu-latest
+    outputs:
+      report_b64: ${{ steps.coverage.outputs.report_b64 }}
+    env:
+      COVERAGE_DIRECTORY: ${{ runner.temp }}/pitcrew-coverage
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
 
       - name: Validate PowerShell syntax
         shell: pwsh
@@ -117,17 +123,78 @@ jobs:
           go-version-file: manager/autoscaler/go.mod
           cache-dependency-path: manager/autoscaler/go.sum
 
+      - name: Validate coverage reporting
+        shell: pwsh
+        run: ./tests/Test-CoverageReporting.ps1
+
+      - name: Validate coverage comment publisher
+        run: node --test ./tests/Test-CoverageComment.mjs
+
       - name: Run admission coordinator tests
         working-directory: manager/admission
         run: |
-          go test ./...
+          mkdir -p "$COVERAGE_DIRECTORY"
+          go test -covermode=atomic -coverprofile="$COVERAGE_DIRECTORY/admission.out" ./...
           go vet ./...
 
       - name: Run autoscaler tests
         working-directory: manager/autoscaler
         run: |
-          go test ./...
+          go test -covermode=atomic -coverprofile="$COVERAGE_DIRECTORY/autoscaler.out" ./...
           go vet ./...
+
+      - name: Report Go coverage
+        id: coverage
+        shell: pwsh
+        env:
+          BASE_SHA: >-
+            ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          HEAD_SHA: ${{ github.sha }}
+        run: |
+          $reportPath = Join-Path $env:COVERAGE_DIRECTORY 'coverage.md'
+          $changedArguments = @{}
+          if (
+            $env:BASE_SHA -and
+            $env:BASE_SHA -notmatch '^0+$'
+          ) {
+            $changedFilesPath = Join-Path $env:COVERAGE_DIRECTORY 'changed.txt'
+            $changedFiles = @(
+              git diff --name-only "$env:BASE_SHA...$env:HEAD_SHA" -- `
+                manager/admission manager/autoscaler
+            )
+            if ($LASTEXITCODE -ne 0) {
+              throw 'Failed to resolve changed Go files for coverage reporting.'
+            }
+            Set-Content `
+              -LiteralPath $changedFilesPath `
+              -Value $changedFiles `
+              -Encoding utf8NoBOM
+            $changedArguments.ChangedFilesPath = $changedFilesPath
+          }
+
+          & ./scripts/coverage/New-GoCoverageReport.ps1 `
+            -ProjectRoot $PWD `
+            -AdmissionProfile (
+              Join-Path $env:COVERAGE_DIRECTORY 'admission.out') `
+            -AutoscalerProfile (
+              Join-Path $env:COVERAGE_DIRECTORY 'autoscaler.out') `
+            -OutputPath $reportPath `
+            @changedArguments
+
+          $report = Get-Content -LiteralPath $reportPath -Raw -Encoding UTF8
+          Add-Content `
+            -LiteralPath $env:GITHUB_STEP_SUMMARY `
+            -Value $report `
+            -Encoding utf8NoBOM
+          $reportBytes = [Text.Encoding]::UTF8.GetBytes($report)
+          if ($reportBytes.Length -gt 49152) {
+            throw 'Coverage report exceeded the bounded job-output limit.'
+          }
+          $encodedReport = [Convert]::ToBase64String($reportBytes)
+          Add-Content `
+            -LiteralPath $env:GITHUB_OUTPUT `
+            -Value "report_b64=$encodedReport" `
+            -Encoding utf8NoBOM
 
       - name: Validate manager shell syntax
         run: |
@@ -171,6 +238,42 @@ jobs:
         run: |
           docker compose --file docker-compose.yml config --quiet
           docker compose --file services/image-builder/docker-compose.yml config --quiet
+
+  coverage-comment:
+    name: Publish Go coverage comment
+    needs: [validation-plan, contracts]
+    if: >-
+      needs.validation-plan.outputs.scope == 'full' &&
+      needs.contracts.result == 'success' &&
+      github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      pull-requests: write
+    steps:
+      - name: Checkout coverage publisher
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+          sparse-checkout: scripts/coverage/Upsert-GoCoverageComment.cjs
+          sparse-checkout-cone-mode: false
+
+      - name: Upsert coverage comment
+        uses: actions/github-script@v8
+        env:
+          COVERAGE_REPORT_B64: ${{ needs.contracts.outputs.report_b64 }}
+        with:
+          script: |
+            const {
+              upsertCoverageComment
+            } = require('./scripts/coverage/Upsert-GoCoverageComment.cjs');
+            await upsertCoverageComment({
+              github,
+              context,
+              encodedReport: process.env.COVERAGE_REPORT_B64
+            });
 
   docker-integration:
     name: Real Docker capacity reconciliation
@@ -230,6 +333,7 @@ jobs:
       [
         validation-plan,
         contracts,
+        coverage-comment,
         docker-integration,
         specialized-images,
         fixed-adoption-recovery
@@ -241,9 +345,13 @@ jobs:
       SCOPE: ${{ needs.validation-plan.outputs.scope }}
       PLAN_RESULT: ${{ needs.validation-plan.result }}
       CONTRACTS_RESULT: ${{ needs.contracts.result }}
+      COMMENT_RESULT: ${{ needs.coverage-comment.result }}
       DOCKER_RESULT: ${{ needs.docker-integration.result }}
       SPECIALIZED_IMAGES_RESULT: ${{ needs.specialized-images.result }}
       FIXED_ADOPTION_RESULT: ${{ needs.fixed-adoption-recovery.result }}
+      EVENT_NAME: ${{ github.event_name }}
+      HEAD_REPOSITORY: ${{ github.event.pull_request.head.repo.full_name || '' }}
+      REPOSITORY: ${{ github.repository }}
     steps:
       - name: Check validation results
         run: |
@@ -268,9 +376,20 @@ jobs:
                 echo "::error::Full validation did not complete successfully."
                 exit 1
               fi
+              if [ "$EVENT_NAME" = "pull_request" ] &&
+                 [ "$HEAD_REPOSITORY" = "$REPOSITORY" ]; then
+                if [ "$COMMENT_RESULT" != "success" ]; then
+                  echo "::error::Coverage comment publication did not complete successfully."
+                  exit 1
+                fi
+              elif [ "$COMMENT_RESULT" != "skipped" ]; then
+                echo "::error::Coverage comment publication ran outside a same-repository pull request."
+                exit 1
+              fi
               ;;
             subset)
               if [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$COMMENT_RESULT" != "skipped" ] ||
                  [ "$DOCKER_RESULT" != "skipped" ] ||
                  [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
                  [ "$FIXED_ADOPTION_RESULT" != "skipped" ]; then
@@ -280,6 +399,7 @@ jobs:
               ;;
             ready-only)
               if [ "$CONTRACTS_RESULT" != "skipped" ] ||
+                 [ "$COMMENT_RESULT" != "skipped" ] ||
                  [ "$DOCKER_RESULT" != "skipped" ] ||
                  [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
                  [ "$FIXED_ADOPTION_RESULT" != "skipped" ]; then
