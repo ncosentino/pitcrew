@@ -57,6 +57,19 @@ pwsh tests/Test-PerformanceReport.ps1
 
 The suite records Docker commands instead of contacting a daemon or GitHub.
 
+Validate Go coverage reporting and its CI publication contract with:
+
+```powershell
+pwsh tests/Test-CoverageReporting.ps1
+node --test tests/Test-CoverageComment.mjs
+```
+
+Full CI measures statement coverage for both Go manager modules, appends a
+weighted summary to the workflow run, and updates one same-repository pull-request
+comment. Coverage profiles remain runner-local and are not uploaded as artifacts.
+PowerShell and shell coverage is not fabricated; their normal contract tests remain
+required pass/fail evidence.
+
 ## Validate shell and Compose
 
 Check the manager script and Compose model:
