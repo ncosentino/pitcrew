@@ -150,6 +150,7 @@ jobs:
           bash -n profiles/image-builder/pitcrew-build-image
           bash -n tests/integration/Test-AutomationControlImage.sh
           bash -n tests/integration/Test-CapacityReconciliation.sh
+          bash -n tests/integration/Test-FixedManagerAdoptionStartup.sh
           bash -n tests/integration/Test-AndroidEmulatorImage.sh
           bash -n tests/integration/Test-HostAdmissionContention.sh
           bash -n tests/integration/Test-IsolatedImageBuilder.sh
@@ -208,9 +209,31 @@ jobs:
       - name: Build and qualify automation-control image
         run: bash ./tests/integration/Test-AutomationControlImage.sh
 
+  fixed-adoption-recovery:
+    name: Fixed manager adoption recovery
+    needs: [validation-plan, contracts]
+    if: >-
+      needs.validation-plan.outputs.scope == 'full' &&
+      needs.contracts.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+
+      - name: Run fixed-manager adoption recovery
+        run: bash ./tests/integration/Test-FixedManagerAdoptionStartup.sh
+
   ci:
     name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
-    needs: [validation-plan, contracts, docker-integration, specialized-images]
+    needs:
+      [
+        validation-plan,
+        contracts,
+        docker-integration,
+        specialized-images,
+        fixed-adoption-recovery
+      ]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
@@ -220,6 +243,7 @@ jobs:
       CONTRACTS_RESULT: ${{ needs.contracts.result }}
       DOCKER_RESULT: ${{ needs.docker-integration.result }}
       SPECIALIZED_IMAGES_RESULT: ${{ needs.specialized-images.result }}
+      FIXED_ADOPTION_RESULT: ${{ needs.fixed-adoption-recovery.result }}
     steps:
       - name: Check validation results
         run: |
@@ -228,7 +252,7 @@ jobs:
             exit 1
           fi
 
-          for result in "$CONTRACTS_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT"; do
+          for result in "$CONTRACTS_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "::error::A required validation job failed or was cancelled."
               exit 1
@@ -239,7 +263,8 @@ jobs:
             full)
               if [ "$CONTRACTS_RESULT" != "success" ] ||
                  [ "$DOCKER_RESULT" != "success" ] ||
-                 [ "$SPECIALIZED_IMAGES_RESULT" != "success" ]; then
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "success" ] ||
+                 [ "$FIXED_ADOPTION_RESULT" != "success" ]; then
                 echo "::error::Full validation did not complete successfully."
                 exit 1
               fi
@@ -247,7 +272,8 @@ jobs:
             subset)
               if [ "$CONTRACTS_RESULT" != "success" ] ||
                  [ "$DOCKER_RESULT" != "skipped" ] ||
-                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ]; then
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
+                 [ "$FIXED_ADOPTION_RESULT" != "skipped" ]; then
                 echo "::error::Draft subset validation did not complete as planned."
                 exit 1
               fi
@@ -255,7 +281,8 @@ jobs:
             ready-only)
               if [ "$CONTRACTS_RESULT" != "skipped" ] ||
                  [ "$DOCKER_RESULT" != "skipped" ] ||
-                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ]; then
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
+                 [ "$FIXED_ADOPTION_RESULT" != "skipped" ]; then
                 echo "::error::Ready-only draft validation ran unexpected jobs."
                 exit 1
               fi

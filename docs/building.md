@@ -24,6 +24,12 @@ pwsh scripts/guidance/Get-ValidationInventory.ps1
 Run the smallest command that covers the changed behavior. Complete Docker
 integration remains owned by pull-request CI.
 
+The hosted `Fixed manager adoption recovery` job runs
+`tests/integration/Test-FixedManagerAdoptionStartup.sh` on an isolated GitHub
+runner. It combines the real setup, manager, coordinator, and fake-worker
+containers with deterministic stalled-adoption injection; do not run it on a
+developer workstation.
+
 ## Validate guidance
 
 ```powershell
