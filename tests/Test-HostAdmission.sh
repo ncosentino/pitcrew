@@ -97,6 +97,9 @@ docker_calls="${TEMP_DIRECTORY}/docker-calls.log"
 cat > "${TEMP_DIRECTORY}/docker" <<'EOF'
 #!/bin/sh
 printf '%s\n' "$*" >> "${PITCREW_TEST_DOCKER_CALLS}"
+if [ "${PITCREW_TEST_DOCKER_SLEEP:-0}" -gt 0 ]; then
+    sleep "${PITCREW_TEST_DOCKER_SLEEP}"
+fi
 if [ "$1" = "inspect" ]; then
     printf '%s\n' "true"
     exit 0
@@ -154,11 +157,20 @@ assert_true \
     "Fixed manager does not reconcile coordinator leases absent from Docker." \
     grep -Fq 'reconcile_orphaned_host_admission_leases' "${manager_source}"
 assert_true \
-    "Fixed manager recovery clears the coordinator fence before tracked adoptions finish." \
-    grep -Fq 'while host_admission_adoption_pending' "${manager_source}"
+    "Fixed manager recovery can block forever while tracked adoptions finish." \
+    grep -Fq 'host_admission_wait_for_tracked_adoptions' "${manager_source}"
+assert_false \
+    "Fixed manager still has an unbounded tracked-adoption startup loop." \
+    grep -Fq 'while host_admission_adoption_pending; do' "${manager_source}"
 assert_true \
     "Fixed manager recovery ignores created worker containers." \
     grep -Fq 'docker ps -aq --filter "label=${MANAGED_LABEL}"' "${manager_source}"
+assert_true \
+    "Fixed manager recovery discovery can block forever on Docker." \
+    grep -Fq 'host_admission_recovery_docker ps -aq' "${manager_source}"
+assert_true \
+    "Fixed manager retries orphan reconciliation while tracked adoption is unresolved." \
+    grep -Fq 'if host_admission_adoption_pending; then' "${manager_source}"
 assert_true \
     "Fixed manager drain can hang forever while the coordinator is unavailable." \
     grep -Fq 'active lease remains fenced' "${manager_source}"
@@ -168,6 +180,26 @@ assert_true \
 assert_true \
     "Fixed admission implementation did not activate manager contract twenty." \
     grep -Fq 'MANAGER_CONTRACT_VERSION=20' "${manager_source}"
+
+mkdir -p "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}"
+: > "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}/control-1.pending"
+assert_false \
+    "Tracked adoption wait accepted a still-pending marker after its deadline." \
+    host_admission_wait_for_tracked_adoptions 0
+rm -f "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}/control-1.pending"
+assert_true \
+    "Tracked adoption wait rejected an empty marker set." \
+    host_admission_wait_for_tracked_adoptions 0
+: > "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}/control-1.pending"
+(
+    sleep 1
+    rm -f "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}/control-1.pending"
+) &
+adoption_settle_pid=$!
+assert_true \
+    "Tracked adoption wait did not observe bounded convergence." \
+    host_admission_wait_for_tracked_adoptions 2
+wait "${adoption_settle_pid}"
 
 disabled_calls="${TEMP_DIRECTORY}/disabled-calls.log"
 : > "${disabled_calls}"
@@ -302,6 +334,18 @@ PITCREW_TEST_ADMISSION_MODE="flaky"
 export PITCREW_TEST_ADMISSION_MODE
 PATH="${TEMP_DIRECTORY}:${PATH}"
 export PATH
+CONTAINER_MONITOR_KILL_AFTER_SECONDS=1
+RECOVERY_DOCKER_COMMAND_TIMEOUT=1
+PITCREW_TEST_DOCKER_SLEEP=3
+export \
+    CONTAINER_MONITOR_KILL_AFTER_SECONDS \
+    RECOVERY_DOCKER_COMMAND_TIMEOUT \
+    PITCREW_TEST_DOCKER_SLEEP
+assert_false \
+    "Recovered-worker Docker probes remained unbounded." \
+    host_admission_recovery_docker inspect recovered-container
+PITCREW_TEST_DOCKER_SLEEP=0
+export PITCREW_TEST_DOCKER_SLEEP
 assert_true \
     "Fixed running-worker adoption did not retry after a transient coordinator outage." \
     host_admission_adopt_running \

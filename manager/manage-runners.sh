@@ -94,6 +94,8 @@ REGISTRATION_ACCESS_RECONCILE_INTERVAL=300
 REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
 REGISTRATION_API_TIMEOUT=5
+RECOVERY_DOCKER_COMMAND_TIMEOUT=5
+HOST_ADMISSION_ADOPTION_SETTLE_SECONDS=20
 REGISTRATION_INVENTORY_DIRECTORY="/tmp/pitcrew-registration-inventory"
 REGISTRATION_ACCESS_DIRECTORY="/tmp/pitcrew-registration-access"
 HOST_ADMISSION_RECOVERY_DIRECTORY="/tmp/pitcrew-host-admission-recovery"
@@ -781,7 +783,9 @@ record_container_image_identity() {
     identity_slot_path="$1"
     identity_container_id="$2"
     identity_image=$(
-        docker inspect --format '{{.Image}}' "${identity_container_id}" 2>/dev/null || true
+        host_admission_recovery_docker inspect \
+            --format '{{.Image}}' \
+            "${identity_container_id}" 2>/dev/null || true
     )
     if printf '%s' "${identity_image}" | grep -Eq '^sha256:[0-9a-f]{64}$'; then
         printf '%s\n' "${identity_image}" > "${identity_slot_path}/image-id"
@@ -822,12 +826,14 @@ run_slot() {
         printf '%s\n' \
             "$(( $(date +%s) + REGISTRATION_GRACE_SECONDS ))" \
             > "${slot_state_path}/registration-grace-until"
-        if docker inspect "${recovered_id}" >/dev/null 2>&1; then
+        if host_admission_recovery_docker inspect \
+            "${recovered_id}" >/dev/null 2>&1; then
             recovered_adoption_pid=""
             if host_admission_enabled; then
                 if [ "${recovered_status}" = "created" ]; then
                     while [ ! -f "${slot_state_path}/drain" ]; do
-                        if ! docker inspect "${recovered_id}" >/dev/null 2>&1; then
+                        if ! host_admission_recovery_docker inspect \
+                            "${recovered_id}" >/dev/null 2>&1; then
                             break
                         fi
                         host_admission_bind_registration \
@@ -1617,12 +1623,33 @@ start_recovered_slot() {
 }
 
 restore_managed_slots() {
-    recovered_ids=$(docker ps -aq --filter "label=${MANAGED_LABEL}") || return 1
-    [ -n "${recovered_ids}" ] || return 0
-
     recovered_inventory="/tmp/pitcrew-recovered.$$"
-    if ! docker inspect ${recovered_ids} |
-        jq -r \
+    recovered_inspection="/tmp/pitcrew-recovered-inspection.$$"
+    recovered_discovery_attempt=0
+    while [ "${recovered_discovery_attempt}" -lt 2 ]; do
+        recovered_ids=$(
+            host_admission_recovery_docker ps -aq \
+                --filter "label=${MANAGED_LABEL}"
+        ) || {
+            rm -f "${recovered_inventory}" "${recovered_inspection}"
+            return 1
+        }
+        [ -n "${recovered_ids}" ] || {
+            rm -f "${recovered_inventory}" "${recovered_inspection}"
+            return 0
+        }
+        if host_admission_recovery_docker inspect ${recovered_ids} \
+            > "${recovered_inspection}" 2>/dev/null; then
+            break
+        fi
+        rm -f "${recovered_inspection}"
+        recovered_discovery_attempt=$((recovered_discovery_attempt + 1))
+    done
+    if [ "${recovered_discovery_attempt}" -ge 2 ]; then
+        rm -f "${recovered_inventory}" "${recovered_inspection}"
+        return 1
+    fi
+    if ! jq -r \
             --arg profile "${PROFILE_ID}" \
             --arg managedLabel "${MANAGED_LABEL_KEY}" \
             --arg slotLabel "${SLOT_LABEL_KEY}" \
@@ -1646,10 +1673,11 @@ restore_managed_slots() {
                     )
                 ]
                 | @tsv
-            ' > "${recovered_inventory}"; then
-        rm -f "${recovered_inventory}"
+            ' "${recovered_inspection}" > "${recovered_inventory}"; then
+        rm -f "${recovered_inventory}" "${recovered_inspection}"
         return 1
     fi
+    rm -f "${recovered_inspection}"
 
     tab=$(printf '\t')
     while IFS="${tab}" read -r recovered_id recovered_name recovered_key recovered_revision recovered_status recovered_repo; do
@@ -2004,12 +2032,25 @@ if ! restore_managed_slots; then
         "" \
         docker-unavailable \
         "Managed worker discovery failed during manager adoption"
+    mark_observed_state_dirty
+    publish_observed_state 1
     exit 1
 fi
-while host_admission_adoption_pending; do
-    sleep 1
-done
-if ! reconcile_orphaned_host_admission_leases ||
+if ! host_admission_wait_for_tracked_adoptions \
+    "${HOST_ADMISSION_ADOPTION_SETTLE_SECONDS}"; then
+    echo "[manager:${PROFILE_ID}] tracked worker adoption exceeded ${HOST_ADMISSION_ADOPTION_SETTLE_SECONDS}s; continuing with recovery fenced" >&2
+    record_manager_diagnostic \
+        recovery \
+        manager-start \
+        "" \
+        timed-out \
+        "" \
+        timeout \
+        "Tracked worker adoption did not settle before manager startup continued"
+    HOST_ADMISSION_LAST_RECOVERY_STATE="tracked-adoption-pending"
+    HOST_ADMISSION_RECOVERY_PENDING=1
+    HOST_ADMISSION_RECOVERY_NEXT_EPOCH=$(( $(date +%s) + REGISTRATION_RECONCILE_INTERVAL ))
+elif ! reconcile_orphaned_host_admission_leases ||
     ! host_admission_complete_adoption; then
     echo "[manager:${PROFILE_ID}] host admission recovery remains fenced; preserving current workers" >&2
     HOST_ADMISSION_RECOVERY_PENDING=1
@@ -2070,7 +2111,9 @@ while [ "${STOPPING}" -eq 0 ]; do
     if [ "${HOST_ADMISSION_RECOVERY_PENDING}" -eq 1 ]; then
         recovery_now=$(date +%s)
         if [ "${recovery_now}" -ge "${HOST_ADMISSION_RECOVERY_NEXT_EPOCH}" ]; then
-            if reconcile_orphaned_host_admission_leases &&
+            if host_admission_adoption_pending; then
+                HOST_ADMISSION_RECOVERY_NEXT_EPOCH=$((recovery_now + REGISTRATION_RECONCILE_INTERVAL))
+            elif reconcile_orphaned_host_admission_leases &&
                 host_admission_complete_adoption; then
                 HOST_ADMISSION_RECOVERY_PENDING=0
                 HOST_ADMISSION_RECOVERY_NEXT_EPOCH=0

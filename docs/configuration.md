@@ -868,7 +868,13 @@ fence.
 
 While recovery is unresolved, `hostAdmission.status` is `degraded`, new
 admission remains fenced, and the manager publishes a bounded recovery-pending
-diagnostic. Active leases still never expire from elapsed time.
+diagnostic. Fixed-manager startup waits only a bounded interval for concurrent
+surviving-worker adoption. If that interval expires, the manager acknowledges
+its desired generation, publishes fresh degraded evidence, preserves every
+worker and lease, and retries exact reconciliation after tracked adoption
+settles. Docker discovery during that startup pass is also bounded; unavailable
+inventory is reported rather than leaving a running manager silent. Active
+leases still never expire from elapsed time.
 
 ## Capacity reconciliation
 
