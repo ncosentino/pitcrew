@@ -273,6 +273,12 @@ also retain `orphaned host admission lease reconciliation is pending` in
 `operationJournal`. Repeated admission denials do not make the unresolved
 recovery condition healthy.
 
+Fixed managers bound their startup wait for concurrent surviving-worker
+adoption. A slow or wedged adoption attempt therefore cannot prevent a new
+manager instance, desired-capacity acknowledgement, and degraded recovery
+evidence from being published. The fence and all active leases remain intact;
+the manager retries exact reconciliation only after tracked adoption settles.
+
 ### Unreachable autoscaling maximum
 
 Setup computes each autoscaled profile's theoretical host-admission ceiling

@@ -191,6 +191,27 @@ host_admission_adoption_pending() {
     return 1
 }
 
+host_admission_wait_for_tracked_adoptions() {
+    timeout_seconds="${1:-30}"
+    case "${timeout_seconds}" in
+        ''|*[!0-9]*) return 1 ;;
+    esac
+    elapsed=0
+    while host_admission_adoption_pending; do
+        [ "${elapsed}" -lt "${timeout_seconds}" ] || return 1
+        sleep 1
+        elapsed=$((elapsed + 1))
+    done
+    return 0
+}
+
+host_admission_recovery_docker() {
+    timeout \
+        -k "${CONTAINER_MONITOR_KILL_AFTER_SECONDS:-5}" \
+        "${RECOVERY_DOCKER_COMMAND_TIMEOUT:-10}" \
+        docker "$@"
+}
+
 # Returns 0 when a lease was acquired, 2 when host admission withheld the
 # request, 3 for incompatible policy or lease state, and 1 when coordinator
 # availability or transport failed.
@@ -340,7 +361,7 @@ host_admission_adopt_running() {
     retry_delay="${5:-2}"
     host_admission_enabled || return 0
 
-    while docker inspect \
+    while host_admission_recovery_docker inspect \
         --format '{{.State.Running}}' \
         "${container_id}" 2>/dev/null |
         grep -qx 'true'; do
