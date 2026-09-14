@@ -92,7 +92,7 @@ canonical Docker arguments. Invalid limits are rejected before any container
 starts. Unset values mean no configured limit and are never treated as zero.
 
 Resource policy and the aggregate ceiling were introduced in manager contract
-11 and remain supported by the active contract 20 autoscaler.
+11 and remain supported by the active contract 21 autoscaler.
 
 Contract 18 keeps profile-ceiling and host-admission deficits distinct in
 per-target capacity evidence. `admission-ceiling` remains the in-process

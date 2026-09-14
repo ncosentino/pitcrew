@@ -152,7 +152,7 @@ CPU cores, memory bytes, worker counts, or inferred hardware capacity. Built-in
 profiles declare no host-admission policy, and independent-profile behavior remains
 the default.
 
-Active manager contract 20 resolves and fingerprints this policy, starts the dedicated
+Active manager contract 21 resolves and fingerprints this policy, starts the dedicated
 coordinator through `Setup-Runner.ps1`, and enforces leases for both fixed and
 autoscaled managers. Disabled profiles (no `hostAdmission` manifest entry)
 remain behavior-compatible; they never touch the coordinator.
@@ -343,7 +343,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 20 managers. A profile that
+11 and remain supported by the active contract 21 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -703,13 +703,75 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 20 is active in this release. Both manager modes publish the
+Manager contract 21 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics and adding contract-20 journal aggregation. Setup fails
 closed before Docker, image, or generated state mutation if a contract ahead
 of both implementations is selected. Periodic credential-health checks reuse
 the existing contract-12 GitHub health and operation vocabulary, so they do not
 require another contract revision.
+
+### Contract-21 source observation provenance
+
+Contract 21 adds `sourceObservations`, a required additive envelope for the
+manager-owned source families that contribute to observed state:
+`localRuntime`, `githubScaleSet`, `resourceTelemetry`, `hostHardware`,
+`hostAdmission`, `subsystemHealth`, `capacity`, and `workload`.
+
+Each entry reports:
+
+- `authority: "pitcrew-manager"` and the exact `managerInstanceId` as
+  `sourceIdentity`;
+- a closed source-family name;
+- the source observation time, or `null` when no usable observation exists;
+- `coverage` as `complete`, `partial`, or `unavailable`;
+- `retention` as `live` or `last-known`; and
+- a bounded reason: `not-observed`, `source-partial`, `source-unavailable`,
+  `stale`, or `unsupported`.
+
+Complete live evidence requires a source time and no reason. Retained evidence
+keeps its original source time and reports `last-known`; a new manager document
+does not refresh it. Partial evidence reports only the values actually observed.
+Unavailable evidence carries no source time and must not be converted to zero.
+Numeric zero remains authoritative only when the matching source entry is
+complete and live.
+
+Wholly unavailable fixed-manager capacity is represented by
+`capacityEvidence.fixed: null` with unavailable capacity provenance. The
+fallback does not populate zero worker counts, target counts, or deficits.
+
+Fixed managers explicitly report GitHub scale-set and workload evidence as
+unavailable with reason `unsupported`; fixed runner activity does not establish
+job identity. Autoscaled managers derive both families from the scale-set
+listener. Mixed target coverage is partial, an entirely unobserved listener is
+unavailable, and statistics older than the existing two-minute boundary are
+last-known while retaining their nested timestamp.
+
+The autoscaler normalizes the document publication time and nested statistics
+times to serialized RFC 3339 whole-second precision before evaluating that
+boundary. Evidence is stale only when its serialized age is greater than 120
+seconds; exactly 120 seconds remains current. The executable jq validator uses
+the same comparison.
+
+An incomplete local observation is not an authoritative empty inventory.
+Consumers can retain the prior profile projection and mark its claims
+last-known or unavailable, but PitCrew does not add a durable replay cache.
+After manager restart or state-root loss it never reconstructs missing profiles
+or assigns a new source time to evidence it no longer possesses.
+
+| Producer | Consumer | Behavior |
+| --- | --- | --- |
+| Contract 20 or earlier | New consumer | `sourceObservations` is absent; provenance is unavailable and must not be synthesized. |
+| Contract 21 | Contract-20 schema validator | The document is rejected because the older closed schema does not permit `sourceObservations`; mixed-version systems must negotiate a supported contract or ignore the newer document. |
+| Contract 21 | Tolerant older consumer | A consumer that deliberately ignores unknown fields may continue reading established fields, but this is consumer-specific and is not guaranteed by the contract-20 schema. |
+| Contract 21 | Contract-21-aware consumer | Missing, malformed, or contradictory source metadata is rejected rather than guessed. |
+
+The JSON Schema enforces document shape and local source-entry invariants. Array
+relationships require comparisons that JSON Schema cannot express: the manager's
+executable contract validator additionally correlates scale-set and workload
+provenance with `autoscaling.targets[].statistics`, and capacity provenance with
+`capacityEvidence.targets`. It rejects aggregate timestamps, coverage, or
+retention that contradict the nested target evidence.
 
 ### Contract-14 runner correlation
 

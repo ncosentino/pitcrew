@@ -933,25 +933,7 @@ render_subsystem_health() {
 write_unavailable_capacity_evidence() {
     unavailable_output="$1"
     unavailable_temporary="${unavailable_output}.$$.tmp"
-    if ! jq -n \
-        --arg observedAt "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-        '{
-            fixed: {
-                observedAt: $observedAt,
-                freshness: "unavailable",
-                targetSlots: 0,
-                activeWorkers: 0,
-                startingWorkers: 0,
-                drainingWorkers: 0,
-                cleanupPendingWorkers: 0,
-                eligibleWorkers: null,
-                localDeficit: 0,
-                eligibilityDeficit: null,
-                reason: "unknown",
-                evidence: null
-            },
-            targets: []
-        }' > "${unavailable_temporary}"; then
+    if ! printf '{"fixed":null,"targets":[]}\n' > "${unavailable_temporary}"; then
         rm -f "${unavailable_temporary}"
         return 1
     fi

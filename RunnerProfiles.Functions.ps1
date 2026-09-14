@@ -4,7 +4,7 @@ Set-StrictMode -Version Latest
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerHostAdmissionPolicySchemaVersion = 1
-$script:RunnerManagerContractVersion = 20
+$script:RunnerManagerContractVersion = 21
 $script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerDefinedHostAdmissionContractVersion = 19
 $script:RunnerDefinedDiagnosticsContractVersion = 20

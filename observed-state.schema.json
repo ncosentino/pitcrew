@@ -6,6 +6,222 @@
   "type": "object",
   "additionalProperties": false,
   "$defs": {
+    "sourceObservation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "source",
+        "sourceIdentity",
+        "observedAt",
+        "coverage",
+        "retention",
+        "reason"
+      ],
+      "properties": {
+        "authority": {
+          "const": "pitcrew-manager"
+        },
+        "source": {
+          "enum": [
+            "local-runtime",
+            "github-scale-set",
+            "resource-telemetry",
+            "host-hardware",
+            "host-admission",
+            "subsystem-health",
+            "capacity",
+            "workload"
+          ]
+        },
+        "sourceIdentity": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "coverage": {
+          "enum": ["complete", "partial", "unavailable"]
+        },
+        "retention": {
+          "enum": ["live", "last-known"]
+        },
+        "reason": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "not-observed",
+            "source-partial",
+            "source-unavailable",
+            "stale",
+            "unsupported"
+          ]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "coverage": { "const": "complete" },
+              "retention": { "const": "live" }
+            },
+            "required": ["coverage", "retention"]
+          },
+          "then": {
+            "properties": {
+              "observedAt": { "type": "string" },
+              "reason": { "type": "null" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "coverage": { "const": "complete" },
+              "retention": { "const": "last-known" }
+            },
+            "required": ["coverage", "retention"]
+          },
+          "then": {
+            "properties": {
+              "observedAt": { "type": "string" },
+              "reason": { "const": "stale" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "coverage": { "const": "partial" }
+            },
+            "required": ["coverage"]
+          },
+          "then": {
+            "properties": {
+              "observedAt": { "type": "string" },
+              "reason": { "const": "source-partial" }
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "coverage": { "const": "unavailable" }
+            },
+            "required": ["coverage"]
+          },
+          "then": {
+            "properties": {
+              "observedAt": { "type": "null" },
+              "retention": { "const": "live" },
+              "reason": {
+                "enum": ["not-observed", "source-unavailable", "unsupported"]
+              }
+            }
+          }
+        }
+      ]
+    },
+    "managerSourceObservations": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "localRuntime",
+        "githubScaleSet",
+        "resourceTelemetry",
+        "hostHardware",
+        "hostAdmission",
+        "subsystemHealth",
+        "capacity",
+        "workload"
+      ],
+      "properties": {
+        "localRuntime": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "local-runtime" }
+              }
+            }
+          ]
+        },
+        "githubScaleSet": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "github-scale-set" }
+              }
+            }
+          ]
+        },
+        "resourceTelemetry": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "resource-telemetry" }
+              }
+            }
+          ]
+        },
+        "hostHardware": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "host-hardware" }
+              }
+            }
+          ]
+        },
+        "hostAdmission": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "host-admission" }
+              }
+            }
+          ]
+        },
+        "subsystemHealth": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "subsystem-health" }
+              }
+            }
+          ]
+        },
+        "capacity": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "capacity" }
+              }
+            }
+          ]
+        },
+        "workload": {
+          "allOf": [
+            { "$ref": "#/$defs/sourceObservation" },
+            {
+              "properties": {
+                "source": { "const": "workload" }
+              }
+            }
+          ]
+        }
+      },
+      "$comment": "Each source family preserves manager authority, the exact manager instance that emitted the claim, source-observed time, coverage, and live versus last-known retention. A new document cannot refresh a nested source time."
+    },
     "resourceUsage": {
       "type": "object",
       "additionalProperties": false,
@@ -2017,7 +2233,7 @@
               "type": "null"
             }
           ],
-          "$comment": "null for an autoscaled profile, which reports per-target evidence instead."
+          "$comment": "null for an autoscaled profile, which reports per-target evidence instead, or for a contract-21 fixed profile whose entire capacity observation is unavailable."
         },
         "targets": {
           "type": "array",
@@ -2225,6 +2441,9 @@
           "type": "null"
         }
       ]
+    },
+    "sourceObservations": {
+      "$ref": "#/$defs/managerSourceObservations"
     },
     "slots": {
       "type": "array",
@@ -2661,6 +2880,29 @@
       "if": {
         "properties": {
           "managerContractVersion": {
+            "minimum": 21
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "required": [
+          "sourceObservations"
+        ],
+        "properties": {
+          "sourceObservations": {
+            "$ref": "#/$defs/managerSourceObservations"
+          }
+        }
+      },
+      "$comment": "Contract 21 adds manager-owned source-family provenance. Contract 20 and earlier observations may omit it; newer consumers reject malformed or missing contract-21 provenance rather than inventing current evidence."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
             "minimum": 7
           }
         },
@@ -3019,15 +3261,78 @@
               "properties": {
                 "capacityEvidence": {
                   "properties": {
-                    "fixed": {
-                      "$ref": "#/$defs/capacityDeficitEvidence"
-                    },
                     "targets": {
                       "maxItems": 0
                     }
                   }
                 }
-              }
+              },
+              "allOf": [
+                {
+                  "if": {
+                    "properties": {
+                      "managerContractVersion": {
+                        "minimum": 21
+                      },
+                      "sourceObservations": {
+                        "properties": {
+                          "capacity": {
+                            "properties": {
+                              "coverage": {
+                                "const": "unavailable"
+                              },
+                              "observedAt": {
+                                "type": "null"
+                              },
+                              "retention": {
+                                "const": "live"
+                              },
+                              "reason": {
+                                "const": "source-unavailable"
+                              }
+                            },
+                            "required": [
+                              "coverage",
+                              "observedAt",
+                              "retention",
+                              "reason"
+                            ]
+                          }
+                        },
+                        "required": [
+                          "capacity"
+                        ]
+                      }
+                    },
+                    "required": [
+                      "managerContractVersion",
+                      "sourceObservations"
+                    ]
+                  },
+                  "then": {
+                    "properties": {
+                      "capacityEvidence": {
+                        "properties": {
+                          "fixed": {
+                            "type": "null"
+                          }
+                        }
+                      }
+                    }
+                  },
+                  "else": {
+                    "properties": {
+                      "capacityEvidence": {
+                        "properties": {
+                          "fixed": {
+                            "$ref": "#/$defs/capacityDeficitEvidence"
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              ]
             }
           }
         ],

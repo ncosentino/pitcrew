@@ -7,6 +7,53 @@ import (
 	"time"
 )
 
+const (
+	sourceAuthorityManager = "pitcrew-manager"
+
+	sourceLocalRuntime      = "local-runtime"
+	sourceGitHubScaleSet    = "github-scale-set"
+	sourceResourceTelemetry = "resource-telemetry"
+	sourceHostHardware      = "host-hardware"
+	sourceHostAdmission     = "host-admission"
+	sourceSubsystemHealth   = "subsystem-health"
+	sourceCapacity          = "capacity"
+	sourceWorkload          = "workload"
+
+	coverageComplete    = "complete"
+	coveragePartial     = "partial"
+	coverageUnavailable = "unavailable"
+
+	retentionLive      = "live"
+	retentionLastKnown = "last-known"
+
+	sourceReasonNotObserved = "not-observed"
+	sourceReasonPartial     = "source-partial"
+	sourceReasonUnavailable = "source-unavailable"
+	sourceReasonStale       = "stale"
+	sourceReasonUnsupported = "unsupported"
+)
+
+type sourceObservation struct {
+	Authority      string  `json:"authority"`
+	Source         string  `json:"source"`
+	SourceIdentity string  `json:"sourceIdentity"`
+	ObservedAt     *string `json:"observedAt"`
+	Coverage       string  `json:"coverage"`
+	Retention      string  `json:"retention"`
+	Reason         *string `json:"reason"`
+}
+
+type managerSourceObservations struct {
+	LocalRuntime      sourceObservation `json:"localRuntime"`
+	GitHubScaleSet    sourceObservation `json:"githubScaleSet"`
+	ResourceTelemetry sourceObservation `json:"resourceTelemetry"`
+	HostHardware      sourceObservation `json:"hostHardware"`
+	HostAdmission     sourceObservation `json:"hostAdmission"`
+	SubsystemHealth   sourceObservation `json:"subsystemHealth"`
+	Capacity          sourceObservation `json:"capacity"`
+	Workload          sourceObservation `json:"workload"`
+}
+
 type resourceTelemetry struct {
 	SampledAt    string                `json:"sampledAt"`
 	Status       string                `json:"status"`
@@ -170,27 +217,28 @@ type observedHostAdmission struct {
 }
 
 type observedState struct {
-	SchemaVersion          int                     `json:"schemaVersion"`
-	ManagerContractVersion int                     `json:"managerContractVersion"`
-	ProfileID              string                  `json:"profileId"`
-	ManagerInstanceID      string                  `json:"managerInstanceId"`
-	ManagerStatus          string                  `json:"managerStatus"`
-	ObservedAt             string                  `json:"observedAt"`
-	Scope                  string                  `json:"scope"`
-	Generation             int                     `json:"generation"`
-	DesiredStateHash       *string                 `json:"desiredStateHash"`
-	DesiredStateStatus     string                  `json:"desiredStateStatus"`
-	DesiredSlots           int                     `json:"desiredSlots"`
-	ActiveSlots            int                     `json:"activeSlots"`
-	EligibleSlots          int                     `json:"eligibleSlots"`
-	DrainingSlots          int                     `json:"drainingSlots"`
-	ConfiguredSlots        int                     `json:"configuredSlots"`
-	Slots                  []observedSlot          `json:"slots"`
-	ResourceTelemetry      resourceTelemetry       `json:"resourceTelemetry"`
-	Host                   observedHost            `json:"host"`
-	ResourcePolicy         *observedResourcePolicy `json:"resourcePolicy"`
-	Autoscaling            observedAutoscaling     `json:"autoscaling"`
-	Update                 observedUpdate          `json:"update"`
+	SchemaVersion          int                       `json:"schemaVersion"`
+	ManagerContractVersion int                       `json:"managerContractVersion"`
+	ProfileID              string                    `json:"profileId"`
+	ManagerInstanceID      string                    `json:"managerInstanceId"`
+	ManagerStatus          string                    `json:"managerStatus"`
+	ObservedAt             string                    `json:"observedAt"`
+	Scope                  string                    `json:"scope"`
+	Generation             int                       `json:"generation"`
+	DesiredStateHash       *string                   `json:"desiredStateHash"`
+	DesiredStateStatus     string                    `json:"desiredStateStatus"`
+	DesiredSlots           int                       `json:"desiredSlots"`
+	ActiveSlots            int                       `json:"activeSlots"`
+	EligibleSlots          int                       `json:"eligibleSlots"`
+	DrainingSlots          int                       `json:"drainingSlots"`
+	ConfiguredSlots        int                       `json:"configuredSlots"`
+	Slots                  []observedSlot            `json:"slots"`
+	ResourceTelemetry      resourceTelemetry         `json:"resourceTelemetry"`
+	Host                   observedHost              `json:"host"`
+	ResourcePolicy         *observedResourcePolicy   `json:"resourcePolicy"`
+	Autoscaling            observedAutoscaling       `json:"autoscaling"`
+	Update                 observedUpdate            `json:"update"`
+	SourceObservations     managerSourceObservations `json:"sourceObservations"`
 
 	// Contract-12 diagnostics stay additive until every manager mode
 	// publishes them, so a connector built for an earlier contract keeps
@@ -351,7 +399,386 @@ func buildObservedState(
 	sort.Slice(state.Slots, func(i, j int) bool {
 		return state.Slots[i].Key < state.Slots[j].Key
 	})
+	refreshSourceObservations(&state, snapshots, now)
 	return state
+}
+
+func refreshSourceObservations(
+	state *observedState,
+	snapshots []scalerSnapshot,
+	now time.Time,
+) {
+	state.SourceObservations = managerSourceObservations{
+		LocalRuntime: localRuntimeSourceObservation(*state),
+		GitHubScaleSet: scaleSetSourceObservation(
+			state.ManagerInstanceID,
+			snapshots,
+			now,
+		),
+		ResourceTelemetry: resourceTelemetrySourceObservation(*state),
+		HostHardware:      hostHardwareSourceObservation(*state),
+		HostAdmission:     hostAdmissionSourceObservation(*state),
+		SubsystemHealth:   subsystemHealthSourceObservation(*state),
+		Capacity:          capacitySourceObservation(*state),
+	}
+	state.SourceObservations.Workload = state.SourceObservations.GitHubScaleSet
+	state.SourceObservations.Workload.Source = sourceWorkload
+}
+
+func newSourceObservation(
+	source string,
+	sourceIdentity string,
+	observedAt *string,
+	coverage string,
+	retention string,
+	reason *string,
+) sourceObservation {
+	return sourceObservation{
+		Authority:      sourceAuthorityManager,
+		Source:         source,
+		SourceIdentity: sourceIdentity,
+		ObservedAt:     observedAt,
+		Coverage:       coverage,
+		Retention:      retention,
+		Reason:         reason,
+	}
+}
+
+func localRuntimeSourceObservation(state observedState) sourceObservation {
+	observedAt := state.ObservedAt
+	for _, slot := range state.Slots {
+		if slot.Activity == "unknown" {
+			return newSourceObservation(
+				sourceLocalRuntime,
+				state.ManagerInstanceID,
+				&observedAt,
+				coveragePartial,
+				retentionLive,
+				stringPointer(sourceReasonPartial),
+			)
+		}
+	}
+	return newSourceObservation(
+		sourceLocalRuntime,
+		state.ManagerInstanceID,
+		&observedAt,
+		coverageComplete,
+		retentionLive,
+		nil,
+	)
+}
+
+func scaleSetSourceObservation(
+	sourceIdentity string,
+	snapshots []scalerSnapshot,
+	now time.Time,
+) sourceObservation {
+	if len(snapshots) == 0 {
+		return newSourceObservation(
+			sourceGitHubScaleSet,
+			sourceIdentity,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonNotObserved),
+		)
+	}
+	observedCount := 0
+	staleCount := 0
+	var oldest time.Time
+	for _, snapshot := range snapshots {
+		observedAt := snapshot.statistics.observedAt
+		if observedAt.IsZero() {
+			continue
+		}
+		observedCount++
+		if oldest.IsZero() || observedAt.Before(oldest) {
+			oldest = observedAt
+		}
+		if statisticsFreshness(observedAt, now) == freshnessStale {
+			staleCount++
+		}
+	}
+	if observedCount == 0 {
+		return newSourceObservation(
+			sourceGitHubScaleSet,
+			sourceIdentity,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonNotObserved),
+		)
+	}
+	observedAt := oldest.UTC().Format(time.RFC3339)
+	coverage := coverageComplete
+	reason := (*string)(nil)
+	if observedCount != len(snapshots) ||
+		(staleCount > 0 && staleCount < observedCount) {
+		coverage = coveragePartial
+		reason = stringPointer(sourceReasonPartial)
+	}
+	retention := retentionLive
+	if staleCount > 0 {
+		retention = retentionLastKnown
+		if reason == nil {
+			reason = stringPointer(sourceReasonStale)
+		}
+	}
+	return newSourceObservation(
+		sourceGitHubScaleSet,
+		sourceIdentity,
+		&observedAt,
+		coverage,
+		retention,
+		reason,
+	)
+}
+
+func resourceTelemetrySourceObservation(state observedState) sourceObservation {
+	coverage := coverageUnavailable
+	var observedAt *string
+	reason := stringPointer(sourceReasonUnavailable)
+	switch state.ResourceTelemetry.Status {
+	case "available":
+		coverage = coverageComplete
+		observedAt = stringPointer(state.ResourceTelemetry.SampledAt)
+		reason = nil
+	case "partial":
+		coverage = coveragePartial
+		observedAt = stringPointer(state.ResourceTelemetry.SampledAt)
+		reason = stringPointer(sourceReasonPartial)
+	}
+	retention := retentionLive
+	if observedAt != nil &&
+		(state.ManagerStatus == "stopping" || state.ManagerStatus == "stopped") {
+		retention = retentionLastKnown
+		if reason == nil {
+			reason = stringPointer(sourceReasonStale)
+		}
+	}
+	return newSourceObservation(
+		sourceResourceTelemetry,
+		state.ManagerInstanceID,
+		observedAt,
+		coverage,
+		retention,
+		reason,
+	)
+}
+
+func hostHardwareSourceObservation(state observedState) sourceObservation {
+	hardware := state.Host.Hardware
+	switch hardware.Status {
+	case "current":
+		return newSourceObservation(
+			sourceHostHardware,
+			state.ManagerInstanceID,
+			hardware.CollectedAt,
+			coverageComplete,
+			retentionLive,
+			nil,
+		)
+	case "stale":
+		return newSourceObservation(
+			sourceHostHardware,
+			state.ManagerInstanceID,
+			hardware.CollectedAt,
+			coverageComplete,
+			retentionLastKnown,
+			stringPointer(sourceReasonStale),
+		)
+	default:
+		return newSourceObservation(
+			sourceHostHardware,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonUnavailable),
+		)
+	}
+}
+
+func hostAdmissionSourceObservation(state observedState) sourceObservation {
+	if state.HostAdmission == nil {
+		return newSourceObservation(
+			sourceHostAdmission,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonNotObserved),
+		)
+	}
+	switch state.HostAdmission.Status {
+	case hostAdmissionStatusAvailable, hostAdmissionStatusDisabled:
+		return newSourceObservation(
+			sourceHostAdmission,
+			state.ManagerInstanceID,
+			stringPointer(state.ObservedAt),
+			coverageComplete,
+			retentionLive,
+			nil,
+		)
+	case hostAdmissionStatusDegraded:
+		return newSourceObservation(
+			sourceHostAdmission,
+			state.ManagerInstanceID,
+			stringPointer(state.ObservedAt),
+			coveragePartial,
+			retentionLive,
+			stringPointer(sourceReasonPartial),
+		)
+	default:
+		return newSourceObservation(
+			sourceHostAdmission,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonUnavailable),
+		)
+	}
+}
+
+func subsystemHealthSourceObservation(state observedState) sourceObservation {
+	if state.SubsystemHealth == nil {
+		return newSourceObservation(
+			sourceSubsystemHealth,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonNotObserved),
+		)
+	}
+	summaries := []subsystemHealthSummary{
+		state.SubsystemHealth.Docker,
+		state.SubsystemHealth.GitHub,
+	}
+	observedCount := 0
+	var oldest time.Time
+	for _, summary := range summaries {
+		if summary.State == subsystemUnknown {
+			continue
+		}
+		observedAt, err := time.Parse(time.RFC3339, summary.ObservedAt)
+		if err != nil {
+			continue
+		}
+		observedCount++
+		if oldest.IsZero() || observedAt.Before(oldest) {
+			oldest = observedAt
+		}
+	}
+	if observedCount == 0 {
+		return newSourceObservation(
+			sourceSubsystemHealth,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonNotObserved),
+		)
+	}
+	coverage := coverageComplete
+	reason := (*string)(nil)
+	if observedCount != len(summaries) {
+		coverage = coveragePartial
+		reason = stringPointer(sourceReasonPartial)
+	}
+	observedAt := oldest.UTC().Format(time.RFC3339)
+	return newSourceObservation(
+		sourceSubsystemHealth,
+		state.ManagerInstanceID,
+		&observedAt,
+		coverage,
+		retentionLive,
+		reason,
+	)
+}
+
+func capacitySourceObservation(state observedState) sourceObservation {
+	if state.CapacityEvidence == nil {
+		return newSourceObservation(
+			sourceCapacity,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonNotObserved),
+		)
+	}
+	cores := make([]capacityDeficitCore, 0, 1+len(state.CapacityEvidence.Targets))
+	if state.CapacityEvidence.Fixed != nil {
+		cores = append(cores, *state.CapacityEvidence.Fixed)
+	}
+	for _, target := range state.CapacityEvidence.Targets {
+		cores = append(cores, target.capacityDeficitCore)
+	}
+	if len(cores) == 0 {
+		return newSourceObservation(
+			sourceCapacity,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonUnavailable),
+		)
+	}
+	observedCount := 0
+	staleCount := 0
+	var oldest time.Time
+	for _, core := range cores {
+		if core.Freshness == freshnessUnavailable {
+			continue
+		}
+		observedAt, err := time.Parse(time.RFC3339, core.ObservedAt)
+		if err == nil && (oldest.IsZero() || observedAt.Before(oldest)) {
+			oldest = observedAt
+		}
+		observedCount++
+		if core.Freshness == freshnessStale {
+			staleCount++
+		}
+	}
+	if observedCount == 0 || oldest.IsZero() {
+		return newSourceObservation(
+			sourceCapacity,
+			state.ManagerInstanceID,
+			nil,
+			coverageUnavailable,
+			retentionLive,
+			stringPointer(sourceReasonUnavailable),
+		)
+	}
+	coverage := coverageComplete
+	var reason *string
+	if observedCount != len(cores) ||
+		(staleCount > 0 && staleCount < observedCount) {
+		coverage = coveragePartial
+		reason = stringPointer(sourceReasonPartial)
+	}
+	retention := retentionLive
+	if staleCount > 0 {
+		retention = retentionLastKnown
+		if reason == nil {
+			reason = stringPointer(sourceReasonStale)
+		}
+	}
+	observedAt := oldest.UTC().Format(time.RFC3339)
+	return newSourceObservation(
+		sourceCapacity,
+		state.ManagerInstanceID,
+		&observedAt,
+		coverage,
+		retention,
+		reason,
+	)
+}
+
+func stringPointer(value string) *string {
+	return &value
 }
 
 func applyResourceSample(state *observedState, sample resourceSample) {
