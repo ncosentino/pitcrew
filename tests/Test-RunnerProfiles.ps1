@@ -51,7 +51,7 @@ $composePath = Join-Path $runnerRoot 'docker-compose.yml'
 $hostAdmissionComposePath = Join-Path $runnerRoot 'host-admission.compose.yml'
 $hostAdmissionManagerComposePath = Join-Path $runnerRoot 'host-admission.manager.compose.yml'
 $routingPath = Join-Path $runnerRoot 'docs' 'guides' 'routing-workloads.md'
-$activeManagerContractVersion = 20
+$activeManagerContractVersion = 21
 $testWorkerImageId = 'sha256:1111111111111111111111111111111111111111111111111111111111111111'
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 $digestWorkerImage = 'ghcr.io/example/runner@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
@@ -2402,6 +2402,177 @@ Add-Check (
         Test-Json -SchemaFile $observedStateSchemaPath
 ) 'Manager contract twenty rejected complete journal aggregation evidence.'
 
+$completeSourceObservationsV21 = (
+    $completeJournalAggregateV20 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$completeSourceObservationsV21.managerContractVersion = 21
+$sourceIdentityV21 = $completeSourceObservationsV21.managerInstanceId
+$completeSourceObservationsV21 |
+    Add-Member -NotePropertyName sourceObservations -NotePropertyValue (
+        [PSCustomObject][ordered]@{
+            localRuntime = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'local-runtime'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = '2026-01-01T00:00:00Z'
+                coverage = 'complete'
+                retention = 'live'
+                reason = $null
+            }
+            githubScaleSet = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'github-scale-set'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = $null
+                coverage = 'unavailable'
+                retention = 'live'
+                reason = 'unsupported'
+            }
+            resourceTelemetry = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'resource-telemetry'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = '2026-01-01T00:00:00Z'
+                coverage = 'complete'
+                retention = 'live'
+                reason = $null
+            }
+            hostHardware = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'host-hardware'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = '2026-01-01T00:00:00Z'
+                coverage = 'complete'
+                retention = 'live'
+                reason = $null
+            }
+            hostAdmission = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'host-admission'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = '2026-01-01T00:00:00Z'
+                coverage = 'complete'
+                retention = 'live'
+                reason = $null
+            }
+            subsystemHealth = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'subsystem-health'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = '2026-01-01T00:00:00Z'
+                coverage = 'complete'
+                retention = 'live'
+                reason = $null
+            }
+            capacity = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'capacity'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = '2026-01-01T00:00:00Z'
+                coverage = 'complete'
+                retention = 'live'
+                reason = $null
+            }
+            workload = [PSCustomObject][ordered]@{
+                authority = 'pitcrew-manager'
+                source = 'workload'
+                sourceIdentity = $sourceIdentityV21
+                observedAt = $null
+                coverage = 'unavailable'
+                retention = 'live'
+                reason = 'unsupported'
+            }
+        }
+    )
+Add-Check (
+    ($completeSourceObservationsV21 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twenty-one rejected complete source observation provenance.'
+
+$unavailableFixedCapacityV21 = (
+    $completeSourceObservationsV21 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$unavailableFixedCapacityV21.capacityEvidence.fixed = $null
+$unavailableFixedCapacityV21.sourceObservations.capacity.observedAt = $null
+$unavailableFixedCapacityV21.sourceObservations.capacity.coverage = 'unavailable'
+$unavailableFixedCapacityV21.sourceObservations.capacity.retention = 'live'
+$unavailableFixedCapacityV21.sourceObservations.capacity.reason =
+    'source-unavailable'
+Add-Check (
+    ($unavailableFixedCapacityV21 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twenty-one rejected wholly unavailable fixed capacity.'
+
+$invalidNullFixedCapacityV21 = (
+    $completeSourceObservationsV21 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidNullFixedCapacityV21.capacityEvidence.fixed = $null
+Add-Check (-not (
+    ($invalidNullFixedCapacityV21 | ConvertTo-Json -Depth 20) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract twenty-one accepted null fixed capacity as complete evidence.'
+
+$invalidNullFixedCapacityReasonV21 = (
+    $unavailableFixedCapacityV21 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidNullFixedCapacityReasonV21.sourceObservations.capacity.reason =
+    'not-observed'
+Add-Check (-not (
+    ($invalidNullFixedCapacityReasonV21 | ConvertTo-Json -Depth 20) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract twenty-one accepted null fixed capacity without the unavailable-source reason.'
+
+$missingSourceObservationsV21 = (
+    $completeSourceObservationsV21 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$missingSourceObservationsV21.PSObject.Properties.Remove('sourceObservations')
+Add-Check (-not (
+    ($missingSourceObservationsV21 | ConvertTo-Json -Depth 20) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Manager contract twenty-one accepted missing source observation provenance.'
+
+$invalidUnavailableSourceV21 = (
+    $completeSourceObservationsV21 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$invalidUnavailableSourceV21.sourceObservations.githubScaleSet.observedAt =
+    '2026-01-01T00:00:00Z'
+Add-Check (-not (
+    ($invalidUnavailableSourceV21 | ConvertTo-Json -Depth 20) |
+        Test-Json `
+            -SchemaFile $observedStateSchemaPath `
+            -ErrorAction SilentlyContinue
+)) 'Unavailable source evidence accepted an invented observation time.'
+
+$legacySourceObservationsV20 = (
+    $completeSourceObservationsV21 |
+        ConvertTo-Json -Depth 20 |
+        ConvertFrom-Json -Depth 20
+)
+$legacySourceObservationsV20.managerContractVersion = 20
+$legacySourceObservationsV20.PSObject.Properties.Remove('sourceObservations')
+Add-Check (
+    ($legacySourceObservationsV20 | ConvertTo-Json -Depth 20) |
+        Test-Json -SchemaFile $observedStateSchemaPath
+) 'Manager contract twenty stopped accepting observations without source provenance.'
+
 $invalidOccurrenceCountV20 = (
     $completeJournalAggregateV20 |
         ConvertTo-Json -Depth 20 |
@@ -2772,7 +2943,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 20) 'The setup contract does not activate the journal-aggregation manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 21) 'The setup contract does not activate the source-provenance manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
     $defaultProfile.DefinedHostAdmissionContractVersion -eq 19
@@ -2786,7 +2957,7 @@ Add-Check (
     $implementedContract.Autoscaling -eq $defaultProfile.ManagerContractVersion
 ) 'The activated manager contract does not match both manager implementations.'
 Add-Check (
-    $implementedContract.Implemented -eq $defaultProfile.DefinedDiagnosticsContractVersion
+    $implementedContract.Implemented -ge $defaultProfile.DefinedDiagnosticsContractVersion
 ) 'The active manager contract does not include the defined diagnostics contract.'
 Assert-RunnerManagerContractActivation -Profile $defaultProfile
 $futureProfile = $defaultProfile.PSObject.Copy()
@@ -3200,7 +3371,7 @@ Add-Check ($defaultEnvironment -match '(?m)^RUNNER_NO_DEFAULT_LABELS=$') 'The de
 Add-Check ($defaultEnvironment -match '(?m)^RUNNER_PULL_IMAGE=0$') 'Generated default state permits a second image pull after preparation.'
 Add-Check ($defaultEnvironment -notmatch '(?m)^(REPO_URLS|RUNNER_REPLICAS)=') 'Mutable capacity remains embedded in the static environment.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_STATE_DIR=\.pitcrew-state/default$') 'The default environment does not mount its mutable state directory.'
-Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'The environment does not pin the manager reconciliation contract.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=21$') 'The environment does not pin the manager reconciliation contract.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_REVISION=[0-9a-f]{64}$') 'The environment does not pin the worker revision.'
 Add-Check ($defaultEnvironment -match "(?m)^PITCREW_WORKER_IMAGE_ID=$([regex]::Escape($testWorkerImageId))$") 'The environment does not pin immutable local image identity.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=$') 'The default memory policy is not represented as an empty manager-only value.'
@@ -4490,7 +4661,7 @@ try {
             -Repos 'https://github.com/example/project=1'
         $fixedResourceEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'Fixed setup did not activate manager contract 20.'
+        Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=21$') 'Fixed setup did not activate manager contract 21.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The fixed manager did not receive the canonical worker memory limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_SWAP_BYTES=1073741824$') 'The fixed manager did not receive the canonical worker memory-swap limit.'
         Add-Check ($fixedResourceEnvironment -match '(?m)^PITCREW_WORKER_CPU_CORES=2\.5$') 'The fixed manager did not receive the canonical worker CPU limit.'
@@ -4510,7 +4681,7 @@ try {
             -Repos 'https://github.com/example/project=2'
         $autoscaledAdmissionEnvironment = Get-Content `
             -LiteralPath (Join-Path $fixtureRoot '.env') -Raw -Encoding UTF8
-        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'Autoscaled setup did not activate manager contract 20.'
+        Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=21$') 'Autoscaled setup did not activate manager contract 21.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=4$') 'The autoscaler did not receive the profile-wide admission ceiling.'
         Add-Check ($autoscaledAdmissionEnvironment -match '(?m)^PITCREW_WORKER_MEMORY_BYTES=536870912$') 'The autoscaler did not receive the canonical worker memory limit.'
         $admissionCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
@@ -4680,7 +4851,7 @@ try {
         ) 'Missing-manager recovery attempted a manager or profile shutdown path.'
         Add-Check (
             $missingManagerAck.generation -eq 1 -and
-            $missingManagerAck.managerContractVersion -eq 20
+            $missingManagerAck.managerContractVersion -eq 21
         ) 'Missing-manager recovery did not require a fresh current-contract acknowledgement.'
 
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
@@ -6362,12 +6533,12 @@ Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_S
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_RUNTIME_DEVICES: ${PITCREW_WORKER_RUNTIME_DEVICES:-}')) 'Compose does not pass the typed worker-device contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_SHM_SIZE_BYTES: ${PITCREW_WORKER_SHM_SIZE_BYTES:-}')) 'Compose does not pass the shared-memory contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SESSION_OWNER: ${PITCREW_SESSION_OWNER:-}')) 'Compose does not pass the stable scale-set session owner.'
-Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-20}')) 'Manager containers do not expose their handoff contract.'
+Add-Check ($compose -match [regex]::Escape('pitcrew-manager-contract-version: ${PITCREW_MANAGER_CONTRACT_VERSION:-21}')) 'Manager containers do not expose their handoff contract.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_HOST_PROC_PATH: /host/proc')) 'Manager containers do not use the fixed host-proc telemetry path.'
 Add-Check ($compose -match [regex]::Escape('/proc:/host/proc:ro')) 'Manager containers do not mount Docker-host proc read-only.'
 Add-Check ($compose -notmatch '/var/run/docker\.sock:.+runner') 'Compose appears to expose the Docker socket to a runner service.'
 Add-Check ($compose -notmatch '/host/proc:.+runner') 'Compose appears to expose Docker-host proc to a runner service.'
-Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=20$') 'The example environment does not pin the current manager contract.'
+Add-Check ($exampleEnvironment -match '(?m)^PITCREW_MANAGER_CONTRACT_VERSION=21$') 'The example environment does not pin the current manager contract.'
 Add-Check ($routing -match 'general-purpose') 'Routing guidance does not define the general-purpose pool label.'
 Add-Check ($routing -match 'runs-on: \[linux, x64, copilot-cli\]') 'Routing guidance does not show isolated specialized routing.'
 Add-Check ($routing -match 'Do not add `self-hosted`') 'Routing guidance does not warn against defeating specialized isolation.'

@@ -1376,6 +1376,7 @@ func (m *autoscalerManager) publishObserved() error {
 	if err != nil {
 		return err
 	}
+	publicationTime := serializedObservationTime(m.clock.now())
 	observedCurrent := m.applied
 	if observedCurrent == nil {
 		observedCurrent = m.current
@@ -1392,7 +1393,7 @@ func (m *autoscalerManager) publishObserved() error {
 			m.lastError,
 			m.observedError,
 		),
-		m.clock.now(),
+		publicationTime,
 	)
 	state.Autoscaling.ScaleSetCount += len(m.pending)
 	state.Host = observedHost{Hardware: hardware}
@@ -1403,7 +1404,7 @@ func (m *autoscalerManager) publishObserved() error {
 		for _, container := range containers {
 			updated := container.createdAt
 			if updated.IsZero() {
-				updated = m.clock.now()
+				updated = publicationTime
 			}
 			updatedAt := updated.UTC().Format(time.RFC3339)
 			state.ActiveSlots++
@@ -1431,8 +1432,9 @@ func (m *autoscalerManager) publishObserved() error {
 		}
 	}
 	applyResourceSample(&state, resourceSample)
-	m.applyDiagnostics(&state, snapshots)
+	m.applyDiagnostics(&state, snapshots, publicationTime)
 	m.applyHostAdmission(&state)
+	refreshSourceObservations(&state, snapshots, publicationTime)
 	sort.Slice(state.Slots, func(i, j int) bool {
 		return state.Slots[i].Key < state.Slots[j].Key
 	})
@@ -1464,6 +1466,7 @@ func (m *autoscalerManager) applyHostAdmission(state *observedState) {
 func (m *autoscalerManager) applyDiagnostics(
 	state *observedState,
 	snapshots []scalerSnapshot,
+	publicationTime time.Time,
 ) {
 	if m.diagnostics == nil {
 		return
@@ -1475,7 +1478,7 @@ func (m *autoscalerManager) applyDiagnostics(
 		snapshots,
 		m.targetCapacityConditions(),
 		health,
-		m.clock.now(),
+		publicationTime,
 	)
 	state.OperationJournal = &journal
 	state.SubsystemHealth = &health

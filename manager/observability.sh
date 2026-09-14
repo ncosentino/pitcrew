@@ -6,6 +6,260 @@ observed_state_is_valid() {
             type == "number" and . >= 0 and floor == .;
         def optional_counter:
             . == null or nonnegative_integer;
+        def valid_source_observation($source; $identity):
+            type == "object"
+            and (
+                keys == [
+                    "authority",
+                    "coverage",
+                    "observedAt",
+                    "reason",
+                    "retention",
+                    "source",
+                    "sourceIdentity"
+                ]
+            )
+            and .authority == "pitcrew-manager"
+            and .source == $source
+            and .sourceIdentity == $identity
+            and (
+                .observedAt == null
+                or (
+                    (.observedAt | type == "string")
+                    and ((.observedAt | fromdateiso8601?) | type == "number")
+                )
+            )
+            and (
+                .coverage == "complete"
+                or .coverage == "partial"
+                or .coverage == "unavailable"
+            )
+            and (
+                .retention == "live"
+                or .retention == "last-known"
+            )
+            and (
+                .reason == null
+                or .reason == "not-observed"
+                or .reason == "source-partial"
+                or .reason == "source-unavailable"
+                or .reason == "stale"
+                or .reason == "unsupported"
+            )
+            and (
+                if .coverage == "complete" and .retention == "live" then
+                    .observedAt != null and .reason == null
+                elif .coverage == "complete" and .retention == "last-known" then
+                    .observedAt != null and .reason == "stale"
+                elif .coverage == "partial" then
+                    .observedAt != null and .reason == "source-partial"
+                else
+                    .observedAt == null
+                    and .retention == "live"
+                    and (
+                        .reason == "not-observed"
+                        or .reason == "source-unavailable"
+                        or .reason == "unsupported"
+                    )
+                end
+            );
+        def valid_source_observations($identity):
+            type == "object"
+            and (
+                keys == [
+                    "capacity",
+                    "githubScaleSet",
+                    "hostAdmission",
+                    "hostHardware",
+                    "localRuntime",
+                    "resourceTelemetry",
+                    "subsystemHealth",
+                    "workload"
+                ]
+            )
+            and (.localRuntime | valid_source_observation("local-runtime"; $identity))
+            and (.githubScaleSet | valid_source_observation("github-scale-set"; $identity))
+            and (.resourceTelemetry | valid_source_observation("resource-telemetry"; $identity))
+            and (.hostHardware | valid_source_observation("host-hardware"; $identity))
+            and (.hostAdmission | valid_source_observation("host-admission"; $identity))
+            and (.subsystemHealth | valid_source_observation("subsystem-health"; $identity))
+            and (.capacity | valid_source_observation("capacity"; $identity))
+            and (.workload | valid_source_observation("workload"; $identity));
+        def source_observation_matches(
+            $observation;
+            $observedAt;
+            $coverage;
+            $retention;
+            $reason
+        ):
+            $observation.observedAt == $observedAt
+            and $observation.coverage == $coverage
+            and $observation.retention == $retention
+            and $observation.reason == $reason;
+        def source_time_is_stale($sourceObservedAt; $documentObservedAt):
+            (
+                ($documentObservedAt | fromdateiso8601)
+                - ($sourceObservedAt | fromdateiso8601)
+            ) > 120;
+        def valid_autoscaling_source_relations($state):
+            ($state.autoscaling.targets // []) as $targets
+            | ($state.capacityEvidence.targets // []) as $capacityTargets
+            | (
+                [$targets[] | .statistics | select(. != null)]
+              ) as $statistics
+            | (
+                $statistics
+                | map(select(
+                    source_time_is_stale(.observedAt; $state.observedAt)
+                ))
+              ) as $staleStatistics
+            | (
+                $capacityTargets
+                | map(select(.freshness != "unavailable"))
+              ) as $observedCapacity
+            | (
+                $observedCapacity
+                | map(select(.freshness == "stale"))
+              ) as $staleCapacity
+            | (
+                ($state.autoscaling | has("targets"))
+                and ($state.capacityEvidence | has("targets"))
+                and ($targets | type == "array")
+                and ($capacityTargets | type == "array")
+                and (($targets | length) == ($capacityTargets | length))
+                and (
+                    ([$targets[].key] | sort)
+                    == ([$capacityTargets[].key] | sort)
+                )
+                and all($targets[];
+                    . as $target
+                    | (
+                        [$capacityTargets[] | select(.key == $target.key)]
+                      ) as $matches
+                    | ($matches | length) == 1
+                    and (
+                        $matches[0] as $capacity
+                        | if $target.statistics == null then
+                            $capacity.freshness == "unavailable"
+                            and $capacity.observedAt == $state.observedAt
+                          elif source_time_is_stale(
+                              $target.statistics.observedAt;
+                              $state.observedAt
+                          ) then
+                            $capacity.freshness == "stale"
+                            and $capacity.observedAt
+                                == $target.statistics.observedAt
+                          else
+                            $capacity.freshness == "current"
+                            and $capacity.observedAt
+                                == $target.statistics.observedAt
+                          end
+                    )
+                )
+                and (
+                    if ($statistics | length) == 0 then
+                        source_observation_matches(
+                            $state.sourceObservations.githubScaleSet;
+                            null;
+                            "unavailable";
+                            "live";
+                            "not-observed"
+                        )
+                        and source_observation_matches(
+                            $state.sourceObservations.workload;
+                            null;
+                            "unavailable";
+                            "live";
+                            "not-observed"
+                        )
+                    else
+                        ($statistics | map(.observedAt) | min) as $oldest
+                        | (
+                            if ($statistics | length) != ($targets | length)
+                                or (
+                                    ($staleStatistics | length) > 0
+                                    and ($staleStatistics | length)
+                                        < ($statistics | length)
+                                ) then
+                                "partial"
+                            else
+                                "complete"
+                            end
+                          ) as $coverage
+                        | (
+                            if ($staleStatistics | length) > 0
+                            then "last-known"
+                            else "live"
+                            end
+                          ) as $retention
+                        | (
+                            if $coverage == "partial" then "source-partial"
+                            elif $retention == "last-known" then "stale"
+                            else null
+                            end
+                          ) as $reason
+                        | source_observation_matches(
+                            $state.sourceObservations.githubScaleSet;
+                            $oldest;
+                            $coverage;
+                            $retention;
+                            $reason
+                        )
+                        and source_observation_matches(
+                            $state.sourceObservations.workload;
+                            $oldest;
+                            $coverage;
+                            $retention;
+                            $reason
+                        )
+                    end
+                )
+                and (
+                    if ($observedCapacity | length) == 0 then
+                        source_observation_matches(
+                            $state.sourceObservations.capacity;
+                            null;
+                            "unavailable";
+                            "live";
+                            "source-unavailable"
+                        )
+                    else
+                        ($observedCapacity | map(.observedAt) | min) as $oldest
+                        | (
+                            if ($observedCapacity | length)
+                                != ($capacityTargets | length)
+                                or (
+                                    ($staleCapacity | length) > 0
+                                    and ($staleCapacity | length)
+                                        < ($observedCapacity | length)
+                                ) then
+                                "partial"
+                            else
+                                "complete"
+                            end
+                          ) as $coverage
+                        | (
+                            if ($staleCapacity | length) > 0
+                            then "last-known"
+                            else "live"
+                            end
+                          ) as $retention
+                        | (
+                            if $coverage == "partial" then "source-partial"
+                            elif $retention == "last-known" then "stale"
+                            else null
+                            end
+                          ) as $reason
+                        | source_observation_matches(
+                            $state.sourceObservations.capacity;
+                            $oldest;
+                            $coverage;
+                            $retention;
+                            $reason
+                        )
+                    end
+                )
+            );
         def valid_resource_usage:
             type == "object"
             and (.cpuCores | type == "number" and . >= 0)
@@ -982,6 +1236,16 @@ observed_state_is_valid() {
             or (.capacityEvidence | valid_capacity_evidence)
         )
         and (
+            .sourceObservations == null
+            or (
+                . as $state
+                | (
+                    $state.sourceObservations
+                    | valid_source_observations($state.managerInstanceId)
+                )
+            )
+        )
+        and (
             if .managerContractVersion >= 12 then
                 has("operationJournal")
                 and has("subsystemHealth")
@@ -1004,7 +1268,16 @@ observed_state_is_valid() {
                 )
                 and (
                     if .autoscaling == null then
-                        .capacityEvidence.fixed != null
+                        (
+                            .capacityEvidence.fixed != null
+                            or (
+                                .managerContractVersion >= 21
+                                and .sourceObservations.capacity.coverage == "unavailable"
+                                and .sourceObservations.capacity.observedAt == null
+                                and .sourceObservations.capacity.retention == "live"
+                                and .sourceObservations.capacity.reason == "source-unavailable"
+                            )
+                        )
                         and (.capacityEvidence.targets | length) == 0
                     else
                         .capacityEvidence.fixed == null
@@ -1025,6 +1298,76 @@ observed_state_is_valid() {
                                 and (.host.hardware | valid_host_hardware)
                             )
                         )
+                    end
+                )
+            else
+                true
+            end
+        )
+        and (
+            if .managerContractVersion >= 21 then
+                has("sourceObservations")
+                and (
+                    . as $state
+                    | (
+                        $state.sourceObservations
+                        | valid_source_observations($state.managerInstanceId)
+                    )
+                )
+                and (
+                    if .sourceObservations.localRuntime.coverage == "unavailable" then
+                        .sourceObservations.localRuntime.observedAt == null
+                    else
+                        .sourceObservations.localRuntime.observedAt == .observedAt
+                    end
+                )
+                and (
+                    if .resourceTelemetry.status == "available" then
+                        .sourceObservations.resourceTelemetry.coverage == "complete"
+                        and .sourceObservations.resourceTelemetry.observedAt == .resourceTelemetry.sampledAt
+                    elif .resourceTelemetry.status == "partial" then
+                        .sourceObservations.resourceTelemetry.coverage == "partial"
+                        and .sourceObservations.resourceTelemetry.observedAt == .resourceTelemetry.sampledAt
+                    else
+                        .sourceObservations.resourceTelemetry.coverage == "unavailable"
+                        and .sourceObservations.resourceTelemetry.observedAt == null
+                    end
+                )
+                and (
+                    if .host.hardware.status == "current" then
+                        .sourceObservations.hostHardware.coverage == "complete"
+                        and .sourceObservations.hostHardware.retention == "live"
+                        and .sourceObservations.hostHardware.observedAt == .host.hardware.collectedAt
+                    elif .host.hardware.status == "stale" then
+                        .sourceObservations.hostHardware.coverage == "complete"
+                        and .sourceObservations.hostHardware.retention == "last-known"
+                        and .sourceObservations.hostHardware.observedAt == .host.hardware.collectedAt
+                    else
+                        .sourceObservations.hostHardware.coverage == "unavailable"
+                        and .sourceObservations.hostHardware.observedAt == null
+                    end
+                )
+                and (
+                    if .hostAdmission.status == "available"
+                        or .hostAdmission.status == "disabled" then
+                        .sourceObservations.hostAdmission.coverage == "complete"
+                        and .sourceObservations.hostAdmission.observedAt == .observedAt
+                    elif .hostAdmission.status == "degraded" then
+                        .sourceObservations.hostAdmission.coverage == "partial"
+                        and .sourceObservations.hostAdmission.observedAt == .observedAt
+                    else
+                        .sourceObservations.hostAdmission.coverage == "unavailable"
+                        and .sourceObservations.hostAdmission.observedAt == null
+                    end
+                )
+                and (
+                    if .autoscaling == null then
+                        .sourceObservations.githubScaleSet.coverage == "unavailable"
+                        and .sourceObservations.githubScaleSet.reason == "unsupported"
+                        and .sourceObservations.workload.coverage == "unavailable"
+                        and .sourceObservations.workload.reason == "unsupported"
+                    else
+                        valid_autoscaling_source_relations(.)
                     end
                 )
             else
@@ -2410,7 +2753,227 @@ write_manager_observed_state() {
         --arg targetImage "${target_image}" \
         --arg targetImageId "${target_image_id}" \
         --argjson staleWorkers "${stale_workers}" \
-        '{
+        '
+        def source_observation(
+            $source;
+            $sourceIdentity;
+            $observedAt;
+            $coverage;
+            $retention;
+            $reason
+        ):
+            {
+                authority: "pitcrew-manager",
+                source: $source,
+                sourceIdentity: $sourceIdentity,
+                observedAt: $observedAt,
+                coverage: $coverage,
+                retention: $retention,
+                reason: $reason
+            };
+        ($slots[0] // []) as $slotState
+        | ($resourceTelemetry[0] // {}) as $telemetry
+        | ($hostHardware[0] // {}) as $hardware
+        | ($hostAdmission[0] // {}) as $admission
+        | ($subsystemHealth[0] // null) as $health
+        | ($capacityEvidence[0] // null) as $capacity
+        | ($slotState | any(.activity == "unknown")) as $localPartial
+        | (
+            if ($telemetry.status // "unavailable") == "available" then
+                source_observation(
+                    "resource-telemetry";
+                    $managerInstanceId;
+                    $telemetry.sampledAt;
+                    "complete";
+                    (
+                        if $managerStatus == "stopping" or $managerStatus == "stopped"
+                        then "last-known"
+                        else "live"
+                        end
+                    );
+                    (
+                        if $managerStatus == "stopping" or $managerStatus == "stopped"
+                        then "stale"
+                        else null
+                        end
+                    )
+                )
+            elif ($telemetry.status // "unavailable") == "partial" then
+                source_observation(
+                    "resource-telemetry";
+                    $managerInstanceId;
+                    $telemetry.sampledAt;
+                    "partial";
+                    (
+                        if $managerStatus == "stopping" or $managerStatus == "stopped"
+                        then "last-known"
+                        else "live"
+                        end
+                    );
+                    "source-partial"
+                )
+            else
+                source_observation(
+                    "resource-telemetry";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "source-unavailable"
+                )
+            end
+          ) as $resourceSource
+        | (
+            if ($hardware.status // "unavailable") == "current" then
+                source_observation(
+                    "host-hardware";
+                    $managerInstanceId;
+                    $hardware.collectedAt;
+                    "complete";
+                    "live";
+                    null
+                )
+            elif ($hardware.status // "unavailable") == "stale" then
+                source_observation(
+                    "host-hardware";
+                    $managerInstanceId;
+                    $hardware.collectedAt;
+                    "complete";
+                    "last-known";
+                    "stale"
+                )
+            else
+                source_observation(
+                    "host-hardware";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "source-unavailable"
+                )
+            end
+          ) as $hardwareSource
+        | (
+            if ($admission.status // "unavailable") == "available"
+                or ($admission.status // "unavailable") == "disabled" then
+                source_observation(
+                    "host-admission";
+                    $managerInstanceId;
+                    $observedAt;
+                    "complete";
+                    "live";
+                    null
+                )
+            elif ($admission.status // "unavailable") == "degraded" then
+                source_observation(
+                    "host-admission";
+                    $managerInstanceId;
+                    $observedAt;
+                    "partial";
+                    "live";
+                    "source-partial"
+                )
+            else
+                source_observation(
+                    "host-admission";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "source-unavailable"
+                )
+            end
+          ) as $admissionSource
+        | (
+            if $health == null then
+                source_observation(
+                    "subsystem-health";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "not-observed"
+                )
+            else
+                (
+                    [$health.docker, $health.github]
+                    | map(select(.state != "unknown"))
+                ) as $observedHealth
+                | if ($observedHealth | length) == 0 then
+                    source_observation(
+                        "subsystem-health";
+                        $managerInstanceId;
+                        null;
+                        "unavailable";
+                        "live";
+                        "not-observed"
+                    )
+                  elif ($observedHealth | length) < 2 then
+                    source_observation(
+                        "subsystem-health";
+                        $managerInstanceId;
+                        ($observedHealth | map(.observedAt) | min);
+                        "partial";
+                        "live";
+                        "source-partial"
+                    )
+                  else
+                    source_observation(
+                        "subsystem-health";
+                        $managerInstanceId;
+                        ($observedHealth | map(.observedAt) | min);
+                        "complete";
+                        "live";
+                        null
+                    )
+                  end
+            end
+          ) as $healthSource
+        | (
+            if $capacity == null then
+                source_observation(
+                    "capacity";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "not-observed"
+                )
+            elif $capacity.fixed == null then
+                source_observation(
+                    "capacity";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "source-unavailable"
+                )
+            elif $capacity.fixed.freshness == "current" then
+                source_observation(
+                    "capacity";
+                    $managerInstanceId;
+                    $capacity.fixed.observedAt;
+                    "complete";
+                    "live";
+                    null
+                )
+            else
+                source_observation(
+                    "capacity";
+                    $managerInstanceId;
+                    $capacity.fixed.observedAt;
+                    "partial";
+                    (
+                        if $capacity.fixed.freshness == "stale"
+                        then "last-known"
+                        else "live"
+                        end
+                    );
+                    "source-partial"
+                )
+            end
+          ) as $capacitySource
+        | {
             schemaVersion: $schemaVersion,
             managerContractVersion: $managerContractVersion,
             profileId: $profileId,
@@ -2440,6 +3003,37 @@ write_manager_observed_state() {
             subsystemHealth: $subsystemHealth[0],
             capacityEvidence: $capacityEvidence[0],
             hostAdmission: $hostAdmission[0],
+            sourceObservations: {
+                localRuntime: source_observation(
+                    "local-runtime";
+                    $managerInstanceId;
+                    $observedAt;
+                    (if $localPartial then "partial" else "complete" end);
+                    "live";
+                    (if $localPartial then "source-partial" else null end)
+                ),
+                githubScaleSet: source_observation(
+                    "github-scale-set";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "unsupported"
+                ),
+                resourceTelemetry: $resourceSource,
+                hostHardware: $hardwareSource,
+                hostAdmission: $admissionSource,
+                subsystemHealth: $healthSource,
+                capacity: $capacitySource,
+                workload: source_observation(
+                    "workload";
+                    $managerInstanceId;
+                    null;
+                    "unavailable";
+                    "live";
+                    "unsupported"
+                )
+            },
             autoscaling: null,
             update: {
                 status: (if $staleWorkers > 0 then "rolling" else "current" end),

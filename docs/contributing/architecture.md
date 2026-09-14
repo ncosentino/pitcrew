@@ -64,6 +64,11 @@ Managers collect lifecycle, registration, resource, operation, capacity, hardwar
 and bounded job-context evidence. Unsupported or stale measurements remain explicit;
 they are not inferred from resource activity or converted to zero.
 
+Contract 21 attaches bounded source-family coverage, retention, authority, manager
+source identity, and source-observed time to those claims. A publication heartbeat
+never refreshes nested evidence, and an incomplete local observation never becomes
+an authoritative empty inventory.
+
 The projection contains no registration token, JIT configuration, environment
 values, raw runner identity, job output, or host-private identifiers. Connectors and
 dashboards are read-only consumers and never receive the Docker socket.

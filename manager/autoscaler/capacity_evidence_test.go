@@ -140,12 +140,13 @@ func TestCapacityEvidenceNeverTargetsConfiguredMaximum(t *testing.T) {
 // freshness is published rather than assumed.
 func TestCapacityEvidenceMarksStaleAndUnavailableStatistics(t *testing.T) {
 	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	statisticsObservedAt := now.Add(-statisticsStaleAfter - time.Minute)
 	stale := evidenceSnapshot(
 		"repo-stale",
 		2,
 		activeRunners(2, runnerIdle),
 		scalerStatistics{
-			observedAt:        now.Add(-statisticsStaleAfter - time.Minute),
+			observedAt:        statisticsObservedAt,
 			registeredRunners: 1,
 		},
 	)
@@ -157,7 +158,8 @@ func TestCapacityEvidenceMarksStaleAndUnavailableStatistics(t *testing.T) {
 		now,
 	)
 	if evidence.Targets[0].Freshness != freshnessStale ||
-		evidence.Targets[0].EligibleWorkers == nil {
+		evidence.Targets[0].EligibleWorkers == nil ||
+		evidence.Targets[0].ObservedAt != statisticsObservedAt.Format(time.RFC3339) {
 		t.Fatalf("stale statistics were not published: %#v", evidence.Targets[0])
 	}
 	fresh := evidence.Targets[1]
@@ -166,6 +168,52 @@ func TestCapacityEvidenceMarksStaleAndUnavailableStatistics(t *testing.T) {
 		fresh.EligibilityDeficit != nil ||
 		fresh.Reason != deficitUnknown {
 		t.Fatalf("unobserved statistics were fabricated: %#v", fresh)
+	}
+}
+
+func TestCapacitySourceRetainsContributingStatisticsTimeAcrossPublications(t *testing.T) {
+	statisticsObservedAt := time.Date(2026, 7, 20, 11, 55, 0, 0, time.UTC)
+	snapshot := evidenceSnapshot(
+		"repo-stale",
+		2,
+		activeRunners(2, runnerIdle),
+		scalerStatistics{
+			observedAt:        statisticsObservedAt,
+			registeredRunners: 1,
+		},
+	)
+
+	for _, publicationTime := range []time.Time{
+		time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC),
+		time.Date(2026, 7, 20, 12, 10, 0, 0, time.UTC),
+	} {
+		capacity := buildCapacityEvidence(
+			[]scalerSnapshot{snapshot},
+			nil,
+			healthyDiagnostics(),
+			publicationTime,
+		)
+		state := observedState{
+			ManagerInstanceID: "instance-a",
+			ObservedAt:        publicationTime.Format(time.RFC3339),
+			CapacityEvidence:  &capacity,
+		}
+		source := capacitySourceObservation(state)
+		expectedObservedAt := statisticsObservedAt.Format(time.RFC3339)
+		if capacity.Targets[0].ObservedAt != expectedObservedAt ||
+			source.ObservedAt == nil ||
+			*source.ObservedAt != expectedObservedAt ||
+			source.Retention != retentionLastKnown ||
+			source.Coverage != coverageComplete ||
+			source.Reason == nil ||
+			*source.Reason != sourceReasonStale {
+			t.Fatalf(
+				"publication at %s refreshed retained capacity evidence: capacity=%#v source=%#v",
+				publicationTime,
+				capacity.Targets[0],
+				source,
+			)
+		}
 	}
 }
 

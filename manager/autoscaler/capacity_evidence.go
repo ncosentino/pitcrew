@@ -135,8 +135,13 @@ func targetDeficitCore(
 
 	targetSlots := max(snapshot.targetSlots, 0)
 	active := max(snapshot.activeRunners, 0)
+	observedAt := now
+	if !snapshot.statistics.observedAt.IsZero() &&
+		snapshot.statistics.observedAt.Before(observedAt) {
+		observedAt = snapshot.statistics.observedAt
+	}
 	core := capacityDeficitCore{
-		ObservedAt:            now.UTC().Format(time.RFC3339),
+		ObservedAt:            observedAt.UTC().Format(time.RFC3339),
 		Freshness:             statisticsFreshness(snapshot.statistics.observedAt, now),
 		TargetSlots:           targetSlots,
 		ActiveWorkers:         active,
@@ -162,10 +167,16 @@ func statisticsFreshness(observedAt time.Time, now time.Time) string {
 	if observedAt.IsZero() {
 		return freshnessUnavailable
 	}
-	if now.Sub(observedAt) > statisticsStaleAfter {
+	serializedObservedAt := serializedObservationTime(observedAt)
+	serializedNow := serializedObservationTime(now)
+	if serializedNow.Sub(serializedObservedAt) > statisticsStaleAfter {
 		return freshnessStale
 	}
 	return freshnessCurrent
+}
+
+func serializedObservationTime(value time.Time) time.Time {
+	return value.UTC().Truncate(time.Second)
 }
 
 // deficitReason reports why the manager has not reached the activation target.

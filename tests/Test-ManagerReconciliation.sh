@@ -1088,7 +1088,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "20" \
+    "21" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -2059,9 +2059,9 @@ assert_true \
     observed_state_is_valid "${legacy_contract_sixteen_state}"
 
 assert_equals \
-    "20" \
+    "21" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
-    "The fixed manager does not declare the active contract twenty."
+    "The fixed manager does not declare the active contract twenty-one."
 
 contract_eighteen_disabled_state="${TEMP_DIRECTORY}/contract-eighteen-disabled-state.json"
 jq '
@@ -2271,6 +2271,532 @@ jq '
 assert_true \
     "Contract-nineteen accounting rejected explicit degraded protocol-two compatibility." \
     observed_state_is_valid "${contract_nineteen_previous_protocol_state}"
+
+contract_twenty_one_state="${TEMP_DIRECTORY}/contract-twenty-one-state.json"
+jq '.managerContractVersion = 21' \
+    "${contract_nineteen_available_state}" > "${contract_twenty_one_state}"
+assert_false \
+    "Manager contract twenty-one accepted missing source observation provenance." \
+    observed_state_is_valid "${contract_twenty_one_state}"
+
+contract_twenty_one_sources="${TEMP_DIRECTORY}/contract-twenty-one-sources.json"
+jq '
+    .sourceObservations = {
+        localRuntime: {
+            authority: "pitcrew-manager",
+            source: "local-runtime",
+            sourceIdentity: .managerInstanceId,
+            observedAt: .observedAt,
+            coverage: "complete",
+            retention: "live",
+            reason: null
+        },
+        githubScaleSet: {
+            authority: "pitcrew-manager",
+            source: "github-scale-set",
+            sourceIdentity: .managerInstanceId,
+            observedAt: null,
+            coverage: "unavailable",
+            retention: "live",
+            reason: "unsupported"
+        },
+        resourceTelemetry: {
+            authority: "pitcrew-manager",
+            source: "resource-telemetry",
+            sourceIdentity: .managerInstanceId,
+            observedAt: .resourceTelemetry.sampledAt,
+            coverage: "complete",
+            retention: "live",
+            reason: null
+        },
+        hostHardware: {
+            authority: "pitcrew-manager",
+            source: "host-hardware",
+            sourceIdentity: .managerInstanceId,
+            observedAt: .host.hardware.collectedAt,
+            coverage: "complete",
+            retention: "live",
+            reason: null
+        },
+        hostAdmission: {
+            authority: "pitcrew-manager",
+            source: "host-admission",
+            sourceIdentity: .managerInstanceId,
+            observedAt: .observedAt,
+            coverage: "complete",
+            retention: "live",
+            reason: null
+        },
+        subsystemHealth: {
+            authority: "pitcrew-manager",
+            source: "subsystem-health",
+            sourceIdentity: .managerInstanceId,
+            observedAt: .subsystemHealth.docker.observedAt,
+            coverage: "complete",
+            retention: "live",
+            reason: null
+        },
+        capacity: {
+            authority: "pitcrew-manager",
+            source: "capacity",
+            sourceIdentity: .managerInstanceId,
+            observedAt: .capacityEvidence.fixed.observedAt,
+            coverage: "complete",
+            retention: "live",
+            reason: null
+        },
+        workload: {
+            authority: "pitcrew-manager",
+            source: "workload",
+            sourceIdentity: .managerInstanceId,
+            observedAt: null,
+            coverage: "unavailable",
+            retention: "live",
+            reason: "unsupported"
+        }
+    }
+' "${contract_twenty_one_state}" > "${contract_twenty_one_sources}"
+assert_true \
+    "Manager contract twenty-one rejected complete source observation provenance." \
+    observed_state_is_valid "${contract_twenty_one_sources}"
+
+contract_twenty_one_host_admission="${TEMP_DIRECTORY}/contract-twenty-one-host-admission.json"
+contract_twenty_one_telemetry="${TEMP_DIRECTORY}/contract-twenty-one-telemetry.json"
+contract_twenty_one_produced="${TEMP_DIRECTORY}/contract-twenty-one-produced.json"
+jq '.hostAdmission' \
+    "${contract_nineteen_available_state}" > "${contract_twenty_one_host_admission}"
+jq \
+    --slurpfile contractSixteen "${contract_sixteen_state_json}" \
+    '.hostPressure = $contractSixteen[0].resourceTelemetry.hostPressure' \
+    "${contract_eleven_telemetry_json}" > "${contract_twenty_one_telemetry}"
+write_manager_observed_state \
+    "${contract_twenty_one_produced}" \
+    default \
+    manager-instance \
+    21 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_twenty_one_telemetry}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}" \
+    "${contract_twenty_one_host_admission}"
+assert_true \
+    "The fixed manager producer emitted invalid contract-twenty-one provenance." \
+    observed_state_is_valid "${contract_twenty_one_produced}"
+assert_equals \
+    "unsupported" \
+    "$(jq -r '.sourceObservations.githubScaleSet.reason' "${contract_twenty_one_produced}")" \
+    "The fixed manager fabricated GitHub scale-set evidence."
+assert_equals \
+    "$(jq -r '.resourceTelemetry.sampledAt' "${contract_twenty_one_produced}")" \
+    "$(jq -r '.sourceObservations.resourceTelemetry.observedAt' "${contract_twenty_one_produced}")" \
+    "The fixed manager refreshed resource telemetry to the document timestamp."
+assert_equals \
+    "$(jq -r '.host.hardware.collectedAt' "${contract_twenty_one_produced}")" \
+    "$(jq -r '.sourceObservations.hostHardware.observedAt' "${contract_twenty_one_produced}")" \
+    "The fixed manager refreshed retained hardware evidence to the document timestamp."
+
+contract_twenty_one_stopping="${TEMP_DIRECTORY}/contract-twenty-one-stopping.json"
+write_manager_observed_state \
+    "${contract_twenty_one_stopping}" \
+    default \
+    manager-instance \
+    21 \
+    stopping \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_twenty_one_telemetry}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}" \
+    "${contract_twenty_one_host_admission}"
+assert_equals \
+    "last-known" \
+    "$(jq -r '.sourceObservations.resourceTelemetry.retention' "${contract_twenty_one_stopping}")" \
+    "The fixed manager labeled shutdown telemetry as live evidence."
+assert_equals \
+    "stale" \
+    "$(jq -r '.sourceObservations.resourceTelemetry.reason' "${contract_twenty_one_stopping}")" \
+    "The fixed manager did not identify retained shutdown telemetry."
+
+contract_twenty_one_fallback_capacity="${TEMP_DIRECTORY}/contract-twenty-one-fallback-capacity.json"
+contract_twenty_one_fallback="${TEMP_DIRECTORY}/contract-twenty-one-fallback.json"
+write_unavailable_capacity_evidence "${contract_twenty_one_fallback_capacity}"
+write_manager_observed_state \
+    "${contract_twenty_one_fallback}" \
+    default \
+    manager-instance \
+    21 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_eleven_slots_json}" \
+    "${contract_twenty_one_telemetry}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${contract_twenty_one_fallback_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}" \
+    "${contract_twenty_one_host_admission}"
+assert_true \
+    "The fixed manager rejected wholly unavailable contract-twenty-one capacity." \
+    observed_state_is_valid "${contract_twenty_one_fallback}"
+assert_equals \
+    "null" \
+    "$(jq -r '.capacityEvidence.fixed' "${contract_twenty_one_fallback}")" \
+    "The fixed manager fallback fabricated zero-valued capacity measurements."
+assert_equals \
+    "unavailable" \
+    "$(jq -r '.sourceObservations.capacity.coverage' "${contract_twenty_one_fallback}")" \
+    "The fixed manager fallback presented unavailable capacity as observed."
+assert_equals \
+    "null" \
+    "$(jq -r '.sourceObservations.capacity.observedAt' "${contract_twenty_one_fallback}")" \
+    "The fixed manager fallback assigned a source time to unavailable capacity."
+assert_equals \
+    "source-unavailable" \
+    "$(jq -r '.sourceObservations.capacity.reason' "${contract_twenty_one_fallback}")" \
+    "The fixed manager fallback omitted the unavailable-capacity reason."
+
+contract_twenty_one_partial_slots="${TEMP_DIRECTORY}/contract-twenty-one-partial-slots.json"
+contract_twenty_one_partial="${TEMP_DIRECTORY}/contract-twenty-one-partial.json"
+jq '.[0].activity = "unknown"' \
+    "${contract_eleven_slots_json}" > "${contract_twenty_one_partial_slots}"
+write_manager_observed_state \
+    "${contract_twenty_one_partial}" \
+    default \
+    manager-instance \
+    21 \
+    running \
+    repo \
+    9 \
+    state-hash \
+    accepted \
+    2 \
+    "${contract_twenty_one_partial_slots}" \
+    "${contract_twenty_one_telemetry}" \
+    aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
+    1 \
+    "${contract_eleven_policy_json}" \
+    "${diagnostics_journal_projection}" \
+    "${diagnostics_health_projection}" \
+    "${satisfied_capacity}" \
+    example/runner:1.0 \
+    sha256:1111111111111111111111111111111111111111111111111111111111111111 \
+    "${host_hardware}" \
+    "${contract_twenty_one_host_admission}"
+assert_equals \
+    "partial" \
+    "$(jq -r '.sourceObservations.localRuntime.coverage' "${contract_twenty_one_partial}")" \
+    "The fixed manager presented incomplete local observation as complete."
+
+invalid_contract_twenty_one_sources="${TEMP_DIRECTORY}/invalid-contract-twenty-one-sources.json"
+jq '.sourceObservations.resourceTelemetry.observedAt = .observedAt' \
+    "${contract_twenty_one_sources}" > "${invalid_contract_twenty_one_sources}"
+assert_false \
+    "A fresh manager document refreshed older resource evidence." \
+    observed_state_is_valid "${invalid_contract_twenty_one_sources}"
+jq '
+    .sourceObservations.githubScaleSet.coverage = "complete"
+    | .sourceObservations.githubScaleSet.reason = null
+' "${contract_twenty_one_sources}" > "${invalid_contract_twenty_one_sources}"
+assert_false \
+    "Complete source coverage was accepted without a source observation time." \
+    observed_state_is_valid "${invalid_contract_twenty_one_sources}"
+jq '
+    .sourceObservations.localRuntime.coverage = "unavailable"
+    | .sourceObservations.localRuntime.observedAt = null
+    | .sourceObservations.localRuntime.reason = "source-unavailable"
+' "${contract_twenty_one_sources}" > "${invalid_contract_twenty_one_sources}"
+assert_true \
+    "Manager contract twenty-one rejected unavailable local observation without invented values." \
+    observed_state_is_valid "${invalid_contract_twenty_one_sources}"
+
+contract_twenty_one_autoscaler_complete="${TEMP_DIRECTORY}/contract-twenty-one-autoscaler-complete.json"
+jq '
+    .observedAt = "2026-01-01T12:00:00Z"
+    | .sourceObservations.localRuntime.observedAt = .observedAt
+    | .sourceObservations.hostAdmission.observedAt = .observedAt
+    | .autoscaling = {
+        mode: "scale-set",
+        status: "running",
+        minimumIdleSlots: 0,
+        maximumSlots: 4,
+        targetSlots: 2,
+        assignedJobs: 0,
+        runningJobs: 0,
+        availableJobs: 0,
+        idleRunners: 2,
+        busyRunners: 0,
+        scaleDownDelaySeconds: 120,
+        scaleDownAt: null,
+        scaleSetCount: 2,
+        lastError: null,
+        maximumActiveWorkers: 4,
+        targets: [
+            {
+                key: "repo-a",
+                repository: null,
+                maximumSlots: 2,
+                targetSlots: 1,
+                localActiveWorkers: 1,
+                localIdleWorkers: 1,
+                localBusyWorkers: 0,
+                localDrainingWorkers: 0,
+                statistics: {
+                    observedAt: "2026-01-01T11:59:00Z",
+                    availableJobs: 0,
+                    acquiredJobs: 0,
+                    assignedJobs: 0,
+                    runningJobs: 0,
+                    registeredRunners: 1,
+                    busyRunners: 0,
+                    idleRunners: 1
+                }
+            },
+            {
+                key: "repo-b",
+                repository: null,
+                maximumSlots: 2,
+                targetSlots: 1,
+                localActiveWorkers: 1,
+                localIdleWorkers: 1,
+                localBusyWorkers: 0,
+                localDrainingWorkers: 0,
+                statistics: {
+                    observedAt: "2026-01-01T11:58:30Z",
+                    availableJobs: 0,
+                    acquiredJobs: 0,
+                    assignedJobs: 0,
+                    runningJobs: 0,
+                    registeredRunners: 1,
+                    busyRunners: 0,
+                    idleRunners: 1
+                }
+            }
+        ]
+    }
+    | .capacityEvidence = {
+        fixed: null,
+        targets: [
+            {
+                key: "repo-a",
+                repository: null,
+                observedAt: "2026-01-01T11:59:00Z",
+                freshness: "current",
+                targetSlots: 1,
+                activeWorkers: 1,
+                startingWorkers: 0,
+                drainingWorkers: 0,
+                cleanupPendingWorkers: 0,
+                eligibleWorkers: 1,
+                localDeficit: 0,
+                eligibilityDeficit: 0,
+                reason: "none",
+                evidence: null
+            },
+            {
+                key: "repo-b",
+                repository: null,
+                observedAt: "2026-01-01T11:58:30Z",
+                freshness: "current",
+                targetSlots: 1,
+                activeWorkers: 1,
+                startingWorkers: 0,
+                drainingWorkers: 0,
+                cleanupPendingWorkers: 0,
+                eligibleWorkers: 1,
+                localDeficit: 0,
+                eligibilityDeficit: 0,
+                reason: "none",
+                evidence: null
+            }
+        ]
+    }
+    | .sourceObservations.githubScaleSet.observedAt = "2026-01-01T11:58:30Z"
+    | .sourceObservations.githubScaleSet.coverage = "complete"
+    | .sourceObservations.githubScaleSet.retention = "live"
+    | .sourceObservations.githubScaleSet.reason = null
+    | .sourceObservations.workload = (
+        .sourceObservations.githubScaleSet
+        | .source = "workload"
+      )
+    | .sourceObservations.capacity.observedAt = "2026-01-01T11:58:30Z"
+    | .sourceObservations.capacity.coverage = "complete"
+    | .sourceObservations.capacity.retention = "live"
+    | .sourceObservations.capacity.reason = null
+' "${contract_twenty_one_sources}" > "${contract_twenty_one_autoscaler_complete}"
+assert_true \
+    "Contract twenty-one rejected complete current autoscaler source relations." \
+    observed_state_is_valid "${contract_twenty_one_autoscaler_complete}"
+
+contract_twenty_one_autoscaler_absent="${TEMP_DIRECTORY}/contract-twenty-one-autoscaler-absent.json"
+jq '
+    .autoscaling.targets |= map(.statistics = null)
+    | .capacityEvidence.targets |= map(
+        .observedAt = "2026-01-01T12:00:00Z"
+        | .freshness = "unavailable"
+        | .eligibleWorkers = null
+        | .eligibilityDeficit = null
+        | .reason = "unknown"
+      )
+    | .sourceObservations.githubScaleSet.observedAt = null
+    | .sourceObservations.githubScaleSet.coverage = "unavailable"
+    | .sourceObservations.githubScaleSet.retention = "live"
+    | .sourceObservations.githubScaleSet.reason = "not-observed"
+    | .sourceObservations.workload = (
+        .sourceObservations.githubScaleSet
+        | .source = "workload"
+      )
+    | .sourceObservations.capacity.observedAt = null
+    | .sourceObservations.capacity.coverage = "unavailable"
+    | .sourceObservations.capacity.retention = "live"
+    | .sourceObservations.capacity.reason = "source-unavailable"
+' "${contract_twenty_one_autoscaler_complete}" > "${contract_twenty_one_autoscaler_absent}"
+assert_true \
+    "Contract twenty-one rejected wholly absent autoscaler source relations." \
+    observed_state_is_valid "${contract_twenty_one_autoscaler_absent}"
+
+contract_twenty_one_autoscaler_mixed_absent="${TEMP_DIRECTORY}/contract-twenty-one-autoscaler-mixed-absent.json"
+jq '
+    .autoscaling.targets[1].statistics = null
+    | .capacityEvidence.targets[1].observedAt = "2026-01-01T12:00:00Z"
+    | .capacityEvidence.targets[1].freshness = "unavailable"
+    | .capacityEvidence.targets[1].eligibleWorkers = null
+    | .capacityEvidence.targets[1].eligibilityDeficit = null
+    | .capacityEvidence.targets[1].reason = "unknown"
+    | .sourceObservations.githubScaleSet.observedAt = "2026-01-01T11:59:00Z"
+    | .sourceObservations.githubScaleSet.coverage = "partial"
+    | .sourceObservations.githubScaleSet.retention = "live"
+    | .sourceObservations.githubScaleSet.reason = "source-partial"
+    | .sourceObservations.workload = (
+        .sourceObservations.githubScaleSet
+        | .source = "workload"
+      )
+    | .sourceObservations.capacity.observedAt = "2026-01-01T11:59:00Z"
+    | .sourceObservations.capacity.coverage = "partial"
+    | .sourceObservations.capacity.retention = "live"
+    | .sourceObservations.capacity.reason = "source-partial"
+' "${contract_twenty_one_autoscaler_complete}" > "${contract_twenty_one_autoscaler_mixed_absent}"
+assert_true \
+    "Contract twenty-one rejected mixed present and absent autoscaler sources." \
+    observed_state_is_valid "${contract_twenty_one_autoscaler_mixed_absent}"
+
+contract_twenty_one_autoscaler_stale="${TEMP_DIRECTORY}/contract-twenty-one-autoscaler-stale.json"
+jq '
+    .observedAt = "2026-01-01T12:10:00Z"
+    | .sourceObservations.localRuntime.observedAt = .observedAt
+    | .sourceObservations.hostAdmission.observedAt = .observedAt
+    | .capacityEvidence.targets |= map(.freshness = "stale")
+    | .sourceObservations.githubScaleSet.retention = "last-known"
+    | .sourceObservations.githubScaleSet.reason = "stale"
+    | .sourceObservations.workload = (
+        .sourceObservations.githubScaleSet
+        | .source = "workload"
+      )
+    | .sourceObservations.capacity.retention = "last-known"
+    | .sourceObservations.capacity.reason = "stale"
+' "${contract_twenty_one_autoscaler_complete}" > "${contract_twenty_one_autoscaler_stale}"
+assert_true \
+    "Contract twenty-one rejected consistently retained autoscaler sources." \
+    observed_state_is_valid "${contract_twenty_one_autoscaler_stale}"
+
+contract_twenty_one_autoscaler_mixed_freshness="${TEMP_DIRECTORY}/contract-twenty-one-autoscaler-mixed-freshness.json"
+jq '
+    .autoscaling.targets[0].statistics.observedAt = "2026-01-01T12:09:00Z"
+    | .capacityEvidence.targets[0].observedAt = "2026-01-01T12:09:00Z"
+    | .capacityEvidence.targets[0].freshness = "current"
+    | .sourceObservations.githubScaleSet.coverage = "partial"
+    | .sourceObservations.githubScaleSet.retention = "last-known"
+    | .sourceObservations.githubScaleSet.reason = "source-partial"
+    | .sourceObservations.workload = (
+        .sourceObservations.githubScaleSet
+        | .source = "workload"
+      )
+    | .sourceObservations.capacity.coverage = "partial"
+    | .sourceObservations.capacity.retention = "last-known"
+    | .sourceObservations.capacity.reason = "source-partial"
+' "${contract_twenty_one_autoscaler_stale}" > "${contract_twenty_one_autoscaler_mixed_freshness}"
+assert_true \
+    "Contract twenty-one rejected mixed current and stale autoscaler sources." \
+    observed_state_is_valid "${contract_twenty_one_autoscaler_mixed_freshness}"
+
+invalid_contract_twenty_one_autoscaler="${TEMP_DIRECTORY}/invalid-contract-twenty-one-autoscaler.json"
+jq '
+    .sourceObservations.githubScaleSet.observedAt = .observedAt
+    | .sourceObservations.workload.observedAt = .observedAt
+' "${contract_twenty_one_autoscaler_stale}" > "${invalid_contract_twenty_one_autoscaler}"
+assert_false \
+    "Retained autoscaler sources accepted a refreshed publication timestamp." \
+    observed_state_is_valid "${invalid_contract_twenty_one_autoscaler}"
+jq '
+    .sourceObservations.githubScaleSet.observedAt = .observedAt
+    | .sourceObservations.githubScaleSet.coverage = "complete"
+    | .sourceObservations.githubScaleSet.retention = "live"
+    | .sourceObservations.githubScaleSet.reason = null
+    | .sourceObservations.workload = (
+        .sourceObservations.githubScaleSet
+        | .source = "workload"
+      )
+' "${contract_twenty_one_autoscaler_absent}" > "${invalid_contract_twenty_one_autoscaler}"
+assert_false \
+    "Absent nested statistics accepted complete live autoscaler sources." \
+    observed_state_is_valid "${invalid_contract_twenty_one_autoscaler}"
+jq '.sourceObservations.capacity.observedAt = .observedAt' \
+    "${contract_twenty_one_autoscaler_stale}" > "${invalid_contract_twenty_one_autoscaler}"
+assert_false \
+    "Retained capacity accepted a timestamp newer than its contributing targets." \
+    observed_state_is_valid "${invalid_contract_twenty_one_autoscaler}"
+jq '
+    .sourceObservations.capacity.observedAt = .observedAt
+    | .sourceObservations.capacity.coverage = "complete"
+    | .sourceObservations.capacity.retention = "live"
+    | .sourceObservations.capacity.reason = null
+' "${contract_twenty_one_autoscaler_absent}" > "${invalid_contract_twenty_one_autoscaler}"
+assert_false \
+    "Wholly unobserved capacity targets accepted complete live authority." \
+    observed_state_is_valid "${invalid_contract_twenty_one_autoscaler}"
+jq '.capacityEvidence.targets[0].freshness = "stale"' \
+    "${contract_twenty_one_autoscaler_complete}" > "${invalid_contract_twenty_one_autoscaler}"
+assert_false \
+    "Capacity target freshness contradicted current nested scale-set statistics." \
+    observed_state_is_valid "${invalid_contract_twenty_one_autoscaler}"
+
+legacy_contract_nineteen_sources="${TEMP_DIRECTORY}/legacy-contract-nineteen-sources.json"
+jq '.managerContractVersion = 19 | del(.sourceObservations)' \
+    "${contract_twenty_one_sources}" > "${legacy_contract_nineteen_sources}"
+assert_true \
+    "Observed-state validation rejected contract-nineteen state without source provenance." \
+    observed_state_is_valid "${legacy_contract_nineteen_sources}"
 
 SLOT_DIRECTORY="${TEMP_DIRECTORY}/slots"
 mkdir -p "${SLOT_DIRECTORY}"
