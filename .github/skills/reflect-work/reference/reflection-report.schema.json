@@ -1,0 +1,193 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Report-only work reflection",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "mode", "status", "repository", "window", "model", "evidence", "coverage", "findings", "limitations"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "mode": { "const": "report-only" },
+    "status": { "enum": ["ready", "partial", "no-change"] },
+    "repository": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "headSha", "visibility"],
+      "properties": {
+        "id": { "$ref": "#/definitions/key" },
+        "headSha": { "$ref": "#/definitions/commit" },
+        "visibility": { "enum": ["public", "private", "unknown"] }
+      }
+    },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/definitions/timestamp" },
+        "to": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "reasoningEffort"],
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 100 },
+        "reasoningEffort": { "type": "string", "minLength": 1, "maxLength": 40 }
+      }
+    },
+    "evidence": {
+      "type": "array",
+      "maxItems": 200,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id", "lineage", "source", "role", "reference", "status", "summary"],
+        "properties": {
+          "id": { "$ref": "#/definitions/key" },
+          "lineage": { "$ref": "#/definitions/key" },
+          "source": { "enum": ["repository", "session", "tool", "review", "ci", "measurement", "external-source", "user-correction"] },
+          "role": { "enum": ["incident", "context", "outcome"] },
+          "reference": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "status": { "enum": ["observed", "unverified", "retracted"] },
+          "summary": { "type": "string", "minLength": 1, "maxLength": 2000 }
+        }
+      }
+    },
+    "coverage": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 8,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["area", "status", "reason", "evidenceRefs"],
+        "properties": {
+          "area": { "enum": ["instructions", "documentation", "hooks", "root-guidance", "skills", "enforcement", "ci", "tests"] },
+          "status": { "enum": ["reviewed", "unavailable", "out-of-scope"] },
+          "reason": { "type": "string", "minLength": 1, "maxLength": 1000 },
+          "evidenceRefs": { "$ref": "#/definitions/references" }
+        }
+      }
+    },
+    "findings": {
+      "type": "array",
+      "maxItems": 20,
+      "items": { "$ref": "#/definitions/finding" }
+    },
+    "limitations": {
+      "type": "array",
+      "maxItems": 30,
+      "items": { "type": "string", "minLength": 1, "maxLength": 1000 }
+    }
+  },
+  "definitions": {
+    "key": { "type": "string", "pattern": "^[a-z0-9][a-z0-9-]{0,99}$" },
+    "commit": { "type": "string", "pattern": "^(?:[a-fA-F0-9]{40}|[a-fA-F0-9]{64})$" },
+    "timestamp": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^\\d{4}-\\d{2}-\\d{2}T\\d{2}:\\d{2}:\\d{2}(?:\\.\\d+)?Z$"
+    },
+    "references": {
+      "type": "array",
+      "maxItems": 30,
+      "uniqueItems": true,
+      "items": { "$ref": "#/definitions/key" }
+    },
+    "finding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["key", "title", "disposition", "impact", "diagnosis", "explanation", "evidenceRefs", "counterEvidenceRefs", "counterEvidenceSearch", "alternatives", "target", "enforcement", "genesis", "evaluation", "rollback", "rootJustification", "supersedes", "approvalRequired"],
+      "properties": {
+        "key": { "$ref": "#/definitions/key" },
+        "title": { "type": "string", "minLength": 1, "maxLength": 160 },
+        "disposition": { "enum": ["recommend", "watch", "retract", "already-covered", "no-change", "instrument-first"] },
+        "impact": { "enum": ["critical", "high", "medium", "low"] },
+        "diagnosis": { "enum": ["missing-guidance", "conflicting-guidance", "discovery", "procedure", "tooling", "enforcement-gap", "environment", "ci-efficiency", "test-reliability", "skill-health", "unsupported-claim", "changed-requirement"] },
+        "explanation": { "type": "string", "minLength": 1, "maxLength": 3000 },
+        "evidenceRefs": { "$ref": "#/definitions/references" },
+        "counterEvidenceRefs": { "$ref": "#/definitions/references" },
+        "counterEvidenceSearch": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "alternatives": {
+          "type": "array",
+          "minItems": 2,
+          "maxItems": 5,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["option", "benefits", "drawbacks"],
+            "properties": {
+              "option": { "type": "string", "minLength": 1, "maxLength": 200 },
+              "benefits": { "type": "string", "minLength": 1, "maxLength": 1000 },
+              "drawbacks": { "type": "string", "minLength": 1, "maxLength": 1000 }
+            }
+          }
+        },
+        "target": {
+          "oneOf": [
+            { "type": "null" },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["owner", "surface", "action", "path", "beforeSha256", "applyTo", "change", "rationale"],
+              "properties": {
+                "owner": { "enum": ["repository", "genesis", "tool-upstream"] },
+                "surface": { "enum": ["instruction", "documentation", "copilot-hook", "git-hook", "root-guidance", "skill", "agent", "tool", "configuration", "analyzer", "test", "ci-workflow"] },
+                "action": { "enum": ["add", "update", "remove", "retract"] },
+                "path": { "type": "string", "minLength": 1, "maxLength": 500 },
+                "beforeSha256": { "type": ["string", "null"], "pattern": "^[a-fA-F0-9]{64}$" },
+                "applyTo": { "type": ["string", "null"], "minLength": 1, "maxLength": 500 },
+                "change": { "type": "string", "minLength": 1, "maxLength": 4000 },
+                "rationale": { "type": "string", "minLength": 1, "maxLength": 2000 }
+              }
+            }
+          ]
+        },
+        "enforcement": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["outcome", "investigation"],
+          "properties": {
+            "outcome": { "enum": ["existing-sufficient", "existing-configuration", "custom-required", "not-mechanical", "unknown"] },
+            "investigation": { "type": "string", "minLength": 1, "maxLength": 2000 }
+          }
+        },
+        "genesis": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "baselineCommit", "evidenceRefs"],
+          "properties": {
+            "status": { "enum": ["not-applicable", "unknown", "gap", "partial", "covered", "conflict"] },
+            "baselineCommit": {
+              "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/commit" }]
+            },
+            "evidenceRefs": { "$ref": "#/definitions/references" }
+          }
+        },
+        "evaluation": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["baseline", "success", "regression", "costs", "status", "evidenceRefs"],
+          "properties": {
+            "baseline": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "success": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "regression": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "costs": { "type": "string", "minLength": 1, "maxLength": 2000 },
+            "status": { "enum": ["not-run", "inconclusive", "observed-improvement", "regression"] },
+            "evidenceRefs": { "$ref": "#/definitions/references" }
+          }
+        },
+        "rollback": { "type": "string", "minLength": 1, "maxLength": 2000 },
+        "rootJustification": { "type": ["string", "null"], "minLength": 1, "maxLength": 2000 },
+        "supersedes": {
+          "type": "array",
+          "uniqueItems": true,
+          "maxItems": 20,
+          "items": { "type": "string", "minLength": 1, "maxLength": 500 }
+        },
+        "approvalRequired": { "const": true }
+      }
+    }
+  }
+}
