@@ -104,14 +104,24 @@ second standards corpus.
 
 ## 5. Reflect on guidance
 
-Recommend a guidance change only for one material misstep or repeated evidence of the
-same avoidable mistake. The lesson must generalize and have the correct owner.
+Treat review as a bounded feedback loop, not a default instruction-edit trigger.
 
-Prefer executable contracts for deterministic behavior, instructions for recurring
-exact rules, docs for rationale, skills for procedures, and `AGENTS.md` only for
-safeguards needed before any file is selected.
+Before final handoff, invoke [reflect-work](../reflect-work/SKILL.md) once when the current task or review shows either:
 
-Review remains read-only. Report no guidance change when that threshold is not met.
+- one significant misstep or material correction with concrete risk or impact; or
+- repeated evidence of avoidable friction, or a demonstrated tooling, guidance or CI gap.
+
+The reflection skill uses this task's already-collected evidence and returns zero or one prevention proposal for the handoff.
+Local and cloud agents use the same repository-local procedure; no personal plugin or cross-session history is required.
+Normal TDD failures, necessary exploration and clean successful work are not automatic triggers.
+Do not invoke it again merely to fill a recommendation quota or expand the original task into unrelated cleanup.
+
+The lesson must be generalizable, supported by concrete evidence, and assigned to the correct owner.
+Do not propose guidance for a one-off, speculative, hyper-specific or stylistic incident, or when existing guidance or executable checks already cover it effectively.
+Prefer code or tests for enforceable behavior, instructions for recurring exact rules, docs for rationale, skills for procedures, and `AGENTS.md` only for unscopable safeguards.
+
+Review remains read-only.
+Report no guidance change when the threshold is not met; do not edit guidance automatically.
 
 ## 6. Report
 

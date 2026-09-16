@@ -1,0 +1,75 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Normalized offline CI evidence",
+  "description": "Input only. UTF-8, <=2 MiB, nesting <=16, <=100 attempts, <=1000 total jobs. No live collection is performed. All timestamps on records must fall within the inclusive window (at most 366 days); crossing records are rejected, not clipped. capturedAt must be at least window.to. Completeness is a collector declaration, never independently verified.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "window", "capturedAt", "collection", "runs"],
+  "properties": {
+    "schemaVersion": { "const": 1 },
+    "window": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["from", "to"],
+      "properties": {
+        "from": { "$ref": "#/definitions/timestamp" },
+        "to": { "$ref": "#/definitions/timestamp" }
+      }
+    },
+    "capturedAt": { "$ref": "#/definitions/timestamp" },
+    "collection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["attempts", "complete"],
+      "properties": {
+        "attempts": { "enum": ["all", "latest", "unknown"] },
+        "complete": { "type": "boolean" }
+      }
+    },
+    "runs": {
+      "type": "array",
+      "maxItems": 100,
+      "items": { "$ref": "#/definitions/run" }
+    }
+  },
+  "definitions": {
+    "timestamp": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(\\.[0-9]{1,7})?Z(?![\\s\\S])",
+      "description": "UTC with literal Z, zero to seven fractional digits; calendar validity is enforced by the helper."
+    },
+    "nullableTimestamp": { "anyOf": [{ "$ref": "#/definitions/timestamp" }, { "type": "null" }] },
+    "id": { "type": "string", "pattern": "^(0|[1-9][0-9]{0,19})(?![\\s\\S])" },
+    "label": { "type": "string", "minLength": 1, "maxLength": 200, "pattern": "^[^\\u0000-\\u001f\\u007f]+(?![\\s\\S])" },
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "attempt", "headSha", "workflow", "createdAt", "jobs"],
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "attempt": { "type": "integer", "minimum": 1, "maximum": 1000000 },
+        "headSha": { "type": "string", "pattern": "^([a-fA-F0-9]{40}|[a-fA-F0-9]{64})(?![\\s\\S])" },
+        "workflow": { "$ref": "#/definitions/label" },
+        "createdAt": { "$ref": "#/definitions/timestamp" },
+        "jobs": { "type": "array", "maxItems": 1000, "items": { "$ref": "#/definitions/job" } }
+      },
+      "description": "One attempt per row. Unique run id+attempt; a run retains SHA/workflow across attempts. all+complete requires contiguous attempts from 1. Attempt creation cannot reverse."
+    },
+    "job": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "status", "conclusion", "createdAt", "startedAt", "completedAt", "environmentFingerprint"],
+      "properties": {
+        "id": { "$ref": "#/definitions/id" },
+        "name": { "$ref": "#/definitions/label" },
+        "status": { "enum": ["completed", "in_progress", "queued"] },
+        "conclusion": { "anyOf": [{ "type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9_-]*(?![\\s\\S])" }, { "type": "null" }] },
+        "createdAt": { "$ref": "#/definitions/nullableTimestamp" },
+        "startedAt": { "$ref": "#/definitions/nullableTimestamp" },
+        "completedAt": { "$ref": "#/definitions/nullableTimestamp" },
+        "environmentFingerprint": { "anyOf": [{ "type": "string", "pattern": "^[a-fA-F0-9]{64}(?![\\s\\S])" }, { "type": "null" }] }
+      },
+      "description": "Job IDs are globally unique in the export. Non-null timestamps are chronological and no earlier than run creation. Only completed jobs have non-null conclusions. Unfinished jobs cannot have completion timestamps; queued jobs cannot have start timestamps. Missing timestamps remain unknown. An opaque fingerprint does not prove equivalent environments and is never returned."
+    }
+  }
+}
