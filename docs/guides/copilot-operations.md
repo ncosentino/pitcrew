@@ -329,6 +329,23 @@ The skill requires an expiring read-only Dashboard diagnostic credential in
 authentication. The credential is never placed in a command argument or
 report.
 
+The same supported command has a noninteractive exact-run mode:
+
+```powershell
+pwsh ./plugins/pitcrew-operations/skills/pitcrew-performance-report/scripts/New-PitCrewPerformanceReport.ps1 `
+    -DashboardUrl https://dashboard.example `
+    -TenantId example `
+    -Repository owner/repository `
+    -RunId 123456789 `
+    -RunAttempt 1 `
+    -OutputDirectory ./performance-report
+```
+
+Exact-run mode reads only the supplied workflow run and attempt job endpoints;
+it does not scan unrelated workflow runs. It derives an exact selected-job
+interval, adds two Dashboard raw-sample cadences on each side, and writes
+schema-versioned JSON plus equivalent Markdown.
+
 Only run/job IDs and names, selected step names and numbers, exact runner names,
 labels, timestamps, status, and conclusion are queried. Runner names are hashed
 locally and omitted from the output; mapping uses exact equality against
@@ -354,6 +371,61 @@ admission-related capacity-deficit reasons observed in the range. These units
 are abstract policy accounting, not CPU, memory, or universal workload weights.
 Withheld units show that a worker start was gated; they do not prove how long a
 GitHub job waited or why a completed job ran slowly.
+
+### Trusted workflow-run postprocessing
+
+A downstream repository can own publication while keeping diagnostic
+credentials out of pull-request-authored code. The postprocessor must live on
+the protected default branch, must not check out or execute the triggering
+workflow's head, and should use an environment-scoped credential:
+
+```yaml
+name: Self-hosted performance evidence
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions:
+  actions: read
+  contents: read
+
+jobs:
+  report:
+    if: github.event.workflow_run.repository.full_name == github.repository
+    runs-on: ubuntu-latest
+    environment: pitcrew-diagnostics
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          repository: ncosentino/pitcrew
+          ref: <reviewed-pitcrew-tag>
+          path: pitcrew
+
+      - name: Build exact-run report
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PITCREW_DIAGNOSTICS_CREDENTIAL: ${{ secrets.PITCREW_DIAGNOSTICS_CREDENTIAL }}
+        run: >
+          ./pitcrew/plugins/pitcrew-operations/skills/pitcrew-performance-report/scripts/New-PitCrewPerformanceReport.ps1
+          -DashboardUrl https://dashboard.example
+          -TenantId example
+          -Repository $env:GITHUB_REPOSITORY
+          -RunId ${{ github.event.workflow_run.id }}
+          -RunAttempt ${{ github.event.workflow_run.run_attempt }}
+          -OutputDirectory '${{ runner.temp }}/pitcrew-performance-report'
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pitcrew-performance-report
+          path: ${{ runner.temp }}/pitcrew-performance-report
+```
+
+The output contract is documented in the skill's
+`references/json-contract.md`. Pull-request comments, summaries, thresholds,
+and alerting remain downstream-owned.
 
 ## Profile recovery skill
 

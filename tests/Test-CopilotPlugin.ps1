@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.18.0') 'The operations plugin minor version was not advanced for admission explainability.'
+Add-Check ($plugin.version -eq '1.19.0') 'The operations plugin minor version was not advanced for the CI performance report interface.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -521,6 +521,14 @@ $performanceReportCore = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'scripts' 'PerformanceReport.Core.ps1') `
     -Raw `
     -Encoding UTF8
+$performanceReportContract = Get-Content `
+    -LiteralPath (Join-Path `
+        $skillsRoot `
+        'pitcrew-performance-report' `
+        'references' `
+        'json-contract.md') `
+    -Raw `
+    -Encoding UTF8
 Add-Check (
     $performanceReportSkill -match 'New-PitCrewPerformanceReport\.ps1' -and
     $performanceReportSkill -match 'PITCREW_DIAGNOSTICS_CREDENTIAL'
@@ -565,6 +573,20 @@ Add-Check (
     $performanceReportScript -match '\$githubJob\.steps' -and
     $performanceReportCore -match 'stepProfileSummaries'
 ) 'The performance report does not expose bounded GitHub step-timing cohorts.'
+Add-Check (
+    $performanceReportSkill -match 'workflow run ID' -and
+    $performanceReportSkill -match 'references/json-contract\.md' -and
+    $performanceReportScript -match
+        '(?s)actions/runs/\$WorkflowRunId/.*attempts/\$Attempt/jobs' -and
+    $performanceReportScript -match
+        'ParameterSetName = ''WorkflowRun''' -and
+    $performanceReportCore -match
+        '\$SelectionMode -eq ''workflow-run-attempt''' -and
+    $performanceReportCore -match
+        '''selection''' -and
+    $performanceReportContract -match
+        '"mode": "workflow-run-attempt"'
+) 'The performance report does not expose its exact-run schema-versioned CI contract.'
 Add-Check (
     $performanceReportCore -notmatch 'ToHexStringLower' -and
     $performanceReportCore -match 'SHA256\]::Create' -and

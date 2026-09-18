@@ -14,6 +14,9 @@ $corePath = Join-Path `
     'pitcrew-performance-report' `
     'scripts' `
     'PerformanceReport.Core.ps1'
+$commandPath = Join-Path `
+    (Split-Path -Parent $corePath) `
+    'New-PitCrewPerformanceReport.ps1'
 $fixturePath = Join-Path `
     $PSScriptRoot `
     'fixtures' `
@@ -71,7 +74,10 @@ $steps = @($report.verifiedMeasurements.steps)
 $matchedSteps = @($steps | Where-Object mappingStatus -eq 'matched')
 Add-Check (
     [int]$report.schemaVersion -eq 2
-) 'The performance report schema version did not advance for step measurements.'
+) 'Range reports no longer preserve the existing schema version.'
+Add-Check (
+    $null -eq $report.PSObject.Properties['selection']
+) 'Range reports gained an exact-run-only selection field.'
 Add-Check ($jobs.Count -eq 6) 'The report did not enforce the requested time bounds.'
 Add-Check ($matched.Count -eq 5) 'Exact runner hashes did not map the expected jobs.'
 Add-Check ($steps.Count -eq 5) 'Selected GitHub step metadata was not preserved.'
@@ -815,6 +821,224 @@ try {
 } finally {
     if (Test-Path -LiteralPath $outputDirectory) {
         Remove-Item -LiteralPath $outputDirectory -Recurse -Force
+    }
+}
+
+$ciOutputDirectory = Join-Path `
+    ([IO.Path]::GetTempPath()) `
+    "pitcrew-ci-performance-report-$([Guid]::NewGuid().ToString('n'))"
+$global:PitCrewTestCiGhCalls = [Collections.Generic.List[string]]::new()
+$global:PitCrewTestCiDashboardCalls =
+    [Collections.Generic.List[string]]::new()
+$global:PitCrewTestCiFixture = $fixture
+$previousCredential = [Environment]::GetEnvironmentVariable(
+    'PITCREW_DIAGNOSTICS_CREDENTIAL')
+function gh {
+    param(
+        [Parameter(ValueFromRemainingArguments)]
+        [string[]]$CliArguments
+    )
+
+    $call = $CliArguments -join ' '
+    $global:PitCrewTestCiGhCalls.Add($call)
+    $global:LASTEXITCODE = 0
+    if ($call -match
+        '^api -X GET repos/example/project/actions/runs/1001$') {
+        return [PSCustomObject][ordered]@{
+            id = 1001
+            workflow_id = 10
+            name = 'build'
+            status = 'completed'
+            run_attempt = 2
+            created_at = '2026-08-01T09:59:00Z'
+            updated_at = '2026-08-01T10:11:00Z'
+        } | ConvertTo-Json -Depth 10 -Compress
+    }
+    if ($call -match
+        'repos/example/project/actions/runs/1001/attempts/1/jobs') {
+        $fixtureJob = $global:PitCrewTestCiFixture.jobs[0]
+        $apiSteps = @(
+            foreach ($step in @($fixtureJob.steps)) {
+                [PSCustomObject][ordered]@{
+                    number = $step.number
+                    name = $step.name
+                    started_at = $step.startedAt
+                    completed_at = $step.completedAt
+                    status = $step.status
+                    conclusion = $step.conclusion
+                }
+            })
+        return @(
+            [PSCustomObject][ordered]@{
+                jobs = @(
+                    [PSCustomObject][ordered]@{
+                        id = [long]$fixtureJob.jobId
+                        name = $fixtureJob.jobName
+                        runner_name = $fixtureJob.runnerName
+                        labels = @($fixtureJob.labels)
+                        started_at = $fixtureJob.startedAt
+                        completed_at = $fixtureJob.completedAt
+                        status = $fixtureJob.status
+                        conclusion = $fixtureJob.conclusion
+                        run_attempt = 1
+                        steps = $apiSteps
+                    })
+            }) | ConvertTo-Json -Depth 20 -Compress
+    }
+    throw "Unexpected GitHub CLI call: $call"
+}
+function Invoke-RestMethod {
+    param(
+        [string]$Method,
+        [object]$Uri,
+        [hashtable]$Headers
+    )
+
+    $uriText = [string]$Uri
+    $global:PitCrewTestCiDashboardCalls.Add($uriText)
+    if ($uriText -match '/fleet/history/capabilities$') {
+        return [PSCustomObject][ordered]@{
+            maximumRangeHours = 24
+            maximumPoints = 1000
+            maximumEvents = 1000
+            maximumDiagnostics = 1000
+            expectedRawCadenceSeconds = 15
+        }
+    }
+    if ($uriText -match '/fleet/nodes\?') {
+        return [PSCustomObject][ordered]@{
+            nodes = @($global:PitCrewTestCiFixture.nodes)
+            nextAfterNodeId = $null
+        }
+    }
+    if ($uriText -match '/fleet/nodes/([^/]+)/history\?') {
+        $nodeId = [Uri]::UnescapeDataString($Matches[1])
+        return $global:PitCrewTestCiFixture.histories.PSObject.Properties[$nodeId].Value
+    }
+    throw "Unexpected Dashboard request: $uriText"
+}
+try {
+    [Environment]::SetEnvironmentVariable(
+        'PITCREW_DIAGNOSTICS_CREDENTIAL',
+        'fixture-credential')
+    & $commandPath `
+        -DashboardUrl https://dashboard.example `
+        -TenantId example `
+        -Repository example/project `
+        -RunId 1001 `
+        -RunAttempt 1 `
+        -Step 'Run fixed contracts' `
+        -OutputDirectory $ciOutputDirectory
+
+    $ciJsonPath = Join-Path `
+        $ciOutputDirectory `
+        'pitcrew-performance-report.json'
+    $ciMarkdownPath = Join-Path `
+        $ciOutputDirectory `
+        'pitcrew-performance-report.md'
+    Add-Check (
+        (Test-Path -LiteralPath $ciJsonPath -PathType Leaf) -and
+        (Test-Path -LiteralPath $ciMarkdownPath -PathType Leaf)
+    ) 'Exact-run mode did not write stable report filenames.'
+    $ciReport = Get-Content `
+        -LiteralPath $ciJsonPath `
+        -Raw `
+        -Encoding UTF8 |
+        ConvertFrom-Json -Depth 30
+    Add-Check (
+        [int]$ciReport.schemaVersion -eq 3 -and
+        $ciReport.selection.mode -eq 'workflow-run-attempt' -and
+        $ciReport.selection.workflowRun.repository -eq 'example/project' -and
+        $ciReport.selection.workflowRun.runId -eq '1001' -and
+        [int]$ciReport.selection.workflowRun.attempt -eq 1
+    ) 'Exact-run mode did not write the versioned workflow-run selection contract.'
+    Add-Check (
+        $ciReport.selection.workflowRun.jobInterval.from -eq
+            '2026-08-01T10:00:00.0000000+00:00' -and
+        $ciReport.selection.workflowRun.jobInterval.to -eq
+            '2026-08-01T10:10:00.0000000+00:00' -and
+        $ciReport.range.from -eq '2026-08-01T09:59:30.0000000+00:00' -and
+        $ciReport.range.to -eq '2026-08-01T10:10:30.0000000+00:00'
+    ) 'Exact-run mode did not derive the bounded padded Dashboard interval.'
+    Add-Check (
+        @($ciReport.verifiedMeasurements.jobs).Count -eq 1 -and
+        $ciReport.verifiedMeasurements.jobs[0].jobId -eq '2001' -and
+        @($ciReport.verifiedMeasurements.steps).Count -eq 1
+    ) 'Exact-run mode selected jobs outside the requested run attempt.'
+    $ciJson = Get-Content -LiteralPath $ciJsonPath -Raw -Encoding UTF8
+    $ciMarkdown = Get-Content `
+        -LiteralPath $ciMarkdownPath `
+        -Raw `
+        -Encoding UTF8
+    Add-Check (
+        $ciJson -notmatch 'runner-a-build|fixture-node-a|fixture-credential'
+    ) 'Exact-run output exposed a raw runner, node display name, or credential.'
+    Add-Check (
+        $ciMarkdown -match
+            'Selection: `example/project` run `1001` attempt `1`'
+    ) 'Exact-run Markdown omitted its sanitized selection identity.'
+    Add-Check (
+        $global:PitCrewTestCiGhCalls.Count -eq 2 -and
+        $global:PitCrewTestCiGhCalls[0] -match
+            '^api -X GET repos/example/project/actions/runs/1001$' -and
+        $global:PitCrewTestCiGhCalls[1] -match
+            'actions/runs/1001/attempts/1/jobs' -and
+        @($global:PitCrewTestCiGhCalls | Where-Object {
+                $_ -match 'actions/runs(?:\s|$).*created='
+            }).Count -eq 0
+    ) 'Exact-run mode scanned unrelated workflow runs or selected the wrong attempt.'
+
+    $dashboardCallsBeforeInvalidAttempt =
+        $global:PitCrewTestCiDashboardCalls.Count
+    $invalidAttemptRejected = $false
+    try {
+        & $commandPath `
+            -DashboardUrl https://dashboard.example `
+            -TenantId example `
+            -Repository example/project `
+            -RunId 1001 `
+            -RunAttempt 3 `
+            -OutputDirectory "$ciOutputDirectory-invalid"
+    } catch {
+        $invalidAttemptRejected = (
+            $_.Exception.Message -match
+                'has only 2 attempt\(s\); attempt 3 is unavailable'
+        )
+    }
+    Add-Check (
+        $invalidAttemptRejected -and
+        $global:PitCrewTestCiDashboardCalls.Count -eq
+            $dashboardCallsBeforeInvalidAttempt
+    ) 'Invalid exact attempts did not fail before Dashboard history collection.'
+} finally {
+    [Environment]::SetEnvironmentVariable(
+        'PITCREW_DIAGNOSTICS_CREDENTIAL',
+        $previousCredential)
+    Remove-Item Function:\gh -Force -ErrorAction SilentlyContinue
+    Remove-Item Function:\Invoke-RestMethod -Force -ErrorAction SilentlyContinue
+    Remove-Variable `
+        -Name PitCrewTestCiGhCalls `
+        -Scope Global `
+        -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Variable `
+        -Name PitCrewTestCiDashboardCalls `
+        -Scope Global `
+        -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Variable `
+        -Name PitCrewTestCiFixture `
+        -Scope Global `
+        -Force `
+        -ErrorAction SilentlyContinue
+    if (Test-Path -LiteralPath $ciOutputDirectory) {
+        Remove-Item -LiteralPath $ciOutputDirectory -Recurse -Force
+    }
+    if (Test-Path -LiteralPath "$ciOutputDirectory-invalid") {
+        Remove-Item `
+            -LiteralPath "$ciOutputDirectory-invalid" `
+            -Recurse `
+            -Force
     }
 }
 
