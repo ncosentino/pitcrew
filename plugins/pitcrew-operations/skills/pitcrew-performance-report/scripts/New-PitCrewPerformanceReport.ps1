@@ -138,6 +138,42 @@ function Assert-PitCrewDashboardUri {
     }
 }
 
+function Test-PitCrewTransientDashboardStatusCode {
+    param([Parameter(Mandatory)][int]$StatusCode)
+
+    return $StatusCode -in @(429, 500, 502, 503, 504)
+}
+
+function Get-PitCrewDashboardRetryDelaySeconds {
+    param(
+        [Parameter(Mandatory)][int]$StatusCode,
+        [Parameter(Mandatory)][int]$Attempt,
+        [Parameter(Mandatory)][Net.Http.HttpResponseMessage]$Response
+    )
+
+    $retryAfter = $Response.Headers.RetryAfter
+    if ($null -ne $retryAfter) {
+        $delay =
+            if ($null -ne $retryAfter.Delta) {
+                $retryAfter.Delta.TotalSeconds
+            } elseif ($null -ne $retryAfter.Date) {
+                ($retryAfter.Date.Value - [DateTimeOffset]::UtcNow).TotalSeconds
+            } else {
+                0
+            }
+        if ($delay -gt 0) {
+            return [int][Math]::Min(
+                60,
+                [Math]::Max(1, [Math]::Ceiling($delay)))
+        }
+    }
+
+    if ($StatusCode -eq 429) {
+        return 60
+    }
+    return [int][Math]::Pow(2, $Attempt - 1)
+}
+
 function Invoke-PitCrewDashboardGet {
     param(
         [Parameter(Mandatory)]
@@ -163,18 +199,16 @@ function Invoke-PitCrewDashboardGet {
                 -Uri "$base$Path" `
                 -Headers $Headers
         } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
-            if ([int]$_.Exception.Response.StatusCode -ne 429 -or
+            $statusCode = [int]$_.Exception.Response.StatusCode
+            if (-not (Test-PitCrewTransientDashboardStatusCode $statusCode) -or
                 $attempt -eq 3) {
                 throw
             }
-            $retryAfter = 60
-            $header = $_.Exception.Response.Headers.RetryAfter
-            if ($null -ne $header -and $null -ne $header.Delta) {
-                $retryAfter = [Math]::Max(
-                    1,
-                    [Math]::Ceiling($header.Delta.TotalSeconds))
-            }
-            Start-Sleep -Seconds $retryAfter
+            $retryDelay = Get-PitCrewDashboardRetryDelaySeconds `
+                -StatusCode $statusCode `
+                -Attempt $attempt `
+                -Response $_.Exception.Response
+            Start-Sleep -Seconds $retryDelay
         }
     }
 }

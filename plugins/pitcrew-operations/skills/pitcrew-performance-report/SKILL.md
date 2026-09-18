@@ -81,6 +81,10 @@ not list or partition unrelated workflow runs. The workflow run must already
 be completed, and at least one selected job must have a complete timing
 interval.
 
+Dashboard diagnostic GET requests retry HTTP 429, 500, 502, 503, and 504 up to
+three attempts with bounded backoff. Other HTTP failures remain fail-fast, and
+the final response exception is preserved after retry exhaustion.
+
 Add only caller-approved filters:
 
 ```powershell
