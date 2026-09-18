@@ -830,6 +830,10 @@ $ciOutputDirectory = Join-Path `
 $global:PitCrewTestCiGhCalls = [Collections.Generic.List[string]]::new()
 $global:PitCrewTestCiDashboardCalls =
     [Collections.Generic.List[string]]::new()
+$global:PitCrewTestCiDashboardMode = 'success'
+$global:PitCrewTestCiCapabilitiesAttempts = 0
+$global:PitCrewTestCiSleepCalls =
+    [Collections.Generic.List[string]]::new()
 $global:PitCrewTestCiFixture = $fixture
 $previousCredential = [Environment]::GetEnvironmentVariable(
     'PITCREW_DIAGNOSTICS_CREDENTIAL')
@@ -887,6 +891,35 @@ function gh {
     }
     throw "Unexpected GitHub CLI call: $call"
 }
+function New-PitCrewTestHttpResponseException {
+    param(
+        [Parameter(Mandatory)][Net.HttpStatusCode]$StatusCode,
+        [int]$RetryAfterSeconds = 0
+    )
+
+    $response = [Net.Http.HttpResponseMessage]::new($StatusCode)
+    if ($RetryAfterSeconds -gt 0) {
+        $response.Headers.RetryAfter =
+            [Net.Http.Headers.RetryConditionHeaderValue]::new(
+                [TimeSpan]::FromSeconds($RetryAfterSeconds))
+    }
+    return [Microsoft.PowerShell.Commands.HttpResponseException]::new(
+        "Fixture HTTP status $([int]$StatusCode).",
+        $response)
+}
+function Start-Sleep {
+    param(
+        [int]$Milliseconds,
+        [int]$Seconds
+    )
+
+    if ($PSBoundParameters.ContainsKey('Milliseconds')) {
+        $global:PitCrewTestCiSleepCalls.Add("milliseconds:$Milliseconds")
+    }
+    if ($PSBoundParameters.ContainsKey('Seconds')) {
+        $global:PitCrewTestCiSleepCalls.Add("seconds:$Seconds")
+    }
+}
 function Invoke-RestMethod {
     param(
         [string]$Method,
@@ -897,6 +930,30 @@ function Invoke-RestMethod {
     $uriText = [string]$Uri
     $global:PitCrewTestCiDashboardCalls.Add($uriText)
     if ($uriText -match '/fleet/history/capabilities$') {
+        $global:PitCrewTestCiCapabilitiesAttempts++
+        if ($global:PitCrewTestCiDashboardMode -eq 'transient-once' -and
+            $global:PitCrewTestCiCapabilitiesAttempts -eq 1) {
+            throw (
+                New-PitCrewTestHttpResponseException `
+                    -StatusCode BadGateway)
+        }
+        if ($global:PitCrewTestCiDashboardMode -eq 'transient-always') {
+            throw (
+                New-PitCrewTestHttpResponseException `
+                    -StatusCode ServiceUnavailable)
+        }
+        if ($global:PitCrewTestCiDashboardMode -eq 'retry-after-once' -and
+            $global:PitCrewTestCiCapabilitiesAttempts -eq 1) {
+            throw (
+                New-PitCrewTestHttpResponseException `
+                    -StatusCode TooManyRequests `
+                    -RetryAfterSeconds 7)
+        }
+        if ($global:PitCrewTestCiDashboardMode -eq 'permanent') {
+            throw (
+                New-PitCrewTestHttpResponseException `
+                    -StatusCode Unauthorized)
+        }
         return [PSCustomObject][ordered]@{
             maximumRangeHours = 24
             maximumPoints = 1000
@@ -1010,12 +1067,121 @@ try {
         $global:PitCrewTestCiDashboardCalls.Count -eq
             $dashboardCallsBeforeInvalidAttempt
     ) 'Invalid exact attempts did not fail before Dashboard history collection.'
+
+    $transientOutputDirectory = "$ciOutputDirectory-transient"
+    $global:PitCrewTestCiDashboardMode = 'transient-once'
+    $global:PitCrewTestCiCapabilitiesAttempts = 0
+    $global:PitCrewTestCiSleepCalls.Clear()
+    & $commandPath `
+        -DashboardUrl https://dashboard.example `
+        -TenantId example `
+        -Repository example/project `
+        -RunId 1001 `
+        -RunAttempt 1 `
+        -OutputDirectory $transientOutputDirectory
+    $retrySleeps = @(
+        $global:PitCrewTestCiSleepCalls |
+            Where-Object { $_.StartsWith('seconds:', [StringComparison]::Ordinal) }
+    )
+    Add-Check (
+        $global:PitCrewTestCiCapabilitiesAttempts -eq 2 -and
+        $retrySleeps.Count -eq 1 -and
+        $retrySleeps[0] -eq 'seconds:1' -and
+        (Test-Path `
+            -LiteralPath (
+                Join-Path `
+                    $transientOutputDirectory `
+                    'pitcrew-performance-report.json') `
+            -PathType Leaf)
+    ) 'A transient Dashboard failure did not recover with bounded backoff.'
+
+    $retryAfterOutputDirectory = "$ciOutputDirectory-retry-after"
+    $global:PitCrewTestCiDashboardMode = 'retry-after-once'
+    $global:PitCrewTestCiCapabilitiesAttempts = 0
+    $global:PitCrewTestCiSleepCalls.Clear()
+    & $commandPath `
+        -DashboardUrl https://dashboard.example `
+        -TenantId example `
+        -Repository example/project `
+        -RunId 1001 `
+        -RunAttempt 1 `
+        -OutputDirectory $retryAfterOutputDirectory
+    $retrySleeps = @(
+        $global:PitCrewTestCiSleepCalls |
+            Where-Object { $_.StartsWith('seconds:', [StringComparison]::Ordinal) }
+    )
+    Add-Check (
+        $global:PitCrewTestCiCapabilitiesAttempts -eq 2 -and
+        $retrySleeps.Count -eq 1 -and
+        $retrySleeps[0] -eq 'seconds:7'
+    ) 'Dashboard retry did not honor the bounded Retry-After duration.'
+
+    $exhaustedOutputDirectory = "$ciOutputDirectory-exhausted"
+    $global:PitCrewTestCiDashboardMode = 'transient-always'
+    $global:PitCrewTestCiCapabilitiesAttempts = 0
+    $global:PitCrewTestCiSleepCalls.Clear()
+    $exhaustedStatusCode = 0
+    try {
+        & $commandPath `
+            -DashboardUrl https://dashboard.example `
+            -TenantId example `
+            -Repository example/project `
+            -RunId 1001 `
+            -RunAttempt 1 `
+            -OutputDirectory $exhaustedOutputDirectory
+    } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+        $exhaustedStatusCode = [int]$_.Exception.Response.StatusCode
+    }
+    $retrySleeps = @(
+        $global:PitCrewTestCiSleepCalls |
+            Where-Object { $_.StartsWith('seconds:', [StringComparison]::Ordinal) }
+    )
+    Add-Check (
+        $global:PitCrewTestCiCapabilitiesAttempts -eq 3 -and
+        $exhaustedStatusCode -eq 503 -and
+        $retrySleeps.Count -eq 2 -and
+        $retrySleeps[0] -eq 'seconds:1' -and
+        $retrySleeps[1] -eq 'seconds:2'
+    ) 'Transient Dashboard exhaustion did not preserve the final response.'
+
+    $permanentOutputDirectory = "$ciOutputDirectory-permanent"
+    $global:PitCrewTestCiDashboardMode = 'permanent'
+    $global:PitCrewTestCiCapabilitiesAttempts = 0
+    $global:PitCrewTestCiSleepCalls.Clear()
+    $permanentStatusCode = 0
+    try {
+        & $commandPath `
+            -DashboardUrl https://dashboard.example `
+            -TenantId example `
+            -Repository example/project `
+            -RunId 1001 `
+            -RunAttempt 1 `
+            -OutputDirectory $permanentOutputDirectory
+    } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
+        $permanentStatusCode = [int]$_.Exception.Response.StatusCode
+    }
+    Add-Check (
+        $global:PitCrewTestCiCapabilitiesAttempts -eq 1 -and
+        $permanentStatusCode -eq 401 -and
+        @(
+            $global:PitCrewTestCiSleepCalls |
+                Where-Object {
+                    $_.StartsWith(
+                        'seconds:',
+                        [StringComparison]::Ordinal)
+                }
+        ).Count -eq 0
+    ) 'A permanent Dashboard response did not fail immediately.'
 } finally {
     [Environment]::SetEnvironmentVariable(
         'PITCREW_DIAGNOSTICS_CREDENTIAL',
         $previousCredential)
     Remove-Item Function:\gh -Force -ErrorAction SilentlyContinue
+    Remove-Item Function:\Start-Sleep -Force -ErrorAction SilentlyContinue
     Remove-Item Function:\Invoke-RestMethod -Force -ErrorAction SilentlyContinue
+    Remove-Item Function:\New-PitCrewTestHttpResponseException `
+        -Force `
+        -ErrorAction SilentlyContinue
     Remove-Variable `
         -Name PitCrewTestCiGhCalls `
         -Scope Global `
@@ -1023,6 +1189,21 @@ try {
         -ErrorAction SilentlyContinue
     Remove-Variable `
         -Name PitCrewTestCiDashboardCalls `
+        -Scope Global `
+        -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Variable `
+        -Name PitCrewTestCiDashboardMode `
+        -Scope Global `
+        -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Variable `
+        -Name PitCrewTestCiCapabilitiesAttempts `
+        -Scope Global `
+        -Force `
+        -ErrorAction SilentlyContinue
+    Remove-Variable `
+        -Name PitCrewTestCiSleepCalls `
         -Scope Global `
         -Force `
         -ErrorAction SilentlyContinue
@@ -1039,6 +1220,19 @@ try {
             -LiteralPath "$ciOutputDirectory-invalid" `
             -Recurse `
             -Force
+    }
+    foreach ($suffix in @(
+            'transient',
+            'retry-after',
+            'exhausted',
+            'permanent')) {
+        $retryOutputDirectory = "$ciOutputDirectory-$suffix"
+        if (Test-Path -LiteralPath $retryOutputDirectory) {
+            Remove-Item `
+                -LiteralPath $retryOutputDirectory `
+                -Recurse `
+                -Force
+        }
     }
 }
 

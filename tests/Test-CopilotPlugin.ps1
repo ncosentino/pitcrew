@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.19.0') 'The operations plugin minor version was not advanced for the CI performance report interface.'
+Add-Check ($plugin.version -eq '1.20.0') 'The operations plugin minor version was not advanced for transient performance-report retries.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -600,7 +600,8 @@ Add-Check (
 ) 'The performance report does not deduplicate inputs or preserve stable cohort identity.'
 Add-Check (
     $performanceReportScript -match 'DashboardMinimumIntervalMilliseconds = 500' -and
-    $performanceReportScript -match 'StatusCode -ne 429' -and
+    $performanceReportScript -match 'Test-PitCrewTransientDashboardStatusCode' -and
+    $performanceReportScript -match '429, 500, 502, 503, 504' -and
     $performanceReportScript -match 'Headers\.RetryAfter' -and
     $performanceReportCore -match 'Test-PitCrewLiteralTextFilter'
 ) 'The performance report does not honor Dashboard rate limits or literal filters.'
