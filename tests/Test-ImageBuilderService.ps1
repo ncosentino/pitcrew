@@ -206,10 +206,12 @@ Add-Check (
     $integration -match 'INTERRUPT_PHASE="RUN sleep 15"' -and
     $integration -match [regex]::Escape(
         "--format '{{.State.Running}}'") -and
+    $integration -match [regex]::Escape(
+        "--format '{{.State.ExitCode}}'") -and
     $integration -match
         '\$\{interrupt_logs\}" == \*"\$\{INTERRUPT_PHASE\}"\*' -and
-    $integration -match '--output type=cacheonly' -and
-    $integration -notmatch 'interrupted\.tar' -and
+    $integration -notmatch
+        '--output type=(cacheonly|oci,dest=/tmp/interrupted\.tar)' -and
     $interruptPhaseIndex -ge 0 -and
     $interruptKillIndex -gt $interruptPhaseIndex
 ) 'The image-builder interruption fixture can kill before the local phase or retain a client-bound exporter.'

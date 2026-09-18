@@ -192,7 +192,6 @@ INTERRUPT_CLIENT_ID="$(
         --local context=/workspace \
         --local dockerfile=/workspace \
         --opt platform=linux/amd64 \
-        --output type=cacheonly \
         --progress plain
 )"
 recorded=false
@@ -206,6 +205,15 @@ for _ in $(seq 1 120); do
             2>/dev/null ||
             true
     )"
+    if [[ "${client_running}" == "false" ]]; then
+        client_exit_code="$(
+            docker inspect \
+                --format '{{.State.ExitCode}}' \
+                "${INTERRUPT_CLIENT_ID}"
+        )"
+        echo "Interrupted client exited before the exact local run phase (exit code ${client_exit_code})." >&2
+        exit 1
+    fi
     histories="$(run_buildctl_client debug histories --format '{{json .}}')"
     usage="$(run_buildctl_client du --format '{{json .}}')"
     if [[ "${client_running}" == "true" ]] &&
