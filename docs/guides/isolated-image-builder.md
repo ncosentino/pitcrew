@@ -252,6 +252,15 @@ only after both history and disk usage are verified empty. BuildKit 0.32.2
 serializes empty disk usage as JSON `null`; any other nonempty value is retained
 state and fails the job boundary.
 
+An abruptly killed client can leave cache references marked `inUse` after
+history deletion. BuildKit does not permit safe pruning of those records. The
+helper returns `builder-cleanup-failed` and the daemon must not serve another
+job. After confirming the image-builder profile has no active worker, rerun
+`Setup-PitCrewImageBuilderService.ps1` with the existing server certificate
+directory to force-recreate only the scoped BuildKit service. The successor's
+preflight must then prove empty state. Do not restart Docker or delete the
+persistent state volume.
+
 When cleanup fails, the helper reports only the failed cleanup stage, attempt
 count, cache-record count, in-use-record count, and history-record count. It
 does not print cache IDs, descriptions, build arguments, paths, or build
@@ -274,7 +283,10 @@ Before enabling a repository workflow, prove:
 - pull-request mode produces an OCI tarball and no registry tag;
 - push mode returns the same digest as the registry;
 - `buildctl du` is empty after each job; and
-- the next job removes cache/history left by an interrupted predecessor.
+- an interrupted predecessor either cleans directly or fails closed with
+  `builder-cleanup-failed`; and
+- exact BuildKit service recreation restores a successor that proves empty
+  preflight state.
 
 ## Update and rollback
 

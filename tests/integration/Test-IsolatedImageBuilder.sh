@@ -250,6 +250,57 @@ if [[ -z "${seeded_histories}" ]]; then
     exit 1
 fi
 
+set +e
+docker run --rm \
+    --network "${NETWORK_NAME}" \
+    --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+    --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
+    --mount "type=bind,src=${OUTPUT_DIRECTORY},dst=/output" \
+    --env BUILDKIT_HOST=tcp://buildkitd:1234 \
+    --env BUILDKIT_TLS_DIR=/tls \
+    --env PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS=3 \
+    --entrypoint pitcrew-build-image \
+    "${CLIENT_IMAGE}" \
+    --image-ref registry:5000/pitcrew/image-builder-test:interrupt-recovery \
+    --context /workspace \
+    --dockerfile /workspace \
+    --platform linux/amd64 \
+    --output-oci /output/interrupted-recovery.tar \
+    --candidate-output /output/interrupted-recovery-candidate.json \
+    --recipe-id application-ci
+interrupted_recovery_status=$?
+set -e
+if ((interrupted_recovery_status == 0)); then
+    if ! jq -e \
+        '.status == "ready"
+         and .failureCategory == null
+         and (
+            [.qualifications[] |
+                select(.name == "builder-cleanup")][0].status == "passed"
+         )' \
+        <<<"$(read_output_file interrupted-recovery-candidate.json)" \
+        >/dev/null; then
+        echo "Direct interrupted-state recovery did not publish ready cleanup evidence." >&2
+        exit 1
+    fi
+else
+    if ! jq -e \
+        '.status == "failed"
+         and .failureCategory == "builder-cleanup-failed"
+         and .failureDetail == "BuildKit cleanup did not reach an empty state."
+         and (
+            [.qualifications[] |
+                select(.name == "builder-cleanup")][0].status == "failed"
+         )' \
+        <<<"$(read_output_file interrupted-recovery-candidate.json)" \
+        >/dev/null; then
+        echo "Hard-cancelled state did not fail closed as builder-cleanup-failed." >&2
+        exit 1
+    fi
+    pwsh -NoProfile -File "${SERVICE_SETUP}" \
+        -ServerCertificateDirectory "${SERVER_CERTIFICATE_DIRECTORY}"
+fi
+
 literal_payload='literal-$(touch /tmp/pitcrew-injection)'
 published_reference="$(
     docker run --rm \

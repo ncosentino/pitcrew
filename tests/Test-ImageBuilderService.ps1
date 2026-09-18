@@ -217,9 +217,15 @@ Add-Check (
         '\$\{interrupt_logs\}" == \*"\$\{INTERRUPT_PHASE\}"\*' -and
     $integration -notmatch
         '--output type=(cacheonly|oci,dest=/tmp/interrupted\.tar)' -and
+    $integration -match
+        'PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS=3' -and
+    $integration -match
+        'failureCategory == "builder-cleanup-failed"' -and
+    $integration -match [regex]::Escape(
+        '-ServerCertificateDirectory "${SERVER_CERTIFICATE_DIRECTORY}"') -and
     $interruptPhaseIndex -ge 0 -and
     $interruptKillIndex -gt $interruptPhaseIndex
-) 'The image-builder interruption fixture can kill before the local phase or retain a client-bound exporter.'
+) 'The image-builder interruption fixture does not classify direct cleanup versus exact service recovery.'
 
 $readyCandidate = @{
     schemaVersion = 1
