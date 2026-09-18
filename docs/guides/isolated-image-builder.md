@@ -252,6 +252,11 @@ only after both history and disk usage are verified empty. BuildKit 0.32.2
 serializes empty disk usage as JSON `null`; any other nonempty value is retained
 state and fails the job boundary.
 
+When cleanup fails, the helper reports only the failed cleanup stage, attempt
+count, cache-record count, in-use-record count, and history-record count. It
+does not print cache IDs, descriptions, build arguments, paths, or build
+history payloads.
+
 `PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS` may set the fail-closed cleanup retry
 window between 1 and 600 seconds; the default remains 180. Changing the timeout
 never permits reuse while cache or history remains.

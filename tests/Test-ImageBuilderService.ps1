@@ -194,7 +194,12 @@ Add-Check (
     $helper -match [regex]::Escape(
         'PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS:-180') -and
     $helper -match 'while true' -and
-    $helper -match 'if \(\(SECONDS >= cleanup_deadline\)\)'
+    $helper -match 'if \(\(SECONDS >= cleanup_deadline\)\)' -and
+    $helper -match 'stage=\$\{cleanup_stage\}' -and
+    $helper -match 'attempts=\$\{cleanup_attempts\}' -and
+    $helper -match 'cacheRecords=\$\{usage_records\}' -and
+    $helper -match 'inUseRecords=\$\{in_use_records\}' -and
+    $helper -match 'historyRecords=\$\{history_records\}'
 ) 'Image-builder helper does not verify bounded empty cache and history state.'
 $interruptPhaseIndex = $integration.IndexOf(
     'interrupt_logs="$(docker logs',
