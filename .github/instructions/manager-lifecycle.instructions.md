@@ -23,9 +23,9 @@ applyTo: "manager/**/*.sh,manager/Dockerfile,docker-compose.yml,tests/Test-Manag
   atomically and remain restart-safe.
 - Manager errors must retain the last valid pool and return a nonzero or degraded
   result. Do not fabricate successful reconciliation.
-- Interruption fixtures must prove the exact local phase is active before killing
-  a client. Generic cache or history presence can still represent an external pull
-  and is not deterministic fault-injection evidence.
+- Interruption fixtures must prove the exact local phase is active and use
+  server-side or cache-only output before killing a client. Generic cache/history
+  presence and client-bound exporters are not deterministic fault-injection evidence.
 - Update shell syntax checks, hermetic reconciliation contracts, and real Docker
   integration coverage for lifecycle changes.
 

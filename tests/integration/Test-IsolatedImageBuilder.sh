@@ -192,7 +192,7 @@ INTERRUPT_CLIENT_ID="$(
         --local context=/workspace \
         --local dockerfile=/workspace \
         --opt platform=linux/amd64 \
-        --output type=oci,dest=/tmp/interrupted.tar \
+        --output type=cacheonly \
         --progress plain
 )"
 recorded=false

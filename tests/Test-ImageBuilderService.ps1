@@ -208,9 +208,11 @@ Add-Check (
         "--format '{{.State.Running}}'") -and
     $integration -match
         '\$\{interrupt_logs\}" == \*"\$\{INTERRUPT_PHASE\}"\*' -and
+    $integration -match '--output type=cacheonly' -and
+    $integration -notmatch 'interrupted\.tar' -and
     $interruptPhaseIndex -ge 0 -and
     $interruptKillIndex -gt $interruptPhaseIndex
-) 'The image-builder interruption fixture can kill a client before the exact local run phase is active.'
+) 'The image-builder interruption fixture can kill before the local phase or retain a client-bound exporter.'
 
 $readyCandidate = @{
     schemaVersion = 1
