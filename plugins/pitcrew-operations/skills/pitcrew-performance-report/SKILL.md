@@ -48,6 +48,8 @@ the report marks the assignment universe incomplete and verifies no mappings.
   connector, Docker daemon, container, image, network, volume, or host.
 - Never use fuzzy runner prefixes or host-name guesses. Hash the exact GitHub
   `runner_name` locally and join only by exact lowercase SHA-256 equality.
+- Scope assignment-retention loss to the requested range. Deletions known to
+  predate the range cannot invalidate a later unique assignment.
 - Never treat a missing, ambiguous, stale, partial, or truncated match as zero
   or as a successful measurement.
 
