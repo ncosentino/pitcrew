@@ -11,6 +11,7 @@ SERVICE_STATE_PATH="${ROOT_DIRECTORY}/.pitcrew-state/image-builder-service/servi
 REGISTRY_NAME="pitcrew-registry-test-$$"
 CLIENT_IMAGE="pitcrew-image-builder-test:$$"
 INTERRUPT_CLIENT_ID=""
+INTERRUPT_PHASE="RUN sleep 15"
 TEMP_DIRECTORY="$(mktemp -d)"
 APPARMOR_RESTRICTION=""
 
@@ -79,8 +80,7 @@ EOF
 printf 'isolated-image-builder\n' > "${CONTEXT_DIRECTORY}/payload.txt"
 cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
-# Keep the solve observable while leaving preflight cleanup enough retry time.
-RUN sleep 5
+RUN sleep 15
 EOF
 cat > "${FAILED_CONTEXT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
@@ -196,10 +196,21 @@ INTERRUPT_CLIENT_ID="$(
         --progress plain
 )"
 recorded=false
+interrupt_logs=""
 for _ in $(seq 1 120); do
+    interrupt_logs="$(docker logs "${INTERRUPT_CLIENT_ID}" 2>&1 || true)"
+    client_running="$(
+        docker inspect \
+            --format '{{.State.Running}}' \
+            "${INTERRUPT_CLIENT_ID}" \
+            2>/dev/null ||
+            true
+    )"
     histories="$(run_buildctl_client debug histories --format '{{json .}}')"
     usage="$(run_buildctl_client du --format '{{json .}}')"
-    if [[ -n "${histories}" ]] &&
+    if [[ "${client_running}" == "true" ]] &&
+        [[ "${interrupt_logs}" == *"${INTERRUPT_PHASE}"* ]] &&
+        [[ -n "${histories}" ]] &&
         [[ -n "${usage}" && "${usage}" != "null" ]]; then
         recorded=true
         break
@@ -207,7 +218,7 @@ for _ in $(seq 1 120); do
     sleep 1
 done
 if [[ "${recorded}" != "true" ]]; then
-    echo "Interrupted client did not publish BuildKit state." >&2
+    echo "Interrupted client did not reach the exact local run phase with BuildKit state." >&2
     exit 1
 fi
 
