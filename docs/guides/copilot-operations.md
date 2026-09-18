@@ -312,6 +312,47 @@ restores or uninstalls only the support package. It does not re-enroll the
 normal connector, stop managers or workers, change profile state, or restore a
 database snapshot after new support records have been accepted.
 
+## Admission snapshot skill
+
+`pitcrew-admission-snapshot` records whether one requested worker count fits
+the current authoritative allocatable capacity for one exact node and profile.
+It is suitable for a trusted CI planner that needs to preserve the capacity
+state it observed while constructing a matrix:
+
+```powershell
+pwsh ./plugins/pitcrew-operations/skills/pitcrew-admission-snapshot/scripts/New-PitCrewAdmissionSnapshot.ps1 `
+    -DashboardUrl https://dashboard.example `
+    -TenantId example `
+    -NodeId 00000000-0000-0000-0000-000000000001 `
+    -Profile project-ci `
+    -RequestedWorkers 4 `
+    -OutputPath ./pitcrew-admission-snapshot.json
+```
+
+The credential remains only in
+`PITCREW_DIAGNOSTICS_CREDENTIAL`. The command reads the scoped current-fleet
+diagnostic endpoint and writes schema-versioned JSON. It does not query GitHub
+or Dashboard history and cannot reserve, acquire, release, route, or mutate
+capacity.
+
+Dashboard's claim-level `host-admission` projection owns source observation,
+receipt, evaluation, response-generation, freshness, coverage, and retention
+semantics. Only current, complete, live evidence with an available
+contract-19-or-newer accounting projection can produce `admissible-now` or
+`insufficient-now`. Stale, partial, unavailable, last-known, unsupported,
+missing, malformed, or incomplete evidence produces `unknown`; measured zero
+remains zero.
+
+The result is a point-in-time observation, not a reservation, dispatch
+decision, queue-wait estimate, or completion-time forecast. Fair-share
+rotation, intervening leases, and new demand may change the next coordinator
+decision. Admission units are policy accounting, not CPU, memory, priority, or
+universal worker weights.
+
+The machine-readable contract and executable schema live under the skill's
+`references/` directory. Downstream code should require schema version 1 and
+reject unknown higher versions until reviewed.
+
 ## Performance report skill
 
 `pitcrew-performance-report` joins bounded GitHub Actions job and selected step

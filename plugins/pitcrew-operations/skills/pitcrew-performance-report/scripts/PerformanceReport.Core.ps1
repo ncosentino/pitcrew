@@ -380,29 +380,6 @@ function Get-PitCrewOverlapSeconds {
     return [Math]::Round($seconds, 3)
 }
 
-function Invoke-PitCrewPagedFleetRequest {
-    param(
-        [Parameter(Mandatory)]
-        [scriptblock]$Request,
-
-        [ValidateRange(1, 100)]
-        [int]$Limit = 100
-    )
-
-    $nodes = [Collections.Generic.List[object]]::new()
-    $afterNodeId = $null
-    do {
-        $page = & $Request $afterNodeId $Limit
-        foreach ($node in @($page.nodes)) {
-            $nodes.Add($node)
-        }
-        $afterNodeId = Get-PitCrewProperty `
-            -InputObject $page `
-            -Name 'nextAfterNodeId'
-    } while ($null -ne $afterNodeId)
-    return @($nodes)
-}
-
 function Get-PitCrewPartitionedWorkflowRuns {
     param(
         [Parameter(Mandatory)]

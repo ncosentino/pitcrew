@@ -119,99 +119,9 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
+$pluginRoot = (Resolve-Path (Join-Path $PSScriptRoot '..' '..' '..')).Path
+. (Join-Path $pluginRoot 'scripts' 'DashboardDiagnostics.Client.ps1')
 . (Join-Path $PSScriptRoot 'PerformanceReport.Core.ps1')
-$script:LastDashboardRequestAt = [DateTimeOffset]::MinValue
-$script:DashboardMinimumIntervalMilliseconds = 500
-
-function Assert-PitCrewDashboardUri {
-    param([Parameter(Mandatory)][Uri]$Uri)
-
-    if (-not [string]::IsNullOrEmpty($Uri.UserInfo) -or
-        -not [string]::IsNullOrEmpty($Uri.Query) -or
-        -not [string]::IsNullOrEmpty($Uri.Fragment)) {
-        throw 'DashboardUrl cannot contain credentials, a query string, or a fragment.'
-    }
-    $localHttp = $Uri.Scheme -eq 'http' -and
-        $Uri.Host -in @('localhost', '127.0.0.1', '::1')
-    if ($Uri.Scheme -ne 'https' -and -not $localHttp) {
-        throw 'DashboardUrl must use HTTPS, except for an explicit localhost URL.'
-    }
-}
-
-function Test-PitCrewTransientDashboardStatusCode {
-    param([Parameter(Mandatory)][int]$StatusCode)
-
-    return $StatusCode -in @(429, 500, 502, 503, 504)
-}
-
-function Get-PitCrewDashboardRetryDelaySeconds {
-    param(
-        [Parameter(Mandatory)][int]$StatusCode,
-        [Parameter(Mandatory)][int]$Attempt,
-        [Parameter(Mandatory)][Net.Http.HttpResponseMessage]$Response
-    )
-
-    $retryAfter = $Response.Headers.RetryAfter
-    if ($null -ne $retryAfter) {
-        $delay =
-            if ($null -ne $retryAfter.Delta) {
-                $retryAfter.Delta.TotalSeconds
-            } elseif ($null -ne $retryAfter.Date) {
-                ($retryAfter.Date.Value - [DateTimeOffset]::UtcNow).TotalSeconds
-            } else {
-                0
-            }
-        if ($delay -gt 0) {
-            return [int][Math]::Min(
-                60,
-                [Math]::Max(1, [Math]::Ceiling($delay)))
-        }
-    }
-
-    if ($StatusCode -eq 429) {
-        return 60
-    }
-    return [int][Math]::Pow(2, $Attempt - 1)
-}
-
-function Invoke-PitCrewDashboardGet {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [Parameter(Mandatory)]
-        [hashtable]$Headers
-    )
-
-    $base = $DashboardUrl.AbsoluteUri.TrimEnd('/')
-    for ($attempt = 1; $attempt -le 3; $attempt++) {
-        $now = [DateTimeOffset]::UtcNow
-        $elapsedInterval = $now - $script:LastDashboardRequestAt
-        $elapsed = $elapsedInterval.TotalMilliseconds
-        $delay = $script:DashboardMinimumIntervalMilliseconds - $elapsed
-        if ($delay -gt 0) {
-            Start-Sleep -Milliseconds ([Math]::Ceiling($delay))
-        }
-        $script:LastDashboardRequestAt = [DateTimeOffset]::UtcNow
-        try {
-            return Invoke-RestMethod `
-                -Method Get `
-                -Uri "$base$Path" `
-                -Headers $Headers
-        } catch [Microsoft.PowerShell.Commands.HttpResponseException] {
-            $statusCode = [int]$_.Exception.Response.StatusCode
-            if (-not (Test-PitCrewTransientDashboardStatusCode $statusCode) -or
-                $attempt -eq 3) {
-                throw
-            }
-            $retryDelay = Get-PitCrewDashboardRetryDelaySeconds `
-                -StatusCode $statusCode `
-                -Attempt $attempt `
-                -Response $_.Exception.Response
-            Start-Sleep -Seconds $retryDelay
-        }
-    }
-}
 
 function Invoke-PitCrewGhJson {
     param(
@@ -533,7 +443,6 @@ function Get-PitCrewGitHubJobs {
     return @($jobs)
 }
 
-Assert-PitCrewDashboardUri $DashboardUrl
 $NodeId = @($NodeId | Sort-Object -Unique)
 $Profile = @($Profile | Sort-Object -Unique)
 $Workflow = @($Workflow | Sort-Object -Unique)
@@ -564,9 +473,9 @@ if ($Profile.Count -gt 0 -and $NodeId.Count -eq 0) {
 }
 $credential = [Environment]::GetEnvironmentVariable(
     'PITCREW_DIAGNOSTICS_CREDENTIAL')
-if ([string]::IsNullOrWhiteSpace($credential)) {
-    throw 'Set PITCREW_DIAGNOSTICS_CREDENTIAL in the process environment.'
-}
+$dashboardClient = New-PitCrewDashboardDiagnosticClient `
+    -DashboardUrl $DashboardUrl `
+    -Credential $credential
 if ($PSCmdlet.ParameterSetName -eq 'WorkflowRun') {
     $exactSelection = Get-PitCrewExactWorkflowRunAttempt `
         -ApprovedRepository $Repository `
@@ -578,13 +487,10 @@ if ($PSCmdlet.ParameterSetName -eq 'WorkflowRun') {
     $Repositories = @($exactSelection.Repository)
     $jobs = @($exactSelection.Jobs)
 }
-$headers = @{
-    Authorization = "PitCrew-Diagnostics $credential"
-}
 $tenantPath = [Uri]::EscapeDataString($TenantId)
 $capabilities = Invoke-PitCrewDashboardGet `
-    -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/history/capabilities" `
-    -Headers $headers
+    -Client $dashboardClient `
+    -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/history/capabilities"
 if ($null -ne $exactSelection) {
     $cadenceSeconds = [Math]::Max(
         1,
@@ -606,8 +512,8 @@ $nodes = Invoke-PitCrewPagedFleetRequest -Request {
         $query += "&afterNodeId=$([Uri]::EscapeDataString([string]$afterNodeId))"
     }
     Invoke-PitCrewDashboardGet `
-        -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/nodes?$query" `
-        -Headers $headers
+        -Client $dashboardClient `
+        -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/nodes?$query"
 }
 if ($NodeId.Count -gt 0) {
     $selectedNodes = @($NodeId | ForEach-Object { $_.ToString('D') })
@@ -640,8 +546,8 @@ foreach ($node in $nodes) {
     $encodedNode = [Uri]::EscapeDataString($nodeIdText)
     try {
         $nodeHistory = Invoke-PitCrewDashboardGet `
-            -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/nodes/$encodedNode/history?$query" `
-            -Headers $headers
+            -Client $dashboardClient `
+            -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/nodes/$encodedNode/history?$query"
         if ($Profile.Count -gt 0) {
             $availableProfiles = @(
                 $nodeHistory.profiles.profileId |
@@ -680,8 +586,8 @@ foreach ($node in $nodes) {
         $encodedProfile = [Uri]::EscapeDataString($profileId)
         try {
             $response = Invoke-PitCrewDashboardGet `
-                -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/nodes/$encodedNode/profiles/$encodedProfile/history?$query" `
-                -Headers $headers
+                -Client $dashboardClient `
+                -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/nodes/$encodedNode/profiles/$encodedProfile/history?$query"
             if (@($response.profiles).Count -eq 0) {
                 $missingProfiles.Add($profileId)
             } else {

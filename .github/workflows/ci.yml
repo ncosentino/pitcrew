@@ -115,6 +115,10 @@ jobs:
         shell: pwsh
         run: ./tests/Test-PerformanceReport.ps1
 
+      - name: Validate admission snapshot
+        shell: pwsh
+        run: ./tests/Test-AdmissionSnapshot.ps1
+
       - name: Set up Go
         uses: actions/setup-go@v6
         with:
