@@ -14,6 +14,11 @@ $dockerfilePath = Join-Path $root 'profiles' 'image-builder' 'Dockerfile'
 $helperPath = Join-Path $root 'profiles' 'image-builder' 'pitcrew-build-image'
 $candidateSchemaPath = Join-Path $root 'image-candidate.schema.json'
 $candidateValidatorPath = Join-Path $root 'scripts' 'Test-PitCrewImageCandidate.ps1'
+$integrationPath = Join-Path `
+    $root `
+    'tests' `
+    'integration' `
+    'Test-IsolatedImageBuilder.sh'
 $attributesPath = Join-Path $root '.gitattributes'
 
 $errors = [Collections.Generic.List[string]]::new()
@@ -51,6 +56,7 @@ foreach ($path in @(
         $helperPath,
         $candidateSchemaPath,
         $candidateValidatorPath,
+        $integrationPath,
         $attributesPath)) {
     Add-Check (Test-Path -LiteralPath $path -PathType Leaf) "Required image-builder surface is missing: $path"
 }
@@ -63,6 +69,10 @@ $config = Get-Content -LiteralPath $configPath -Raw -Encoding UTF8
 $setup = Get-Content -LiteralPath $setupScript -Raw -Encoding UTF8
 $dockerfile = Get-Content -LiteralPath $dockerfilePath -Raw -Encoding UTF8
 $helper = Get-Content -LiteralPath $helperPath -Raw -Encoding UTF8
+$integration = Get-Content `
+    -LiteralPath $integrationPath `
+    -Raw `
+    -Encoding UTF8
 $helperBytes = [IO.File]::ReadAllBytes($helperPath)
 $attributes = Get-Content -LiteralPath $attributesPath -Raw -Encoding UTF8
 $profile = Get-Content -LiteralPath $profilePath -Raw -Encoding UTF8 |
@@ -184,8 +194,38 @@ Add-Check (
     $helper -match [regex]::Escape(
         'PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS:-180') -and
     $helper -match 'while true' -and
-    $helper -match 'if \(\(SECONDS >= cleanup_deadline\)\)'
+    $helper -match 'if \(\(SECONDS >= cleanup_deadline\)\)' -and
+    $helper -match 'stage=\$\{cleanup_stage\}' -and
+    $helper -match 'attempts=\$\{cleanup_attempts\}' -and
+    $helper -match 'cacheRecords=\$\{usage_records\}' -and
+    $helper -match 'inUseRecords=\$\{in_use_records\}' -and
+    $helper -match 'historyRecords=\$\{history_records\}'
 ) 'Image-builder helper does not verify bounded empty cache and history state.'
+$interruptPhaseIndex = $integration.IndexOf(
+    'interrupt_logs="$(docker logs',
+    [StringComparison]::Ordinal)
+$interruptKillIndex = $integration.IndexOf(
+    'docker kill --signal KILL',
+    [StringComparison]::Ordinal)
+Add-Check (
+    $integration -match 'INTERRUPT_PHASE="RUN sleep 15"' -and
+    $integration -match [regex]::Escape(
+        "--format '{{.State.Running}}'") -and
+    $integration -match [regex]::Escape(
+        "--format '{{.State.ExitCode}}'") -and
+    $integration -match
+        '\$\{interrupt_logs\}" == \*"\$\{INTERRUPT_PHASE\}"\*' -and
+    $integration -notmatch
+        '--output type=(cacheonly|oci,dest=/tmp/interrupted\.tar)' -and
+    $integration -match
+        'PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS=3' -and
+    $integration -match
+        'failureCategory == "builder-cleanup-failed"' -and
+    $integration -match [regex]::Escape(
+        '-ServerCertificateDirectory "${SERVER_CERTIFICATE_DIRECTORY}"') -and
+    $interruptPhaseIndex -ge 0 -and
+    $interruptKillIndex -gt $interruptPhaseIndex
+) 'The image-builder interruption fixture does not classify direct cleanup versus exact service recovery.'
 
 $readyCandidate = @{
     schemaVersion = 1

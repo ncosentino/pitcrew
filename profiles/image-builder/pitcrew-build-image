@@ -401,27 +401,43 @@ write_candidate_report() {
 
 cleanup_builder() {
     local cleanup_deadline=$((SECONDS + builder_cleanup_timeout_seconds))
-    local histories
-    local usage
+    local cleanup_attempts=0
+    local cleanup_stage="not-started"
+    local histories=""
+    local history_records="unknown"
+    local in_use_records="unknown"
+    local usage=""
+    local usage_records="unknown"
+    local usage_summary=""
 
     while true; do
-        if buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null &&
-            buildctl "${buildctl_arguments[@]}" prune --all >/dev/null &&
-            usage="$(
-                buildctl \
-                    "${buildctl_arguments[@]}" \
-                    du \
-                    --format '{{json .}}'
-            )" &&
-            histories="$(
-                buildctl \
-                    "${buildctl_arguments[@]}" \
-                    debug histories \
-                    --format '{{json .}}'
-            )" &&
-            [[ -z "${histories}" ]] &&
-            [[ -z "${usage}" || "${usage}" == "null" ]]; then
-            return 0
+        cleanup_attempts=$((cleanup_attempts + 1))
+        cleanup_stage="prune-histories"
+        if buildctl "${buildctl_arguments[@]}" prune-histories >/dev/null; then
+            cleanup_stage="prune-cache"
+            if buildctl "${buildctl_arguments[@]}" prune --all >/dev/null; then
+                cleanup_stage="inspect-cache"
+                if usage="$(
+                    buildctl \
+                        "${buildctl_arguments[@]}" \
+                        du \
+                        --format '{{json .}}'
+                )"; then
+                    cleanup_stage="inspect-histories"
+                    if histories="$(
+                        buildctl \
+                            "${buildctl_arguments[@]}" \
+                            debug histories \
+                            --format '{{json .}}'
+                    )"; then
+                        if [[ -z "${histories}" ]] &&
+                            [[ -z "${usage}" || "${usage}" == "null" ]]; then
+                            return 0
+                        fi
+                        cleanup_stage="retained-state"
+                    fi
+                fi
+            fi
         fi
         if ((SECONDS >= cleanup_deadline)); then
             break
@@ -429,7 +445,50 @@ cleanup_builder() {
         sleep 1
     done
 
-    echo "BuildKit cleanup did not reach empty cache and history state." >&2
+    if [[ -z "${usage}" || "${usage}" == "null" ]]; then
+        usage_records=0
+        in_use_records=0
+    else
+        usage_summary="$(
+            jq -r -s \
+                '[
+                    .[] |
+                    if . == null then
+                        empty
+                    elif type == "array" then
+                        .[]
+                    else
+                        .
+                    end
+                ] |
+                "\(length) \(map(select(.inUse == true)) | length)"' \
+                <<<"${usage}" \
+                2>/dev/null ||
+                printf '%s' "unknown unknown"
+        )"
+        read -r usage_records in_use_records <<<"${usage_summary}"
+    fi
+    if [[ -z "${histories}" ]]; then
+        history_records=0
+    else
+        history_records="$(
+            jq -r -s \
+                '[
+                    .[] |
+                    if . == null then
+                        empty
+                    elif type == "array" then
+                        .[]
+                    else
+                        .
+                    end
+                ] | length' \
+                <<<"${histories}" \
+                2>/dev/null ||
+                printf '%s' "unknown"
+        )"
+    fi
+    echo "BuildKit cleanup did not reach empty cache and history state (stage=${cleanup_stage}, attempts=${cleanup_attempts}, cacheRecords=${usage_records}, inUseRecords=${in_use_records}, historyRecords=${history_records})." >&2
     return 1
 }
 

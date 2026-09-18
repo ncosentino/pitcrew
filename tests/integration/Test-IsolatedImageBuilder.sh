@@ -11,6 +11,7 @@ SERVICE_STATE_PATH="${ROOT_DIRECTORY}/.pitcrew-state/image-builder-service/servi
 REGISTRY_NAME="pitcrew-registry-test-$$"
 CLIENT_IMAGE="pitcrew-image-builder-test:$$"
 INTERRUPT_CLIENT_ID=""
+INTERRUPT_PHASE="RUN sleep 15"
 TEMP_DIRECTORY="$(mktemp -d)"
 APPARMOR_RESTRICTION=""
 
@@ -79,8 +80,7 @@ EOF
 printf 'isolated-image-builder\n' > "${CONTEXT_DIRECTORY}/payload.txt"
 cat > "${INTERRUPT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
-# Keep the solve observable while leaving preflight cleanup enough retry time.
-RUN sleep 5
+RUN sleep 15
 EOF
 cat > "${FAILED_CONTEXT_DIRECTORY}/Dockerfile" <<'EOF'
 FROM alpine:3.22
@@ -192,14 +192,33 @@ INTERRUPT_CLIENT_ID="$(
         --local context=/workspace \
         --local dockerfile=/workspace \
         --opt platform=linux/amd64 \
-        --output type=oci,dest=/tmp/interrupted.tar \
         --progress plain
 )"
 recorded=false
+interrupt_logs=""
 for _ in $(seq 1 120); do
+    interrupt_logs="$(docker logs "${INTERRUPT_CLIENT_ID}" 2>&1 || true)"
+    client_running="$(
+        docker inspect \
+            --format '{{.State.Running}}' \
+            "${INTERRUPT_CLIENT_ID}" \
+            2>/dev/null ||
+            true
+    )"
+    if [[ "${client_running}" == "false" ]]; then
+        client_exit_code="$(
+            docker inspect \
+                --format '{{.State.ExitCode}}' \
+                "${INTERRUPT_CLIENT_ID}"
+        )"
+        echo "Interrupted client exited before the exact local run phase (exit code ${client_exit_code})." >&2
+        exit 1
+    fi
     histories="$(run_buildctl_client debug histories --format '{{json .}}')"
     usage="$(run_buildctl_client du --format '{{json .}}')"
-    if [[ -n "${histories}" ]] &&
+    if [[ "${client_running}" == "true" ]] &&
+        [[ "${interrupt_logs}" == *"${INTERRUPT_PHASE}"* ]] &&
+        [[ -n "${histories}" ]] &&
         [[ -n "${usage}" && "${usage}" != "null" ]]; then
         recorded=true
         break
@@ -207,7 +226,7 @@ for _ in $(seq 1 120); do
     sleep 1
 done
 if [[ "${recorded}" != "true" ]]; then
-    echo "Interrupted client did not publish BuildKit state." >&2
+    echo "Interrupted client did not reach the exact local run phase with BuildKit state." >&2
     exit 1
 fi
 
@@ -229,6 +248,57 @@ seeded_histories="$(run_buildctl_client debug histories --format '{{json .}}')"
 if [[ -z "${seeded_histories}" ]]; then
     echo "Interrupted-job fixture did not leave BuildKit history." >&2
     exit 1
+fi
+
+set +e
+docker run --rm \
+    --network "${NETWORK_NAME}" \
+    --mount "type=bind,src=${CLIENT_CERTIFICATE_DIRECTORY},dst=/tls,readonly" \
+    --mount "type=bind,src=${CONTEXT_DIRECTORY},dst=/workspace,readonly" \
+    --mount "type=bind,src=${OUTPUT_DIRECTORY},dst=/output" \
+    --env BUILDKIT_HOST=tcp://buildkitd:1234 \
+    --env BUILDKIT_TLS_DIR=/tls \
+    --env PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS=3 \
+    --entrypoint pitcrew-build-image \
+    "${CLIENT_IMAGE}" \
+    --image-ref registry:5000/pitcrew/image-builder-test:interrupt-recovery \
+    --context /workspace \
+    --dockerfile /workspace \
+    --platform linux/amd64 \
+    --output-oci /output/interrupted-recovery.tar \
+    --candidate-output /output/interrupted-recovery-candidate.json \
+    --recipe-id application-ci
+interrupted_recovery_status=$?
+set -e
+if ((interrupted_recovery_status == 0)); then
+    if ! jq -e \
+        '.status == "ready"
+         and .failureCategory == null
+         and (
+            [.qualifications[] |
+                select(.name == "builder-cleanup")][0].status == "passed"
+         )' \
+        <<<"$(read_output_file interrupted-recovery-candidate.json)" \
+        >/dev/null; then
+        echo "Direct interrupted-state recovery did not publish ready cleanup evidence." >&2
+        exit 1
+    fi
+else
+    if ! jq -e \
+        '.status == "failed"
+         and .failureCategory == "builder-cleanup-failed"
+         and .failureDetail == "BuildKit cleanup did not reach an empty state."
+         and (
+            [.qualifications[] |
+                select(.name == "builder-cleanup")][0].status == "failed"
+         )' \
+        <<<"$(read_output_file interrupted-recovery-candidate.json)" \
+        >/dev/null; then
+        echo "Hard-cancelled state did not fail closed as builder-cleanup-failed." >&2
+        exit 1
+    fi
+    pwsh -NoProfile -File "${SERVICE_SETUP}" \
+        -ServerCertificateDirectory "${SERVER_CERTIFICATE_DIRECTORY}"
 fi
 
 literal_payload='literal-$(touch /tmp/pitcrew-injection)'
