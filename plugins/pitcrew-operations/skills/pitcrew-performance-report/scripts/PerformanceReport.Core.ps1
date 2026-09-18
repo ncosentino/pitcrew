@@ -72,6 +72,70 @@ function ConvertTo-PitCrewRepositoryIdentity {
         [Text.RegularExpressions.RegexOptions]::IgnoreCase)
 }
 
+function New-PitCrewPerformanceReportSelection {
+    param(
+        [Parameter(Mandatory)]
+        [ValidateSet('range', 'workflow-run-attempt')]
+        [string]$Mode,
+
+        [AllowNull()]
+        [string]$Repository,
+
+        [AllowNull()]
+        [string]$WorkflowRunId,
+
+        [int]$RunAttempt = 0,
+
+        [Nullable[DateTimeOffset]]$JobFrom,
+
+        [Nullable[DateTimeOffset]]$JobTo
+    )
+
+    if ($Mode -eq 'range') {
+        return [PSCustomObject][ordered]@{
+            mode = 'range'
+            workflowRun = $null
+        }
+    }
+
+    $repositoryIdentity = ConvertTo-PitCrewRepositoryIdentity $Repository
+    if ($repositoryIdentity -notmatch
+        '^[a-z0-9_.-]+/[a-z0-9_.-]+$') {
+        throw 'Workflow-run selection requires one OWNER/REPOSITORY identity.'
+    }
+    $parsedRunId = 0L
+    if (-not [long]::TryParse(
+            $WorkflowRunId,
+            [Globalization.NumberStyles]::None,
+            [Globalization.CultureInfo]::InvariantCulture,
+            [ref]$parsedRunId) -or
+        $parsedRunId -lt 1) {
+        throw 'Workflow-run selection requires a positive run ID.'
+    }
+    if ($RunAttempt -lt 1) {
+        throw 'Workflow-run selection requires a positive run attempt.'
+    }
+    if ($null -eq $JobFrom -or
+        $null -eq $JobTo -or
+        ([DateTimeOffset]$JobTo) -le ([DateTimeOffset]$JobFrom)) {
+        throw 'Workflow-run selection requires a complete positive job interval.'
+    }
+
+    return [PSCustomObject][ordered]@{
+        mode = 'workflow-run-attempt'
+        workflowRun = [PSCustomObject][ordered]@{
+            repository = $repositoryIdentity
+            runId = $parsedRunId.ToString(
+                [Globalization.CultureInfo]::InvariantCulture)
+            attempt = $RunAttempt
+            jobInterval = [PSCustomObject][ordered]@{
+                from = ([DateTimeOffset]$JobFrom).ToUniversalTime().ToString('O')
+                to = ([DateTimeOffset]$JobTo).ToUniversalTime().ToString('O')
+            }
+        }
+    }
+}
+
 function ConvertTo-PitCrewMarkdownText {
     param(
         [AllowNull()]
@@ -897,6 +961,21 @@ function New-PitCrewPerformanceReportModel {
 
         [ValidateRange(1, 86400)]
         [int]$ExpectedCadenceSeconds = 15,
+
+        [ValidateSet('range', 'workflow-run-attempt')]
+        [string]$SelectionMode = 'range',
+
+        [AllowNull()]
+        [string]$WorkflowRunRepository,
+
+        [AllowNull()]
+        [string]$WorkflowRunId,
+
+        [int]$WorkflowRunAttempt = 0,
+
+        [Nullable[DateTimeOffset]]$WorkflowRunJobFrom,
+
+        [Nullable[DateTimeOffset]]$WorkflowRunJobTo,
 
         [DateTimeOffset]$GeneratedAt = [DateTimeOffset]::UtcNow
     )
@@ -1819,8 +1898,12 @@ function New-PitCrewPerformanceReportModel {
         })
     }
 
-    return [PSCustomObject][ordered]@{
-        schemaVersion = 2
+    $report = [ordered]@{
+        schemaVersion = if ($SelectionMode -eq 'workflow-run-attempt') {
+            3
+        } else {
+            2
+        }
         generatedAt = $GeneratedAt.ToUniversalTime().ToString('O')
         range = [PSCustomObject][ordered]@{
             from = $From.ToUniversalTime().ToString('O')
@@ -1850,6 +1933,19 @@ function New-PitCrewPerformanceReportModel {
             'Withheld units show that a worker start was gated; they do not prove GitHub queue delay or a running-job performance cause.'
         )
     }
+    if ($SelectionMode -eq 'workflow-run-attempt') {
+        $report.Insert(
+            2,
+            'selection',
+            (New-PitCrewPerformanceReportSelection `
+                -Mode $SelectionMode `
+                -Repository $WorkflowRunRepository `
+                -WorkflowRunId $WorkflowRunId `
+                -RunAttempt $WorkflowRunAttempt `
+                -JobFrom $WorkflowRunJobFrom `
+                -JobTo $WorkflowRunJobTo))
+    }
+    return [PSCustomObject]$report
 }
 
 function ConvertTo-PitCrewPerformanceMarkdown {
@@ -1861,6 +1957,18 @@ function ConvertTo-PitCrewPerformanceMarkdown {
     $lines = [Collections.Generic.List[string]]::new()
     $lines.Add('# PitCrew performance correlation report')
     $lines.Add('')
+    $selection = Get-PitCrewProperty $Report 'selection'
+    if ($null -ne $selection -and
+        $selection.mode -eq 'workflow-run-attempt') {
+        $workflowRun = $selection.workflowRun
+        $repository = ConvertTo-PitCrewMarkdownText $workflowRun.repository
+        $lines.Add(
+            "Selection: ``$repository`` run ``$($workflowRun.runId)`` attempt ``$($workflowRun.attempt)``")
+        $lines.Add('')
+        $lines.Add(
+            "Selected job interval: ``$($workflowRun.jobInterval.from)`` to ``$($workflowRun.jobInterval.to)``")
+        $lines.Add('')
+    }
     $lines.Add(
         "Range: ``$($Report.range.from)`` to ``$($Report.range.to)``")
     $lines.Add('')

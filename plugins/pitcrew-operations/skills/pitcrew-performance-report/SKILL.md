@@ -17,10 +17,13 @@ Collect all of these from the caller:
 
 - one PitCrew Dashboard base URL;
 - one tenant identifier;
-- one or more explicitly approved `OWNER/REPOSITORY` values;
-- an inclusive start and exclusive end time;
+- either:
+  - one or more explicitly approved `OWNER/REPOSITORY` values plus an
+    inclusive start and exclusive end time; or
+  - one exact `OWNER/REPOSITORY`, workflow run ID, and run attempt;
 - optional node, profile, workflow, job, and step filters;
-- an optional output directory.
+- an output directory for exact-run mode; range mode may generate a timestamped
+  directory when one is omitted.
 
 Require the raw diagnostic credential in the process environment variable
 `PITCREW_DIAGNOSTICS_CREDENTIAL`. Never ask the caller to place it in a URL,
@@ -60,6 +63,23 @@ pwsh ./scripts/New-PitCrewPerformanceReport.ps1 `
     -From 2026-08-01T00:00:00Z `
     -To 2026-08-02T00:00:00Z
 ```
+
+For a noninteractive exact-run report, invoke the same supported command:
+
+```powershell
+pwsh ./scripts/New-PitCrewPerformanceReport.ps1 `
+    -DashboardUrl https://dashboard.example `
+    -TenantId example `
+    -Repository owner/repository `
+    -RunId 123456789 `
+    -RunAttempt 1 `
+    -OutputDirectory ./performance-report
+```
+
+Exact-run mode reads only the supplied run and attempt job endpoints. It does
+not list or partition unrelated workflow runs. The workflow run must already
+be completed, and at least one selected job must have a complete timing
+interval.
 
 Add only caller-approved filters:
 
@@ -134,6 +154,12 @@ The files carry equivalent measurements and use three explicit sections:
 The report omits raw runner names and node display names. It uses Dashboard
 node IDs plus neutral `node-N` labels and contains no credentials, internal
 paths, job output, or URL query strings.
+
+Exact-run JSON uses schema version 3; existing range reports remain schema
+version 2 and retain their prior shape. Read
+[the machine-readable report contract](references/json-contract.md) before
+building downstream automation. Publication, thresholds, annotations, and
+pull-request summaries remain downstream-owned.
 
 State explicitly:
 

@@ -17,6 +17,15 @@ Dashboard tenant identifier authorized by the diagnostic credential.
 .PARAMETER Repositories
 Explicit GitHub repositories in OWNER/REPOSITORY form.
 
+.PARAMETER Repository
+Exact GitHub repository in OWNER/REPOSITORY form for workflow-run mode.
+
+.PARAMETER RunId
+Exact GitHub Actions workflow run identifier.
+
+.PARAMETER RunAttempt
+Exact one-based workflow run attempt.
+
 .PARAMETER From
 Inclusive UTC start of the bounded report range.
 
@@ -50,8 +59,18 @@ $env:PITCREW_DIAGNOSTICS_CREDENTIAL = '<credential>'
     -Repositories owner/repository `
     -From 2026-08-01T00:00:00Z `
     -To 2026-08-02T00:00:00Z
+
+.EXAMPLE
+$env:PITCREW_DIAGNOSTICS_CREDENTIAL = '<credential>'
+./New-PitCrewPerformanceReport.ps1 `
+    -DashboardUrl https://dashboard.example `
+    -TenantId example `
+    -Repository owner/repository `
+    -RunId 123456789 `
+    -RunAttempt 1 `
+    -OutputDirectory ./performance-report
 #>
-[CmdletBinding()]
+[CmdletBinding(DefaultParameterSetName = 'Range')]
 param(
     [Parameter(Mandatory)]
     [Uri]$DashboardUrl,
@@ -60,16 +79,30 @@ param(
     [ValidatePattern('^[a-z0-9][a-z0-9-]{0,62}$')]
     [string]$TenantId,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = 'Range')]
     [ValidateNotNullOrEmpty()]
     [string[]]$Repositories,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = 'WorkflowRun')]
+    [ValidatePattern('^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$')]
+    [string]$Repository,
+
+    [Parameter(Mandatory, ParameterSetName = 'WorkflowRun')]
+    [ValidateRange(1, [long]::MaxValue)]
+    [long]$RunId,
+
+    [Parameter(Mandatory, ParameterSetName = 'WorkflowRun')]
+    [ValidateRange(1, [int]::MaxValue)]
+    [int]$RunAttempt,
+
+    [Parameter(Mandatory, ParameterSetName = 'Range')]
     [DateTimeOffset]$From,
 
-    [Parameter(Mandatory)]
+    [Parameter(Mandatory, ParameterSetName = 'Range')]
     [DateTimeOffset]$To,
 
+    [Parameter(ParameterSetName = 'Range')]
+    [Parameter(Mandatory, ParameterSetName = 'WorkflowRun')]
     [string]$OutputDirectory,
 
     [Guid[]]$NodeId = @(),
@@ -162,6 +195,188 @@ function Invoke-PitCrewGhJson {
     return ($output -join "`n") | ConvertFrom-Json -Depth 100
 }
 
+function ConvertTo-PitCrewGitHubJobProjection {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ApprovedRepository,
+
+        [Parameter(Mandatory)]
+        [object]$Run,
+
+        [Parameter(Mandatory)]
+        [object]$GitHubJob,
+
+        [string[]]$StepFilters = @()
+    )
+
+    $startedAt = if ($null -eq $GitHubJob.started_at) {
+        $null
+    } else {
+        ConvertTo-PitCrewUtc $GitHubJob.started_at
+    }
+    $completedAt = if ($null -eq $GitHubJob.completed_at) {
+        $null
+    } else {
+        ConvertTo-PitCrewUtc $GitHubJob.completed_at
+    }
+    $selectedSteps = @(
+        Select-PitCrewGitHubStepMetadata `
+            -Steps @($GitHubJob.steps) `
+            -Filters $StepFilters
+    )
+    return [PSCustomObject][ordered]@{
+        repository = $ApprovedRepository.ToLowerInvariant()
+        workflowRunId = [string]$Run.id
+        workflowId = [string]$Run.workflow_id
+        workflowName = [string]$Run.name
+        runAttempt = [int](
+            Get-PitCrewProperty `
+                $GitHubJob `
+                'run_attempt' `
+                (Get-PitCrewProperty $Run 'run_attempt' 1))
+        jobId = [string]$GitHubJob.id
+        jobName = [string]$GitHubJob.name
+        runnerName = [string]$GitHubJob.runner_name
+        labels = @($GitHubJob.labels)
+        startedAt = $startedAt
+        completedAt = $completedAt
+        status = [string]$GitHubJob.status
+        conclusion = $GitHubJob.conclusion
+        steps = $selectedSteps
+    }
+}
+
+function Get-PitCrewExactWorkflowRunAttempt {
+    param(
+        [Parameter(Mandatory)]
+        [string]$ApprovedRepository,
+
+        [Parameter(Mandatory)]
+        [long]$WorkflowRunId,
+
+        [Parameter(Mandatory)]
+        [int]$Attempt,
+
+        [string[]]$WorkflowFilters = @(),
+
+        [string[]]$JobFilters = @(),
+
+        [string[]]$StepFilters = @()
+    )
+
+    if ($null -eq (Get-Command gh -ErrorAction SilentlyContinue)) {
+        throw 'GitHub CLI (gh) is required for job metadata.'
+    }
+    if ($ApprovedRepository -notmatch
+        '^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$') {
+        throw "Repository '$ApprovedRepository' must use OWNER/REPOSITORY form."
+    }
+    $run = Invoke-PitCrewGhJson `
+        -Operation "reading workflow run '$WorkflowRunId'" `
+        -Arguments @(
+            'api',
+            '-X', 'GET',
+            "repos/$ApprovedRepository/actions/runs/$WorkflowRunId")
+    if ([string]$run.id -cne [string]$WorkflowRunId) {
+        throw "GitHub returned a different workflow run for '$WorkflowRunId'."
+    }
+    if ([string]$run.status -cne 'completed') {
+        throw "Workflow run '$WorkflowRunId' is not completed."
+    }
+    $availableAttempt = [int](Get-PitCrewProperty $run 'run_attempt' 1)
+    if ($Attempt -gt $availableAttempt) {
+        throw (
+            "Workflow run '$WorkflowRunId' has only $availableAttempt " +
+            "attempt(s); attempt $Attempt is unavailable."
+        )
+    }
+    if (-not (Test-PitCrewLiteralTextFilter `
+            -Value ([string]$run.name) `
+            -Filters $WorkflowFilters)) {
+        throw "Workflow run '$WorkflowRunId' does not match the workflow filters."
+    }
+
+    $jobPages = Invoke-PitCrewGhJson `
+        -Operation (
+            "listing jobs for workflow run '$WorkflowRunId' attempt '$Attempt'"
+        ) `
+        -Arguments @(
+            'api',
+            '--paginate',
+            '--slurp',
+            '-X', 'GET',
+            (
+                "repos/$ApprovedRepository/actions/runs/$WorkflowRunId/" +
+                "attempts/$Attempt/jobs"
+            ),
+            '-f', 'per_page=100')
+    $jobs = @(
+        foreach ($page in @($jobPages)) {
+            foreach ($githubJob in @($page.jobs)) {
+                $jobAttempt = [int](
+                    Get-PitCrewProperty $githubJob 'run_attempt' $Attempt)
+                if ($jobAttempt -ne $Attempt) {
+                    throw (
+                        "GitHub returned job '$($githubJob.id)' from attempt " +
+                        "$jobAttempt while attempt $Attempt was requested."
+                    )
+                }
+                if (-not (Test-PitCrewLiteralTextFilter `
+                        -Value ([string]$githubJob.name) `
+                        -Filters $JobFilters)) {
+                    continue
+                }
+                ConvertTo-PitCrewGitHubJobProjection `
+                    -ApprovedRepository $ApprovedRepository `
+                    -Run $run `
+                    -GitHubJob $githubJob `
+                    -StepFilters $StepFilters
+            }
+        }
+    )
+    if ($jobs.Count -eq 0) {
+        throw (
+            "Workflow run '$WorkflowRunId' attempt '$Attempt' has no jobs " +
+            'matching the requested filters.'
+        )
+    }
+    $timedJobs = @(
+        $jobs |
+            Where-Object {
+                $null -ne $_.startedAt -and
+                $null -ne $_.completedAt
+            })
+    if ($timedJobs.Count -eq 0) {
+        throw (
+            "Workflow run '$WorkflowRunId' attempt '$Attempt' has no " +
+            'complete timed jobs for a Dashboard history interval.'
+        )
+    }
+    $jobFrom = [DateTimeOffset](
+        $timedJobs.startedAt |
+            Sort-Object |
+            Select-Object -First 1)
+    $jobTo = [DateTimeOffset](
+        $timedJobs.completedAt |
+            Sort-Object |
+            Select-Object -Last 1)
+    if ($jobTo -le $jobFrom) {
+        throw (
+            "Workflow run '$WorkflowRunId' attempt '$Attempt' returned an " +
+            'invalid non-positive job interval.'
+        )
+    }
+
+    return [PSCustomObject][ordered]@{
+        Repository = $ApprovedRepository.ToLowerInvariant()
+        WorkflowRunId = [string]$WorkflowRunId
+        RunAttempt = $Attempt
+        JobFrom = $jobFrom
+        JobTo = $jobTo
+        Jobs = $jobs
+    }
+}
+
 function Get-PitCrewGitHubJobs {
     param(
         [Parameter(Mandatory)]
@@ -249,16 +464,13 @@ function Get-PitCrewGitHubJobs {
                             -Filters $Job)) {
                         continue
                     }
-                    $startedAt = if ($null -eq $githubJob.started_at) {
-                        $null
-                    } else {
-                        ConvertTo-PitCrewUtc $githubJob.started_at
-                    }
-                    $completedAt = if ($null -eq $githubJob.completed_at) {
-                        $null
-                    } else {
-                        ConvertTo-PitCrewUtc $githubJob.completed_at
-                    }
+                    $projection = ConvertTo-PitCrewGitHubJobProjection `
+                        -ApprovedRepository $repository `
+                        -Run $run `
+                        -GitHubJob $githubJob `
+                        -StepFilters $StepFilters
+                    $startedAt = $projection.startedAt
+                    $completedAt = $projection.completedAt
                     if ($null -eq $startedAt -and
                         -not (Test-PitCrewUntimedJobRelevant `
                             -Conclusion $githubJob.conclusion `
@@ -279,31 +491,7 @@ function Get-PitCrewGitHubJobs {
                             $startedAt -ge $RangeEnd)) {
                         continue
                     }
-                    $selectedSteps = @(
-                        Select-PitCrewGitHubStepMetadata `
-                            -Steps @($githubJob.steps) `
-                            -Filters $StepFilters
-                    )
-                    $jobs.Add([PSCustomObject][ordered]@{
-                        repository = $repository.ToLowerInvariant()
-                        workflowRunId = [string]$run.id
-                        workflowId = [string]$run.workflow_id
-                        workflowName = $workflowName
-                        runAttempt = [int](
-                            Get-PitCrewProperty `
-                                $githubJob `
-                                'run_attempt' `
-                                (Get-PitCrewProperty $run 'run_attempt' 1))
-                        jobId = [string]$githubJob.id
-                        jobName = $jobName
-                        runnerName = [string]$githubJob.runner_name
-                        labels = @($githubJob.labels)
-                        startedAt = $startedAt
-                        completedAt = $completedAt
-                        status = [string]$githubJob.status
-                        conclusion = $githubJob.conclusion
-                        steps = $selectedSteps
-                    })
+                    $jobs.Add($projection)
                 }
             }
         }
@@ -312,13 +500,6 @@ function Get-PitCrewGitHubJobs {
 }
 
 Assert-PitCrewDashboardUri $DashboardUrl
-if ($To -le $From) {
-    throw 'To must be after From.'
-}
-$Repositories = @(
-    $Repositories |
-        ForEach-Object { $_.Trim().ToLowerInvariant() } |
-        Sort-Object -Unique)
 $NodeId = @($NodeId | Sort-Object -Unique)
 $Profile = @($Profile | Sort-Object -Unique)
 $Workflow = @($Workflow | Sort-Object -Unique)
@@ -331,6 +512,19 @@ $Step = @(
         } |
         Sort-Object -Unique
 )
+$exactSelection = $null
+$jobs = $null
+if ($PSCmdlet.ParameterSetName -eq 'WorkflowRun') {
+    $Repository = $Repository.Trim().ToLowerInvariant()
+} else {
+    if ($To -le $From) {
+        throw 'To must be after From.'
+    }
+    $Repositories = @(
+        $Repositories |
+            ForEach-Object { $_.Trim().ToLowerInvariant() } |
+            Sort-Object -Unique)
+}
 if ($Profile.Count -gt 0 -and $NodeId.Count -eq 0) {
     throw 'Profile filters require explicit NodeId values so removed retained profiles remain enumerable.'
 }
@@ -339,6 +533,17 @@ $credential = [Environment]::GetEnvironmentVariable(
 if ([string]::IsNullOrWhiteSpace($credential)) {
     throw 'Set PITCREW_DIAGNOSTICS_CREDENTIAL in the process environment.'
 }
+if ($PSCmdlet.ParameterSetName -eq 'WorkflowRun') {
+    $exactSelection = Get-PitCrewExactWorkflowRunAttempt `
+        -ApprovedRepository $Repository `
+        -WorkflowRunId $RunId `
+        -Attempt $RunAttempt `
+        -WorkflowFilters $Workflow `
+        -JobFilters $Job `
+        -StepFilters $Step
+    $Repositories = @($exactSelection.Repository)
+    $jobs = @($exactSelection.Jobs)
+}
 $headers = @{
     Authorization = "PitCrew-Diagnostics $credential"
 }
@@ -346,6 +551,14 @@ $tenantPath = [Uri]::EscapeDataString($TenantId)
 $capabilities = Invoke-PitCrewDashboardGet `
     -Path "/api/diagnostics/v1/tenants/$tenantPath/fleet/history/capabilities" `
     -Headers $headers
+if ($null -ne $exactSelection) {
+    $cadenceSeconds = [Math]::Max(
+        1,
+        [int]$capabilities.expectedRawCadenceSeconds)
+    $historyPaddingSeconds = 2 * $cadenceSeconds
+    $From = $exactSelection.JobFrom.AddSeconds(-$historyPaddingSeconds)
+    $To = $exactSelection.JobTo.AddSeconds($historyPaddingSeconds)
+}
 $maximumRange = [TimeSpan]::FromHours(
     [double]$capabilities.maximumRangeHours)
 if (($To - $From) -gt $maximumRange) {
@@ -483,19 +696,31 @@ foreach ($node in $nodes) {
     }
 }
 
-$jobs = Get-PitCrewGitHubJobs `
-    -ApprovedRepositories $Repositories `
-    -RangeStart $From `
-    -RangeEnd $To `
-    -StepFilters $Step
-$report = New-PitCrewPerformanceReportModel `
-    -Jobs $jobs `
-    -Nodes $nodes `
-    -Histories $histories `
-    -From $From `
-    -To $To `
-    -Repositories $Repositories `
-    -ExpectedCadenceSeconds ([int]$capabilities.expectedRawCadenceSeconds)
+if ($null -eq $exactSelection) {
+    $jobs = Get-PitCrewGitHubJobs `
+        -ApprovedRepositories $Repositories `
+        -RangeStart $From `
+        -RangeEnd $To `
+        -StepFilters $Step
+}
+$reportParameters = @{
+    Jobs = $jobs
+    Nodes = $nodes
+    Histories = $histories
+    From = $From
+    To = $To
+    Repositories = $Repositories
+    ExpectedCadenceSeconds = [int]$capabilities.expectedRawCadenceSeconds
+}
+if ($null -ne $exactSelection) {
+    $reportParameters.SelectionMode = 'workflow-run-attempt'
+    $reportParameters.WorkflowRunRepository = $exactSelection.Repository
+    $reportParameters.WorkflowRunId = $exactSelection.WorkflowRunId
+    $reportParameters.WorkflowRunAttempt = $exactSelection.RunAttempt
+    $reportParameters.WorkflowRunJobFrom = $exactSelection.JobFrom
+    $reportParameters.WorkflowRunJobTo = $exactSelection.JobTo
+}
+$report = New-PitCrewPerformanceReportModel @reportParameters
 if ([string]::IsNullOrWhiteSpace($OutputDirectory)) {
     $stamp = [DateTimeOffset]::UtcNow.ToString('yyyyMMdd-HHmmss')
     $OutputDirectory = Join-Path `
