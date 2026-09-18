@@ -46,11 +46,12 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.20.0') 'The operations plugin minor version was not advanced for transient performance-report retries.'
+Add-Check ($plugin.version -eq '1.21.0') 'The operations plugin minor version was not advanced for current admission snapshots.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
 $expectedSkills = @(
+    'pitcrew-admission-snapshot',
     'pitcrew-capacity',
     'pitcrew-dashboard-update',
     'pitcrew-host-diagnostics',
@@ -509,6 +510,100 @@ Add-Check (
     $remoteReleaseAsset -match 'Get-FileHash'
 ) 'The release asset staging script does not publish the collector and broker-access contracts with SHA-256 sidecars.'
 
+$dashboardClientPath = Join-Path `
+    $pluginRoot `
+    'scripts' `
+    'DashboardDiagnostics.Client.ps1'
+$admissionProjectionPath = Join-Path `
+    $pluginRoot `
+    'scripts' `
+    'HostAdmission.Projection.ps1'
+$admissionSnapshotRoot = Join-Path `
+    $skillsRoot `
+    'pitcrew-admission-snapshot'
+$admissionSnapshotSkill = Get-Content `
+    -LiteralPath (Join-Path $admissionSnapshotRoot 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+$admissionSnapshotScript = Get-Content `
+    -LiteralPath (Join-Path `
+        $admissionSnapshotRoot `
+        'scripts' `
+        'New-PitCrewAdmissionSnapshot.ps1') `
+    -Raw `
+    -Encoding UTF8
+$admissionSnapshotContract = Get-Content `
+    -LiteralPath (Join-Path `
+        $admissionSnapshotRoot `
+        'references' `
+        'json-contract.md') `
+    -Raw `
+    -Encoding UTF8
+$admissionSnapshotSchemaPath = Join-Path `
+    $admissionSnapshotRoot `
+    'references' `
+    'admission-snapshot.schema.json'
+$dashboardClient = Get-Content `
+    -LiteralPath $dashboardClientPath `
+    -Raw `
+    -Encoding UTF8
+$admissionProjection = Get-Content `
+    -LiteralPath $admissionProjectionPath `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $admissionSnapshotSkill -match 'New-PitCrewAdmissionSnapshot\.ps1' -and
+    $admissionSnapshotSkill -match 'PITCREW_DIAGNOSTICS_CREDENTIAL' -and
+    $admissionSnapshotSkill -match 'point-in-time observation' -and
+    $admissionSnapshotSkill -match 'not a reservation or promise'
+) 'The admission snapshot skill does not expose its supported credential-safe point-in-time contract.'
+Add-Check (
+    $admissionSnapshotScript -match
+        '/api/diagnostics/v1/tenants/.*/fleet/nodes' -and
+    $admissionSnapshotScript -notmatch '/history' -and
+    $admissionSnapshotScript -notmatch 'DiagnosticCredential' -and
+    $admissionSnapshotScript -match
+        'PITCREW_DIAGNOSTICS_CREDENTIAL' -and
+    $admissionSnapshotScript -match
+        'DashboardDiagnostics\.Client\.ps1' -and
+    $admissionSnapshotScript -match
+        'HostAdmission\.Projection\.ps1'
+) 'The admission snapshot command uses an unsupported data surface or duplicated client/projection path.'
+Add-Check (
+    $admissionProjection -match '''admissible-now''' -and
+    $admissionProjection -match '''insufficient-now''' -and
+    $admissionProjection -match '''unknown''' -and
+    $admissionProjection -match
+        'RequestedWorkers -le \$allocatableWorkers' -and
+    $admissionProjection -notmatch
+        '(?i)(cpu|memory).*RequestedWorkers'
+) 'The admission snapshot does not derive its disposition solely from authoritative allocatable workers.'
+Add-Check (
+    $admissionProjection -match '''stale''' -and
+    $admissionProjection -match '''partial''' -and
+    $admissionProjection -match '''unavailable''' -and
+    $admissionProjection -match '''last-known''' -and
+    $admissionProjection -match
+        'host-admission-freshness-unsupported' -and
+    $admissionProjection -match
+        'host-admission-accounting-incomplete'
+) 'The admission snapshot collapses unavailable or incomplete evidence into a capacity result.'
+Add-Check (
+    $admissionSnapshotContract -match '"schemaVersion": 1' -and
+    $admissionSnapshotContract -match
+        'Consumers must require `schemaVersion` 1' -and
+    (Test-Path `
+        -LiteralPath $admissionSnapshotSchemaPath `
+        -PathType Leaf)
+) 'The admission snapshot lacks a documented executable versioned JSON contract.'
+Add-Check (
+    $dashboardClient -match
+        'Test-PitCrewTransientDashboardStatusCode' -and
+    $dashboardClient -match '429, 500, 502, 503, 504' -and
+    $dashboardClient -match 'Headers\.RetryAfter' -and
+    $dashboardClient -match 'Get-PitCrewDashboardFleetPages'
+) 'The shared Dashboard diagnostics client omits bounded retries or fleet pagination.'
+
 $performanceReportSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-performance-report' 'SKILL.md') `
     -Raw `
@@ -599,10 +694,12 @@ Add-Check (
     $performanceReportCore -match 'seenJobs'
 ) 'The performance report does not deduplicate inputs or preserve stable cohort identity.'
 Add-Check (
-    $performanceReportScript -match 'DashboardMinimumIntervalMilliseconds = 500' -and
-    $performanceReportScript -match 'Test-PitCrewTransientDashboardStatusCode' -and
-    $performanceReportScript -match '429, 500, 502, 503, 504' -and
-    $performanceReportScript -match 'Headers\.RetryAfter' -and
+    $performanceReportScript -match
+        'DashboardDiagnostics\.Client\.ps1' -and
+    $performanceReportScript -match
+        'New-PitCrewDashboardDiagnosticClient' -and
+    $dashboardClient -match
+        'MinimumIntervalMilliseconds = 500' -and
     $performanceReportCore -match 'Test-PitCrewLiteralTextFilter'
 ) 'The performance report does not honor Dashboard rate limits or literal filters.'
 Add-Check (
