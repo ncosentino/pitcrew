@@ -870,6 +870,32 @@ observed_state_is_valid() {
             and (.capacity | nonnegative_integer and . >= 1 and . <= 64)
             and (.highestSequence == null or (.highestSequence | nonnegative_integer and . >= 1))
             and (.droppedEvents | nonnegative_integer)
+            and (
+                if (
+                    has("evictedEvents")
+                    or has("rejectedEvents")
+                    or has("unclassifiedEvents")
+                ) then
+                    has("evictedEvents")
+                    and has("rejectedEvents")
+                    and has("unclassifiedEvents")
+                    and (.evictedEvents | nonnegative_integer)
+                    and (.rejectedEvents | nonnegative_integer)
+                    and (.unclassifiedEvents | nonnegative_integer)
+                    and .droppedEvents == (
+                        .evictedEvents
+                        + .rejectedEvents
+                        + .unclassifiedEvents
+                    )
+                    and (
+                        if .status == "current" then
+                            .rejectedEvents == 0
+                        elif .status == "truncated" then
+                            .rejectedEvents >= 1
+                        else true end
+                    )
+                else true end
+            )
             and (.events | type == "array")
             and (.events | length) <= 64
             and (.events | length) <= .capacity
@@ -1261,6 +1287,18 @@ observed_state_is_valid() {
                             and has("occurrenceCount")
                             and .observedAt == .lastObservedAt
                             and .firstObservedAt <= .lastObservedAt
+                        )
+                    else
+                        true
+                    end
+                )
+                and (
+                    if .managerContractVersion >= 22 then
+                        (
+                            .operationJournal
+                            | has("evictedEvents")
+                            and has("rejectedEvents")
+                            and has("unclassifiedEvents")
                         )
                     else
                         true

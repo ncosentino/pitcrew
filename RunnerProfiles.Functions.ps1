@@ -4,10 +4,10 @@ Set-StrictMode -Version Latest
 $script:RunnerDesiredCapacitySchemaVersion = 1
 $script:RunnerStaticProfileSchemaVersion = 1
 $script:RunnerHostAdmissionPolicySchemaVersion = 1
-$script:RunnerManagerContractVersion = 21
+$script:RunnerManagerContractVersion = 22
 $script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerDefinedHostAdmissionContractVersion = 19
-$script:RunnerDefinedDiagnosticsContractVersion = 20
+$script:RunnerDefinedDiagnosticsContractVersion = 22
 $script:RunnerWorkerRuntimeContractVersion = 3
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384
@@ -1151,6 +1151,52 @@ function Test-RunnerManagerJournalBudget {
     $events = @($declaredEvents)
     if ($events.Count -gt $script:RunnerManagerJournalMaximumEvents) {
         return $false
+    }
+    $classifiedNames = @(
+        'evictedEvents',
+        'rejectedEvents',
+        'unclassifiedEvents')
+    $classifiedProperties = @(
+        $classifiedNames |
+            Where-Object { $null -ne $Journal.PSObject.Properties[$_] }
+    )
+    if ($classifiedProperties.Count -gt 0) {
+        if ($classifiedProperties.Count -ne $classifiedNames.Count) {
+            return $false
+        }
+        $classifiedValues = @(
+            $classifiedNames |
+                ForEach-Object {
+                    Get-RunnerOptionalMember -Value $Journal -Name $_
+                }
+        )
+        if (@(
+                $classifiedValues |
+                    Where-Object {
+                        ($_ -isnot [int] -and $_ -isnot [long]) -or $_ -lt 0
+                    }
+            ).Count -gt 0) {
+            return $false
+        }
+        $droppedEvents = Get-RunnerOptionalMember `
+            -Value $Journal `
+            -Name 'droppedEvents'
+        if (
+            ($droppedEvents -isnot [int] -and $droppedEvents -isnot [long]) -or
+            $droppedEvents -ne (
+                [long]$classifiedValues[0] +
+                [long]$classifiedValues[1] +
+                [long]$classifiedValues[2])
+        ) {
+            return $false
+        }
+        $status = Get-RunnerOptionalMember -Value $Journal -Name 'status'
+        if (
+            ($status -eq 'truncated' -and $classifiedValues[1] -lt 1) -or
+            ($status -eq 'current' -and $classifiedValues[1] -ne 0)
+        ) {
+            return $false
+        }
     }
     foreach ($event in $events) {
         $evidence = Get-RunnerOptionalMember -Value $event -Name 'evidence'

@@ -7,8 +7,9 @@
 
 DIAGNOSTIC_JOURNAL_CAPACITY=32
 DIAGNOSTIC_JOURNAL_MAXIMUM_BYTES=16384
-DIAGNOSTIC_JOURNAL_SCHEMA_VERSION=2
-DIAGNOSTIC_PREVIOUS_JOURNAL_SCHEMA_VERSION=1
+DIAGNOSTIC_JOURNAL_SCHEMA_VERSION=3
+DIAGNOSTIC_PREVIOUS_JOURNAL_SCHEMA_VERSION=2
+DIAGNOSTIC_LEGACY_JOURNAL_SCHEMA_VERSION=1
 DIAGNOSTIC_EVIDENCE_MAXIMUM_LENGTH=160
 DIAGNOSTIC_SLOW_OPERATION_MILLISECONDS=5000
 DIAGNOSTIC_UNAVAILABLE_FAILURES=3
@@ -76,13 +77,33 @@ diagnostic_journal_state_is_valid() {
             type == "number" and . >= 0 and floor == .;
         type == "object"
         and (
-            .schemaVersion == 2
+            .schemaVersion == 3
+            or .schemaVersion == 2
             or .schemaVersion == 1
         )
         and (.status == "current" or .status == "truncated" or .status == "unavailable")
         and (.capacity | type == "number" and . >= 1 and . <= 64 and floor == .)
         and (.highestSequence == null or (.highestSequence | nonnegative_integer and . >= 1))
         and (.droppedEvents | nonnegative_integer)
+        and (
+            if .schemaVersion == 3 then
+                (.evictedEvents | nonnegative_integer)
+                and (.rejectedEvents | nonnegative_integer)
+                and (.unclassifiedEvents | nonnegative_integer)
+                and .droppedEvents == (
+                    .evictedEvents
+                    + .rejectedEvents
+                    + .unclassifiedEvents
+                )
+                and (
+                    if .status == "current" then
+                        .rejectedEvents == 0
+                    elif .status == "truncated" then
+                        .rejectedEvents >= 1
+                    else true end
+                )
+            else true end
+        )
         and (.events | type == "array")
     ' "$1" >/dev/null 2>&1
 }
@@ -304,7 +325,7 @@ diagnostics_initialize() {
     jq -c '.events[]?' "${journal_path}" 2>/dev/null |
         while IFS= read -r journal_event; do
             [ -n "${journal_event}" ] || continue
-            if [ "${journal_schema}" -eq "${DIAGNOSTIC_PREVIOUS_JOURNAL_SCHEMA_VERSION}" ]; then
+            if [ "${journal_schema}" -eq "${DIAGNOSTIC_LEGACY_JOURNAL_SCHEMA_VERSION}" ]; then
                 normalized_event=$(
                     printf '%s' "${journal_event}" |
                         jq -c '
@@ -334,6 +355,7 @@ diagnostics_initialize() {
     if ! jq \
         --argjson capacity "${DIAGNOSTIC_JOURNAL_CAPACITY}" \
         --argjson discarded "${discarded_events}" \
+        --argjson currentSchema "${DIAGNOSTIC_JOURNAL_SCHEMA_VERSION}" \
         --slurpfile events "${retained_path}" \
         '
             def same_scope($left; $right):
@@ -391,14 +413,28 @@ diagnostics_initialize() {
                     merge_event(.; $event)
                 );
             .capacity = $capacity
-            | .schemaVersion = 2
+            | if .schemaVersion == $currentSchema then
+                .evictedEvents = .evictedEvents
+                | .rejectedEvents = .rejectedEvents
+                | .unclassifiedEvents = .unclassifiedEvents
+              else
+                .evictedEvents = 0
+                | .rejectedEvents = 0
+                | .unclassifiedEvents = .droppedEvents
+              end
+            | .schemaVersion = $currentSchema
             | .events = ($events | sort_by(.sequence) | coalesce_events)
-            | .droppedEvents = (.droppedEvents + $discarded)
+            | .rejectedEvents = (.rejectedEvents + $discarded)
+            | .droppedEvents = (
+                .evictedEvents
+                + .rejectedEvents
+                + .unclassifiedEvents
+              )
             | .highestSequence = (
                 [.highestSequence // 0, ((.events | map(.sequence)) + [0] | max)] | max
                 | if . == 0 then null else . end
             )
-            | .status = (if .droppedEvents > 0 then "truncated" else "current" end)
+            | .status = (if .rejectedEvents > 0 then "truncated" else "current" end)
         ' "${journal_path}" > "${restored_path}"; then
         rm -f "${restored_path}" "${retained_path}"
         diagnostic_write_empty_journal "${journal_path}" unavailable 1 || return 1
@@ -431,16 +467,27 @@ diagnostic_write_empty_journal() {
     empty_status="$2"
     empty_dropped="$3"
     empty_temporary="${empty_path}.$$.tmp"
+    empty_rejected=0
+    empty_unclassified="${empty_dropped}"
+    if [ "${empty_status}" = "unavailable" ]; then
+        empty_rejected="${empty_dropped}"
+        empty_unclassified=0
+    fi
     if ! jq -n \
         --arg status "${empty_status}" \
         --argjson capacity "${DIAGNOSTIC_JOURNAL_CAPACITY}" \
         --argjson droppedEvents "${empty_dropped}" \
+        --argjson rejectedEvents "${empty_rejected}" \
+        --argjson unclassifiedEvents "${empty_unclassified}" \
         '{
-            schemaVersion: 2,
+            schemaVersion: 3,
             status: $status,
             capacity: $capacity,
             highestSequence: null,
             droppedEvents: $droppedEvents,
+            evictedEvents: 0,
+            rejectedEvents: $rejectedEvents,
+            unclassifiedEvents: $unclassifiedEvents,
             events: []
         }' > "${empty_temporary}"; then
         rm -f "${empty_temporary}"
@@ -463,12 +510,17 @@ diagnostic_enforce_journal_budget() {
             '
                 (.events | length) as $count
                 | if $count > $capacity then
-                    .droppedEvents = (.droppedEvents + ($count - $capacity))
+                    .evictedEvents = (.evictedEvents + ($count - $capacity))
                     | .events = (.events[($count - $capacity):])
                   else . end
+                | .droppedEvents = (
+                    .evictedEvents
+                    + .rejectedEvents
+                    + .unclassifiedEvents
+                  )
                 | .status = (
                     if .status == "unavailable" then "unavailable"
-                    elif .droppedEvents > 0 then "truncated"
+                    elif .rejectedEvents > 0 then "truncated"
                     else "current" end
                   )
             ' "${budget_path}" > "${budget_temporary}"; then
@@ -480,7 +532,16 @@ diagnostic_enforce_journal_budget() {
             return 1
         fi
         serialized_bytes=$(
-            jq -c '{status, capacity, highestSequence, droppedEvents, events}' "${budget_path}" |
+            jq -c '{
+                status,
+                capacity,
+                highestSequence,
+                droppedEvents,
+                evictedEvents,
+                rejectedEvents,
+                unclassifiedEvents,
+                events
+            }' "${budget_path}" |
                 wc -c |
                 tr -d ' '
         )
@@ -491,9 +552,18 @@ diagnostic_enforce_journal_budget() {
         remaining=$(jq -r '.events | length' "${budget_path}")
         [ "${remaining}" -le 1 ] && return 0
         if ! jq '
-            .droppedEvents = (.droppedEvents + 1)
+            .evictedEvents = (.evictedEvents + 1)
+            | .droppedEvents = (
+                .evictedEvents
+                + .rejectedEvents
+                + .unclassifiedEvents
+              )
             | .events = (.events[1:])
-            | .status = (if .status == "unavailable" then "unavailable" else "truncated" end)
+            | .status = (
+                if .status == "unavailable" then "unavailable"
+                elif .rejectedEvents > 0 then "truncated"
+                else "current" end
+              )
         ' "${budget_path}" > "${budget_temporary}"; then
             rm -f "${budget_temporary}"
             return 1
@@ -727,6 +797,7 @@ diagnostic_append_journal_event() {
         --arg retryAt "${append_retry_at}" \
         --arg reason "${append_reason}" \
         --arg evidence "${append_evidence}" \
+        --argjson schemaVersion "${DIAGNOSTIC_JOURNAL_SCHEMA_VERSION}" \
         '
             (if $target == "" then null else $target end) as $eventTarget
             | (.events // []) as $events
@@ -756,7 +827,7 @@ diagnostic_append_journal_event() {
                 if $coalesce then $scoped.value else null end
             ) as $previous
             | ((.highestSequence // 0) + 1) as $sequence
-            | .schemaVersion = 2
+            | .schemaVersion = $schemaVersion
             | .highestSequence = $sequence
             | .events = (
                 (
@@ -807,7 +878,7 @@ diagnostic_append_journal_event() {
                 }]
             )
             | .status = (
-                if .droppedEvents > 0 then "truncated" else "current" end
+                if .rejectedEvents > 0 then "truncated" else "current" end
             )
         ' "${append_path}" > "${append_temporary}"; then
         rm -f "${append_temporary}"
@@ -828,7 +899,16 @@ render_operation_journal() {
 
     if [ -f "${journal_source}" ] &&
         diagnostic_journal_state_is_valid "${journal_source}" &&
-        jq '{status, capacity, highestSequence, droppedEvents, events}' \
+        jq '{
+            status,
+            capacity,
+            highestSequence,
+            droppedEvents,
+            evictedEvents,
+            rejectedEvents,
+            unclassifiedEvents,
+            events
+        }' \
             "${journal_source}" > "${journal_temporary}" 2>/dev/null; then
         if mv -f "${journal_temporary}" "${journal_output}"; then
             return 0
@@ -842,6 +922,9 @@ render_operation_journal() {
             capacity: $capacity,
             highestSequence: null,
             droppedEvents: 0,
+            evictedEvents: 0,
+            rejectedEvents: 0,
+            unclassifiedEvents: 0,
             events: []
         }' > "${journal_output}"
 }

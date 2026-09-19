@@ -1473,6 +1473,9 @@ done
 assert_equals "3" "$(jq -r '.events | length' "${storm_journal}")" "Repeated failure pairs displaced causal journal evidence."
 assert_equals "current" "$(jq -r '.status' "${storm_journal}")" "Coalesced failure pairs incorrectly truncated the journal."
 assert_equals "0" "$(jq -r '.droppedEvents' "${storm_journal}")" "Coalesced observations were counted as dropped evidence."
+assert_equals "0" "$(jq -r '.evictedEvents' "${storm_journal}")" "Coalesced observations were counted as retention evictions."
+assert_equals "0" "$(jq -r '.rejectedEvents' "${storm_journal}")" "Coalesced observations were counted as rejected evidence."
+assert_equals "0" "$(jq -r '.unclassifiedEvents' "${storm_journal}")" "Coalesced observations were counted as legacy loss."
 assert_equals "worker-exit" "$(jq -r '.events[0].operation' "${storm_journal}")" "Failure storm evicted the causal worker-exit event."
 assert_true \
     "Failure storm did not retain bounded occurrence aggregates." \
@@ -1555,7 +1558,7 @@ cat > "${legacy_journal}" <<'EOF'
 EOF
 assert_true "Legacy journal schema could not be migrated." \
     diagnostics_initialize "${legacy_diagnostics_directory}" manager-migrated
-assert_equals "2" "$(jq -r '.schemaVersion' "${legacy_journal}")" "Legacy journal did not advance to private schema two."
+assert_equals "3" "$(jq -r '.schemaVersion' "${legacy_journal}")" "Legacy journal did not advance to private schema three."
 assert_true \
     "Legacy journal event did not receive aggregate defaults." \
     json_condition_holds "${legacy_journal}" '
@@ -1566,8 +1569,37 @@ assert_true \
         and $cleanup[0].occurrenceCount == 2
         and any(.events[]; .operation == "worker-exit")
         and .droppedEvents == 0
+        and .evictedEvents == 0
+        and .rejectedEvents == 0
+        and .unclassifiedEvents == 0
     '
 diagnostics_directory="${TEMP_DIRECTORY}/diagnostics"
+
+legacy_dropped_directory="${TEMP_DIRECTORY}/legacy-dropped-diagnostics"
+legacy_dropped_journal="${legacy_dropped_directory}/journal.json"
+mkdir -p "${legacy_dropped_directory}"
+cat > "${legacy_dropped_journal}" <<'EOF'
+{
+  "schemaVersion": 2,
+  "status": "truncated",
+  "capacity": 32,
+  "highestSequence": null,
+  "droppedEvents": 7,
+  "events": []
+}
+EOF
+assert_true "Schema-two dropped evidence could not be migrated." \
+    diagnostics_initialize "${legacy_dropped_directory}" manager-migrated
+assert_true \
+    "Legacy dropped evidence was not preserved as non-priority unclassified loss." \
+    json_condition_holds "${legacy_dropped_journal}" '
+        .schemaVersion == 3
+        and .status == "current"
+        and .droppedEvents == 7
+        and .evictedEvents == 0
+        and .rejectedEvents == 0
+        and .unclassifiedEvents == 7
+    '
 
 journal_events_bounded=0
 while [ "${journal_events_bounded}" -lt 40 ]; do
@@ -1576,23 +1608,45 @@ while [ "${journal_events_bounded}" -lt 40 ]; do
     journal_events_bounded=$((journal_events_bounded + 1))
 done
 assert_equals "32" "$(jq -r '.events | length' "${journal_state}")" "The operation journal exceeded its retained window."
-assert_equals "truncated" "$(jq -r '.status' "${journal_state}")" "A trimmed operation journal was not reported as truncated."
+assert_equals "current" "$(jq -r '.status' "${journal_state}")" "Expected rolling-window eviction degraded the journal."
 assert_true \
     "A trimmed operation journal did not count dropped events." \
-    json_condition_holds "${journal_state}" '.droppedEvents >= 1' 
+    json_condition_holds "${journal_state}" '
+        .droppedEvents >= 1
+        and .evictedEvents == .droppedEvents
+        and .rejectedEvents == 0
+        and .unclassifiedEvents == 0
+    '
 assert_true \
     "The serialized operation journal exceeded its byte budget." \
     json_condition_holds "${journal_state}" \
-        '({status, capacity, highestSequence, droppedEvents, events} | tojson | length) <= 16384' 
+        '({
+            status,
+            capacity,
+            highestSequence,
+            droppedEvents,
+            evictedEvents,
+            rejectedEvents,
+            unclassifiedEvents,
+            events
+        } | tojson | length) <= 16384'
 
 jq '.events[0] = {"sequence":"not-a-sequence"}' "${journal_state}" > "${journal_state}.malformed"
 mv -f "${journal_state}.malformed" "${journal_state}"
-dropped_before=$(jq -r '.droppedEvents' "${journal_state}")
+rejected_before=$(jq -r '.rejectedEvents' "${journal_state}")
 assert_true "A malformed journal entry stopped diagnostics restore." \
     diagnostics_initialize "${diagnostics_directory}" manager-instance-c
 assert_true \
     "A malformed journal entry was retained instead of discarded." \
-    json_condition_holds "${journal_state}" '.droppedEvents > $expected' "${dropped_before}"
+    json_condition_holds "${journal_state}" '
+        .rejectedEvents > $expected
+        and .status == "truncated"
+        and .droppedEvents == (
+            .evictedEvents
+            + .rejectedEvents
+            + .unclassifiedEvents
+        )
+    ' "${rejected_before}"
 assert_equals \
     "journal-restore" \
     "$(jq -r '.events[-1].operation' "${journal_state}")" \
@@ -1603,7 +1657,10 @@ assert_true "A corrupt journal blocked manager diagnostics restore." \
     diagnostics_initialize "${diagnostics_directory}" manager-instance-d
 assert_true \
     "A corrupt journal was reset without reporting the loss." \
-    json_condition_holds "${journal_state}" '.droppedEvents >= 1' 
+    json_condition_holds "${journal_state}" '
+        .droppedEvents >= 1
+        and .rejectedEvents >= 1
+    '
 assert_equals \
     "journal-restore" \
     "$(jq -r '.events[-1].operation' "${journal_state}")" \
@@ -1617,6 +1674,9 @@ unreadable_journal_projection="${TEMP_DIRECTORY}/unreadable-journal.json"
 render_operation_journal "${unreadable_journal_directory}" "${unreadable_journal_projection}"
 assert_equals "unavailable" "$(jq -r '.status' "${unreadable_journal_projection}")" "An unreadable journal was not projected as unavailable."
 assert_equals "0" "$(jq -r '.events | length' "${unreadable_journal_projection}")" "An unavailable journal projected events."
+assert_equals "0" "$(jq -r '.evictedEvents' "${unreadable_journal_projection}")" "An unavailable projection invented retention eviction."
+assert_equals "0" "$(jq -r '.rejectedEvents' "${unreadable_journal_projection}")" "An unreadable projection fabricated classified rejection evidence."
+assert_equals "0" "$(jq -r '.unclassifiedEvents' "${unreadable_journal_projection}")" "An unreadable projection invented legacy loss."
 
 diagnostics_journal_projection="${TEMP_DIRECTORY}/operation-journal.json"
 diagnostics_health_projection="${TEMP_DIRECTORY}/subsystem-health.json"
@@ -2273,7 +2333,7 @@ assert_true \
     observed_state_is_valid "${contract_nineteen_previous_protocol_state}"
 
 contract_twenty_one_state="${TEMP_DIRECTORY}/contract-twenty-one-state.json"
-jq '.managerContractVersion = 21' \
+jq '.managerContractVersion = 22' \
     "${contract_nineteen_available_state}" > "${contract_twenty_one_state}"
 assert_false \
     "Manager contract twenty-one accepted missing source observation provenance." \

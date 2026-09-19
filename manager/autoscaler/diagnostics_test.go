@@ -142,6 +142,9 @@ func TestJournalCoalescesInterleavedFailureStorms(t *testing.T) {
 	journal := recorder.journal()
 	if journal.Status != journalStatusCurrent ||
 		journal.DroppedEvents != 0 ||
+		journal.EvictedEvents != 0 ||
+		journal.RejectedEvents != 0 ||
+		journal.UnclassifiedEvents != 0 ||
 		len(journal.Events) != 3 {
 		t.Fatalf("failure storm displaced causal evidence: %#v", journal)
 	}
@@ -257,7 +260,7 @@ func TestJournalRestoresCoalescedAndLegacyEvents(t *testing.T) {
 	if err := json.Unmarshal(data, &document); err != nil {
 		t.Fatal(err)
 	}
-	document.SchemaVersion = previousDiagnosticsSchemaVersion
+	document.SchemaVersion = legacyDiagnosticsSchemaVersion
 	document.Events = append(document.Events, managerEvent{
 		Sequence:          document.HighestSequence + 1,
 		ManagerInstanceID: "legacy-instance",
@@ -295,6 +298,62 @@ func TestJournalRestoresCoalescedAndLegacyEvents(t *testing.T) {
 	}
 }
 
+func TestJournalMigratesUnclassifiedLegacyDropsWithoutDegradingCurrentWindow(t *testing.T) {
+	directory := projectTestDirectory(t)
+	document := journalDocument{
+		SchemaVersion:   previousDiagnosticsSchemaVersion,
+		HighestSequence: 1,
+		DroppedEvents:   12,
+		Events: []managerEvent{{
+			Sequence:          1,
+			ManagerInstanceID: "instance-one",
+			ObservedAt:        "2026-07-20T12:00:00Z",
+			FirstObservedAt:   "2026-07-20T12:00:00Z",
+			LastObservedAt:    "2026-07-20T12:00:00Z",
+			OccurrenceCount:   1,
+			Subsystem:         subsystemDocker,
+			Operation:         operationDockerRun,
+			Outcome:           outcomeRecovered,
+			Reason:            reasonRecovered,
+		}},
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		filepath.Join(directory, diagnosticsJournalFileName),
+		data,
+		0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := newDiagnosticsRecorder(directory, "instance-two", nil)
+	recorder.restore()
+	journal := recorder.journal()
+	if journal.Status != journalStatusCurrent ||
+		journal.DroppedEvents != 12 ||
+		journal.EvictedEvents != 0 ||
+		journal.RejectedEvents != 0 ||
+		journal.UnclassifiedEvents != 12 {
+		t.Fatalf("legacy drops were not retained as non-priority unclassified evidence: %#v", journal)
+	}
+	migratedData, err := os.ReadFile(filepath.Join(directory, diagnosticsJournalFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var migrated journalDocument
+	if err := json.Unmarshal(migratedData, &migrated); err != nil {
+		t.Fatal(err)
+	}
+	if migrated.SchemaVersion != diagnosticsSchemaVersion ||
+		migrated.DroppedEvents != 12 ||
+		migrated.UnclassifiedEvents != 12 {
+		t.Fatalf("legacy journal was not persisted in the classified schema: %#v", migrated)
+	}
+}
+
 // TestJournalCorruptionIsContained proves a corrupt journal is discarded
 // without destroying live state or failing the manager.
 func TestJournalCorruptionIsContained(t *testing.T) {
@@ -309,6 +368,7 @@ func TestJournalCorruptionIsContained(t *testing.T) {
 	journal := recorder.journal()
 	if journal.Status != journalStatusUnavailable ||
 		journal.DroppedEvents < 1 ||
+		journal.RejectedEvents < 1 ||
 		len(journal.Events) != 0 ||
 		journal.HighestSequence != nil {
 		t.Fatalf("corrupt journal was not contained: %#v", journal)
@@ -325,7 +385,7 @@ func TestJournalCorruptionIsContained(t *testing.T) {
 func TestJournalDropsMalformedPersistedEntries(t *testing.T) {
 	directory := projectTestDirectory(t)
 	document := journalDocument{
-		SchemaVersion:   previousDiagnosticsSchemaVersion,
+		SchemaVersion:   legacyDiagnosticsSchemaVersion,
 		HighestSequence: 2,
 		Events: []managerEvent{
 			{Sequence: 0, ManagerInstanceID: "", Operation: ""},
@@ -358,7 +418,11 @@ func TestJournalDropsMalformedPersistedEntries(t *testing.T) {
 	if len(journal.Events) != 2 || journal.Events[0].Sequence != 2 {
 		t.Fatalf("valid retained events were lost: %#v", journal)
 	}
-	if journal.Status != journalStatusTruncated || journal.DroppedEvents != 1 {
+	if journal.Status != journalStatusTruncated ||
+		journal.DroppedEvents != 1 ||
+		journal.RejectedEvents != 1 ||
+		journal.EvictedEvents != 0 ||
+		journal.UnclassifiedEvents != 0 {
 		t.Fatalf("malformed entry was not counted as dropped: %#v", journal)
 	}
 }
@@ -383,12 +447,13 @@ func TestJournalUnsupportedSchemaIsUnavailable(t *testing.T) {
 	journal := recorder.journal()
 	if journal.Status != journalStatusUnavailable ||
 		journal.DroppedEvents != 1 ||
+		journal.RejectedEvents != 1 ||
 		len(journal.Events) != 0 {
 		t.Fatalf("unsupported journal schema did not fail closed: %#v", journal)
 	}
 }
 
-func TestJournalRejectsInvalidSchemaTwoAggregate(t *testing.T) {
+func TestJournalRejectsInvalidSchemaThreeAggregate(t *testing.T) {
 	directory := projectTestDirectory(t)
 	document := journalDocument{
 		SchemaVersion:   diagnosticsSchemaVersion,
@@ -424,7 +489,7 @@ func TestJournalRejectsInvalidSchemaTwoAggregate(t *testing.T) {
 	if journal.Status != journalStatusTruncated ||
 		journal.DroppedEvents != 1 ||
 		len(journal.Events) != 0 {
-		t.Fatalf("invalid schema-two aggregate was not discarded: %#v", journal)
+		t.Fatalf("invalid schema-three aggregate was not discarded: %#v", journal)
 	}
 }
 
@@ -462,7 +527,11 @@ func TestJournalRespectsCapacityAndSizeBudget(t *testing.T) {
 	if len(journal.Events) > journalCapacity {
 		t.Fatalf("journal exceeded its capacity: %d", len(journal.Events))
 	}
-	if journal.Status != journalStatusCurrent || journal.DroppedEvents < 5 {
+	if journal.Status != journalStatusCurrent ||
+		journal.DroppedEvents < 5 ||
+		journal.EvictedEvents != journal.DroppedEvents ||
+		journal.RejectedEvents != 0 ||
+		journal.UnclassifiedEvents != 0 {
 		t.Fatalf("expected eviction did not preserve a current retained window: %#v", journal)
 	}
 	encoded, err := json.Marshal(journal.Events)
