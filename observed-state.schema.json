@@ -1753,7 +1753,7 @@
       "properties": {
         "status": {
           "enum": ["current", "truncated", "unavailable"],
-          "$comment": "current means the retained window is intact, truncated means older or rejected entries were discarded, unavailable means the manager could not read or restore its journal."
+          "$comment": "current means the retained window is internally valid, including when older entries were evicted by bounded retention; truncated means entries were rejected as malformed or unreadable; unavailable means the manager could not read or restore its journal."
         },
         "capacity": {
           "type": "integer",
@@ -1765,6 +1765,18 @@
           "minimum": 1
         },
         "droppedEvents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "evictedEvents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "rejectedEvents": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "unclassifiedEvents": {
           "type": "integer",
           "minimum": 0
         },
@@ -1838,7 +1850,7 @@
           }
         }
       ],
-      "$comment": "The journal retains failures, state transitions, retries, and recovery rather than every reconciliation pass. An empty events array with status current means no notable event has occurred. Malformed or oversized persisted entries are discarded into droppedEvents; the rest of observed state stays valid. Serialized journal size is capped at 16384 bytes."
+      "$comment": "The journal retains failures, state transitions, retries, and recovery rather than every reconciliation pass. An empty events array with status current means no notable event has occurred. Contract 22 classifies droppedEvents into expected rolling-window evictions, rejected malformed evidence, and legacy unclassified loss. Serialized journal size is capped at 16384 bytes."
     },
     "subsystemOperationEvidence": {
       "type": "object",
@@ -2898,6 +2910,70 @@
         }
       },
       "$comment": "Contract 21 adds manager-owned source-family provenance. Contract 20 and earlier observations may omit it; newer consumers reject malformed or missing contract-21 provenance rather than inventing current evidence."
+    },
+    {
+      "if": {
+        "properties": {
+          "managerContractVersion": {
+            "minimum": 22
+          }
+        },
+        "required": [
+          "managerContractVersion"
+        ]
+      },
+      "then": {
+        "properties": {
+          "operationJournal": {
+            "required": [
+              "evictedEvents",
+              "rejectedEvents",
+              "unclassifiedEvents"
+            ],
+            "allOf": [
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "current"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "rejectedEvents": {
+                      "const": 0
+                    }
+                  }
+                }
+              },
+              {
+                "if": {
+                  "properties": {
+                    "status": {
+                      "const": "truncated"
+                    }
+                  },
+                  "required": [
+                    "status"
+                  ]
+                },
+                "then": {
+                  "properties": {
+                    "rejectedEvents": {
+                      "minimum": 1
+                    }
+                  }
+                }
+              }
+            ]
+          }
+        }
+      },
+      "$comment": "Contract 22 classifies manager journal loss. droppedEvents remains the compatibility total; normal bounded evictions keep status current, rejected entries make it truncated, and legacy totals migrate as unclassified evidence."
     },
     {
       "if": {

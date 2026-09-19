@@ -106,8 +106,9 @@ const (
 	journalStatusCurrent             = "current"
 	journalStatusTruncated           = "truncated"
 	journalStatusUnavailable         = "unavailable"
-	diagnosticsSchemaVersion         = 2
-	previousDiagnosticsSchemaVersion = 1
+	diagnosticsSchemaVersion         = 3
+	previousDiagnosticsSchemaVersion = 2
+	legacyDiagnosticsSchemaVersion   = 1
 	diagnosticsJournalFileName       = "operation-journal.json"
 )
 
@@ -134,11 +135,14 @@ type managerEvent struct {
 }
 
 type managerOperationJournal struct {
-	Status          string         `json:"status"`
-	Capacity        int            `json:"capacity"`
-	HighestSequence *int           `json:"highestSequence"`
-	DroppedEvents   int            `json:"droppedEvents"`
-	Events          []managerEvent `json:"events"`
+	Status             string         `json:"status"`
+	Capacity           int            `json:"capacity"`
+	HighestSequence    *int           `json:"highestSequence"`
+	DroppedEvents      int            `json:"droppedEvents"`
+	EvictedEvents      int            `json:"evictedEvents"`
+	RejectedEvents     int            `json:"rejectedEvents"`
+	UnclassifiedEvents int            `json:"unclassifiedEvents"`
+	Events             []managerEvent `json:"events"`
 }
 
 // subsystemOperationEvidence describes one operation this manager performed. It
@@ -169,10 +173,13 @@ type managerSubsystemHealth struct {
 // manager restart so listener and Docker failures that preceded a recovery are
 // still visible to an operator.
 type journalDocument struct {
-	SchemaVersion   int            `json:"schemaVersion"`
-	HighestSequence int            `json:"highestSequence"`
-	DroppedEvents   int            `json:"droppedEvents"`
-	Events          []managerEvent `json:"events"`
+	SchemaVersion      int            `json:"schemaVersion"`
+	HighestSequence    int            `json:"highestSequence"`
+	DroppedEvents      int            `json:"droppedEvents"`
+	EvictedEvents      int            `json:"evictedEvents"`
+	RejectedEvents     int            `json:"rejectedEvents"`
+	UnclassifiedEvents int            `json:"unclassifiedEvents"`
+	Events             []managerEvent `json:"events"`
 }
 
 // diagnosticsObservation carries one completed operation into the recorder.
@@ -218,11 +225,13 @@ type diagnosticsRecorder struct {
 	write      func(string, []byte, os.FileMode) error
 	read       func(string) ([]byte, bool, error)
 
-	events          []managerEvent
-	highestSequence int
-	droppedEvents   int
-	restoreFailed   bool
-	persistFailed   bool
+	events             []managerEvent
+	highestSequence    int
+	evictedEvents      int
+	rejectedEvents     int
+	unclassifiedEvents int
+	restoreFailed      bool
+	persistFailed      bool
 
 	docker subsystemHealthState
 	github subsystemHealthState
@@ -257,7 +266,7 @@ func (r *diagnosticsRecorder) restore() {
 	r.mu.Lock()
 	if err != nil {
 		r.restoreFailed = true
-		r.droppedEvents++
+		r.rejectedEvents++
 		r.mu.Unlock()
 		return
 	}
@@ -268,21 +277,38 @@ func (r *diagnosticsRecorder) restore() {
 	var document journalDocument
 	if err := json.Unmarshal(data, &document); err != nil {
 		r.restoreFailed = true
-		r.droppedEvents++
+		r.rejectedEvents++
 		r.mu.Unlock()
 		return
 	}
 	if document.SchemaVersion != diagnosticsSchemaVersion &&
-		document.SchemaVersion != previousDiagnosticsSchemaVersion {
+		document.SchemaVersion != previousDiagnosticsSchemaVersion &&
+		document.SchemaVersion != legacyDiagnosticsSchemaVersion {
 		r.restoreFailed = true
-		r.droppedEvents++
+		r.rejectedEvents++
 		r.mu.Unlock()
 		return
 	}
-	migrateLegacyEvents :=
-		document.SchemaVersion == previousDiagnosticsSchemaVersion
+	migrateLegacyEvents := document.SchemaVersion == legacyDiagnosticsSchemaVersion
 	validEvents := make([]managerEvent, 0, len(document.Events))
-	dropped := max(document.DroppedEvents, 0)
+	evicted := 0
+	rejected := 0
+	unclassified := 0
+	if document.SchemaVersion == diagnosticsSchemaVersion {
+		evicted = max(document.EvictedEvents, 0)
+		rejected = max(document.RejectedEvents, 0)
+		unclassified = max(document.UnclassifiedEvents, 0)
+		classified := evicted + rejected + unclassified
+		if document.DroppedEvents != classified ||
+			document.EvictedEvents < 0 ||
+			document.RejectedEvents < 0 ||
+			document.UnclassifiedEvents < 0 {
+			unclassified += max(document.DroppedEvents-classified, 0)
+			rejected++
+		}
+	} else {
+		unclassified = max(document.DroppedEvents, 0)
+	}
 	highest := max(document.HighestSequence, 0)
 	for _, event := range document.Events {
 		if migrateLegacyEvents {
@@ -290,7 +316,7 @@ func (r *diagnosticsRecorder) restore() {
 		}
 		highest = max(highest, event.Sequence)
 		if !validJournalEvent(event) {
-			dropped++
+			rejected++
 			continue
 		}
 		validEvents = append(validEvents, event)
@@ -304,12 +330,15 @@ func (r *diagnosticsRecorder) restore() {
 	}
 	for len(retained) > journalCapacity {
 		retained = dropOldestJournalEvent(retained)
-		dropped++
+		evicted++
 	}
 	r.events = retained
 	r.highestSequence = highest
-	r.droppedEvents = dropped
+	r.evictedEvents = evicted
+	r.rejectedEvents = rejected
+	r.unclassifiedEvents = unclassified
 	restored := len(retained)
+	migrated := r.documentLocked()
 	r.mu.Unlock()
 	if restored > 0 {
 		r.record(diagnosticsObservation{
@@ -319,7 +348,9 @@ func (r *diagnosticsRecorder) restore() {
 			reason:    reasonNone,
 			evidence:  "restored durable operation evidence after manager restart",
 		})
+		return
 	}
+	r.persist(migrated)
 }
 
 // validJournalEvent rejects persisted entries that no longer satisfy the
@@ -472,7 +503,7 @@ func (r *diagnosticsRecorder) appendLocked(event managerEvent) {
 	r.events = coalesceJournalEvent(r.events, event)
 	for len(r.events) > journalCapacity {
 		r.events = dropOldestJournalEvent(r.events)
-		r.droppedEvents++
+		r.evictedEvents++
 	}
 }
 
@@ -701,15 +732,20 @@ func projectSubsystemHealth(
 func (r *diagnosticsRecorder) journal() managerOperationJournal {
 	if r == nil {
 		return managerOperationJournal{
-			Status:        journalStatusCurrent,
-			Capacity:      journalCapacity,
-			DroppedEvents: 0,
-			Events:        []managerEvent{},
+			Status:             journalStatusCurrent,
+			Capacity:           journalCapacity,
+			DroppedEvents:      0,
+			EvictedEvents:      0,
+			RejectedEvents:     0,
+			UnclassifiedEvents: 0,
+			Events:             []managerEvent{},
 		}
 	}
 	r.mu.Lock()
 	events := append([]managerEvent(nil), r.events...)
-	dropped := r.droppedEvents
+	evicted := r.evictedEvents
+	rejected := r.rejectedEvents
+	unclassified := r.unclassifiedEvents
 	restoreFailed := r.restoreFailed
 	r.mu.Unlock()
 
@@ -719,13 +755,16 @@ func (r *diagnosticsRecorder) journal() managerOperationJournal {
 			break
 		}
 		events = dropOldestJournalEvent(events)
-		dropped++
+		evicted++
 	}
 
 	projected := managerOperationJournal{
-		Capacity:      journalCapacity,
-		DroppedEvents: dropped,
-		Events:        events,
+		Capacity:           journalCapacity,
+		DroppedEvents:      evicted + rejected + unclassified,
+		EvictedEvents:      evicted,
+		RejectedEvents:     rejected,
+		UnclassifiedEvents: unclassified,
+		Events:             events,
 	}
 	if projected.Events == nil {
 		projected.Events = []managerEvent{}
@@ -738,10 +777,11 @@ func (r *diagnosticsRecorder) journal() managerOperationJournal {
 	case len(projected.Events) == 0 && restoreFailed:
 		projected.Status = journalStatusUnavailable
 		projected.HighestSequence = nil
-		if projected.DroppedEvents == 0 {
-			projected.DroppedEvents = 1
+		if projected.RejectedEvents == 0 {
+			projected.RejectedEvents = 1
+			projected.DroppedEvents++
 		}
-	case projected.DroppedEvents > 0:
+	case projected.RejectedEvents > 0:
 		projected.Status = journalStatusTruncated
 	default:
 		projected.Status = journalStatusCurrent
@@ -751,10 +791,13 @@ func (r *diagnosticsRecorder) journal() managerOperationJournal {
 
 func (r *diagnosticsRecorder) documentLocked() journalDocument {
 	return journalDocument{
-		SchemaVersion:   diagnosticsSchemaVersion,
-		HighestSequence: r.highestSequence,
-		DroppedEvents:   r.droppedEvents,
-		Events:          append([]managerEvent(nil), r.events...),
+		SchemaVersion:      diagnosticsSchemaVersion,
+		HighestSequence:    r.highestSequence,
+		DroppedEvents:      r.evictedEvents + r.rejectedEvents + r.unclassifiedEvents,
+		EvictedEvents:      r.evictedEvents,
+		RejectedEvents:     r.rejectedEvents,
+		UnclassifiedEvents: r.unclassifiedEvents,
+		Events:             append([]managerEvent(nil), r.events...),
 	}
 }
 

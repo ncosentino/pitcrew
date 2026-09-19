@@ -152,7 +152,7 @@ CPU cores, memory bytes, worker counts, or inferred hardware capacity. Built-in
 profiles declare no host-admission policy, and independent-profile behavior remains
 the default.
 
-Active manager contract 21 resolves and fingerprints this policy, starts the dedicated
+Active manager contract 22 resolves and fingerprints this policy, starts the dedicated
 coordinator through `Setup-Runner.ps1`, and enforces leases for both fixed and
 autoscaled managers. Disabled profiles (no `hostAdmission` manifest entry)
 remain behavior-compatible; they never touch the coordinator.
@@ -343,7 +343,7 @@ insignificant zeroes. Empty generated environment values mean no configured
 limit; managers must not interpret them as zero.
 
 Resource policy and `maximumActiveWorkers` were introduced in manager contract
-11 and remain supported by the active contract 21 managers. A profile that
+11 and remain supported by the active contract 22 managers. A profile that
 still runs an older manager upgrades through the established manager hot-swap,
 and its existing workers are preserved and converge naturally. Activation
 occurs only after both manager modes implement the same contract, so a newer
@@ -627,14 +627,20 @@ bodies, environment values, JIT payloads, job output, and raw Docker or GitHub
 stderr cannot be relayed. `target` is limited to a slot or autoscaling target
 key that already appears in non-secret state.
 
-Journal `status` separates the intact window (`current`) from a window that
-discarded older, malformed, or oversized entries (`truncated`, which requires a
-nonzero `droppedEvents`) and from a journal the manager could not read or
-restore (`unavailable`, which reports no events). A discarded journal never
-discards otherwise valid observed state. An empty `events` array with status
-`current` means no notable event has occurred. Coalescing does not increment
-`droppedEvents`; that counter remains reserved for evidence that was genuinely
-discarded.
+Journal `status` describes the validity of the retained window, not whether the
+manager has ever exceeded its retention budget. Contract 22 keeps normal
+rolling-window eviction `current`, marks the journal `truncated` only when
+malformed or unreadable evidence was rejected, and uses `unavailable` when the
+manager could not read or restore any retained events.
+
+`droppedEvents` remains the compatibility total and equals the sum of
+`evictedEvents`, `rejectedEvents`, and `unclassifiedEvents`. Evicted events are
+older entries deliberately removed by the count or serialized-size budget.
+Rejected events are evidence the current manager could not validate.
+Unclassified events preserve cumulative loss reported by pre-contract-22
+managers, which did not distinguish eviction from rejection. An empty `events`
+array with status `current` means no notable event is retained. Coalescing does
+not increment any drop counter.
 
 Subsystem summaries describe operations PitCrew itself performed. They are not
 a claim that the host, Docker daemon, network, or GitHub service is healthy.
@@ -703,13 +709,36 @@ The projection excludes usernames, absolute paths, serial numbers, machine
 GUIDs, network addresses, MAC addresses, Docker root paths, credentials,
 registration material, and job output.
 
-Manager contract 21 is active in this release. Both manager modes publish the
+Manager contract 22 is active in this release. Both manager modes publish the
 same hardware contract while retaining contract-11 resource and contract-12
 diagnostic semantics and adding contract-20 journal aggregation. Setup fails
 closed before Docker, image, or generated state mutation if a contract ahead
 of both implementations is selected. Periodic credential-health checks reuse
 the existing contract-12 GitHub health and operation vocabulary, so they do not
 require another contract revision.
+
+### Contract-22 journal retention classification
+
+Contract 22 adds three required counters to `operationJournal`:
+
+- `evictedEvents` counts expected oldest-entry removal needed to preserve the
+  bounded count and serialized-size budgets;
+- `rejectedEvents` counts malformed, unreadable, unsupported, or internally
+  inconsistent evidence the current manager could not trust; and
+- `unclassifiedEvents` carries forward the cumulative `droppedEvents` total
+  from an older manager that could not classify its cause.
+
+The compatibility `droppedEvents` field remains required and equals the sum of
+the three classified counters. A journal containing only evicted or legacy
+unclassified entries remains `current`; a positive `rejectedEvents` count makes
+it `truncated`. This keeps expected long-running retention from presenting as a
+current manager failure while preserving genuine and legacy evidence loss.
+
+Both manager implementations migrate their private journal format in place.
+Schema-one event records receive the existing aggregate defaults. Schema-one
+and schema-two drop totals become `unclassifiedEvents`; future capacity and
+size eviction increments only `evictedEvents`, while validation failures
+increment only `rejectedEvents`.
 
 ### Contract-21 source observation provenance
 
@@ -765,6 +794,8 @@ or assigns a new source time to evidence it no longer possesses.
 | Contract 21 | Contract-20 schema validator | The document is rejected because the older closed schema does not permit `sourceObservations`; mixed-version systems must negotiate a supported contract or ignore the newer document. |
 | Contract 21 | Tolerant older consumer | A consumer that deliberately ignores unknown fields may continue reading established fields, but this is consumer-specific and is not guaranteed by the contract-20 schema. |
 | Contract 21 | Contract-21-aware consumer | Missing, malformed, or contradictory source metadata is rejected rather than guessed. |
+| Contract 22 | Contract-21-aware tolerant consumer | The established journal fields remain readable; the consumer may ignore the three additive classification counters. |
+| Contract 22 | Contract-22-aware consumer | The classified counters are required, their sum must equal `droppedEvents`, and only rejected evidence makes the retained window truncated. |
 
 The JSON Schema enforces document shape and local source-entry invariants. Array
 relationships require comparisons that JSON Schema cannot express: the manager's

@@ -178,8 +178,8 @@ assert_true \
     "Recovered draining slots do not clear pending host demand before return." \
     grep -Fq 'host_admission_end_wait \' "${manager_source}"
 assert_true \
-    "Fixed admission implementation did not activate manager contract twenty-one." \
-    grep -Fq 'MANAGER_CONTRACT_VERSION=21' "${manager_source}"
+    "Fixed admission implementation did not activate manager contract twenty-two." \
+    grep -Fq 'MANAGER_CONTRACT_VERSION=22' "${manager_source}"
 
 mkdir -p "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}"
 : > "${PITCREW_HOST_ADMISSION_ADOPTION_DIRECTORY}/control-1.pending"

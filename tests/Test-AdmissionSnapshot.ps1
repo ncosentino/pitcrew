@@ -47,7 +47,7 @@ function Add-Check {
 function New-TestAdmissionProfile {
     param(
         [string]$Status = 'available',
-        [int]$ManagerContractVersion = 21,
+        [int]$ManagerContractVersion = 22,
         [AllowNull()][Nullable[long]]$Epoch = 4,
         [AllowNull()][Nullable[long]]$DecisionSequence = 51,
         [AllowNull()][Nullable[long]]$UnitCost = 2,
