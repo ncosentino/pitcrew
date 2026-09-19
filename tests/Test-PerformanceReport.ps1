@@ -6,6 +6,12 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
 $root = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+$dashboardClientPath = Join-Path `
+    $root `
+    'plugins' `
+    'pitcrew-operations' `
+    'scripts' `
+    'DashboardDiagnostics.Client.ps1'
 $corePath = Join-Path `
     $root `
     'plugins' `
@@ -22,6 +28,7 @@ $fixturePath = Join-Path `
     'fixtures' `
     'performance-report' `
     'input.json'
+. $dashboardClientPath
 . $corePath
 
 $errors = [Collections.Generic.List[string]]::new()

@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/ncosentino/pitcrew/main/plugins/pitcrew-operations/skills/pitcrew-admission-snapshot/references/admission-snapshot.schema.json",
+  "title": "PitCrew Current Admission Snapshot",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schemaVersion",
+    "generatedAt",
+    "scope",
+    "evidence",
+    "admission",
+    "disposition",
+    "reason",
+    "limitations"
+  ],
+  "properties": {
+    "schemaVersion": {
+      "const": 1
+    },
+    "generatedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "scope": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "nodeId",
+        "profileId",
+        "requestedWorkers"
+      ],
+      "properties": {
+        "nodeId": {
+          "type": "string",
+          "pattern": "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+        },
+        "profileId": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9-]{0,31}$"
+        },
+        "requestedWorkers": {
+          "type": "integer",
+          "minimum": 1
+        }
+      }
+    },
+    "evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "authority",
+        "source",
+        "managerContractVersion",
+        "sourceObservedAt",
+        "dashboardReceivedAt",
+        "evaluatedAt",
+        "responseGeneratedAt",
+        "freshnessBoundary",
+        "freshness",
+        "coverage",
+        "retention",
+        "completeness",
+        "unavailableReason"
+      ],
+      "properties": {
+        "authority": {
+          "type": ["string", "null"],
+          "enum": [null, "pitcrew-manager"]
+        },
+        "source": {
+          "type": ["string", "null"],
+          "enum": [null, "host-admission"]
+        },
+        "managerContractVersion": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "sourceObservedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "dashboardReceivedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "evaluatedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "responseGeneratedAt": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "freshnessBoundary": {
+          "type": ["string", "null"],
+          "format": "date-time"
+        },
+        "freshness": {
+          "enum": [
+            "current",
+            "stale",
+            "partial",
+            "unavailable",
+            "last-known"
+          ]
+        },
+        "coverage": {
+          "enum": ["complete", "partial", "unavailable"]
+        },
+        "retention": {
+          "type": ["string", "null"],
+          "enum": [null, "live", "last-known"]
+        },
+        "completeness": {
+          "enum": ["complete", "incomplete", "unsupported"]
+        },
+        "unavailableReason": {
+          "type": ["string", "null"],
+          "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+          "maxLength": 128
+        }
+      }
+    },
+    "admission": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "epoch",
+        "decisionSequence",
+        "hostPolicyFingerprint",
+        "profilePolicyFingerprint",
+        "unitCost",
+        "requestedUnits",
+        "allocatableUnits",
+        "allocatableWorkers",
+        "theoreticalMaximumUnits",
+        "theoreticalMaximumWorkers",
+        "pendingUnits",
+        "withheldUnits",
+        "withholdingReason"
+      ],
+      "properties": {
+        "status": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "available",
+            "degraded",
+            "unavailable",
+            "disabled"
+          ]
+        },
+        "epoch": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "decisionSequence": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "hostPolicyFingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_-]{1,128}$"
+        },
+        "profilePolicyFingerprint": {
+          "type": ["string", "null"],
+          "pattern": "^[A-Za-z0-9_-]{1,128}$"
+        },
+        "unitCost": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "requestedUnits": {
+          "type": ["integer", "null"],
+          "minimum": 1
+        },
+        "allocatableUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "allocatableWorkers": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "theoreticalMaximumUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "theoreticalMaximumWorkers": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "pendingUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "withheldUnits": {
+          "type": ["integer", "null"],
+          "minimum": 0
+        },
+        "withholdingReason": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "budget-exhausted",
+            "protected-reservation",
+            "fair-share-contention",
+            "adoption-pending"
+          ]
+        }
+      }
+    },
+    "disposition": {
+      "enum": [
+        "admissible-now",
+        "insufficient-now",
+        "unknown"
+      ]
+    },
+    "reason": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9]*(-[a-z0-9]+)*$",
+      "maxLength": 128
+    },
+    "limitations": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "disposition": {
+            "enum": ["admissible-now", "insufficient-now"]
+          }
+        },
+        "required": ["disposition"]
+      },
+      "then": {
+        "properties": {
+          "evidence": {
+            "properties": {
+              "authority": { "const": "pitcrew-manager" },
+              "source": { "const": "host-admission" },
+              "sourceObservedAt": { "type": "string" },
+              "dashboardReceivedAt": { "type": "string" },
+              "evaluatedAt": { "type": "string" },
+              "responseGeneratedAt": { "type": "string" },
+              "freshnessBoundary": { "type": "string" },
+              "freshness": { "const": "current" },
+              "coverage": { "const": "complete" },
+              "retention": { "const": "live" },
+              "completeness": { "const": "complete" },
+              "unavailableReason": { "type": "null" }
+            }
+          },
+          "admission": {
+            "properties": {
+              "status": { "const": "available" },
+              "epoch": { "type": "integer" },
+              "decisionSequence": { "type": "integer" },
+              "hostPolicyFingerprint": { "type": "string" },
+              "profilePolicyFingerprint": { "type": "string" },
+              "unitCost": { "type": "integer" },
+              "requestedUnits": { "type": "integer" },
+              "allocatableUnits": { "type": "integer" },
+              "allocatableWorkers": { "type": "integer" },
+              "theoreticalMaximumUnits": { "type": "integer" },
+              "theoreticalMaximumWorkers": { "type": "integer" },
+              "pendingUnits": { "type": "integer" },
+              "withheldUnits": { "type": "integer" }
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": { "const": "admissible-now" }
+        },
+        "required": ["disposition"]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "const": "current-allocatable-capacity-sufficient"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "disposition": { "const": "insufficient-now" }
+        },
+        "required": ["disposition"]
+      },
+      "then": {
+        "properties": {
+          "reason": {
+            "const": "current-allocatable-capacity-insufficient"
+          }
+        }
+      }
+    }
+  ]
+}
