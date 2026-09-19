@@ -1610,7 +1610,25 @@ while [ "${journal_events_bounded}" -lt 40 ]; do
         reconciliation desired-state-apply "generation-${journal_events_bounded}" succeeded "" none "Accepted a new desired capacity generation" || true
     journal_events_bounded=$((journal_events_bounded + 1))
 done
-assert_equals "32" "$(jq -r '.events | length' "${journal_state}")" "The operation journal exceeded its retained window."
+journal_retained_count=$(jq -r '.events | length' "${journal_state}")
+journal_compact_bytes=$(
+    jq -c '{
+        status,
+        capacity,
+        highestSequence,
+        droppedEvents,
+        evictedEvents,
+        rejectedEvents,
+        unclassifiedEvents,
+        events
+    }' "${journal_state}" |
+        wc -c |
+        tr -d ' '
+)
+if [ "${journal_retained_count}" -ne 32 ]; then
+    echo "Journal budget retained ${journal_retained_count} events in ${journal_compact_bytes} bytes." >&2
+    exit 1
+fi
 assert_equals "current" "$(jq -r '.status' "${journal_state}")" "Expected rolling-window eviction degraded the journal."
 assert_true \
     "A trimmed operation journal did not count dropped events." \
