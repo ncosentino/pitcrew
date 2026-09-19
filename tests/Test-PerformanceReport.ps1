@@ -632,6 +632,89 @@ Add-Check (
         Where-Object jobId -eq '2001').mappingStatus -eq 'incomplete'
 ) 'Assignment loss on another selected node still permitted a verified mapping.'
 
+$postBoundaryRetentionFixture = $fixture |
+    ConvertTo-Json -Depth 30 |
+    ConvertFrom-Json -Depth 30
+foreach ($profile in @(
+        $postBoundaryRetentionFixture.histories.
+            '11111111-1111-1111-1111-111111111111'.profiles[0],
+        $postBoundaryRetentionFixture.histories.
+            '22222222-2222-2222-2222-222222222222'.profiles[0])) {
+    $profile.retention.droppedRunnerAssignments = 10
+    $profile.retention |
+        Add-Member `
+            -NotePropertyName earliestRetainedRunnerAssignment `
+            -NotePropertyValue '2026-08-01T08:30:00Z' `
+            -Force
+}
+$postBoundaryRetentionHistories = @{}
+foreach ($property in $postBoundaryRetentionFixture.histories.PSObject.Properties) {
+    $postBoundaryRetentionHistories[$property.Name] = $property.Value
+}
+$postBoundaryRetentionReport = New-PitCrewPerformanceReportModel `
+    -Jobs @($postBoundaryRetentionFixture.jobs) `
+    -Nodes @($postBoundaryRetentionFixture.nodes) `
+    -Histories $postBoundaryRetentionHistories `
+    -From ([DateTimeOffset]$postBoundaryRetentionFixture.from) `
+    -To ([DateTimeOffset]$postBoundaryRetentionFixture.to) `
+    -Repositories @($postBoundaryRetentionFixture.repositories)
+Add-Check (
+    ($postBoundaryRetentionReport.verifiedMeasurements.jobs |
+        Where-Object jobId -eq '2001').mappingStatus -eq 'matched'
+) 'Assignment deletions known to predate the range invalidated a unique mapping.'
+
+$overlappingRetentionFixture = $fixture |
+    ConvertTo-Json -Depth 30 |
+    ConvertFrom-Json -Depth 30
+$overlappingRetention =
+    $overlappingRetentionFixture.histories.
+        '11111111-1111-1111-1111-111111111111'.profiles[0].retention
+$overlappingRetention.droppedRunnerAssignments = 10
+$overlappingRetention |
+    Add-Member `
+        -NotePropertyName earliestRetainedRunnerAssignment `
+        -NotePropertyValue '2026-08-01T09:30:00Z' `
+        -Force
+$overlappingRetentionHistories = @{}
+foreach ($property in $overlappingRetentionFixture.histories.PSObject.Properties) {
+    $overlappingRetentionHistories[$property.Name] = $property.Value
+}
+$overlappingRetentionReport = New-PitCrewPerformanceReportModel `
+    -Jobs @($overlappingRetentionFixture.jobs) `
+    -Nodes @($overlappingRetentionFixture.nodes) `
+    -Histories $overlappingRetentionHistories `
+    -From ([DateTimeOffset]$overlappingRetentionFixture.from) `
+    -To ([DateTimeOffset]$overlappingRetentionFixture.to) `
+    -Repositories @($overlappingRetentionFixture.repositories)
+Add-Check (
+    ($overlappingRetentionReport.verifiedMeasurements.jobs |
+        Where-Object jobId -eq '2001').mappingStatus -eq 'incomplete'
+) 'Assignment retention overlapping the range still produced a verified mapping.'
+
+$unknownRetentionFixture = $fixture |
+    ConvertTo-Json -Depth 30 |
+    ConvertFrom-Json -Depth 30
+$unknownRetentionFixture.histories.
+    '22222222-2222-2222-2222-222222222222'.
+    profiles[0].
+    retention.
+    droppedRunnerAssignments = 10
+$unknownRetentionHistories = @{}
+foreach ($property in $unknownRetentionFixture.histories.PSObject.Properties) {
+    $unknownRetentionHistories[$property.Name] = $property.Value
+}
+$unknownRetentionReport = New-PitCrewPerformanceReportModel `
+    -Jobs @($unknownRetentionFixture.jobs) `
+    -Nodes @($unknownRetentionFixture.nodes) `
+    -Histories $unknownRetentionHistories `
+    -From ([DateTimeOffset]$unknownRetentionFixture.from) `
+    -To ([DateTimeOffset]$unknownRetentionFixture.to) `
+    -Repositories @($unknownRetentionFixture.repositories)
+Add-Check (
+    ($unknownRetentionReport.verifiedMeasurements.jobs |
+        Where-Object jobId -eq '2001').mappingStatus -eq 'incomplete'
+) 'Unknown assignment retention boundaries did not remain fail-closed.'
+
 $missingProfileFixture = $fixture |
     ConvertTo-Json -Depth 30 |
     ConvertFrom-Json -Depth 30

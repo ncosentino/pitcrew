@@ -914,6 +914,25 @@ function ConvertTo-PitCrewRetention {
     return [PSCustomObject]$projection
 }
 
+function Test-PitCrewRunnerAssignmentRetentionMayOverlapRange {
+    param(
+        [Parameter(Mandatory)]
+        [object]$Retention,
+
+        [Parameter(Mandatory)]
+        [DateTimeOffset]$From
+    )
+
+    if ([long]$Retention.droppedRunnerAssignments -le 0) {
+        return $false
+    }
+    if ($null -eq $Retention.earliestRetainedRunnerAssignment) {
+        return $true
+    }
+    return (ConvertTo-PitCrewUtc `
+            $Retention.earliestRetainedRunnerAssignment) -gt $From
+}
+
 function New-PitCrewPerformanceReportModel {
     param(
         [Parameter(Mandatory)]
@@ -1260,7 +1279,9 @@ function New-PitCrewPerformanceReportModel {
                     [long]$retention.rejectedFutureSamples
                 if ($dropped -gt 0 -or
                     $null -ne $retention.historyExpiredAt) {
-                    if ([long]$retention.droppedRunnerAssignments -gt 0) {
+                    if (Test-PitCrewRunnerAssignmentRetentionMayOverlapRange `
+                            -Retention $retention `
+                            -From $From) {
                         $assignmentUniverseIncomplete = $true
                         $mappingIncompleteProfiles.Add(
                             "$nodeKey|$profileId") | Out-Null
