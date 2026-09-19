@@ -1626,7 +1626,18 @@ journal_compact_bytes=$(
         tr -d ' '
 )
 if [ "${journal_retained_count}" -ne 32 ]; then
-    echo "Journal budget retained ${journal_retained_count} events in ${journal_compact_bytes} bytes." >&2
+    journal_budget_summary=$(
+        jq -c '{
+            status,
+            schemaVersion,
+            droppedEvents,
+            evictedEvents,
+            rejectedEvents,
+            unclassifiedEvents,
+            operations: [.events[].operation]
+        }' "${journal_state}"
+    )
+    echo "Journal budget retained ${journal_retained_count} events in ${journal_compact_bytes} bytes: ${journal_budget_summary}" >&2
     exit 1
 fi
 assert_equals "current" "$(jq -r '.status' "${journal_state}")" "Expected rolling-window eviction degraded the journal."
