@@ -1604,10 +1604,21 @@ assert_true \
         and .unclassifiedEvents == 7
     '
 
-journal_events_bounded=0
-while [ "${journal_events_bounded}" -lt 40 ]; do
+journal_sequence_before_bounded=$(jq -r '.highestSequence' "${journal_state}")
+assert_true "A successful desired-state transition could not be journaled." \
     record_manager_event "${diagnostics_directory}" manager-instance-b \
-        reconciliation desired-state-apply "generation-${journal_events_bounded}" succeeded "" none "Accepted a new desired capacity generation" || true
+        reconciliation desired-state-apply generation-0 succeeded "" none \
+        "Accepted a new desired capacity generation"
+assert_equals \
+    "$((journal_sequence_before_bounded + 1))" \
+    "$(jq -r '.highestSequence' "${journal_state}")" \
+    "A successful desired-state transition returned without advancing the journal."
+journal_events_bounded=1
+while [ "${journal_events_bounded}" -lt 40 ]; do
+    assert_true "A successful desired-state transition could not be journaled." \
+        record_manager_event "${diagnostics_directory}" manager-instance-b \
+            reconciliation desired-state-apply "generation-${journal_events_bounded}" \
+            succeeded "" none "Accepted a new desired capacity generation"
     journal_events_bounded=$((journal_events_bounded + 1))
 done
 journal_retained_count=$(jq -r '.events | length' "${journal_state}")
