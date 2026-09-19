@@ -61,6 +61,22 @@ func (a *admissionController) leave(key string) {
 	}
 }
 
+// setDemand replaces one target's transient fairness demand with its current
+// reconciled deficit. Publishing zero is required so completed or cancelled
+// work cannot keep protecting profile capacity for an idle target.
+func (a *admissionController) setDemand(key string, demand int) {
+	if a == nil {
+		return
+	}
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	member, exists := a.members[key]
+	if !exists {
+		return
+	}
+	member.demand = max(demand, 0)
+}
+
 // reserve admits up to want additional workers for one target. Each target is
 // guaranteed a rotating fair share of the ceiling, and unclaimed capacity is
 // released to whichever target needs it, so no target starves and idle targets
