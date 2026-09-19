@@ -409,6 +409,18 @@ func (s *runnerScaler) HandleJobCompleted(
 	runner := s.findRunnerLocked(jobInfo.RunnerName, int64(jobInfo.RunnerID))
 	if runner == nil {
 		s.mu.Unlock()
+		s.setProfileAdmissionDemand(0)
+		evidence := "unknown runner completion invalidated transient profile admission state; exact demand reconciliation is pending"
+		s.setBlocking(deficitUnknown, evidence)
+		s.diagnostics.record(diagnosticsObservation{
+			subsystem: subsystemAdmission,
+			operation: operationAdmissionSettle,
+			target:    s.target.key,
+			outcome:   outcomeRecovered,
+			reason:    reasonRecovered,
+			evidence:  "transient profile admission demand was cleared after an unknown runner completion",
+		})
+		s.onChange()
 		return fmt.Errorf(
 			"job-completed message references unknown runner %q (%d)",
 			jobInfo.RunnerName,
@@ -595,6 +607,7 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	if s.shuttingDown {
 		count := s.capacityCountLocked()
 		s.mu.Unlock()
+		s.setProfileAdmissionDemand(0)
 		return count, errors.Join(operationErrors...)
 	}
 	current := s.capacityCountLocked()
@@ -606,6 +619,7 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 
 	if target > current {
 		if !hostLeasesAdopted {
+			s.setProfileAdmissionDemand(0)
 			blockingReason, _, evidence := hostAdmissionFailureDetails(adoptionErr)
 			s.setBlocking(blockingReason, evidence)
 			return current, errors.Join(operationErrors...)
@@ -624,6 +638,9 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 				"Deferring replacement capacity until registration cleanup completes",
 				"blockedSlots", blocked,
 			)
+		}
+		if missing == 0 {
+			s.setProfileAdmissionDemand(0)
 		}
 		admitted := s.admission.reserve(s.target.key, missing)
 		if admitted < missing {
@@ -669,10 +686,12 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
 	if target == current {
+		s.setProfileAdmissionDemand(0)
 		s.hostAdmission.setTargetDemand(s.target.key, 0)
 		s.clearBlocking()
 		return s.capacityCount(), errors.Join(operationErrors...)
 	}
+	s.setProfileAdmissionDemand(0)
 	s.clearBlocking()
 	s.hostAdmission.setTargetDemand(s.target.key, 0)
 
@@ -783,6 +802,10 @@ func (s *runnerScaler) clearBlocking() {
 	s.mu.Lock()
 	s.blocking = capacityBlock{}
 	s.mu.Unlock()
+}
+
+func (s *runnerScaler) setProfileAdmissionDemand(demand int) {
+	s.admission.setDemand(s.target.key, demand)
 }
 
 func (s *runnerScaler) retryCleanupPending(ctx context.Context) error {

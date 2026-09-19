@@ -447,6 +447,94 @@ func TestFreedCeilingCapacityGoesToTheStarvedTarget(t *testing.T) {
 	}
 }
 
+func TestUnknownCompletionRebuildsProfileAdmissionState(t *testing.T) {
+	admission := newAdmissionController(1)
+	first, _, firstDocker, cancelFirst := newCeilingTestScaler(
+		t,
+		"repo-one",
+		1,
+		admission,
+		nil,
+	)
+	defer cancelFirst()
+	second, _, _, cancelSecond := newCeilingTestScaler(
+		t,
+		"repo-two",
+		1,
+		admission,
+		nil,
+	)
+	defer cancelSecond()
+
+	if _, err := first.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := second.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if second.runnerCount() != 0 ||
+		second.snapshot().blocking.reason != deficitAdmissionCeiling {
+		t.Fatalf("second target was not blocked by the occupied ceiling: %#v", second.snapshot())
+	}
+
+	second.RecordStatistics(&scaleset.RunnerScaleSetStatistic{
+		TotalAssignedJobs: 0,
+	})
+	err := second.HandleJobCompleted(
+		context.Background(),
+		&scaleset.JobCompleted{},
+	)
+	if err == nil || !strings.Contains(err.Error(), "unknown runner") {
+		t.Fatalf("empty runner completion was not classified explicitly: %v", err)
+	}
+
+	now := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	evidence := buildCapacityEvidence(
+		[]scalerSnapshot{second.snapshot()},
+		nil,
+		healthyDiagnostics(),
+		now,
+	).Targets[0]
+	if evidence.Reason != deficitUnknown ||
+		evidence.Evidence == nil ||
+		!strings.Contains(*evidence.Evidence, "unknown runner completion") {
+		t.Fatalf("stale completion remained indistinguishable from ceiling contention: %#v", evidence)
+	}
+
+	recovered := false
+	for _, event := range second.diagnostics.journal().Events {
+		if event.Operation == operationAdmissionSettle &&
+			event.Outcome == outcomeRecovered &&
+			event.Evidence != nil &&
+			strings.Contains(*event.Evidence, "unknown runner completion") {
+			recovered = true
+		}
+	}
+	if !recovered {
+		t.Fatal("profile admission recovery was not journaled")
+	}
+
+	if _, err := second.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatal(err)
+	}
+	exiting := first.snapshot().runners[0]
+	first.handleContainerExit(exiting.containerID, exitStatus(0))
+
+	if first.runnerCount() != 1 || len(firstDocker.launches) != 2 {
+		t.Fatalf(
+			"valid assigned work did not regain the released ceiling: runners=%d launches=%d",
+			first.runnerCount(),
+			len(firstDocker.launches),
+		)
+	}
+	if second.runnerCount() != 0 {
+		t.Fatal("unknown completion invented a replacement runner")
+	}
+	if total := first.runnerCount() + second.runnerCount(); total > 1 {
+		t.Fatalf("profile admission exceeded its ceiling after recovery: %d", total)
+	}
+}
+
 func TestSingleTargetUsesFullCeilingWhenOthersAreIdle(t *testing.T) {
 	admission := newAdmissionController(4)
 	busy, _, _, cancelBusy := newCeilingTestScaler(t, "repo-one", 6, admission, nil)
