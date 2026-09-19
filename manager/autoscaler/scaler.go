@@ -418,7 +418,7 @@ func (s *runnerScaler) HandleJobCompleted(
 			target:    s.target.key,
 			outcome:   outcomeRecovered,
 			reason:    reasonRecovered,
-			evidence:  "profile admission state was rebuilt after an unknown runner completion",
+			evidence:  "transient profile admission demand was cleared after an unknown runner completion",
 		})
 		s.onChange()
 		return fmt.Errorf(
