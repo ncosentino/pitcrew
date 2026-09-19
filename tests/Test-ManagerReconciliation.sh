@@ -1605,10 +1605,12 @@ assert_true \
     '
 
 journal_sequence_before_bounded=$(jq -r '.highestSequence' "${journal_state}")
+set -x
 assert_true "A successful desired-state transition could not be journaled." \
     record_manager_event "${diagnostics_directory}" manager-instance-b \
         reconciliation desired-state-apply generation-0 succeeded "" none \
         "Accepted a new desired capacity generation"
+set +x
 assert_equals \
     "$((journal_sequence_before_bounded + 1))" \
     "$(jq -r '.highestSequence' "${journal_state}")" \
