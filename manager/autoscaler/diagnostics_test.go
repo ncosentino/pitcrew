@@ -462,8 +462,8 @@ func TestJournalRespectsCapacityAndSizeBudget(t *testing.T) {
 	if len(journal.Events) > journalCapacity {
 		t.Fatalf("journal exceeded its capacity: %d", len(journal.Events))
 	}
-	if journal.Status != journalStatusTruncated || journal.DroppedEvents < 5 {
-		t.Fatalf("truncation was not reported: %#v", journal)
+	if journal.Status != journalStatusCurrent || journal.DroppedEvents < 5 {
+		t.Fatalf("expected eviction did not preserve a current retained window: %#v", journal)
 	}
 	encoded, err := json.Marshal(journal.Events)
 	if err != nil {
