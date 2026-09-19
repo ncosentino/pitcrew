@@ -1604,13 +1604,12 @@ assert_true \
         and .unclassifiedEvents == 7
     '
 
+diagnostics_directory="${TEMP_DIRECTORY}/diagnostics"
 journal_sequence_before_bounded=$(jq -r '.highestSequence' "${journal_state}")
-set -x
 assert_true "A successful desired-state transition could not be journaled." \
     record_manager_event "${diagnostics_directory}" manager-instance-b \
         reconciliation desired-state-apply generation-0 succeeded "" none \
         "Accepted a new desired capacity generation"
-set +x
 assert_equals \
     "$((journal_sequence_before_bounded + 1))" \
     "$(jq -r '.highestSequence' "${journal_state}")" \
@@ -1623,36 +1622,7 @@ while [ "${journal_events_bounded}" -lt 40 ]; do
             succeeded "" none "Accepted a new desired capacity generation"
     journal_events_bounded=$((journal_events_bounded + 1))
 done
-journal_retained_count=$(jq -r '.events | length' "${journal_state}")
-journal_compact_bytes=$(
-    jq -c '{
-        status,
-        capacity,
-        highestSequence,
-        droppedEvents,
-        evictedEvents,
-        rejectedEvents,
-        unclassifiedEvents,
-        events
-    }' "${journal_state}" |
-        wc -c |
-        tr -d ' '
-)
-if [ "${journal_retained_count}" -ne 32 ]; then
-    journal_budget_summary=$(
-        jq -c '{
-            status,
-            schemaVersion,
-            droppedEvents,
-            evictedEvents,
-            rejectedEvents,
-            unclassifiedEvents,
-            operations: [.events[].operation]
-        }' "${journal_state}"
-    )
-    echo "Journal budget retained ${journal_retained_count} events in ${journal_compact_bytes} bytes: ${journal_budget_summary}" >&2
-    exit 1
-fi
+assert_equals "32" "$(jq -r '.events | length' "${journal_state}")" "The operation journal exceeded its retained window."
 assert_equals "current" "$(jq -r '.status' "${journal_state}")" "Expected rolling-window eviction degraded the journal."
 assert_true \
     "A trimmed operation journal did not count dropped events." \
