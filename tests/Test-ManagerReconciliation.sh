@@ -1362,9 +1362,12 @@ docker_health_state="${diagnostics_directory}/subsystem-docker.json"
 github_health_state="${diagnostics_directory}/subsystem-github.json"
 assert_true "Operation diagnostics could not be initialized." \
     diagnostics_initialize "${diagnostics_directory}" manager-instance-a
-assert_equals "2" "$(jq -r '.schemaVersion' "${journal_state}")" "A fresh journal did not use private schema two."
+assert_equals "3" "$(jq -r '.schemaVersion' "${journal_state}")" "A fresh journal did not use private schema three."
 assert_equals "current" "$(jq -r '.status' "${journal_state}")" "A fresh operation journal was not reported as current."
 assert_equals "0" "$(jq -r '.events | length' "${journal_state}")" "A fresh operation journal retained events."
+assert_equals "0" "$(jq -r '.evictedEvents' "${journal_state}")" "A fresh operation journal reported retention eviction."
+assert_equals "0" "$(jq -r '.rejectedEvents' "${journal_state}")" "A fresh operation journal reported rejected evidence."
+assert_equals "0" "$(jq -r '.unclassifiedEvents' "${journal_state}")" "A fresh operation journal reported legacy loss."
 assert_equals "unknown" "$(jq -r '.state' "${docker_health_state}")" "A manager without Docker evidence claimed Docker health."
 assert_equals "unknown" "$(jq -r '.state' "${github_health_state}")" "A manager without GitHub evidence claimed GitHub health."
 
