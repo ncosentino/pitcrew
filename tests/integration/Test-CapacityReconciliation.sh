@@ -385,8 +385,8 @@ done
     echo "Observed state did not publish the configured PID policy." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${LEGACY_OBSERVED_STATE}")" -eq 21 ] || {
-    echo "Direct Compose observed state did not report manager contract version twenty-one." >&2
+[ "$(jq -r '.managerContractVersion' "${LEGACY_OBSERVED_STATE}")" -eq 22 ] || {
+    echo "Direct Compose observed state did not report manager contract version twenty-two." >&2
     exit 1
 }
 [ "$(jq -r '.hostAdmission.status' "${LEGACY_OBSERVED_STATE}")" = "disabled" ] || {
@@ -421,8 +421,8 @@ MANAGER_ID=$(manager_id)
     echo "Runner manager did not start." >&2
     exit 1
 }
-[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 21 ] || {
-    echo "Observed state did not report manager contract version twenty-one." >&2
+[ "$(jq -r '.managerContractVersion' "${OBSERVED_STATE}")" -eq 22 ] || {
+    echo "Observed state did not report manager contract version twenty-two." >&2
     exit 1
 }
 [ "$(jq -r '.profileId' "${OBSERVED_STATE}")" = "${PROFILE_NAME}" ] || {

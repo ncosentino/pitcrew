@@ -1088,7 +1088,7 @@ jq '
 assert_true "Observed-state validation rejected a pre-registration manager contract." observed_state_is_valid "${legacy_observed_state}"
 
 assert_equals \
-    "21" \
+    "22" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "The fixed manager does not declare the activated contract."
 
@@ -2119,9 +2119,9 @@ assert_true \
     observed_state_is_valid "${legacy_contract_sixteen_state}"
 
 assert_equals \
-    "21" \
+    "22" \
     "$(sed -n 's/^MANAGER_CONTRACT_VERSION=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
-    "The fixed manager does not declare the active contract twenty-one."
+    "The fixed manager does not declare the active contract twenty-two."
 
 contract_eighteen_disabled_state="${TEMP_DIRECTORY}/contract-eighteen-disabled-state.json"
 jq '

@@ -3041,7 +3041,7 @@ Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_ARM64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI arm64 checksum is not pinned.'
 Add-Check ($defaultProfile.StateVolumePath -eq '.pitcrew-state/default') 'The default profile state mount is not stable.'
 Add-Check ($copilotProfile.StateVolumePath -eq '.pitcrew-state/copilot-cli') 'Named mutable state is not profile-scoped.'
-Add-Check ($defaultProfile.ManagerContractVersion -eq 21) 'The setup contract does not activate the source-provenance manager contract.'
+Add-Check ($defaultProfile.ManagerContractVersion -eq 22) 'The setup contract does not activate the journal-retention manager contract.'
 Add-Check ($defaultProfile.DefinedManagerContractVersion -eq 11) 'The setup contract does not expose the defined resilience contract.'
 Add-Check (
     $defaultProfile.DefinedHostAdmissionContractVersion -eq 19
@@ -4949,7 +4949,7 @@ try {
         ) 'Missing-manager recovery attempted a manager or profile shutdown path.'
         Add-Check (
             $missingManagerAck.generation -eq 1 -and
-            $missingManagerAck.managerContractVersion -eq 21
+            $missingManagerAck.managerContractVersion -eq 22
         ) 'Missing-manager recovery did not require a fresh current-contract acknowledgement.'
 
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
