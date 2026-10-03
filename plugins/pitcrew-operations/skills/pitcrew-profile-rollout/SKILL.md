@@ -68,8 +68,11 @@ including:
 Report image reference, verification, build-input, resource-policy, and
 scale-set tuning differences separately. List read-only external volume
 additions, removals, and source changes by logical name; they are
-rolling-compatible worker changes, not routing changes. Report an external
-service-network addition, removal, or source change separately; it is also a
+rolling-compatible worker changes, not routing changes. Report a read-write
+volume addition, removal, source, or access-mode change separately;
+it is also rolling-compatible. Writable mounts persist between the profile's
+jobs and require explicitly trusted routing.
+Report an external service-network addition, removal, or source change separately; it is also a
 rolling-compatible worker change. Capacity must remain exactly equal to the
 accepted desired-capacity document.
 
@@ -86,6 +89,7 @@ Always dry run first. Display:
 7. every rolling-compatible difference
    - for read-only volumes, show only logical name, external Docker volume name,
      and derived `/mnt/pitcrew-data/<name>` target
+   - for read-write volumes, show the same fields and explicit writable access
    - for an external service network, show only the exact Docker network name
      and whether setup verifies it as a local, non-internal bridge
 8. the complete setup command that would run, with secret-free arguments and
@@ -107,7 +111,8 @@ After explicit operator confirmation of the dry-run plan:
    stored registration credential.
 5. Let setup pull or build and verify the candidate before manager handoff.
    Setup must also inspect every declared external volume and attach it
-   read-only to candidate verification. When `serviceNetwork` is declared,
+   with its declared read-only or read-write access mode to candidate
+   verification. When `serviceNetwork` is declared,
    setup must inspect that exact network and attach candidate verification to
    it.
 6. Stop on the first failure. Do not retry with a weaker command or route.

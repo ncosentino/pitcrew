@@ -1049,8 +1049,8 @@ func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
 			runnerNameLabelKey:     "runner-one",
 			runnerIDLabelKey:       "99",
 		},
-		volumes: []readOnlyVolume{
-			{name: "reference-data", source: "pitcrew-reference-data-v1"},
+		volumes: []externalVolume{
+			{name: "reference-data", source: "pitcrew-reference-data-v1", readOnly: true},
 		},
 	}
 	arguments := buildDockerRunArguments(launch)

@@ -124,6 +124,22 @@ with the emulator inside the same worker container. When the one job completes,
 Docker removes the runner, emulator processes, writable device state, and runner
 credentials together.
 
+### External shared data amendment
+
+Profiles may explicitly attach operator-created named volumes through
+`readOnlyVolumes` or `readWriteVolumes`. Both modes use deterministic
+`/mnt/pitcrew-data/<name>` targets and `volume-nocopy`; read-only mounts also
+use `readonly`. The combined contract is bounded to eight unique logical names
+and source volumes, with exact existence checks before setup handoff.
+
+Writable external data is an explicit exception to disposable job state:
+all jobs of the selected trusted profile can read and modify the shared data,
+and worker destruction does not remove it. Isolate producer and consumer
+profiles where appropriate; read-only consumers cannot perform deletion.
+This does not permit host-path binds, sockets, arbitrary targets, devices,
+privilege, or driver options in profiles. ADR-0005 supersedes the image-builder
+deployment boundary, not this bounded data-mount contract.
+
 ## Alternatives considered
 
 ### Give workers the orchestration Docker socket

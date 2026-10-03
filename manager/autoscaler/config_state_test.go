@@ -47,8 +47,8 @@ func TestLoadConfigDefaultsAndValidation(t *testing.T) {
 	if !cfg.noDefaultLabels {
 		t.Fatal("expected RUNNER_NO_DEFAULT_LABELS=1 to be enabled")
 	}
-	if len(cfg.readOnlyVolumes) != 0 {
-		t.Fatalf("unexpected default read-only volumes: %#v", cfg.readOnlyVolumes)
+	if len(cfg.externalVolumes) != 0 {
+		t.Fatalf("unexpected default external volumes: %#v", cfg.externalVolumes)
 	}
 	if cfg.serviceNetwork != "" {
 		t.Fatalf("unexpected default service network: %q", cfg.serviceNetwork)
@@ -68,6 +68,7 @@ func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
 		"RUNNER_SCOPE":              "repo",
 		"RUNNER_NAME_PREFIX":        "runner",
 		"PITCREW_READ_ONLY_VOLUMES": "reference-data=pitcrew-reference-data-v1,fixtures=pitcrew-fixtures",
+		"PITCREW_READ_WRITE_VOLUMES": "handoff=pitcrew-handoff-v1",
 		"PITCREW_SERVICE_NETWORK":   "pitcrew-profile-a-services",
 	}
 	cfg, err := loadConfig(func(name string) (string, bool) {
@@ -77,15 +78,46 @@ func TestLoadConfigParsesReadOnlyVolumes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("loadConfig returned an error: %v", err)
 	}
-	if len(cfg.readOnlyVolumes) != 2 {
-		t.Fatalf("unexpected read-only volume count: %#v", cfg.readOnlyVolumes)
+	if len(cfg.externalVolumes) != 3 {
+		t.Fatalf("unexpected external volume count: %#v", cfg.externalVolumes)
 	}
-	if cfg.readOnlyVolumes[0].target() != "/mnt/pitcrew-data/reference-data" ||
-		cfg.readOnlyVolumes[1].source != "pitcrew-fixtures" {
-		t.Fatalf("unexpected read-only volume contract: %#v", cfg.readOnlyVolumes)
+	if cfg.externalVolumes[0].target() != "/mnt/pitcrew-data/reference-data" ||
+		cfg.externalVolumes[1].source != "pitcrew-fixtures" ||
+		!cfg.externalVolumes[0].readOnly ||
+		cfg.externalVolumes[2].readOnly ||
+		cfg.externalVolumes[2].source != "pitcrew-handoff-v1" {
+		t.Fatalf("unexpected external volume contract: %#v", cfg.externalVolumes)
 	}
 	if cfg.serviceNetwork != "pitcrew-profile-a-services" {
 		t.Fatalf("unexpected service network: %q", cfg.serviceNetwork)
+	}
+}
+
+func TestExternalVolumesCombinedValidation(t *testing.T) {
+	eight := "a=one,b=two,c=three,d=four,e=five,f=six,g=seven,h=eight"
+	for _, test := range []struct {
+		name      string
+		readOnly  string
+		readWrite string
+		valid     bool
+	}{
+		{"empty", "", "", true},
+		{"mixed boundary", "a=one,b=two,c=three,d=four", "e=five,f=six,g=seven,h=eight", true},
+		{"writable boundary", "", eight, true},
+		{"combined overflow", eight, "i=nine", false},
+		{"duplicate cross-mode name", "data=one", "data=two", false},
+		{"duplicate cross-mode source", "one=data", "two=data", false},
+		{"host bind", "", "data=/host/path", false},
+		{"socket", "", "data=/var/run/docker.sock", false},
+		{"destination traversal", "", "../data=volume", false},
+		{"empty entry", "", "data=one,", false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, err := parseExternalVolumes(test.readOnly, test.readWrite)
+			if (err == nil) != test.valid {
+				t.Fatalf("valid=%v, got error %v", test.valid, err)
+			}
+		})
 	}
 }
 
@@ -99,6 +131,7 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		"RUNNER_SCOPE":            "repo",
 		"RUNNER_NAME_PREFIX":      "runner",
 	}
+
 	tests := []struct {
 		name   string
 		key    string
@@ -120,6 +153,8 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 		{name: "duplicate read-only volume name", key: "PITCREW_READ_ONLY_VOLUMES", value: "data=one,data=two"},
 		{name: "duplicate read-only volume source", key: "PITCREW_READ_ONLY_VOLUMES", value: "one=data,two=data"},
 		{name: "invalid read-only volume target name", key: "PITCREW_READ_ONLY_VOLUMES", value: "Upper=data"},
+		{name: "invalid writable volume", key: "PITCREW_READ_WRITE_VOLUMES", value: "data=/host/path"},
+		{name: "duplicate writable name", key: "PITCREW_READ_WRITE_VOLUMES", value: "data=one,data=two"},
 		{name: "invalid service network", key: "PITCREW_SERVICE_NETWORK", value: "host/network"},
 		{name: "default bridge network", key: "PITCREW_SERVICE_NETWORK", value: "bridge"},
 		{name: "reserved manager network", key: "PITCREW_SERVICE_NETWORK", value: "self-hosted-runner-profile-a_default"},

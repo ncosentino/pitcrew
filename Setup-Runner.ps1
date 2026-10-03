@@ -375,6 +375,7 @@ $composeEnvironmentNames = @(
     'PITCREW_WORKER_RUNTIME_DEVICES',
     'PITCREW_WORKER_SHM_SIZE_BYTES',
     'PITCREW_READ_ONLY_VOLUMES',
+    'PITCREW_READ_WRITE_VOLUMES',
     'PITCREW_SERVICE_NETWORK',
     'PITCREW_SESSION_OWNER',
     'PITCREW_ASSUME_UNVERSIONED_CURRENT',
@@ -2484,7 +2485,7 @@ try {
     ) {
         throw "Profile '$($profileConfig.Name)' changes registration topology or routing that cannot roll safely. Stop the profile explicitly with -Down before applying this configuration."
     }
-    foreach ($volume in $profileConfig.ReadOnlyVolumes) {
+    foreach ($volume in $profileConfig.ExternalVolumes) {
         $volumeOutput = & docker volume inspect `
             --format '{{.Name}}' `
             $volume.Source 2>$null
@@ -2670,9 +2671,9 @@ try {
 
             Write-Host "[verify] Verifying runner image contract"
             $verificationMountArguments = @(
-                foreach ($volume in $profileConfig.ReadOnlyVolumes) {
+                foreach ($volume in $profileConfig.ExternalVolumes) {
                     '--mount'
-                    "type=volume,src=$($volume.Source),dst=$($volume.Target),readonly,volume-nocopy"
+                    $volume.Mount
                 }
             )
             $verificationNetworkArguments = if ($profileConfig.ServiceNetwork) {

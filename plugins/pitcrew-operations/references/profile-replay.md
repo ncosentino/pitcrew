@@ -42,6 +42,7 @@ Use `static-profile.json.configuration` to preserve:
 - host-admission namespace, host capacity, safety margin, worker cost,
   reservation, and borrowing policy
 - operator-approved read-only external volume names and sources
+- operator-approved read-write external volume names and sources
 - the operator-approved external service-network source
 
 For the default profile, use `-Profile default`. For a built-in named profile,
