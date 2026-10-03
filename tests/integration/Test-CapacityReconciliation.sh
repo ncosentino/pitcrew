@@ -12,6 +12,7 @@ LEGACY_MANAGER_LABEL="ephemeral-runner-manager-profile=${LEGACY_PROFILE_NAME}"
 SLOT_LABEL="ephemeral-managed-runner-slot"
 FAKE_IMAGE="pitcrew-fake-runner:${PROFILE_NAME}"
 VOLUME_NAME="pitcrew-integration-data-${RUN_ID}"
+WRITABLE_VOLUME_NAME="pitcrew-integration-handoff-${RUN_ID}"
 SERVICE_NETWORK="pitcrew-integration-services-${RUN_ID}"
 SERVICE_CONTAINER="pitcrew-integration-service-${RUN_ID}"
 REPOSITORY_URL="https://github.com/example/integration"
@@ -268,6 +269,7 @@ cleanup() {
     docker network rm "${SERVICE_NETWORK}" >/dev/null 2>&1 || true
     docker image rm -f "${FAKE_IMAGE}" >/dev/null 2>&1 || true
     docker volume rm "${VOLUME_NAME}" >/dev/null 2>&1 || true
+    docker volume rm "${WRITABLE_VOLUME_NAME}" >/dev/null 2>&1 || true
     rm -f "${ROOT}/.env.${PROFILE_NAME}"
     rm -rf "${STATE_DIRECTORY}" "${LEGACY_STATE_DIRECTORY}" "${FIXTURE_DIRECTORY}"
     rmdir "${ROOT}/.pitcrew-state" >/dev/null 2>&1 || true
@@ -295,8 +297,15 @@ cat > "${PROFILE_PATH}" <<EOF
   "serviceNetwork": {
     "source": "${SERVICE_NETWORK}"
   },
+  "readWriteVolumes": [
+    {
+      "name": "handoff",
+      "source": "${WRITABLE_VOLUME_NAME}"
+    }
+  ],
   "verificationCommands": [
     "test -f /mnt/pitcrew-data/reference-data/marker.txt",
+    "printf verified > /mnt/pitcrew-data/handoff/verification-probe && test \"\$(cat /mnt/pitcrew-data/handoff/verification-probe)\" = verified && rm /mnt/pitcrew-data/handoff/verification-probe",
     "test \"\$(wget -qO- http://package-mirror:8080/health)\" = \"ready\""
   ]
 }
@@ -307,6 +316,7 @@ docker build \
     "${ROOT}/tests/integration/fake-runner"
 FAKE_IMAGE_ID=$(docker image inspect --format '{{.Id}}' "${FAKE_IMAGE}")
 docker volume create "${VOLUME_NAME}" >/dev/null
+docker volume create "${WRITABLE_VOLUME_NAME}" >/dev/null
 docker run \
     --rm \
     --mount "type=volume,src=${VOLUME_NAME},dst=/data" \
@@ -504,6 +514,22 @@ worker_mount=$(docker inspect \
     echo "Worker did not receive the required external volume read-only." >&2
     exit 1
 }
+[ "$(printf '%s' "${worker_mount}" | jq -r \
+    --arg volume "${WRITABLE_VOLUME_NAME}" \
+    '[.[] | select(
+        .Type == "volume"
+        and .Name == $volume
+        and .Destination == "/mnt/pitcrew-data/handoff"
+        and .RW == true)] | length')" -eq 1 ] || {
+    echo "Worker did not receive the required external volume read-write." >&2
+    exit 1
+}
+docker exec "${original_workers[0]}" sh -c \
+    'printf verified > /mnt/pitcrew-data/handoff/worker-probe'
+docker exec "${original_workers[1]}" sh -c \
+    'test "$(cat /mnt/pitcrew-data/handoff/worker-probe)" = verified && rm /mnt/pitcrew-data/handoff/worker-probe'
+docker exec "${original_workers[0]}" sh -c \
+    'if touch /mnt/pitcrew-data/reference-data/forbidden-probe; then rm /mnt/pitcrew-data/reference-data/forbidden-probe; exit 1; fi'
 
 [ "$(jq -r --arg imageId "${FAKE_IMAGE_ID}" \
     '[.slots[] | select(.imageId == $imageId)] | length' "${OBSERVED_STATE}")" -eq 5 ] || {

@@ -24,7 +24,7 @@ type containerLaunch struct {
 	labels    map[string]string
 	resources workerResourcePolicy
 	runtime   workerRuntimePolicy
-	volumes   []readOnlyVolume
+	volumes   []externalVolume
 	network   string
 }
 
@@ -207,7 +207,7 @@ func (d *dockerCLI) start(ctx context.Context, containerID string) error {
 
 func (d *dockerCLI) validateVolumes(
 	ctx context.Context,
-	volumes []readOnlyVolume,
+	volumes []externalVolume,
 ) error {
 	for _, volume := range volumes {
 		operationContext, cancel := context.WithTimeout(ctx, dockerOperationTimeout)
@@ -299,12 +299,16 @@ func dockerLaunchArguments(verb string, detach bool, launch containerLaunch) []s
 	arguments = append(arguments, launch.resources.dockerArguments()...)
 	arguments = append(arguments, launch.runtime.dockerArguments()...)
 	for _, volume := range launch.volumes {
+		accessMode := ""
+		if volume.readOnly {
+			accessMode = ",readonly"
+		}
 		arguments = append(
 			arguments,
 			"--mount",
 			"type=volume,src="+volume.source+
 				",dst="+volume.target()+
-				",readonly,volume-nocopy",
+				accessMode+",volume-nocopy",
 		)
 	}
 	labelKeys := make([]string, 0, len(launch.labels))

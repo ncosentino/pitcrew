@@ -32,6 +32,7 @@ WORKER_PIDS_LIMIT="${PITCREW_WORKER_PIDS_LIMIT:-}"
 WORKER_RUNTIME_DEVICES="${PITCREW_WORKER_RUNTIME_DEVICES:-}"
 WORKER_SHM_SIZE_BYTES="${PITCREW_WORKER_SHM_SIZE_BYTES:-}"
 READ_ONLY_VOLUMES="${PITCREW_READ_ONLY_VOLUMES:-}"
+READ_WRITE_VOLUMES="${PITCREW_READ_WRITE_VOLUMES:-}"
 SERVICE_NETWORK="${PITCREW_SERVICE_NETWORK:-}"
 ASSUME_UNVERSIONED_CURRENT="${PITCREW_ASSUME_UNVERSIONED_CURRENT:-0}"
 PROFILE_ID="${RUNNER_PROFILE_ID:-default}"
@@ -115,9 +116,12 @@ HOST_ADMISSION_NAMESPACE_LABEL_KEY="pitcrew-host-admission-namespace"
 HOST_ADMISSION_PROFILE_LABEL_KEY="pitcrew-host-admission-profile"
 HOST_ADMISSION_SLOT_LABEL_KEY="pitcrew-host-admission-slot"
 
-read_only_volumes_are_valid() (
+external_volumes_are_valid() (
     configured_volumes="$1"
     [ -z "${configured_volumes}" ] && exit 0
+    case "${configured_volumes}" in
+        ,*|*,|*,,*) exit 1 ;;
+    esac
     IFS=','
     volume_count=0
     seen_names=","
@@ -146,7 +150,7 @@ read_only_volumes_are_valid() (
     done
 )
 
-verify_read_only_volumes() (
+verify_external_volumes() (
     configured_volumes="$1"
     [ -z "${configured_volumes}" ] && exit 0
     IFS=','
@@ -285,12 +289,13 @@ if ! worker_resource_policy_is_valid \
     echo "[manager:${PROFILE_ID}] worker resource policy is invalid; refusing to launch unlimited workers." >&2
     exit 1
 fi
-if ! read_only_volumes_are_valid "${READ_ONLY_VOLUMES}"; then
-    echo "[manager:${PROFILE_ID}] PITCREW_READ_ONLY_VOLUMES is invalid." >&2
+EXTERNAL_VOLUMES="${READ_ONLY_VOLUMES}${READ_ONLY_VOLUMES:+${READ_WRITE_VOLUMES:+,}}${READ_WRITE_VOLUMES}"
+if ! external_volumes_are_valid "${EXTERNAL_VOLUMES}"; then
+    echo "[manager:${PROFILE_ID}] external volume configuration is invalid." >&2
     exit 1
 fi
-if ! verify_read_only_volumes "${READ_ONLY_VOLUMES}"; then
-    echo "[manager:${PROFILE_ID}] a required external read-only volume is unavailable." >&2
+if ! verify_external_volumes "${EXTERNAL_VOLUMES}"; then
+    echo "[manager:${PROFILE_ID}] a required external volume is unavailable." >&2
     exit 1
 fi
 if ! service_network_is_valid "${SERVICE_NETWORK}"; then
@@ -1030,18 +1035,28 @@ run_slot() {
         if [ -n "${SERVICE_NETWORK}" ]; then
             set -- "$@" --network "${SERVICE_NETWORK}"
         fi
-        if [ -n "${READ_ONLY_VOLUMES}" ]; then
+        for volume_access in readonly readwrite; do
+            case "${volume_access}" in
+                readonly)
+                    configured_volumes="${READ_ONLY_VOLUMES}"
+                    volume_access_argument=",readonly"
+                    ;;
+                readwrite)
+                    configured_volumes="${READ_WRITE_VOLUMES}"
+                    volume_access_argument=""
+                    ;;
+            esac
             previous_ifs=${IFS}
             IFS=','
-            for configured_volume in ${READ_ONLY_VOLUMES}; do
+            for configured_volume in ${configured_volumes}; do
                 volume_name=${configured_volume%%=*}
                 volume_source=${configured_volume#*=}
                 set -- "$@" \
                     --mount \
-                    "type=volume,src=${volume_source},dst=/mnt/pitcrew-data/${volume_name},readonly,volume-nocopy"
+                    "type=volume,src=${volume_source},dst=/mnt/pitcrew-data/${volume_name}${volume_access_argument},volume-nocopy"
             done
             IFS=${previous_ifs}
-        fi
+        done
         # Canonical policy values are validated at startup, so unquoted expansion
         # only splits manager-owned Docker arguments.
         set -- "$@" ${WORKER_RESOURCE_ARGUMENTS} ${WORKER_RUNTIME_ARGUMENTS} "${IMAGE}"

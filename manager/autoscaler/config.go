@@ -34,7 +34,7 @@ type config struct {
 	workerImageID        string
 	resources            workerResourcePolicy
 	runtime              workerRuntimePolicy
-	readOnlyVolumes      []readOnlyVolume
+	externalVolumes      []externalVolume
 	serviceNetwork       string
 	scaleDownDelay       time.Duration
 	observedInterval     time.Duration
@@ -59,55 +59,63 @@ type hostAdmissionConfig struct {
 	profileFingerprint string
 }
 
-type readOnlyVolume struct {
-	name   string
-	source string
+type externalVolume struct {
+	name     string
+	source   string
+	readOnly bool
 }
 
-func (v readOnlyVolume) target() string {
+func (v externalVolume) target() string {
 	return "/mnt/pitcrew-data/" + v.name
 }
 
-func parseReadOnlyVolumes(value string) ([]readOnlyVolume, error) {
-	value = strings.TrimSpace(value)
-	if value == "" {
-		return nil, nil
-	}
-	entries := strings.Split(value, ",")
-	if len(entries) > 8 {
-		return nil, errors.New("PITCREW_READ_ONLY_VOLUMES supports at most 8 volumes")
-	}
-	names := make(map[string]struct{}, len(entries))
-	sources := make(map[string]struct{}, len(entries))
-	volumes := make([]readOnlyVolume, 0, len(entries))
-	for _, entry := range entries {
-		name, source, found := strings.Cut(entry, "=")
-		if !found || !validReadOnlyVolumeName(name) || !validDockerVolumeName(source) {
-			return nil, fmt.Errorf(
-				"PITCREW_READ_ONLY_VOLUMES contains invalid entry %q",
-				entry,
-			)
+func parseExternalVolumes(readOnly, readWrite string) ([]externalVolume, error) {
+	names := make(map[string]struct{})
+	sources := make(map[string]struct{})
+	var volumes []externalVolume
+	for _, list := range []struct {
+		value    string
+		readOnly bool
+	}{
+		{readOnly, true},
+		{readWrite, false},
+	} {
+		value := strings.TrimSpace(list.value)
+		if value == "" {
+			continue
 		}
-		if _, exists := names[name]; exists {
-			return nil, fmt.Errorf(
-				"PITCREW_READ_ONLY_VOLUMES duplicates logical name %q",
-				name,
-			)
+		for _, entry := range strings.Split(value, ",") {
+			name, source, found := strings.Cut(entry, "=")
+			if !found || !validExternalVolumeName(name) || !validDockerVolumeName(source) {
+				return nil, fmt.Errorf(
+					"external volumes contain invalid entry %q",
+					entry,
+				)
+			}
+			if _, exists := names[name]; exists {
+				return nil, fmt.Errorf(
+					"external volumes duplicate logical name %q",
+					name,
+				)
+			}
+			if _, exists := sources[source]; exists {
+				return nil, fmt.Errorf(
+					"external volumes duplicate source volume %q",
+					source,
+				)
+			}
+			names[name] = struct{}{}
+			sources[source] = struct{}{}
+			volumes = append(volumes, externalVolume{name: name, source: source, readOnly: list.readOnly})
+			if len(volumes) > 8 {
+				return nil, errors.New("external volumes support at most 8 volumes combined")
+			}
 		}
-		if _, exists := sources[source]; exists {
-			return nil, fmt.Errorf(
-				"PITCREW_READ_ONLY_VOLUMES duplicates source volume %q",
-				source,
-			)
-		}
-		names[name] = struct{}{}
-		sources[source] = struct{}{}
-		volumes = append(volumes, readOnlyVolume{name: name, source: source})
 	}
 	return volumes, nil
 }
 
-func validReadOnlyVolumeName(value string) bool {
+func validExternalVolumeName(value string) bool {
 	if len(value) < 1 || len(value) > 32 || value[0] < 'a' || value[0] > 'z' {
 		return false
 	}
@@ -159,7 +167,7 @@ func validDockerNetworkName(value string) bool {
 			return false
 		}
 		if strings.HasPrefix(middle, "-") &&
-			validReadOnlyVolumeName(strings.TrimPrefix(middle, "-")) {
+			validExternalVolumeName(strings.TrimPrefix(middle, "-")) {
 			return false
 		}
 	}
@@ -269,8 +277,9 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 	if err != nil {
 		return config{}, err
 	}
-	readOnlyVolumes, err := parseReadOnlyVolumes(
+	externalVolumes, err := parseExternalVolumes(
 		value("PITCREW_READ_ONLY_VOLUMES", ""),
+		value("PITCREW_READ_WRITE_VOLUMES", ""),
 	)
 	if err != nil {
 		return config{}, err
@@ -306,7 +315,7 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 		workerImageID:        workerImageID,
 		resources:            resources,
 		runtime:              runtimePolicy,
-		readOnlyVolumes:      readOnlyVolumes,
+		externalVolumes:      externalVolumes,
 		serviceNetwork:       serviceNetwork,
 		scaleDownDelay:       scaleDownDelay,
 		observedInterval:     observedInterval,

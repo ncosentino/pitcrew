@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.21.1') 'The operations plugin patch version was not advanced for range-aware assignment retention.'
+Add-Check ($plugin.version -eq '1.21.2') 'The operations plugin patch version was not advanced for writable-volume rollout guidance.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -742,6 +742,8 @@ Add-Check (
 ) 'The profile rollout skill does not verify truthful rolling convergence.'
 Add-Check (
     $profileRolloutSkill -match 'read-only external volume' -and
+    $profileRolloutSkill -match 'read-write\s+volume' -and
+    $profileRolloutSkill -match 'declared read-only or read-write access mode' -and
     $profileRolloutSkill -match '/mnt/pitcrew-data/<name>' -and
     $profileRolloutSkill -match 'never creates, populates, removes'
 ) 'The profile rollout skill does not preserve external-volume safety.'

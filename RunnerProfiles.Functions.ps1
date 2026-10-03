@@ -488,6 +488,7 @@ function Resolve-RunnerProfile {
     $effectivePullImage = $true
     $verificationCommands = @()
     $effectiveReadOnlyVolumes = @()
+    $effectiveReadWriteVolumes = @()
     $effectiveServiceNetwork = $null
     $effectiveRuntimeDevices = @()
     $effectiveSharedMemory = $null
@@ -536,29 +537,38 @@ function Resolve-RunnerProfile {
         } else {
             @()
         }
-        if ($manifest.PSObject.Properties['readOnlyVolumes']) {
-            $volumeNames = [Collections.Generic.HashSet[string]]::new(
-                [StringComparer]::Ordinal)
-            $volumeSources = [Collections.Generic.HashSet[string]]::new(
-                [StringComparer]::Ordinal)
-            $effectiveReadOnlyVolumes = @(
-                foreach ($volume in @($manifest.readOnlyVolumes)) {
-                    $name = [string]$volume.name
-                    $source = [string]$volume.source
-                    if (-not $volumeNames.Add($name)) {
-                        throw "Runner profile read-only volume name '$name' is duplicated."
-                    }
-                    if (-not $volumeSources.Add($source)) {
-                        throw "Runner profile read-only volume source '$source' is duplicated."
-                    }
-                    [PSCustomObject][ordered]@{
-                        Name = $name
-                        Source = $source
-                        Target = "/mnt/pitcrew-data/$name"
+        $volumeNames = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal)
+        $volumeSources = [Collections.Generic.HashSet[string]]::new(
+            [StringComparer]::Ordinal)
+        $normalizedVolumes = @{}
+        foreach ($field in @('readOnlyVolumes', 'readWriteVolumes')) {
+            $volumeEntries = @(
+                if ($manifest.PSObject.Properties[$field]) {
+                    foreach ($volume in @($manifest.$field)) {
+                        $name = [string]$volume.name
+                        $source = [string]$volume.source
+                        if (-not $volumeNames.Add($name)) {
+                            throw "Runner profile external volume name '$name' is duplicated across read-only and read-write volumes."
+                        }
+                        if (-not $volumeSources.Add($source)) {
+                            throw "Runner profile external volume source '$source' is duplicated."
+                        }
+                        if ($volumeNames.Count -gt 8) {
+                            throw 'Runner profiles support at most eight external volumes combined.'
+                        }
+                        [PSCustomObject][ordered]@{
+                            Name = $name
+                            Source = $source
+                            Target = "/mnt/pitcrew-data/$name"
+                        }
                     }
                 }
-            ) | Sort-Object Name
+            )
+            $normalizedVolumes[$field] = @($volumeEntries | Sort-Object Name)
         }
+        $effectiveReadOnlyVolumes = @($normalizedVolumes.readOnlyVolumes)
+        $effectiveReadWriteVolumes = @($normalizedVolumes.readWriteVolumes)
         if ($manifest.PSObject.Properties['serviceNetwork']) {
             $serviceNetworkSource = [string]$manifest.serviceNetwork.source
             if (
@@ -955,6 +965,26 @@ function Resolve-RunnerProfile {
             $effectiveReadOnlyVolumes |
                 ForEach-Object { "$($_.Name)=$($_.Source)" }
         ) -join ','
+        ReadWriteVolumes = @($effectiveReadWriteVolumes)
+        ReadWriteVolumesValue = @(
+            $effectiveReadWriteVolumes |
+                ForEach-Object { "$($_.Name)=$($_.Source)" }
+        ) -join ','
+        ExternalVolumes = @(
+            foreach ($policy in @(
+                @{ Volumes = $effectiveReadOnlyVolumes; AccessMode = ',readonly' },
+                @{ Volumes = $effectiveReadWriteVolumes; AccessMode = '' }
+            )) {
+                foreach ($volume in $policy.Volumes) {
+                    [PSCustomObject]@{
+                        Name = $volume.Name
+                        Source = $volume.Source
+                        Target = $volume.Target
+                        Mount = "type=volume,src=$($volume.Source),dst=$($volume.Target)$($policy.AccessMode),volume-nocopy"
+                    }
+                }
+            }
+        )
         ServiceNetwork = $effectiveServiceNetwork
         ServiceNetworkValue = if ($effectiveServiceNetwork) {
             [string]$effectiveServiceNetwork.Source
@@ -1983,6 +2013,16 @@ function New-RunnerStaticProfileState {
                     }
                 }
         )
+        readWriteVolumes = @(
+            $Profile.ReadWriteVolumes |
+                ForEach-Object {
+                    [PSCustomObject][ordered]@{
+                        name = [string]$_.Name
+                        source = [string]$_.Source
+                        target = [string]$_.Target
+                    }
+                }
+        )
         serviceNetwork = if ($Profile.ServiceNetwork) {
             [PSCustomObject][ordered]@{
                 source = [string]$Profile.ServiceNetwork.Source
@@ -2067,7 +2107,7 @@ function Get-RunnerWorkerConfiguration {
     } else {
         1
     }
-    return [PSCustomObject][ordered]@{
+    $workerConfiguration = [ordered]@{
         workerRuntimeContractVersion = $workerRuntimeContractVersion
         profile = [string]$Configuration.profile
         image = [string]$Configuration.image
@@ -2109,6 +2149,14 @@ function Get-RunnerWorkerConfiguration {
         runnerGroup = [string]$Configuration.runnerGroup
         namePrefix = [string]$Configuration.namePrefix
     }
+    # An absent or empty writable list must preserve existing worker revisions.
+    if (
+        $Configuration.PSObject.Properties['readWriteVolumes'] -and
+        @($Configuration.readWriteVolumes).Count -gt 0
+    ) {
+        $workerConfiguration.readWriteVolumes = @($Configuration.readWriteVolumes)
+    }
+    return [PSCustomObject]$workerConfiguration
 }
 
 <#
@@ -2134,7 +2182,7 @@ function Get-RunnerRefreshCompatibilityConfiguration {
     )
 
     $worker = Get-RunnerWorkerConfiguration -Configuration $Configuration
-    return [PSCustomObject][ordered]@{
+    $refreshConfiguration = [ordered]@{
         profile = [string]$worker.profile
         image = [string]$worker.image
         resolvedImageId = $worker.resolvedImageId
@@ -2151,6 +2199,10 @@ function Get-RunnerRefreshCompatibilityConfiguration {
         runnerGroup = [string]$worker.runnerGroup
         namePrefix = [string]$worker.namePrefix
     }
+    if ($worker.PSObject.Properties['readWriteVolumes']) {
+        $refreshConfiguration.readWriteVolumes = @($worker.readWriteVolumes)
+    }
+    return [PSCustomObject]$refreshConfiguration
 }
 
 <#
@@ -2425,6 +2477,7 @@ function New-RunnerEnvironmentContent {
             ''
         }),
         $Profile.ReadOnlyVolumesValue,
+        $Profile.ReadWriteVolumesValue,
         $Profile.ServiceNetworkValue,
         $Profile.HostAdmissionVolumeName,
         $Profile.HostAdmissionSocketPath,
@@ -2490,6 +2543,7 @@ function New-RunnerEnvironmentContent {
         ''
     }
     $readOnlyVolumes = [string]$Profile.ReadOnlyVolumesValue
+    $readWriteVolumes = [string]$Profile.ReadWriteVolumesValue
     $serviceNetwork = [string]$Profile.ServiceNetworkValue
     $hostAdmissionNamespace = if ($Profile.HostAdmission) {
         [string]$Profile.HostAdmission.Namespace
@@ -2527,6 +2581,7 @@ function New-RunnerEnvironmentContent {
         "PITCREW_WORKER_RUNTIME_DEVICES=$runtimeDevices"
         "PITCREW_WORKER_SHM_SIZE_BYTES=$sharedMemoryBytes"
         "PITCREW_READ_ONLY_VOLUMES=$readOnlyVolumes"
+        "PITCREW_READ_WRITE_VOLUMES=$readWriteVolumes"
         "PITCREW_SERVICE_NETWORK=$serviceNetwork"
         "PITCREW_SESSION_OWNER=$SessionOwner"
         "PITCREW_ASSUME_UNVERSIONED_CURRENT=$assumeUnversionedCurrentValue"

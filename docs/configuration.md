@@ -72,6 +72,7 @@ Named profiles conform to
 | `autoscaling` | No | Scale-set mode, minimum idle runners, scale-down stabilization delay, and optional aggregate admission ceiling. |
 | `hostAdmission` | No | Opt-in host-local admission namespace, capacity, safety margin, per-worker cost, reservation, and borrowing policy. |
 | `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
+| `readWriteVolumes` | No | Existing external Docker named volumes mounted read-write at the same deterministic paths; shared persistent state for trusted jobs. |
 | `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned or explicitly PitCrew-shipped profile services. |
 | `runtime` | No | Bounded container-runtime policy. Only typed KVM access and canonical shared-memory sizing are supported. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
@@ -271,7 +272,11 @@ not GitHub queue weighting or worker priority. Different worker costs can
 produce different worker counts and leave fragments smaller than one whole
 worker cost.
 
-### Read-only external volumes
+### External volumes
+
+`readOnlyVolumes` and `readWriteVolumes` share the following entry contract.
+Together they permit at most eight volumes, with unique logical names and source
+volume names across both lists.
 
 Each entry contains:
 
@@ -286,9 +291,15 @@ revision, so source changes roll safely while busy workers retain their
 original mounts. Volume changes are rejected by `-Refresh` and
 `-CapacityOnly`.
 
-Only read-only named volumes are supported. Bind mounts, arbitrary targets,
+Both modes use `volume-nocopy`; only `readOnlyVolumes` adds `readonly`.
+Writable mounts persist between jobs and are shared by all jobs of the profile.
+Use dedicated profiles for workloads that must not expose that state to other
+repositories. Existing profiles without writable volumes retain their worker
+revisions.
+
+Bind mounts, arbitrary targets,
 devices, sockets, driver options, and credentials are outside the profile
-contract. See [Read-Only External Data Volumes](guides/external-data-volumes.md).
+contract. See [External Data Volumes](guides/external-data-volumes.md).
 
 ### External service network
 

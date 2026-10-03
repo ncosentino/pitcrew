@@ -137,8 +137,9 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 			cpuCores:        "2.5",
 			pids:            &pids,
 		},
-		volumes: []readOnlyVolume{
-			{name: "reference-data", source: "pitcrew-reference-data-v1"},
+		volumes: []externalVolume{
+			{name: "reference-data", source: "pitcrew-reference-data-v1", readOnly: true},
+			{name: "handoff", source: "pitcrew-handoff-v1"},
 		},
 		network: "pitcrew-profile-a-services",
 	})
@@ -150,6 +151,7 @@ func TestWorkerLaunchCarriesCanonicalResourceArguments(t *testing.T) {
 		"--pids-limit 1024",
 		"--network pitcrew-profile-a-services",
 		"--mount type=volume,src=pitcrew-reference-data-v1,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy",
+		"--mount type=volume,src=pitcrew-handoff-v1,dst=/mnt/pitcrew-data/handoff,volume-nocopy",
 	} {
 		if !strings.Contains(joined, expected) {
 			t.Fatalf("expected %q in %q", expected, joined)
@@ -227,8 +229,8 @@ func TestDockerVolumePreflightRequiresExactExistingNames(t *testing.T) {
 		},
 	})
 	client := &dockerCLI{executor: executor}
-	volumes := []readOnlyVolume{
-		{name: "reference-data", source: "pitcrew-reference-data-v1"},
+	volumes := []externalVolume{
+		{name: "reference-data", source: "pitcrew-reference-data-v1", readOnly: true},
 	}
 	if err := client.validateVolumes(context.Background(), volumes); err != nil {
 		t.Fatalf("valid external volume was rejected: %v", err)
@@ -305,8 +307,9 @@ func TestScalerLaunchesWorkersUnderConfiguredResourcePolicy(t *testing.T) {
 		func(cfg *config) {
 			cfg.resources = workerResourcePolicy{memoryBytes: &memory, pids: &pids}
 			cfg.workerImageID = "sha256:" + strings.Repeat("a", 64)
-			cfg.readOnlyVolumes = []readOnlyVolume{
-				{name: "reference-data", source: "pitcrew-reference-data-v1"},
+			cfg.externalVolumes = []externalVolume{
+				{name: "reference-data", source: "pitcrew-reference-data-v1", readOnly: true},
+				{name: "handoff", source: "pitcrew-handoff-v1"},
 			}
 			cfg.serviceNetwork = "pitcrew-profile-a-services"
 		},
@@ -323,9 +326,12 @@ func TestScalerLaunchesWorkersUnderConfiguredResourcePolicy(t *testing.T) {
 		launch.resources.pids == nil || *launch.resources.pids != pids {
 		t.Fatalf("worker launched without the configured policy: %+v", launch.resources)
 	}
-	if len(launch.volumes) != 1 ||
-		launch.volumes[0].source != "pitcrew-reference-data-v1" {
-		t.Fatalf("worker launched without the configured read-only volume: %+v", launch.volumes)
+	if len(launch.volumes) != 2 ||
+		launch.volumes[0].source != "pitcrew-reference-data-v1" ||
+		!launch.volumes[0].readOnly ||
+		launch.volumes[1].readOnly ||
+		launch.volumes[1].source != "pitcrew-handoff-v1" {
+		t.Fatalf("worker launched without the configured external volumes: %+v", launch.volumes)
 	}
 	if launch.network != "pitcrew-profile-a-services" {
 		t.Fatalf("worker launched without the configured service network: %q", launch.network)

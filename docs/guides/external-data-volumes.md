@@ -1,8 +1,8 @@
 ---
-description: Attach operator-provisioned Docker named volumes to ephemeral workers as deterministic read-only data mounts.
+description: Attach operator-provisioned Docker named volumes to ephemeral workers as bounded read-only or read-write data mounts.
 ---
 
-# Read-Only External Data Volumes
+# External Data Volumes
 
 Some workloads require large immutable reference data that should remain
 outside runner images and disposable worker layers. PitCrew can attach an
@@ -56,7 +56,51 @@ name.
 
 PitCrew derives `/mnt/pitcrew-data/reference-data` from the logical name.
 Profiles cannot select arbitrary container paths, bind host paths, devices, or
-sockets. The mount always uses `readonly` and `volume-nocopy`.
+sockets. Read-only mounts use `readonly` and `volume-nocopy`.
+Both lists together allow at most eight entries. Logical names and Docker source
+volume names must be unique across the combined lists.
+
+## Writable shared data
+
+Trusted producer jobs can declare `readWriteVolumes` with the same entry shape:
+
+```json
+{
+  "readWriteVolumes": [
+    {
+      "name": "handoff",
+      "source": "pitcrew-build-handoff-rw"
+    }
+  ],
+  "verificationCommands": [
+    "probe=$(mktemp /mnt/pitcrew-data/handoff/probe.XXXXXX) && printf verified > \"$probe\" && test \"$(cat \"$probe\")\" = verified && rm \"$probe\""
+  ]
+}
+```
+
+This is a fragment to add to a complete profile. Provision the writable volume
+first, using operator-reviewed storage settings, for example:
+
+```powershell
+docker volume create `
+    --driver local `
+    --opt type=nfs `
+    --opt "o=addr=STORAGE_HOST,rw,nfsvers=4.1" `
+    --opt "device=:/export/build-handoff" `
+    pitcrew-build-handoff-rw
+```
+
+Writable mounts use `volume-nocopy` without `readonly`. They are deliberate
+shared persistent state between all jobs of that profile, not disposable worker
+storage. Route only trusted workflows to that profile, and use a dedicated
+profile when other repositories must not receive the mount. Access mode belongs
+to the reviewed profile; a workflow cannot override it.
+
+A separate consumer profile can mount an operator-provisioned read-only volume
+backed by the same storage. Enforce read-only access in its storage options as
+well as the container mount. Use run-and-attempt-specific directories and verify
+published file hashes before consumption. The producer or another explicitly
+authorized writer owns cleanup: a read-only consumer cannot delete files.
 
 ## Apply and route
 
@@ -69,7 +113,7 @@ Use the complete external-profile command:
 ```
 
 Setup inspects the exact named volume before changing the manager and attaches
-it to every image-verification container. A missing volume or failed data
+it to every image-verification container with the declared access mode. A missing volume or failed data
 verification leaves the running profile unchanged.
 
 Workflows request the profile label, not the volume:
@@ -87,6 +131,9 @@ jobs:
 3. Apply it with `pitcrew-profile-rollout`.
 4. Treat `update.status: rolling` as successful partial convergence.
 5. Keep the previous volume until every required check accepts the new data.
+
+Adding or removing writable mounts, changing their source, or changing access
+mode advances the worker revision without changing routing or capacity.
 
 Busy workers retain their original volume until their one job finishes. New
 workers use the target volume. Roll back by restoring the previous source

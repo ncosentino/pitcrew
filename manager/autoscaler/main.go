@@ -45,7 +45,7 @@ func main() {
 		accessToken: cfg.accessToken,
 	}
 	docker := newDockerCLI()
-	if err := docker.validateVolumes(context.Background(), cfg.readOnlyVolumes); err != nil {
+	if err := docker.validateVolumes(context.Background(), cfg.externalVolumes); err != nil {
 		fmt.Fprintf(os.Stderr, "pitcrew autoscaler volume error: %v\n", err)
 		os.Exit(1)
 	}

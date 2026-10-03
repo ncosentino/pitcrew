@@ -43,6 +43,20 @@ assert_false() {
     fi
 }
 
+sed -n '/^external_volumes_are_valid() (/,/^service_network_is_valid()/p' \
+    "${ROOT}/manager/manage-runners.sh" | sed '$d' \
+    > "${TEMP_DIRECTORY}/external-volumes.sh"
+. "${TEMP_DIRECTORY}/external-volumes.sh"
+assert_true "Empty volumes were rejected." external_volumes_are_valid ""
+assert_true "Mixed volumes were rejected." external_volumes_are_valid "reference=reference-volume,handoff=handoff-volume"
+assert_false "Cross-mode duplicate names were accepted." external_volumes_are_valid "data=one,data=two"
+assert_false "Cross-mode duplicate sources were accepted." external_volumes_are_valid "one=data,two=data"
+assert_false "Host binds were accepted." external_volumes_are_valid "data=/host/path"
+assert_false "Arbitrary targets were accepted." external_volumes_are_valid "../data=volume"
+assert_false "Empty entries were accepted." external_volumes_are_valid "data=volume,"
+assert_true "Eight volumes were rejected." external_volumes_are_valid "a=a,b=b,c=c,d=d,e=e,f=f,g=g,h=h"
+assert_false "Nine combined volumes were accepted." external_volumes_are_valid "a=a,b=b,c=c,d=d,e=e,f=f,g=g,h=h,i=i"
+
 contains_access_token_field() {
     jq -e '[.. | objects | has("accessToken")] | any' "$1" >/dev/null
 }

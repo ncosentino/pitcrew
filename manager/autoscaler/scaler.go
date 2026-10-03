@@ -129,7 +129,7 @@ type runnerScaler struct {
 	imageID           string
 	resources         workerResourcePolicy
 	runtime           workerRuntimePolicy
-	volumes           []readOnlyVolume
+	volumes           []externalVolume
 	network           string
 	workerRevision    string
 	assumeUnversioned bool
@@ -194,7 +194,7 @@ func newRunnerScaler(
 		imageID:           cfg.workerImageID,
 		resources:         cfg.resources,
 		runtime:           cfg.runtime,
-		volumes:           cfg.readOnlyVolumes,
+		volumes:           cfg.externalVolumes,
 		network:           cfg.serviceNetwork,
 		workerRevision:    cfg.workerRevision,
 		assumeUnversioned: cfg.assumeUnversioned,

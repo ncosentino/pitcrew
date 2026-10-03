@@ -3479,6 +3479,7 @@ Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_PIDS_LIMIT=$') 'The d
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_RUNTIME_DEVICES=$') 'The default environment unexpectedly configures a worker device.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_WORKER_SHM_SIZE_BYTES=$') 'The default environment unexpectedly configures shared memory.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_READ_ONLY_VOLUMES=$') 'The default environment unexpectedly configures external data volumes.'
+Add-Check ($defaultEnvironment -match '(?m)^PITCREW_READ_WRITE_VOLUMES=$') 'The default environment unexpectedly configures writable data volumes.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SERVICE_NETWORK=$') 'The default environment unexpectedly configures an external service network.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$') 'The default admission ceiling is not represented as an empty manager-only value.'
 Add-Check ($defaultEnvironment -match '(?m)^PITCREW_SESSION_OWNER=pitcrew-default$') 'The environment does not pin the stable session owner.'
@@ -3610,6 +3611,12 @@ try {
                 source = 'pitcrew-reference-data-v1'
             }
         )
+        readWriteVolumes = @(
+            @{
+                name = 'handoff'
+                source = 'pitcrew-handoff-v1'
+            }
+        )
         serviceNetwork = @{
             source = 'pitcrew-browser-services-v1'
         }
@@ -3645,6 +3652,10 @@ try {
     Add-Check (
         $externalProfile.ReadOnlyVolumesValue -eq 'reference-data=pitcrew-reference-data-v1'
     ) 'External profile read-only volumes were not serialized canonically.'
+    Add-Check (
+        $externalProfile.ReadWriteVolumesValue -eq 'handoff=pitcrew-handoff-v1' -and
+        $externalProfile.ReadWriteVolumes[0].Target -eq '/mnt/pitcrew-data/handoff'
+    ) 'External profile writable volumes were not resolved canonically.'
     Add-Check (
         $externalProfile.ServiceNetwork.Source -eq 'pitcrew-browser-services-v1'
     ) 'External profile service network was not resolved.'
@@ -3897,6 +3908,10 @@ try {
             'pitcrew-reference-data-v1'
     ) 'Static profile state did not retain the read-only volume source.'
     Add-Check (
+        $externalStaticProfile.configuration.readWriteVolumes[0].source -eq
+            'pitcrew-handoff-v1'
+    ) 'Static profile state did not retain the writable volume source.'
+    Add-Check (
         $externalStaticProfile.configuration.serviceNetwork.source -eq
             'pitcrew-browser-services-v1'
     ) 'Static profile state did not retain the external service network.'
@@ -3911,6 +3926,10 @@ try {
         $externalEnvironment -match
             '(?m)^PITCREW_READ_ONLY_VOLUMES=reference-data=pitcrew-reference-data-v1$'
     ) 'External profile environment omitted its read-only volume contract.'
+    Add-Check (
+        $externalEnvironment -match
+            '(?m)^PITCREW_READ_WRITE_VOLUMES=handoff=pitcrew-handoff-v1$'
+    ) 'External profile environment omitted its writable volume contract.'
     Add-Check (
         $externalEnvironment -match
             '(?m)^PITCREW_SERVICE_NETWORK=pitcrew-browser-services-v1$'
@@ -4297,10 +4316,100 @@ try {
                 -RootPath $runnerRoot `
                 -ProfilePath $duplicateVolumeManifestPath
         } `
-        -ExpectedMessage 'read-only volume name' `
+        -ExpectedMessage 'external volume name' `
         -Failure 'An external profile accepted duplicate read-only volume names.'
 
     $invalidVolumeManifestPath = Join-Path $externalDirectory 'invalid-volume-profile.json'
+    $volumeCasePath = Join-Path $externalDirectory 'volume-case.json'
+    foreach ($volumeCase in @(
+        @{
+            ReadOnly = @(@{ name = 'handoff'; source = 'other-volume' })
+            ReadWrite = @(@{ name = 'handoff'; source = 'pitcrew-handoff-v1' })
+            Message = 'external volume name'
+        },
+        @{
+            ReadOnly = @(@{ name = 'reference'; source = 'same-volume' })
+            ReadWrite = @(@{ name = 'handoff'; source = 'same-volume' })
+            Message = 'external volume source'
+        },
+        @{
+            ReadOnly = @(1..4 | ForEach-Object {
+                @{ name = "reference-$_"; source = "reference-$_" }
+            })
+            ReadWrite = @(1..5 | ForEach-Object {
+                @{ name = "handoff-$_"; source = "handoff-$_" }
+            })
+            Message = 'eight external volumes combined'
+        },
+        @{
+            ReadOnly = @()
+            ReadWrite = @(@{ name = 'handoff'; source = '/var/run/docker.sock' })
+            Message = 'not valid with the schema'
+        },
+        @{
+            ReadOnly = @()
+            ReadWrite = @(@{ name = '../handoff'; source = 'pitcrew-handoff-v1' })
+            Message = 'not valid with the schema'
+        }
+    )) {
+        $volumeCaseManifest = Get-Content -LiteralPath $externalManifestPath -Raw |
+            ConvertFrom-Json -Depth 10
+        $volumeCaseManifest.readOnlyVolumes = $volumeCase.ReadOnly
+        $volumeCaseManifest.readWriteVolumes = $volumeCase.ReadWrite
+        $volumeCaseManifest | ConvertTo-Json -Depth 10 |
+            Set-Content -LiteralPath $volumeCasePath -Encoding UTF8
+        Add-ThrowsCheck `
+            -Action {
+                Resolve-RunnerProfile -RootPath $runnerRoot -ProfilePath $volumeCasePath
+            } `
+            -ExpectedMessage $volumeCase.Message `
+            -Failure 'An external profile accepted invalid combined volume configuration.'
+    }
+
+    $emptyWritableConfiguration = $externalStaticProfile.configuration |
+        ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    $emptyWritableConfiguration.readWriteVolumes = @()
+    $legacyVolumeConfiguration = $emptyWritableConfiguration |
+        ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    $legacyVolumeConfiguration.PSObject.Properties.Remove('readWriteVolumes')
+    Add-Check (
+        (Get-RunnerObjectFingerprint -Value (
+            Get-RunnerWorkerConfiguration -Configuration $emptyWritableConfiguration
+        )) -ceq (Get-RunnerObjectFingerprint -Value (
+            Get-RunnerWorkerConfiguration -Configuration $legacyVolumeConfiguration
+        ))
+    ) 'An empty writable list changed a legacy worker revision.'
+    foreach ($volumeChange in @('source', 'access-mode', 'removal')) {
+        $writableConfiguration = $externalStaticProfile.configuration |
+            ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+        switch ($volumeChange) {
+            'source' { $writableConfiguration.readWriteVolumes[0].source = 'pitcrew-handoff-v2' }
+            'access-mode' {
+                $writableConfiguration.readOnlyVolumes += $writableConfiguration.readWriteVolumes
+                $writableConfiguration.readWriteVolumes = @()
+            }
+            'removal' { $writableConfiguration.readWriteVolumes = @() }
+        }
+        Add-Check (
+            (Get-RunnerObjectFingerprint -Value (
+                Get-RunnerWorkerConfiguration -Configuration $writableConfiguration
+            )) -cne $externalStaticProfile.workerRevision
+        ) "A writable volume $volumeChange did not change the worker revision."
+        Add-Check (
+            (Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRefreshCompatibilityConfiguration -Configuration $writableConfiguration
+            )) -cne (Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRefreshCompatibilityConfiguration -Configuration $externalStaticProfile.configuration
+            ))
+        ) "Manager refresh ignored writable volume $volumeChange."
+        Add-Check (
+            (Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration -Configuration $writableConfiguration
+            )) -ceq (Get-RunnerObjectFingerprint -Value (
+                Get-RunnerRollingCompatibilityConfiguration -Configuration $externalStaticProfile.configuration
+            ))
+        ) "A writable volume $volumeChange was not rolling-compatible."
+    }
     $invalidVolumeManifest = Get-Content `
         -LiteralPath $externalManifestPath `
         -Raw `
@@ -4380,6 +4489,7 @@ try {
         'PITCREW_WORKER_RUNTIME_DEVICES',
         'PITCREW_WORKER_SHM_SIZE_BYTES',
         'PITCREW_READ_ONLY_VOLUMES',
+        'PITCREW_READ_WRITE_VOLUMES',
         'PITCREW_SERVICE_NETWORK',
         'PITCREW_AUTOSCALING_MODE',
         'PITCREW_AUTOSCALING_MIN_IDLE',
@@ -4410,6 +4520,7 @@ try {
     $env:PITCREW_WORKER_RUNTIME_DEVICES = 'ambient-device'
     $env:PITCREW_WORKER_SHM_SIZE_BYTES = '9999999999'
     $env:PITCREW_READ_ONLY_VOLUMES = 'ambient=wrong-volume'
+    $env:PITCREW_READ_WRITE_VOLUMES = 'ambient=wrong-writable-volume'
     $env:PITCREW_SERVICE_NETWORK = 'ambient-wrong-network'
     $env:PITCREW_AUTOSCALING_MODE = 'ambient-mode'
     $env:PITCREW_AUTOSCALING_MIN_IDLE = '99'
@@ -4426,6 +4537,9 @@ try {
             -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
             -Value (($dockerArguments | ForEach-Object { [string]$_ }) -join "`t")
         if ($dockerArguments[0] -eq 'compose') {
+            Add-Content `
+                -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
+                -Value "compose-writable-env`tPITCREW_READ_WRITE_VOLUMES=$env:PITCREW_READ_WRITE_VOLUMES"
             Add-Content `
                 -LiteralPath $env:PITCREW_RUNNER_DOCKER_LOG `
                 -Value "compose-env`tACCESS_TOKEN=$env:ACCESS_TOKEN`tREPO_URLS=$env:REPO_URLS`tREPO_URL=$env:REPO_URL`tRUNNER_PROFILE_ID=$env:RUNNER_PROFILE_ID`tRUNNER_REPLICAS=$env:RUNNER_REPLICAS`tRUNNER_IMAGE=$env:RUNNER_IMAGE`tPITCREW_WORKER_IMAGE_ID=$env:PITCREW_WORKER_IMAGE_ID`tPITCREW_WORKER_MEMORY_BYTES=$env:PITCREW_WORKER_MEMORY_BYTES`tPITCREW_WORKER_MEMORY_SWAP_BYTES=$env:PITCREW_WORKER_MEMORY_SWAP_BYTES`tPITCREW_WORKER_CPU_CORES=$env:PITCREW_WORKER_CPU_CORES`tPITCREW_WORKER_PIDS_LIMIT=$env:PITCREW_WORKER_PIDS_LIMIT`tPITCREW_WORKER_RUNTIME_DEVICES=$env:PITCREW_WORKER_RUNTIME_DEVICES`tPITCREW_WORKER_SHM_SIZE_BYTES=$env:PITCREW_WORKER_SHM_SIZE_BYTES`tPITCREW_READ_ONLY_VOLUMES=$env:PITCREW_READ_ONLY_VOLUMES`tPITCREW_SERVICE_NETWORK=$env:PITCREW_SERVICE_NETWORK`tPITCREW_AUTOSCALING_MODE=$env:PITCREW_AUTOSCALING_MODE`tPITCREW_AUTOSCALING_MIN_IDLE=$env:PITCREW_AUTOSCALING_MIN_IDLE`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=$env:PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=$env:PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS`tPITCREW_STATE_DIR=$env:PITCREW_STATE_DIR`tPITCREW_MANAGER_CONTRACT_VERSION=$env:PITCREW_MANAGER_CONTRACT_VERSION"
@@ -4531,7 +4645,13 @@ try {
             $dockerArguments[0] -eq 'volume' -and
             $dockerArguments[1] -eq 'inspect'
         ) {
-            if ($env:PITCREW_TEST_VOLUME_MISSING -eq '1') {
+            if (
+                $env:PITCREW_TEST_VOLUME_MISSING -eq '1' -or
+                (
+                    $env:PITCREW_TEST_VOLUME_MISSING -eq 'writable' -and
+                    $dockerArguments[-1] -eq 'pitcrew-handoff-v1'
+                )
+            ) {
                 $global:LASTEXITCODE = 1
                 return
             }
@@ -4665,6 +4785,9 @@ try {
             ConvertFrom-Json -Depth 20
         $volumeCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
         Add-Check (
+            $volumeCommands -match '^compose-writable-env\tPITCREW_READ_WRITE_VOLUMES=$'
+        ) 'Ambient writable mounts were visible to Docker Compose.'
+        Add-Check (
             $volumeEnvironment -match
                 '(?m)^PITCREW_READ_ONLY_VOLUMES=reference-data=pitcrew-reference-data-v2$'
         ) 'Setup did not pass the approved read-only volume contract to the manager.'
@@ -4684,6 +4807,14 @@ try {
             $volumeCommands -match
                 "--mount`ttype=volume,src=pitcrew-reference-data-v2,dst=/mnt/pitcrew-data/reference-data,readonly,volume-nocopy"
         ) 'Image verification did not receive the read-only external volume.'
+        Add-Check (
+            $volumeEnvironment -match
+                '(?m)^PITCREW_READ_WRITE_VOLUMES=handoff=pitcrew-handoff-v1$' -and
+            $volumeCommands -match
+                "volume`tinspect`t--format`t\{\{\.Name\}\}`tpitcrew-handoff-v1" -and
+            $volumeCommands -match
+                "--mount`ttype=volume,src=pitcrew-handoff-v1,dst=/mnt/pitcrew-data/handoff,volume-nocopy"
+        ) 'Setup did not inspect and attach the writable volume to verification.'
         Add-Check (
             $volumeCommands -match
                 "network`tinspect`t--format`t\{\{\.Name\}\}\|\{\{\.Driver\}\}\|\{\{\.Scope\}\}\|\{\{\.Internal\}\}`tpitcrew-browser-services-v1"
@@ -4712,6 +4843,23 @@ try {
         Add-Check (
             -not ($missingVolumeCommands -match "compose`t.*`tup")
         ) 'A missing external Docker volume reached manager startup.'
+        $env:PITCREW_TEST_VOLUME_MISSING = '0'
+
+        $env:PITCREW_TEST_VOLUME_MISSING = 'writable'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -ProfilePath $changedVolumeManifestPath `
+                    -Token 'test-registration-token' `
+                    -Repos 'https://github.com/example/project=1'
+            } `
+            -ExpectedMessage 'Required external Docker volume' `
+            -Failure 'Setup accepted a missing writable volume.'
+        $missingWritableCommands = @(Get-Content -LiteralPath $dockerLog -Encoding UTF8)
+        Add-Check (
+            -not ($missingWritableCommands -match "compose`t.*`tup")
+        ) 'A missing writable volume reached manager startup.'
         $env:PITCREW_TEST_VOLUME_MISSING = '0'
 
         $env:PITCREW_TEST_NETWORK_MISSING = '1'
@@ -4849,6 +4997,10 @@ try {
             )
         ) 'Default setup did not prepare its pinned image before replacement.'
         Add-Check ($defaultCommands -match "compose-env`tACCESS_TOKEN=`tREPO_URLS=`tREPO_URL=`tRUNNER_PROFILE_ID=`tRUNNER_REPLICAS=`tRUNNER_IMAGE=`tPITCREW_WORKER_IMAGE_ID=`tPITCREW_WORKER_MEMORY_BYTES=`tPITCREW_WORKER_MEMORY_SWAP_BYTES=`tPITCREW_WORKER_CPU_CORES=`tPITCREW_WORKER_PIDS_LIMIT=`tPITCREW_WORKER_RUNTIME_DEVICES=`tPITCREW_WORKER_SHM_SIZE_BYTES=`tPITCREW_READ_ONLY_VOLUMES=`tPITCREW_SERVICE_NETWORK=`tPITCREW_AUTOSCALING_MODE=`tPITCREW_AUTOSCALING_MIN_IDLE=`tPITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS=`tPITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS=`tPITCREW_STATE_DIR=`tPITCREW_MANAGER_CONTRACT_VERSION=$") 'Ambient profile variables were visible to Docker Compose.'
+        Add-Check (
+            $defaultCommands -match '^compose-writable-env\tPITCREW_READ_WRITE_VOLUMES=$' -and
+            $env:PITCREW_READ_WRITE_VOLUMES -eq 'ambient=wrong-writable-volume'
+        ) 'Docker Compose did not isolate and restore ambient writable mounts.'
         Add-Check ($env:RUNNER_PROFILE_ID -eq 'ambient-profile') 'Docker Compose isolation did not restore ambient profile variables.'
 
         Set-TestCapacityAcknowledgement `
@@ -6539,9 +6691,12 @@ Add-Check ($manager -match $diagnosticAttributionPattern) 'Recorded operation ev
 Add-Check ($manager -match [regex]::Escape('DIAGNOSTICS_DIRECTORY="${STATE_DIRECTORY}/diagnostics"')) 'The operation journal is not persisted in the profile state directory.'
 Add-Check (
     $manager -match 'PITCREW_READ_ONLY_VOLUMES' -and
+    $manager -match 'PITCREW_READ_WRITE_VOLUMES' -and
     $manager -match 'docker volume inspect' -and
-    $manager -match 'type=volume,src=\$\{volume_source\},dst=/mnt/pitcrew-data/\$\{volume_name\},readonly,volume-nocopy'
-) 'The fixed manager does not validate and mount external volumes read-only.'
+    $manager -match [regex]::Escape('volume_access_argument=",readonly"') -and
+    $manager -match [regex]::Escape('volume_access_argument=""') -and
+    $manager -match [regex]::Escape('type=volume,src=${volume_source},dst=/mnt/pitcrew-data/${volume_name}${volume_access_argument},volume-nocopy')
+) 'The fixed manager does not validate and mount both external volume modes.'
 Add-Check (
     $manager -match 'PITCREW_SERVICE_NETWORK' -and
     $manager -match 'docker network inspect' -and
@@ -6627,6 +6782,7 @@ Add-Check ($compose -match [regex]::Escape('RUNNER_REPLICAS: ${RUNNER_REPLICAS:-
 Add-Check ($compose -match [regex]::Escape('REPO_URLS: ${REPO_URLS:-}')) 'Compose does not expose legacy repository targets to the bootstrap adapter.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_REVISION: ${PITCREW_WORKER_REVISION:-}')) 'Compose does not pass worker revision state to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_READ_ONLY_VOLUMES: ${PITCREW_READ_ONLY_VOLUMES:-}')) 'Compose does not pass the read-only volume contract to the manager.'
+Add-Check ($compose -match [regex]::Escape('PITCREW_READ_WRITE_VOLUMES: ${PITCREW_READ_WRITE_VOLUMES:-}')) 'Compose does not pass the writable volume contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_SERVICE_NETWORK: ${PITCREW_SERVICE_NETWORK:-}')) 'Compose does not pass the external service network contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_RUNTIME_DEVICES: ${PITCREW_WORKER_RUNTIME_DEVICES:-}')) 'Compose does not pass the typed worker-device contract to the manager.'
 Add-Check ($compose -match [regex]::Escape('PITCREW_WORKER_SHM_SIZE_BYTES: ${PITCREW_WORKER_SHM_SIZE_BYTES:-}')) 'Compose does not pass the shared-memory contract to the manager.'
