@@ -101,6 +101,7 @@ try
 catch (Exception error)
 {
     Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=execution status=failed category={error.GetType().Name}");
+    ReportDockerFailure(error.ToString());
     return 1;
 }
 
@@ -136,29 +137,40 @@ static async Task<string> DockerAsync(string[] arguments, CancellationToken toke
     var diagnostic = await errors;
     if (process.ExitCode != 0)
     {
-        var reason = diagnostic switch
-        {
-            _ when diagnostic.Contains("no space left", StringComparison.OrdinalIgnoreCase) => "storage-capacity",
-            _ when diagnostic.Contains("toomanyrequests", StringComparison.OrdinalIgnoreCase) ||
-                diagnostic.Contains("pull rate limit", StringComparison.OrdinalIgnoreCase) => "registry-rate-limit",
-            _ when diagnostic.Contains("x509", StringComparison.OrdinalIgnoreCase) => "registry-tls",
-            _ when diagnostic.Contains("no such host", StringComparison.OrdinalIgnoreCase) => "registry-dns",
-            _ when diagnostic.Contains("timeout", StringComparison.OrdinalIgnoreCase) => "registry-network-timeout",
-            _ when diagnostic.Contains("permission denied", StringComparison.OrdinalIgnoreCase) ||
-                diagnostic.Contains("operation not permitted", StringComparison.OrdinalIgnoreCase) => "kernel-permission",
-            _ when diagnostic.Contains("manifest unknown", StringComparison.OrdinalIgnoreCase) => "image-pin",
-            _ => "unclassified-docker-failure",
-        };
-        Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=docker-operation status=failed operation={arguments[0]} exit_code={process.ExitCode} reason={reason}");
-        try
-        {
-            Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=storage-pressure available_bytes={new DriveInfo("/var/lib/pitcrew-docker").AvailableFreeSpace}");
-        }
-        catch (IOException)
-        {
-            Console.Error.WriteLine("[pitcrew:nested-smoke] phase=storage-pressure available_bytes=unavailable");
-        }
+        Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=docker-operation status=failed operation={arguments[0]} exit_code={process.ExitCode}");
+        ReportDockerFailure(diagnostic);
         throw new InvalidOperationException("A fixture-owned Docker operation failed.");
     }
     return result;
+}
+
+static void ReportDockerFailure(string diagnostic)
+{
+    bool Contains(string value) => diagnostic.Contains(value, StringComparison.OrdinalIgnoreCase);
+    var reason = diagnostic switch
+    {
+        _ when Contains("no space left") => "storage-capacity",
+        _ when Contains("toomanyrequests") || Contains("pull rate limit") => "registry-rate-limit",
+        _ when Contains("x509") => "registry-tls",
+        _ when Contains("no such host") => "registry-dns",
+        _ when Contains("cgroup") => "cgroup-configuration",
+        _ when Contains("read-only file system") => "read-only-filesystem",
+        _ when Contains("permission denied") || Contains("operation not permitted") => "kernel-permission",
+        _ when Contains("executable file not found") => "image-tool-contract",
+        _ when Contains("timeout") => "runtime-network-timeout",
+        _ when Contains("manifest unknown") => "image-pin",
+        _ => "unclassified-docker-failure",
+    };
+    string[] features = ["cgroup", "mount", "sysctl", "apparmor", "seccomp",
+        "executable", "permission denied", "operation not permitted", "read-only", "shim", "iptables", "runc"];
+    var evidence = string.Join(",", features.Where(Contains).Select(value => value.Replace(' ', '-')));
+    Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=docker-diagnostic reason={reason} evidence={evidence}");
+    try
+    {
+        Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=storage-pressure available_bytes={new DriveInfo("/var/lib/pitcrew-docker").AvailableFreeSpace}");
+    }
+    catch (IOException)
+    {
+        Console.Error.WriteLine("[pitcrew:nested-smoke] phase=storage-pressure available_bytes=unavailable");
+    }
 }

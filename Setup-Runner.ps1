@@ -1619,7 +1619,7 @@ function Test-RunnerNestedDockerImage {
         --pids-limit ([string]$resources.Pids) `
         --entrypoint /bin/sh `
         --env PITCREW_NESTED_DOCKER_VERIFY_ONLY=1 `
-        --tmpfs "/var/lib/pitcrew-docker:rw,nosuid,nodev,size=$($Profile.Runtime.DockerStorageBytes)" `
+        --tmpfs "/var/lib/pitcrew-docker:rw,exec,nosuid,nodev,size=$($Profile.Runtime.DockerStorageBytes)" `
         --tmpfs '/run/pitcrew-docker:rw,nosuid,nodev,size=67108864,mode=0700' `
         $Profile.Image -c $runtimeScript pitcrew-nested-docker run
     if ($LASTEXITCODE -ne 0) {

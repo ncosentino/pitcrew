@@ -12,6 +12,13 @@ $manifestPath = Join-Path $temporary 'profile.json'
 try {
     $fixture | Set-Content $manifestPath -Encoding utf8
     $profile = Resolve-RunnerProfile -RootPath $root -ProfilePath $manifestPath
+    if (-not $profile.DisableDefaultLabels -or
+        $profile.Labels -contains 'self-hosted' -or $profile.Labels -contains 'general-purpose') {
+        throw 'The dedicated example advertised a broad ordinary-worker route.'
+    }
+    foreach ($label in @('linux', 'x64', 'database-ci', 'nested-docker')) {
+        if ($profile.Labels -notcontains $label) { throw "Example manifest omitted workflow label '$label'." }
+    }
     if ($profile.Runtime.DockerMode -cne 'privileged-local' -or
         $profile.Runtime.DockerStorageBytes -ne 4294967296) {
         throw 'Nested runtime normalization did not retain the exact typed policy.'

@@ -23,7 +23,7 @@ qualification; do not treat an unexecuted fixture as production approval.
 | Endpoint | `unix:///run/pitcrew-docker/docker.sock`; worker-local authority only |
 | Unsupported combinations | Fixed workers, rootless hosts/daemon, non-root images, emulation, KVM, external volumes, service networks |
 
-Privileged code can attack the shared host kernel and may defeat namespace
+Privileged code can access host devices, attack the shared kernel and defeat namespace
 restrictions. This is **not a hostile-code sandbox**. Use an authorized isolated
 validation host and trusted repository/group access; never route untrusted forks.
 Do not expose the shared host socket or enable a Docker TCP listener.
@@ -40,7 +40,7 @@ example's host policy onto an existing node.
 jobs:
   affected-native-database-tests:
     # The existing affected-test planner must select this job first.
-    runs-on: [self-hosted, linux, x64, database-ci, nested-docker]
+    runs-on: [linux, x64, database-ci, nested-docker]
     steps:
       - uses: actions/checkout@v6
       - name: Verify the required local engine
@@ -49,7 +49,10 @@ jobs:
         run: ./scripts/run-selected-native-tests
 ```
 
-The last command is a workload-owned placeholder, not a PitCrew executable.
+The manifest deliberately disables broad default labels: it does **not**
+advertise `self-hosted` or `general-purpose`. Do not add either to this route
+without explicitly revisiting group/trust isolation. The last command is a
+workload-owned placeholder, not a PitCrew executable.
 Ordinary build jobs keep their existing pool. Policy/planning stays on
 `automation-control`, without Docker probes or provisioning. Update the consuming
 repository's delivery metadata, routing instructions and executable label-contract
@@ -66,7 +69,8 @@ The parent cgroup consequently cannot accept new processes: **outer `docker exec
 is not supported after delegation**. Job steps inherit the listener's child
 cgroup and can execute normally.
 
-The daemon uses `vfs` and `/var/lib/pitcrew-docker` in a size-limited tmpfs.
+The daemon uses `vfs` and `/var/lib/pitcrew-docker` in a size-limited,
+explicitly executable tmpfs so inner container binaries can run.
 Daemon state, image layers, database files and logs therefore consume the
 worker's memory budget. Copy amplification and cold pulls can be expensive.
 This is not a bounded persistent-disk implementation; large database images may

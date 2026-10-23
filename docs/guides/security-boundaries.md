@@ -43,11 +43,13 @@ paths. Workers receive neither the Docker socket nor the host-proc mount.
 
 ## Keep workers socketless
 
-Worker containers never receive the host Docker socket. Workflows therefore
-cannot control the host daemon. Ordinary workers cannot use local Docker builds,
+Worker containers never receive the host Docker socket. Ordinary workflows
+therefore cannot control the host daemon. Ordinary workers cannot use local Docker builds,
 container actions, service containers, or Testcontainers. The explicitly opted-in
 [nested Docker capability](nested-docker.md) supplies a different, job-local
 daemon; its privileged kernel risk requires separate trusted-host approval.
+Removing the socket is not an isolation guarantee for privileged code: it can
+access host devices and attempt filesystem or kernel escape.
 
 Do not restore host socket access as a convenience. Use a separate disposable
 VM or isolated daemon for Docker-dependent workloads.

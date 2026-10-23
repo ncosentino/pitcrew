@@ -124,7 +124,7 @@ func (p workerRuntimePolicy) dockerArguments() []string {
 	if p.dockerMode != "" {
 		arguments = append(arguments,
 			"--privileged", "--cgroupns", "private",
-			"--tmpfs", "/var/lib/pitcrew-docker:rw,nosuid,nodev,size="+
+			"--tmpfs", "/var/lib/pitcrew-docker:rw,exec,nosuid,nodev,size="+
 				strconv.FormatInt(*p.dockerStorageBytes, 10),
 			"--tmpfs", "/run/pitcrew-docker:rw,nosuid,nodev,size=67108864,mode=0700",
 			"--env", "DOCKER_HOST=unix:///run/pitcrew-docker/docker.sock",

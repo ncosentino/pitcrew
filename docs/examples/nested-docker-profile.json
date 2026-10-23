@@ -4,7 +4,7 @@
   "name": "database-ci",
   "description": "Trusted affected native database tests with a worker-local daemon.",
   "image": "ghcr.io/example/ci-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
-  "labels": ["nested-docker"],
+  "labels": ["linux", "x64", "nested-docker"],
   "replicas": 1,
   "pullImage": true,
   "disableDefaultLabels": true,

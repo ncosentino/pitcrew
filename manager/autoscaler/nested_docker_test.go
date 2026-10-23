@@ -25,7 +25,7 @@ func TestNestedDockerLaunchKeepsTheDaemonInsideTheDisposableWorker(t *testing.T)
 		for _, expected := range []string{
 			"--rm", "--init", "--privileged --cgroupns private",
 			"--memory 3221225472 --memory-swap 3221225472 --cpus 1 --pids-limit 1024",
-			"--tmpfs /var/lib/pitcrew-docker:rw,nosuid,nodev,size=2147483648",
+			"--tmpfs /var/lib/pitcrew-docker:rw,exec,nosuid,nodev,size=2147483648",
 			"--entrypoint /bin/sh", "DOCKER_HOST=unix:///run/pitcrew-docker/docker.sock",
 			"PITCREW_NESTED_DOCKER_VERIFY_ONLY=0",
 			"pitcrew-nested-docker run",
