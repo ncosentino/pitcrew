@@ -65,7 +65,7 @@ env -u ACTIONS_RUNNER_INPUT_JITCONFIG dockerd \
     --data-root /var/lib/pitcrew-docker \
     --exec-root /run/pitcrew-docker/exec \
     --pidfile /run/pitcrew-docker/daemon.pid \
-    --storage-driver vfs \
+    --storage-driver overlay2 \
     --exec-opt native.cgroupdriver=cgroupfs \
     --cgroup-parent /pitcrew-containers \
     --ip 127.0.0.1 \

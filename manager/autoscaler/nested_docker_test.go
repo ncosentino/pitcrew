@@ -45,6 +45,9 @@ func TestNestedDockerLaunchKeepsTheDaemonInsideTheDisposableWorker(t *testing.T)
 			strings.Index(nestedDockerBootstrap, `/actions-runner/bin/Runner.Listener "$@"`) {
 			t.Fatal("runner can start before daemon readiness")
 		}
+		if !strings.Contains(nestedDockerBootstrap, "--storage-driver overlay2") {
+			t.Fatal("nested daemon lost its copy-on-write storage contract")
+		}
 	}
 }
 

@@ -43,6 +43,10 @@ containers. The workers do not receive that socket. Run PitCrew only on a
 dedicated host you trust, and never route untrusted fork pull requests to
 self-hosted runners.
 
+The opt-in [worker-local Docker runtime](docs/guides/nested-docker.md) requires
+privileged trusted workers. A private socket is not a sandbox: privileged code
+can access host devices and attempt filesystem or kernel escape.
+
 ## Quick start
 
 Requirements:

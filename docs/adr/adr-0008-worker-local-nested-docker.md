@@ -49,9 +49,13 @@ outer finite cgroup after moving initial processes to a child. All intended
 daemon/database use is charged to that worker and its existing admission lease.
 Outer `docker exec` is unsupported after cgroup delegation.
 
-Bound daemon state with tmpfs and `vfs`; the memory ceiling covers daemon data
+Bound daemon state with tmpfs and `overlay2`; the memory ceiling covers daemon data
 as well as processes. No state survives the worker. This avoids unbounded
-anonymous outer volumes but incurs cold pulls, RAM cost and copy amplification.
+anonymous outer volumes but incurs cold pulls and RAM cost. Require kernel
+OverlayFS support; there is no fallback to a copy-amplifying driver. Controlled
+qualification found `vfs` exhausted a 1 GiB store during image extraction and a
+2 GiB store during container creation. Copy-on-write addresses that duplication
+without increasing the worker's finite memory/storage policy.
 Large engine images may make it impractical; do not claim a speedup before
 comparable end-to-end measurement.
 

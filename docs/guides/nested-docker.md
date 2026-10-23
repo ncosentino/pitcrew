@@ -19,7 +19,7 @@ qualification; do not treat an unexecuted fixture as production approval.
 | Privilege | Fixed `--privileged --cgroupns private`; no arbitrary flag injection |
 | Admission | Explicit host admission, calibrated to the whole worker plus nested workload |
 | Resources | Explicit CPU, memory, PIDs; memory-plus-swap equals memory; storage smaller than memory |
-| Storage | Bounded disposable tmpfs, `vfs`; no persistent database or image cache |
+| Storage | Bounded disposable tmpfs with `overlay2`; no persistent database or image cache |
 | Endpoint | `unix:///run/pitcrew-docker/docker.sock`; worker-local authority only |
 | Unsupported combinations | Fixed workers, rootless hosts/daemon, non-root images, emulation, KVM, external volumes, service networks |
 
@@ -69,8 +69,11 @@ The parent cgroup consequently cannot accept new processes: **outer `docker exec
 is not supported after delegation**. Job steps inherit the listener's child
 cgroup and can execute normally.
 
-The daemon uses `vfs` and `/var/lib/pitcrew-docker` in a size-limited,
+The daemon requires kernel OverlayFS support and uses `overlay2` with
+`/var/lib/pitcrew-docker` in a size-limited,
 explicitly executable tmpfs so inner container binaries can run.
+The private tmpfs, not the outer image's filesystem, backs the writable layers.
+There is no storage-driver fallback: unsupported storage fails daemon readiness.
 Daemon state, image layers, database files and logs therefore consume the
 worker's memory budget. Copy amplification and cold pulls can be expensive.
 This is not a bounded persistent-disk implementation; large database images may

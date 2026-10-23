@@ -16,6 +16,11 @@ if [ -n "$(docker ps --all --quiet)" ]; then
     exit 1
 fi
 echo '[pitcrew:nested-smoke] phase=fresh-daemon status=passed'
+if [ "$(docker info --format '{{.Driver}}')" != overlay2 ]; then
+    echo '[pitcrew:nested-smoke] phase=storage-policy status=failed' >&2
+    exit 1
+fi
+echo '[pitcrew:nested-smoke] phase=storage-policy status=passed driver=overlay2'
 echo "[pitcrew:nested-smoke] daemon_identity=$(docker info --format '{{.ID}}')"
 budget="$(cat /sys/fs/cgroup/memory.max)|$(cat /sys/fs/cgroup/memory.swap.max)|$(cat /sys/fs/cgroup/pids.max)|$(cat /sys/fs/cgroup/cpu.max)"
 if [ "$budget" != '3221225472|0|1024|100000 100000' ]; then
