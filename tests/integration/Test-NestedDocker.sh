@@ -14,7 +14,7 @@ report() {
         echo
         echo 'Fixture: .NET SDK 10.0.302, Docker 28.5.2, Testcontainers 4.16.0, pinned MariaDB 11.4.5 and Ryuk 0.14.0.'
         echo
-        echo 'Worker-local daemon; two concurrent Linux x64 workers, each 1 CPU / 3 GiB memory / no swap / 1024 PIDs / 1 GiB bounded in-memory daemon storage.'
+        echo 'Worker-local daemon; two concurrent Linux x64 workers, each 1 CPU / 3 GiB memory / no swap / 1024 PIDs / 2 GiB bounded in-memory daemon storage.'
         echo
         echo 'This is a synthetic listener exercising the actual launch builder, not a registered GitHub worker qualification or an application provider suite.'
         echo

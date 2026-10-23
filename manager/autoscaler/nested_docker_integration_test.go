@@ -47,11 +47,22 @@ func TestNestedDockerIntegration(t *testing.T) {
 			launch.runtime = workerRuntimePolicy{}
 		}
 		started := time.Now()
-		id, err := client.run(t.Context(), launch)
+		var id string
+		var err error
+		if index == 2 {
+			id, err = client.create(t.Context(), launch)
+		} else {
+			id, err = client.run(t.Context(), launch)
+		}
 		if err != nil {
 			t.Fatalf("controlled nested worker launch failed: %v", err)
 		}
 		containers = append(containers, id)
+		if index == 2 {
+			if err := client.start(t.Context(), id); err != nil {
+				t.Fatalf("controlled admission-style worker start failed: %v", err)
+			}
+		}
 		worker := &fixtureWorker{id: id, events: make(chan string, 256)}
 		followers.Add(1)
 		go func() {

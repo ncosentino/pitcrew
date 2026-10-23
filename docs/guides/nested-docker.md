@@ -148,6 +148,12 @@ launch builder. It checks database cgroup ancestry and aggregate limits.
 Manager recovery retains existing deterministic adoption coverage; it is not a
 new registered-worker recovery drill.
 
+For focused iterations, dispatch the existing workflow with
+`gh workflow run ci.yml --ref <branch> -f validation_scope=nested-runtime`.
+That manual-only scope runs contracts plus this controlled fixture without
+unrelated Android/BuildKit/fixed-manager work. Its distinct
+`Nested runtime qualification` result cannot substitute for full ready-PR CI.
+
 Markers/job summaries retain phase timings, tested revision, selected inventory,
 concurrency, budgets, parent CPU/memory/pressure counters and explicit unavailable
 scope. No Actions artifacts are uploaded. Every replacement is cold; the warm

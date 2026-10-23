@@ -7,7 +7,7 @@ import (
 
 func nestedDockerLaunch() containerLaunch {
 	memory := int64(3221225472)
-	storage := int64(1073741824)
+	storage := int64(2147483648)
 	pids := int64(1024)
 	return containerLaunch{
 		name: "test-worker", image: "example/runner:qualification", jitConfig: "synthetic",
@@ -25,7 +25,7 @@ func TestNestedDockerLaunchKeepsTheDaemonInsideTheDisposableWorker(t *testing.T)
 		for _, expected := range []string{
 			"--rm", "--init", "--privileged --cgroupns private",
 			"--memory 3221225472 --memory-swap 3221225472 --cpus 1 --pids-limit 1024",
-			"--tmpfs /var/lib/pitcrew-docker:rw,nosuid,nodev,size=1073741824",
+			"--tmpfs /var/lib/pitcrew-docker:rw,nosuid,nodev,size=2147483648",
 			"--entrypoint /bin/sh", "DOCKER_HOST=unix:///run/pitcrew-docker/docker.sock",
 			"PITCREW_NESTED_DOCKER_VERIFY_ONLY=0",
 			"pitcrew-nested-docker run",
