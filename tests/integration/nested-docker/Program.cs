@@ -133,9 +133,31 @@ static async Task<string> DockerAsync(string[] arguments, CancellationToken toke
     var errors = process.StandardError.ReadToEndAsync(token);
     await process.WaitForExitAsync(token);
     var result = await output;
-    await errors;
+    var diagnostic = await errors;
     if (process.ExitCode != 0)
     {
+        var reason = diagnostic switch
+        {
+            _ when diagnostic.Contains("no space left", StringComparison.OrdinalIgnoreCase) => "storage-capacity",
+            _ when diagnostic.Contains("toomanyrequests", StringComparison.OrdinalIgnoreCase) ||
+                diagnostic.Contains("pull rate limit", StringComparison.OrdinalIgnoreCase) => "registry-rate-limit",
+            _ when diagnostic.Contains("x509", StringComparison.OrdinalIgnoreCase) => "registry-tls",
+            _ when diagnostic.Contains("no such host", StringComparison.OrdinalIgnoreCase) => "registry-dns",
+            _ when diagnostic.Contains("timeout", StringComparison.OrdinalIgnoreCase) => "registry-network-timeout",
+            _ when diagnostic.Contains("permission denied", StringComparison.OrdinalIgnoreCase) ||
+                diagnostic.Contains("operation not permitted", StringComparison.OrdinalIgnoreCase) => "kernel-permission",
+            _ when diagnostic.Contains("manifest unknown", StringComparison.OrdinalIgnoreCase) => "image-pin",
+            _ => "unclassified-docker-failure",
+        };
+        Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=docker-operation status=failed operation={arguments[0]} exit_code={process.ExitCode} reason={reason}");
+        try
+        {
+            Console.Error.WriteLine($"[pitcrew:nested-smoke] phase=storage-pressure available_bytes={new DriveInfo("/var/lib/pitcrew-docker").AvailableFreeSpace}");
+        }
+        catch (IOException)
+        {
+            Console.Error.WriteLine("[pitcrew:nested-smoke] phase=storage-pressure available_bytes=unavailable");
+        }
         throw new InvalidOperationException("A fixture-owned Docker operation failed.");
     }
     return result;
