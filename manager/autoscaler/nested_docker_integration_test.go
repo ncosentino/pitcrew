@@ -33,8 +33,8 @@ func TestNestedDockerIntegration(t *testing.T) {
 		}
 	})
 	type fixtureWorker struct {
-		id string
-		events chan string
+		id       string
+		events   chan string
 		daemonID string
 	}
 	start := func(index int, mode string) *fixtureWorker {
@@ -88,8 +88,12 @@ func TestNestedDockerIntegration(t *testing.T) {
 				if strings.HasPrefix(line, "[pitcrew:nested-smoke] daemon_identity=") {
 					worker.daemonID = strings.TrimPrefix(line, "[pitcrew:nested-smoke] daemon_identity=")
 				}
-				if strings.Contains(line, marker) { return }
-				if line == "stream-ended" { t.Fatal("worker ended before its required bounded evidence") }
+				if strings.Contains(line, marker) {
+					return
+				}
+				if line == "stream-ended" {
+					t.Fatal("worker ended before its required bounded evidence")
+				}
 			case <-t.Context().Done():
 				t.Fatal("controlled integration cancelled before its required evidence")
 			}
@@ -110,10 +114,15 @@ func TestNestedDockerIntegration(t *testing.T) {
 	defer timer.Stop()
 	for {
 		running, err := client.isRunning(t.Context(), failed.id)
-		if err != nil { t.Fatalf("daemon-failure inspection failed: %v", err) }
-		if !running { break }
+		if err != nil {
+			t.Fatalf("daemon-failure inspection failed: %v", err)
+		}
+		if !running {
+			break
+		}
 		select {
-		case <-t.Context().Done(): t.Fatal("daemon failure did not terminate its runner")
+		case <-t.Context().Done():
+			t.Fatal("daemon failure did not terminate its runner")
 		case <-timer.C:
 		}
 	}

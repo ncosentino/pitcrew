@@ -297,6 +297,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Select affected nested-runtime qualification
+        id: nested-runtime
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          changed=true
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
+            if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}"; then
+              if git diff --quiet "$BASE" "$GITHUB_SHA" -- \
+                manager/autoscaler manager/Dockerfile docker-compose.yml \
+                RunnerProfiles.Functions.ps1 Setup-Runner.ps1 runner-profile.schema.json \
+                tests/integration/nested-docker tests/integration/Test-NestedDocker.sh \
+                .github/workflows/ci.yml; then
+                changed=false
+              fi
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Nested runtime affected or explicitly requested: $changed"
 
       - name: Run real Docker reconciliation
         run: bash ./tests/integration/Test-CapacityReconciliation.sh
@@ -308,6 +331,7 @@ jobs:
         run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
 
       - name: Set up Go for controlled nested execution
+        if: steps.nested-runtime.outputs.changed == 'true'
         uses: actions/setup-go@v6
         with:
           go-version-file: manager/autoscaler/go.mod
@@ -315,7 +339,9 @@ jobs:
 
       - name: Qualify nested Docker with real Testcontainers
         # Privileged qualification runs only in the existing trusted CI lane.
-        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        if: >-
+          steps.nested-runtime.outputs.changed == 'true' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         run: bash ./tests/integration/Test-NestedDocker.sh
 
   specialized-images:
