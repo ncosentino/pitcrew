@@ -927,9 +927,21 @@ func TestHostAdmissionCreatedContainerRecoveryWithoutLeaseLabelIsRemoved(t *test
 // container recovered across a manager restart re-confirms its lease and is
 // adopted with the lease identity intact.
 func TestHostAdmissionActiveLeaseRestartAdoption(t *testing.T) {
+	t.Run("ordinary", func(t *testing.T) {
+		testHostAdmissionActiveLeaseRestartAdoption(t, containerLaunch{})
+	})
+	t.Run("nested-docker", func(t *testing.T) {
+		testHostAdmissionActiveLeaseRestartAdoption(t, nestedDockerLaunch())
+	})
+}
+
+func testHostAdmissionActiveLeaseRestartAdoption(t *testing.T, launch containerLaunch) {
+	t.Helper()
 	client := newFakeHostAdmissionClient(1)
-	scaler, _, _, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	scaler, _, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
+	scaler.runtime = launch.runtime
+	scaler.resources = launch.resources
 	client.preGrant("profile-a", "slot-running", true)
 
 	container := recoveredContainer{
@@ -967,6 +979,12 @@ func TestHostAdmissionActiveLeaseRestartAdoption(t *testing.T) {
 	client.mu.Unlock()
 	if bound != "runner-running" {
 		t.Fatalf("restart adoption did not bind the exact registration: %q", bound)
+	}
+	docker.mu.Lock()
+	defer docker.mu.Unlock()
+	if len(docker.launches) != 0 || len(docker.starts) != 0 ||
+		len(docker.stops) != 0 || len(docker.stopRemove) != 0 {
+		t.Fatal("adoption restarted or replaced the existing worker/daemon")
 	}
 }
 

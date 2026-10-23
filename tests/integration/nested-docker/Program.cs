@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
+using System.Text.Json;
 using DotNet.Testcontainers.Containers;
 using MySqlConnector;
 using Testcontainers.MariaDb;
@@ -32,6 +33,20 @@ try
         .WithLabel("pitcrew.nested-proof", "true")
         .Build();
     await PhaseAsync("database-readiness", () => database.StartAsync(token));
+    using var bindings = JsonDocument.Parse(await DockerAsync(
+        ["inspect", "--format", "{{json .NetworkSettings.Ports}}", database.Id], token));
+    foreach (var port in bindings.RootElement.EnumerateObject())
+    {
+        if (port.Value.ValueKind == JsonValueKind.Null) { continue; }
+        foreach (var binding in port.Value.EnumerateArray())
+        {
+            if (binding.GetProperty("HostIp").GetString() != "127.0.0.1")
+            {
+                throw new InvalidOperationException("A nested database published outside worker loopback.");
+            }
+        }
+    }
+    Console.WriteLine("[pitcrew:nested-smoke] phase=port-isolation status=passed scope=worker-loopback");
     var databasePid = (await DockerAsync(
         ["inspect", "--format", "{{.State.Pid}}", database.Id], token)).Trim();
     if (!int.TryParse(databasePid, out var pid) || pid < 1 ||

@@ -1919,6 +1919,14 @@ function Get-RunnerHostAdmissionServicePolicySignature {
     return Get-RunnerObjectFingerprint -Value $normalized
 }
 
+function Get-RunnerNestedDockerMode {
+    param([Parameter(Mandatory)][PSCustomObject]$Profile)
+    if ($Profile.Runtime -and $Profile.Runtime.PSObject.Properties['DockerMode']) {
+        return [string]$Profile.Runtime.DockerMode
+    }
+    return ''
+}
+
 <#
 .SYNOPSIS
     Creates static profile metadata used to select in-place reconciliation.
@@ -1945,14 +1953,6 @@ function Get-RunnerHostAdmissionServicePolicySignature {
 .OUTPUTS
     PSCustomObject containing the static contract and its SHA-256 fingerprint.
 #>
-function Get-RunnerNestedDockerMode {
-    param([Parameter(Mandatory)][PSCustomObject]$Profile)
-    if ($Profile.Runtime -and $Profile.Runtime.PSObject.Properties['DockerMode']) {
-        return [string]$Profile.Runtime.DockerMode
-    }
-    return ''
-}
-
 function New-RunnerStaticProfileState {
     [CmdletBinding()]
     param(

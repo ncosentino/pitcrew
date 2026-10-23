@@ -321,15 +321,6 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "Nested runtime affected or explicitly requested: $changed"
 
-      - name: Run real Docker reconciliation
-        run: bash ./tests/integration/Test-CapacityReconciliation.sh
-
-      - name: Run host admission contention
-        run: bash ./tests/integration/Test-HostAdmissionContention.sh
-
-      - name: Run isolated image-builder integration
-        run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
-
       - name: Set up Go for controlled nested execution
         if: steps.nested-runtime.outputs.changed == 'true'
         uses: actions/setup-go@v6
@@ -343,6 +334,15 @@ jobs:
           steps.nested-runtime.outputs.changed == 'true' &&
           (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
         run: bash ./tests/integration/Test-NestedDocker.sh
+
+      - name: Run real Docker reconciliation
+        run: bash ./tests/integration/Test-CapacityReconciliation.sh
+
+      - name: Run host admission contention
+        run: bash ./tests/integration/Test-HostAdmissionContention.sh
+
+      - name: Run isolated image-builder integration
+        run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
 
   specialized-images:
     name: Specialized profile images

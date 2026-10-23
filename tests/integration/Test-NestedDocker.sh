@@ -34,5 +34,5 @@ image_id="$(docker image inspect --format '{{.Id}}' "$image")"
 echo "[pitcrew:nested-smoke] phase=fixture-image-preparation elapsed_seconds=$((SECONDS - started)) revision=$GITHUB_SHA image=$image_id" | tee -a "$log"
 export PITCREW_TEST_NESTED_DOCKER_IMAGE="$image"
 cd "$root/manager/autoscaler"
-go test -tags=nested_docker_integration -count=1 -timeout=20m -run '^TestNestedDockerIntegration$' -v . |
+go test -tags=nested_docker_integration -count=1 -run '^TestNestedDockerIntegration$' -v . |
     tee -a "$log"

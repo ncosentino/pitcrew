@@ -47,16 +47,28 @@ if [ "$status" != 23 ]; then
     exit 1
 fi
 started=$SECONDS
+progress_at=$SECONDS
+previous_count=2147483647
 while :; do
-    remaining=$(docker ps --all --quiet --filter label=pitcrew.nested-proof=true)
+    remaining=$(docker ps --all --quiet)
     if [ -z "$remaining" ]; then break; fi
-    if [ "$((SECONDS - started))" -ge 120 ]; then
+    mapfile -t owned <<< "$remaining"
+    if [ "${#owned[@]}" -lt "$previous_count" ]; then
+        previous_count="${#owned[@]}"
+        progress_at=$SECONDS
+    fi
+    if [ "$((SECONDS - progress_at))" -ge 120 ]; then
         echo '[pitcrew:nested-smoke] phase=reaper-cleanup status=stalled' >&2
         exit 1
     fi
     sleep 1
 done
-echo '[pitcrew:nested-smoke] phase=reaper-cleanup status=passed'
+if [ -n "$(docker volume ls --quiet)" ] ||
+    [ -n "$(docker network ls --quiet --filter type=custom)" ]; then
+    echo '[pitcrew:nested-smoke] phase=reaper-cleanup status=failed reason=owned-resources-remain' >&2
+    exit 1
+fi
+echo "[pitcrew:nested-smoke] phase=reaper-cleanup status=passed elapsed_seconds=$((SECONDS - started))"
 report_counters final
 # The fixture uses synthetic JIT input only; this is not a registered listener.
 case "${ACTIONS_RUNNER_INPUT_JITCONFIG:-}" in

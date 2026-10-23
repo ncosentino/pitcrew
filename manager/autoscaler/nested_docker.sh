@@ -69,6 +69,7 @@ env -u ACTIONS_RUNNER_INPUT_JITCONFIG dockerd \
     --exec-opt native.cgroupdriver=cgroupfs \
     --cgroup-parent /pitcrew-containers \
     --ip 127.0.0.1 \
+    --default-network-opt bridge=com.docker.network.bridge.host_binding_ipv4=127.0.0.1 \
     --log-level error \
     > /run/pitcrew-docker/daemon.log 2>&1 &
 daemon_pid=$!
