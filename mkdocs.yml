@@ -53,6 +53,7 @@ nav:
           - "ADR-0005: Rootless Same-Host Image Building": adr/adr-0005-rootless-same-host-image-building.md
           - "ADR-0006: Expiring Host-Admission Demand": adr/adr-0006-expiring-host-admission-demand.md
           - "ADR-0007: Outbound Read-Only Support Plane": adr/adr-0007-outbound-read-only-support-plane.md
+          - "ADR-0008: Worker-Local Nested Docker": adr/adr-0008-worker-local-nested-docker.md
   - Guides:
       - Overview: guides/index.md
       - Named Profiles: guides/named-profiles.md
@@ -62,6 +63,7 @@ nav:
       - Read-Only External Data Volumes: guides/external-data-volumes.md
       - Pool-Local Services: guides/pool-local-services.md
       - Isolated Image Builder: guides/isolated-image-builder.md
+      - Opt-In Nested Docker: guides/nested-docker.md
       - Android Emulator Runners: guides/android-emulator.md
       - Routing Workloads: guides/routing-workloads.md
       - Host-Local Admission: guides/host-admission.md

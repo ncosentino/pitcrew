@@ -3,6 +3,10 @@
 # state. Each slot owns one foreground `docker run --rm`; after that runner exits,
 # a desired slot launches a clean replacement while a draining slot stops.
 set -u
+if [ -n "${PITCREW_WORKER_DOCKER_MODE:-}${PITCREW_WORKER_DOCKER_STORAGE_BYTES:-}" ]; then
+    echo '[manager] nested Docker requires scale-set mode' >&2
+    exit 1
+fi
 
 SCRIPT_DIRECTORY=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 . "${SCRIPT_DIRECTORY}/reconciliation.sh"

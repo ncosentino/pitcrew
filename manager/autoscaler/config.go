@@ -379,6 +379,21 @@ func (c config) validate() error {
 	if err := c.resources.validate(); err != nil {
 		return err
 	}
+	if err := c.runtime.validateLaunch(c.resources, c.externalVolumes, c.serviceNetwork); err != nil {
+		return err
+	}
+	if c.runtime.dockerMode != "" && (c.architectureLabel != "x64" || !c.hostAdmission.enabled) {
+		return errors.New("nested Docker requires Linux x64 and explicit host admission")
+	}
+	if c.runtime.dockerMode != "" {
+		_, digest, found := strings.Cut(c.runnerImage, "@")
+		if !found || !strings.HasPrefix(digest, "sha256:") {
+			return errors.New("nested Docker requires an operator-approved immutable image digest")
+		}
+		if _, err := parseWorkerImageID("nested Docker image digest", digest); err != nil {
+			return err
+		}
+	}
 	if _, err := parseWorkerImageID("PITCREW_WORKER_IMAGE_ID", c.workerImageID); err != nil {
 		return err
 	}

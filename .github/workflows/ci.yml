@@ -99,6 +99,10 @@ jobs:
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
 
+      - name: Validate opt-in nested Docker contracts
+        shell: pwsh
+        run: ./tests/Test-NestedDockerProfile.ps1
+
       - name: Validate image-builder service
         shell: pwsh
         run: ./tests/Test-ImageBuilderService.ps1
@@ -214,6 +218,7 @@ jobs:
           sh -n manager/container-monitor-group-leader.sh
           sh -n manager/slot-registry.sh
           sh -n manager/reconciliation.sh
+          sh -n manager/autoscaler/nested_docker.sh
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/Test-ContainerSupervision.sh
@@ -226,6 +231,8 @@ jobs:
           bash -n tests/integration/Test-AndroidEmulatorImage.sh
           bash -n tests/integration/Test-HostAdmissionContention.sh
           bash -n tests/integration/Test-IsolatedImageBuilder.sh
+          bash -n tests/integration/Test-NestedDocker.sh
+          bash -n tests/integration/nested-docker/runner.sh
 
       - name: Run manager reconciliation contracts
         run: sh ./tests/Test-ManagerReconciliation.sh
@@ -299,6 +306,17 @@ jobs:
 
       - name: Run isolated image-builder integration
         run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
+
+      - name: Set up Go for controlled nested execution
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: manager/autoscaler/go.mod
+          cache-dependency-path: manager/autoscaler/go.sum
+
+      - name: Qualify nested Docker with real Testcontainers
+        # Privileged qualification runs only in the existing trusted CI lane.
+        if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+        run: bash ./tests/integration/Test-NestedDocker.sh
 
   specialized-images:
     name: Specialized profile images

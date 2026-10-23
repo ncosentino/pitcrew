@@ -163,6 +163,18 @@
       "additionalProperties": false,
       "minProperties": 1,
       "properties": {
+        "docker": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["mode", "storage"],
+          "properties": {
+            "mode": { "const": "privileged-local" },
+            "storage": {
+              "type": "string",
+              "pattern": "^[0-9]+(?:[bBkKmMgGtT]|[kKmMgGtT][bBiI]|[kKmMgGtT][iI][bB])?$"
+            }
+          }
+        },
         "devices": {
           "type": "array",
           "minItems": 1,

@@ -74,7 +74,7 @@ Named profiles conform to
 | `readOnlyVolumes` | No | Existing external Docker named volumes mounted at deterministic `/mnt/pitcrew-data/<name>` paths. |
 | `readWriteVolumes` | No | Existing external Docker named volumes mounted read-write at the same deterministic paths; shared persistent state for trusted jobs. |
 | `serviceNetwork` | No | One existing local, non-internal Docker bridge network that provides stable DNS for operator-owned or explicitly PitCrew-shipped profile services. |
-| `runtime` | No | Bounded container-runtime policy. Only typed KVM access and canonical shared-memory sizing are supported. |
+| `runtime` | No | Typed KVM, shared-memory sizing, or the explicit [nested Docker](guides/nested-docker.md) capability. |
 | `resources` | No | Contract-11 per-worker memory, memory-plus-swap, CPU, and PID policy. |
 | `verificationCommands` | No | Shell commands executed in the prepared image before profile replacement. |
 | `build` | No | Local Docker build context, Dockerfile, and non-secret build arguments. |

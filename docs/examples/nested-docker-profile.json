@@ -1,0 +1,43 @@
+{
+  "$schema": "../../runner-profile.schema.json",
+  "schemaVersion": 1,
+  "name": "database-ci",
+  "description": "Trusted affected native database tests with a worker-local daemon.",
+  "image": "ghcr.io/example/ci-runner@sha256:0000000000000000000000000000000000000000000000000000000000000000",
+  "labels": ["nested-docker"],
+  "replicas": 1,
+  "pullImage": true,
+  "disableDefaultLabels": true,
+  "autoscaling": {
+    "mode": "scale-set",
+    "minimumIdle": 0,
+    "scaleDownDelaySeconds": 60,
+    "maximumActiveWorkers": 2
+  },
+  "hostAdmission": {
+    "namespace": "trusted-ci",
+    "capacityUnits": 8,
+    "safetyMarginUnits": 0,
+    "workerCostUnits": 2,
+    "reservationUnits": 0,
+    "borrowable": true
+  },
+  "resources": {
+    "memory": "8GiB",
+    "memorySwap": "8GiB",
+    "cpus": "2",
+    "pids": 2048
+  },
+  "runtime": {
+    "docker": {
+      "mode": "privileged-local",
+      "storage": "4GiB"
+    }
+  },
+  "verificationCommands": [
+    "test -x /actions-runner/bin/Runner.Listener",
+    "test \"$(id -u)\" = 0",
+    "test \"$(docker --version | cut -d' ' -f3 | tr -d ',')\" = 28.5.2",
+    "command -v dockerd && command -v containerd && command -v runc && command -v iptables && command -v ip && command -v timeout"
+  ]
+}
