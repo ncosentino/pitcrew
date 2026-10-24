@@ -45,6 +45,12 @@ func main() {
 		accessToken: cfg.accessToken,
 	}
 	docker := newDockerCLI()
+	if cfg.runtime.dockerMode != "" {
+		if err := docker.validateNestedDockerImage(context.Background(), cfg.runnerImage); err != nil {
+			fmt.Fprintf(os.Stderr, "pitcrew autoscaler nested Docker preflight: %v\n", err)
+			os.Exit(1)
+		}
+	}
 	if err := docker.validateVolumes(context.Background(), cfg.externalVolumes); err != nil {
 		fmt.Fprintf(os.Stderr, "pitcrew autoscaler volume error: %v\n", err)
 		os.Exit(1)

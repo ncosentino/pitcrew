@@ -13,7 +13,7 @@ on:
         required: false
         default: 'full'
         type: choice
-        options: [full, subset]
+        options: [full, subset, nested-runtime]
 
 permissions:
   contents: read
@@ -46,12 +46,16 @@ jobs:
           fi
 
           case "$scope" in
-            full|subset|ready-only) ;;
+            full|subset|ready-only|nested-runtime) ;;
             *)
               echo "::error::Unsupported validation scope '$scope'."
               exit 1
               ;;
           esac
+          if [ "$scope" = nested-runtime ] && [ "$EVENT_NAME" != workflow_dispatch ]; then
+            echo "::error::Nested-runtime targeting is manual-only; PR readiness still requires full CI."
+            exit 1
+          fi
 
           echo "scope=$scope" >> "$GITHUB_OUTPUT"
           echo "Validation scope: $scope"
@@ -61,7 +65,8 @@ jobs:
     needs: validation-plan
     if: >-
       needs.validation-plan.outputs.scope == 'full' ||
-      needs.validation-plan.outputs.scope == 'subset'
+      needs.validation-plan.outputs.scope == 'subset' ||
+      needs.validation-plan.outputs.scope == 'nested-runtime'
     runs-on: ubuntu-latest
     outputs:
       report_b64: ${{ steps.coverage.outputs.report_b64 }}
@@ -98,6 +103,10 @@ jobs:
       - name: Run runner-profile contracts
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
+
+      - name: Validate opt-in nested Docker contracts
+        shell: pwsh
+        run: ./tests/Test-NestedDockerProfile.ps1
 
       - name: Validate image-builder service
         shell: pwsh
@@ -214,6 +223,7 @@ jobs:
           sh -n manager/container-monitor-group-leader.sh
           sh -n manager/slot-registry.sh
           sh -n manager/reconciliation.sh
+          sh -n manager/autoscaler/nested_docker.sh
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/Test-ContainerSupervision.sh
@@ -226,6 +236,8 @@ jobs:
           bash -n tests/integration/Test-AndroidEmulatorImage.sh
           bash -n tests/integration/Test-HostAdmissionContention.sh
           bash -n tests/integration/Test-IsolatedImageBuilder.sh
+          bash -n tests/integration/Test-NestedDocker.sh
+          bash -n tests/integration/nested-docker/runner.sh
 
       - name: Run manager reconciliation contracts
         run: sh ./tests/Test-ManagerReconciliation.sh
@@ -284,20 +296,61 @@ jobs:
     name: Real Docker capacity reconciliation
     needs: [validation-plan, contracts]
     if: >-
-      needs.validation-plan.outputs.scope == 'full' &&
+      (needs.validation-plan.outputs.scope == 'full' ||
+      needs.validation-plan.outputs.scope == 'nested-runtime') &&
       needs.contracts.result == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
         uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Select affected nested-runtime qualification
+        id: nested-runtime
+        env:
+          EVENT: ${{ github.event_name }}
+          BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+        run: |
+          changed=true
+          if [ "$EVENT" = pull_request ] || [ "$EVENT" = push ]; then
+            if [ -n "$BASE" ] && git cat-file -e "$BASE^{commit}"; then
+              if git diff --quiet "$BASE" "$GITHUB_SHA" -- \
+                manager/autoscaler manager/Dockerfile docker-compose.yml \
+                RunnerProfiles.Functions.ps1 Setup-Runner.ps1 runner-profile.schema.json \
+                tests/integration/nested-docker tests/integration/Test-NestedDocker.sh \
+                .github/workflows/ci.yml; then
+                changed=false
+              fi
+            fi
+          fi
+          echo "changed=$changed" >> "$GITHUB_OUTPUT"
+          echo "Nested runtime affected or explicitly requested: $changed"
+
+      - name: Set up Go for controlled nested execution
+        if: steps.nested-runtime.outputs.changed == 'true'
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: manager/autoscaler/go.mod
+          cache-dependency-path: manager/autoscaler/go.sum
+
+      - name: Qualify nested Docker with real Testcontainers
+        # Privileged qualification runs only in the existing trusted CI lane.
+        if: >-
+          steps.nested-runtime.outputs.changed == 'true' &&
+          (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository)
+        run: bash ./tests/integration/Test-NestedDocker.sh
 
       - name: Run real Docker reconciliation
+        if: needs.validation-plan.outputs.scope == 'full'
         run: bash ./tests/integration/Test-CapacityReconciliation.sh
 
       - name: Run host admission contention
+        if: needs.validation-plan.outputs.scope == 'full'
         run: bash ./tests/integration/Test-HostAdmissionContention.sh
 
       - name: Run isolated image-builder integration
+        if: needs.validation-plan.outputs.scope == 'full'
         run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
 
   specialized-images:
@@ -333,7 +386,7 @@ jobs:
         run: bash ./tests/integration/Test-FixedManagerAdoptionStartup.sh
 
   ci:
-    name: ${{ github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
+    name: ${{ inputs.validation_scope == 'nested-runtime' && 'Nested runtime qualification' || github.event_name == 'pull_request' && github.event.pull_request.draft && 'Draft CI' || 'CI' }}
     needs:
       [
         validation-plan,
@@ -373,6 +426,18 @@ jobs:
           done
 
           case "$SCOPE" in
+            nested-runtime)
+              if [ "$EVENT_NAME" != "workflow_dispatch" ] ||
+                 [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$DOCKER_RESULT" != "success" ] ||
+                 [ "$COMMENT_RESULT" != "skipped" ] ||
+                 [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
+                 [ "$FIXED_ADOPTION_RESULT" != "skipped" ]; then
+                echo "::error::Targeted nested-runtime qualification did not complete as planned."
+                exit 1
+              fi
+              echo "Targeted runtime qualification passed; this is not full merge-gate CI."
+              ;;
             full)
               if [ "$CONTRACTS_RESULT" != "success" ] ||
                  [ "$DOCKER_RESULT" != "success" ] ||

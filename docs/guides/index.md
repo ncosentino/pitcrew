@@ -20,6 +20,8 @@ Use these guides after completing [Getting Started](../getting-started.md):
   ports.
 - [Isolated Image Builder](isolated-image-builder.md) - publish OCI images
   through an mTLS BuildKit service without exposing the orchestration socket.
+- [Opt-In Nested Docker](nested-docker.md) - qualify trusted database workers
+  with a private disposable daemon and explicit aggregate limits.
 - [Android Emulator Runners](android-emulator.md) - run disposable Android 14
   emulators with typed KVM access.
 - [Routing Workloads](routing-workloads.md) - target the correct pool from GitHub Actions.

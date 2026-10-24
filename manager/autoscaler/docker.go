@@ -160,7 +160,7 @@ func (d *dockerCLI) run(ctx context.Context, launch containerLaunch) (string, er
 	if err := launch.resources.validate(); err != nil {
 		return "", fmt.Errorf("reject worker launch with invalid resource policy: %w", err)
 	}
-	if err := launch.runtime.validate(); err != nil {
+	if err := launch.runtime.validateLaunch(launch.resources, launch.volumes, launch.network); err != nil {
 		return "", fmt.Errorf("reject worker launch with invalid runtime policy: %w", err)
 	}
 	output, err := d.executor.run(ctx, buildDockerRunArguments(launch)...)
@@ -182,7 +182,7 @@ func (d *dockerCLI) create(ctx context.Context, launch containerLaunch) (string,
 	if err := launch.resources.validate(); err != nil {
 		return "", fmt.Errorf("reject worker launch with invalid resource policy: %w", err)
 	}
-	if err := launch.runtime.validate(); err != nil {
+	if err := launch.runtime.validateLaunch(launch.resources, launch.volumes, launch.network); err != nil {
 		return "", fmt.Errorf("reject worker launch with invalid runtime policy: %w", err)
 	}
 	output, err := d.executor.run(ctx, buildDockerCreateArguments(launch)...)
@@ -283,6 +283,10 @@ func buildDockerCreateArguments(launch containerLaunch) []string {
 
 func dockerLaunchArguments(verb string, detach bool, launch containerLaunch) []string {
 	arguments := []string{verb, "--rm"}
+	entrypoint := "/actions-runner/bin/Runner.Listener"
+	if launch.runtime.dockerMode != "" {
+		entrypoint = "/bin/sh"
+	}
 	if detach {
 		arguments = append(arguments, "--detach")
 	}
@@ -290,7 +294,7 @@ func dockerLaunchArguments(verb string, detach bool, launch containerLaunch) []s
 		arguments,
 		"--init",
 		"--workdir", "/actions-runner",
-		"--entrypoint", "/actions-runner/bin/Runner.Listener",
+		"--entrypoint", entrypoint,
 		"--name", launch.name,
 	)
 	if launch.network != "" {
@@ -326,8 +330,11 @@ func dockerLaunchArguments(verb string, detach bool, launch containerLaunch) []s
 		"--env",
 		"RUNNER_ALLOW_RUNASROOT=1",
 		launch.image,
-		"run",
 	)
+	if launch.runtime.dockerMode != "" {
+		arguments = append(arguments, "-c", nestedDockerBootstrap, "pitcrew-nested-docker")
+	}
+	arguments = append(arguments, "run")
 	return arguments
 }
 

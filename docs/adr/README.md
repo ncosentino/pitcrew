@@ -17,3 +17,4 @@ them with a new record.
 | [ADR-0005](adr-0005-rootless-same-host-image-building.md) | Accepted | Run the image-builder service rootless on existing nodes and support typed push and non-push image workflows. |
 | [ADR-0006](adr-0006-expiring-host-admission-demand.md) | Accepted | Expire abandoned pending demand without changing durable worker leases. |
 | [ADR-0007](adr-0007-outbound-read-only-support-plane.md) | Accepted | Provide connector-independent diagnostics through an outbound-only, typed, read-only support plane. |
+| [ADR-0008](adr-0008-worker-local-nested-docker.md) | Accepted | Opt trusted scale-set workers into a private, bounded worker-local Docker daemon. |

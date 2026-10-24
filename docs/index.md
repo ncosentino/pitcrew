@@ -77,6 +77,8 @@ GitHub runner scale-set demand to return toward their operator-defined maximum.
   through an mTLS BuildKit service without exposing Docker control.
 - [Automation Control Runners](guides/automation-control.md) provide a minimal,
   non-root scale-set lane for repository policy and orchestration.
+- [Opt-In Nested Docker](guides/nested-docker.md) defines the trusted
+  worker-local daemon capability and its explicit qualification boundary.
 - [Android Emulator Runners](guides/android-emulator.md) run a fresh
   hardware-accelerated Android emulator inside each disposable worker.
 - [Contributor Architecture](contributing/architecture.md) maps implementation

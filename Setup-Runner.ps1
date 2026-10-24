@@ -1585,6 +1585,48 @@ function Restore-RunnerImageTag {
     }
 }
 
+function Test-RunnerNestedDockerImage {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$Profile
+    )
+    if (-not (Get-RunnerNestedDockerMode -Profile $Profile)) {
+        return
+    }
+    $hostContract = & docker info --format `
+        '{{.OSType}}|{{.Architecture}}|{{.CgroupVersion}}|{{join .SecurityOptions ","}}'
+    if ($LASTEXITCODE -ne 0 -or
+        [string]$hostContract -notmatch '^linux\|x86_64\|2\|' -or
+        [string]$hostContract -match 'rootless|userns') {
+        throw 'Nested Docker requires a rootful Linux x64 Docker host with cgroup v2 and without user-namespace remapping.'
+    }
+    $imageContract = & docker image inspect --format `
+        '{{.Os}}|{{.Architecture}}|{{.Config.User}}|{{if .Config.Volumes}}{{len .Config.Volumes}}{{else}}0{{end}}' `
+        $Profile.Image
+    if ($LASTEXITCODE -ne 0 -or
+        [string]$imageContract -notmatch '^linux\|amd64\|(?:|0|root|0:0|root:root)\|0$') {
+        throw 'Nested Docker requires a native Linux amd64 root-user image without image-declared volumes.'
+    }
+    $resources = $Profile.Resources
+    $runtimeScript = Get-Content -LiteralPath (
+        Join-Path $PSScriptRoot 'manager' 'autoscaler' 'nested_docker.sh'
+    ) -Raw -Encoding UTF8
+    & docker run --rm --init --privileged --cgroupns private `
+        --label "pitcrew.verification.profile=$($Profile.Name)" `
+        --memory ([string]$resources.MemoryBytes) `
+        --memory-swap ([string]$resources.MemorySwapBytes) `
+        --cpus ([string]$resources.CpuCores) `
+        --pids-limit ([string]$resources.Pids) `
+        --entrypoint /bin/sh `
+        --env PITCREW_NESTED_DOCKER_VERIFY_ONLY=1 `
+        --tmpfs "/var/lib/pitcrew-docker:rw,exec,nosuid,nodev,size=$($Profile.Runtime.DockerStorageBytes)" `
+        --tmpfs '/run/pitcrew-docker:rw,nosuid,nodev,size=67108864,mode=0700' `
+        $Profile.Image -c $runtimeScript pitcrew-nested-docker run
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Nested Docker daemon readiness or resource delegation verification failed; the current profile was not replaced.'
+    }
+}
+
 function Get-RunnerResolvedImageId {
     param(
         [Parameter(Mandatory)]
@@ -2639,6 +2681,7 @@ try {
 
     if ($Refresh) {
         Write-Host "[image] Reusing the unchanged runner image '$($profileConfig.Image)'"
+        Test-RunnerNestedDockerImage -Profile $profileConfig
     } else {
         try {
             Write-Host "[image] Preparing runner image '$($profileConfig.Image)'"
@@ -2729,6 +2772,7 @@ try {
                     Write-Error "Runner image '$($profileConfig.Image)' does not satisfy the scale-set JIT runtime contract."
                 }
             }
+            Test-RunnerNestedDockerImage -Profile $profileConfig
 
             $resolvedImageId = Get-RunnerResolvedImageId -Image $profileConfig.Image
             $staticProfileState = New-RunnerStaticProfileState `

@@ -9,6 +9,7 @@ $script:RunnerDefinedManagerContractVersion = 11
 $script:RunnerDefinedHostAdmissionContractVersion = 19
 $script:RunnerDefinedDiagnosticsContractVersion = 22
 $script:RunnerWorkerRuntimeContractVersion = 3
+$script:RunnerNestedDockerRuntimeContractVersion = 4
 $script:RunnerManagerJournalMaximumEvents = 64
 $script:RunnerManagerJournalMaximumBytes = 16384
 $script:RunnerManagerJournalMaximumEvidenceLength = 160
@@ -492,6 +493,8 @@ function Resolve-RunnerProfile {
     $effectiveServiceNetwork = $null
     $effectiveRuntimeDevices = @()
     $effectiveSharedMemory = $null
+    $effectiveDockerMode = ''
+    $effectiveDockerStorage = $null
     $build = $null
     $effectiveAutoscaling = $null
     $effectiveHostAdmission = $null
@@ -583,6 +586,10 @@ function Resolve-RunnerProfile {
             }
         }
         if ($manifest.PSObject.Properties['runtime']) {
+            if ($manifest.runtime.PSObject.Properties['docker']) {
+                $effectiveDockerMode = [string]$manifest.runtime.docker.mode
+                $effectiveDockerStorage = [string]$manifest.runtime.docker.storage
+            }
             if ($manifest.runtime.PSObject.Properties['devices']) {
                 $effectiveRuntimeDevices = @(
                     @($manifest.runtime.devices) |
@@ -821,14 +828,54 @@ function Resolve-RunnerProfile {
     } else {
         $null
     }
+    $dockerStorageBytes = if ($effectiveDockerMode) {
+        if ($effectiveDockerMode -cne 'privileged-local') {
+            throw 'Nested Docker supports only the explicit privileged-local mode.'
+        }
+        if ($effectiveImage -cnotmatch '@sha256:[0-9a-f]{64}$') {
+            throw 'Nested Docker requires an operator-approved immutable image digest.'
+        }
+        if (-not $effectiveAutoscaling -or -not $effectiveHostAdmission) {
+            throw 'Nested Docker requires scale-set mode and explicit host admission.'
+        }
+        if (
+            $effectiveRuntimeDevices.Count -gt 0 -or
+            $effectiveReadOnlyVolumes.Count -gt 0 -or
+            $effectiveReadWriteVolumes.Count -gt 0 -or
+            $effectiveServiceNetwork
+        ) {
+            throw 'Nested Docker cannot combine devices, external volumes or service networks.'
+        }
+        $storageBytes = ConvertTo-RunnerByteLimit `
+            -Value $effectiveDockerStorage `
+            -LimitName 'Nested Docker storage' `
+            -MinimumBytes 67108864
+        if (
+            -not $resourcePolicy -or
+            $null -eq $resourcePolicy.MemoryBytes -or
+            $null -eq $resourcePolicy.MemorySwapBytes -or
+            $null -eq $resourcePolicy.CpuCores -or
+            $null -eq $resourcePolicy.Pids -or
+            $resourcePolicy.MemorySwapBytes -ne $resourcePolicy.MemoryBytes -or
+            $storageBytes -ge $resourcePolicy.MemoryBytes
+        ) {
+            throw 'Nested Docker requires explicit CPU, memory, PID and swap-disabled limits, with storage smaller than memory.'
+        }
+        $storageBytes
+    } else {
+        $null
+    }
     $runtimePolicy = if (
         $effectiveRuntimeDevices.Count -gt 0 -or
-        $null -ne $sharedMemoryBytes
+        $null -ne $sharedMemoryBytes -or
+        $effectiveDockerMode
     ) {
         [PSCustomObject][ordered]@{
             Devices = @($effectiveRuntimeDevices)
             DevicesValue = $effectiveRuntimeDevices -join ','
             SharedMemoryBytes = $sharedMemoryBytes
+            DockerMode = $effectiveDockerMode
+            DockerStorageBytes = $dockerStorageBytes
         }
     } else {
         $null
@@ -1872,6 +1919,14 @@ function Get-RunnerHostAdmissionServicePolicySignature {
     return Get-RunnerObjectFingerprint -Value $normalized
 }
 
+function Get-RunnerNestedDockerMode {
+    param([Parameter(Mandatory)][PSCustomObject]$Profile)
+    if ($Profile.Runtime -and $Profile.Runtime.PSObject.Properties['DockerMode']) {
+        return [string]$Profile.Runtime.DockerMode
+    }
+    return ''
+}
+
 <#
 .SYNOPSIS
     Creates static profile metadata used to select in-place reconciliation.
@@ -1945,7 +2000,11 @@ function New-RunnerStaticProfileState {
 
     $staticConfiguration = [PSCustomObject][ordered]@{
         managerContractVersion = [int]$Profile.ManagerContractVersion
-        workerRuntimeContractVersion = $script:RunnerWorkerRuntimeContractVersion
+        workerRuntimeContractVersion = if (Get-RunnerNestedDockerMode -Profile $Profile) {
+            $script:RunnerNestedDockerRuntimeContractVersion
+        } else {
+            $script:RunnerWorkerRuntimeContractVersion
+        }
         profile = [string]$Profile.Name
         image = [string]$Profile.Image
         resolvedImageId = if ([string]::IsNullOrWhiteSpace($ResolvedImageId)) {
@@ -1996,10 +2055,17 @@ function New-RunnerStaticProfileState {
             $null
         }
         runtime = if ($Profile.Runtime) {
-            [PSCustomObject][ordered]@{
+            $runtimeState = [ordered]@{
                 devices = @($Profile.Runtime.Devices)
                 sharedMemoryBytes = $Profile.Runtime.SharedMemoryBytes
             }
+            if (Get-RunnerNestedDockerMode -Profile $Profile) {
+                $runtimeState.docker = [PSCustomObject][ordered]@{
+                    mode = $Profile.Runtime.DockerMode
+                    storageBytes = $Profile.Runtime.DockerStorageBytes
+                }
+            }
+            [PSCustomObject]$runtimeState
         } else {
             $null
         }
@@ -2543,6 +2609,10 @@ function New-RunnerEnvironmentContent {
         ''
     }
     $readOnlyVolumes = [string]$Profile.ReadOnlyVolumesValue
+    $dockerMode = Get-RunnerNestedDockerMode -Profile $Profile
+    $dockerStorage = if ($dockerMode) {
+        [string]$Profile.Runtime.DockerStorageBytes
+    } else { '' }
     $readWriteVolumes = [string]$Profile.ReadWriteVolumesValue
     $serviceNetwork = [string]$Profile.ServiceNetworkValue
     $hostAdmissionNamespace = if ($Profile.HostAdmission) {
@@ -2580,6 +2650,8 @@ function New-RunnerEnvironmentContent {
         "PITCREW_WORKER_PIDS_LIMIT=$pidsLimit"
         "PITCREW_WORKER_RUNTIME_DEVICES=$runtimeDevices"
         "PITCREW_WORKER_SHM_SIZE_BYTES=$sharedMemoryBytes"
+        "PITCREW_WORKER_DOCKER_MODE=$dockerMode"
+        "PITCREW_WORKER_DOCKER_STORAGE_BYTES=$dockerStorage"
         "PITCREW_READ_ONLY_VOLUMES=$readOnlyVolumes"
         "PITCREW_READ_WRITE_VOLUMES=$readWriteVolumes"
         "PITCREW_SERVICE_NETWORK=$serviceNetwork"
