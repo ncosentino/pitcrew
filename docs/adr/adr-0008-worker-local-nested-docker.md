@@ -19,7 +19,8 @@ scale-set JIT launch intentionally overrides the image entrypoint.
 ADR-0005's rootless mTLS BuildKit service remains the image-building contract.
 This proposal introduces a separate typed, trusted-only database capability;
 it does not replace BuildKit, enable host-socket access or change ordinary
-worker defaults. Acceptance awaits controlled and registered-worker evidence.
+worker defaults. Configured CI owns generic runtime coverage; the consuming
+repository owns registered-worker verification during its normal rollout.
 
 ## Options
 
@@ -68,7 +69,7 @@ processes, bridge and state without pruning unrelated resources.
 
 Privileged execution shares the host kernel and is not a strong sandbox.
 Trusted code can deliberately defeat restrictions. Operators must approve
-isolated validation and trusted repository/group routing; fork code is excluded.
+privileged execution and trusted repository/group routing; fork code is excluded.
 Finite cgroups constrain supported cooperative workloads, not a malicious root.
 
 Native architecture, cgroup delegation, reaper access, real SQL connectivity and
@@ -84,7 +85,8 @@ workers select internal runtime contract 4. Manager observed-state contract
 22 does not change. Existing compatible-worker preservation/adoption remains.
 
 The [canonical guide](../guides/nested-docker.md) owns the exact image, profile,
-endpoint, diagnostics, evidence and rollout contract. Retain Proposed/draft
-status until configured CI and the separately authorized registered-worker
-canary pass. Record unavailable counters and queue timings as unavailable;
+endpoint, diagnostics, evidence and rollout contract. The decision remains
+Proposed pending normal architecture review. Consumer rollout verification is
+not a requirement to create a separate upstream test environment or credential.
+Record unavailable counters and queue timings as unavailable;
 publish bounded summaries, not uploaded artifacts or private infrastructure.
