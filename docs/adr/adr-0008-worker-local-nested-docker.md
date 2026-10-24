@@ -1,6 +1,6 @@
 ---
 title: "ADR-0008: Worker-local nested Docker"
-status: "Proposed"
+status: "Accepted"
 date: "2026-10-23"
 authors: []
 tags: ["architecture", "containers", "security", "testcontainers"]
@@ -17,7 +17,7 @@ Docker binary or starting a daemon in an image entrypoint is insufficient:
 scale-set JIT launch intentionally overrides the image entrypoint.
 
 ADR-0005's rootless mTLS BuildKit service remains the image-building contract.
-This proposal introduces a separate typed, trusted-only database capability;
+This decision introduces a separate typed, trusted-only database capability;
 it does not replace BuildKit, enable host-socket access or change ordinary
 worker defaults. Configured CI owns generic runtime coverage; the consuming
 repository owns registered-worker verification during its normal rollout.
@@ -85,8 +85,7 @@ workers select internal runtime contract 4. Manager observed-state contract
 22 does not change. Existing compatible-worker preservation/adoption remains.
 
 The [canonical guide](../guides/nested-docker.md) owns the exact image, profile,
-endpoint, diagnostics, evidence and rollout contract. The decision remains
-Proposed pending normal architecture review. Consumer rollout verification is
+endpoint, diagnostics, evidence and rollout contract. Consumer rollout verification is
 not a requirement to create a separate upstream test environment or credential.
 Record unavailable counters and queue timings as unavailable;
 publish bounded summaries, not uploaded artifacts or private infrastructure.

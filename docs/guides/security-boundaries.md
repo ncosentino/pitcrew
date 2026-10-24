@@ -58,7 +58,7 @@ VM or isolated daemon for Docker-dependent workloads.
 
 Ordinary profiles may select the typed KVM device and canonical shared-memory
 size. Setup verifies them before manager replacement, and both managers render
-the same fixed Docker arguments. The proposed nested Docker exception is
+the same fixed Docker arguments. The opt-in nested Docker exception is
 scale-set-only and rejects KVM, service-network and external-volume combinations.
 
 The contract does not accept arbitrary device paths, Linux capabilities, seccomp
