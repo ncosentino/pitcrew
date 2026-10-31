@@ -227,9 +227,7 @@ jobs:
           sh -n tests/Test-ManagerReconciliation.sh
           sh -n tests/Test-HostAdmission.sh
           sh -n tests/Test-ContainerSupervision.sh
-          bash -n tests/Test-ImageCandidateReport.sh
           sh -n tests/integration/fake-runner/fake-runner.sh
-          bash -n profiles/image-builder/pitcrew-build-image
           bash -n tests/integration/Test-AutomationControlImage.sh
           bash -n tests/integration/Test-CapacityReconciliation.sh
           bash -n tests/integration/Test-FixedManagerAdoptionStartup.sh
@@ -248,13 +246,28 @@ jobs:
       - name: Run container supervision contracts
         run: sh ./tests/Test-ContainerSupervision.sh
 
-      - name: Run image candidate contracts
-        run: bash ./tests/Test-ImageCandidateReport.sh
-
       - name: Validate Docker Compose configuration
         run: |
           docker compose --file docker-compose.yml config --quiet
           docker compose --file services/image-builder/docker-compose.yml config --quiet
+
+  image-candidate:
+    name: Image candidate contracts
+    needs: validation-plan
+    if: >-
+      needs.validation-plan.outputs.scope == 'full' ||
+      needs.validation-plan.outputs.scope == 'subset' ||
+      needs.validation-plan.outputs.scope == 'nested-runtime'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Validate image helper and fixture syntax
+        run: |
+          bash -n profiles/image-builder/pitcrew-build-image
+          bash -n tests/Test-ImageCandidateReport.sh
+      - name: Run image candidate contracts
+        run: bash ./tests/Test-ImageCandidateReport.sh
 
   coverage-comment:
     name: Publish Go coverage comment
@@ -391,6 +404,7 @@ jobs:
       [
         validation-plan,
         contracts,
+        image-candidate,
         coverage-comment,
         docker-integration,
         specialized-images,
@@ -403,6 +417,7 @@ jobs:
       SCOPE: ${{ needs.validation-plan.outputs.scope }}
       PLAN_RESULT: ${{ needs.validation-plan.result }}
       CONTRACTS_RESULT: ${{ needs.contracts.result }}
+      IMAGE_CANDIDATE_RESULT: ${{ needs.image-candidate.result }}
       COMMENT_RESULT: ${{ needs.coverage-comment.result }}
       DOCKER_RESULT: ${{ needs.docker-integration.result }}
       SPECIALIZED_IMAGES_RESULT: ${{ needs.specialized-images.result }}
@@ -418,7 +433,7 @@ jobs:
             exit 1
           fi
 
-          for result in "$CONTRACTS_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
+          for result in "$CONTRACTS_RESULT" "$IMAGE_CANDIDATE_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "::error::A required validation job failed or was cancelled."
               exit 1
@@ -429,6 +444,7 @@ jobs:
             nested-runtime)
               if [ "$EVENT_NAME" != "workflow_dispatch" ] ||
                  [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$IMAGE_CANDIDATE_RESULT" != "success" ] ||
                  [ "$DOCKER_RESULT" != "success" ] ||
                  [ "$COMMENT_RESULT" != "skipped" ] ||
                  [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
@@ -440,6 +456,7 @@ jobs:
               ;;
             full)
               if [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$IMAGE_CANDIDATE_RESULT" != "success" ] ||
                  [ "$DOCKER_RESULT" != "success" ] ||
                  [ "$SPECIALIZED_IMAGES_RESULT" != "success" ] ||
                  [ "$FIXED_ADOPTION_RESULT" != "success" ]; then
@@ -459,6 +476,7 @@ jobs:
               ;;
             subset)
               if [ "$CONTRACTS_RESULT" != "success" ] ||
+                 [ "$IMAGE_CANDIDATE_RESULT" != "success" ] ||
                  [ "$COMMENT_RESULT" != "skipped" ] ||
                  [ "$DOCKER_RESULT" != "skipped" ] ||
                  [ "$SPECIALIZED_IMAGES_RESULT" != "skipped" ] ||
