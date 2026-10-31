@@ -340,6 +340,10 @@ jobs:
           echo "changed=$changed" >> "$GITHUB_OUTPUT"
           echo "Nested runtime affected or explicitly requested: $changed"
 
+      - name: Run isolated image-builder integration
+        if: needs.validation-plan.outputs.scope == 'full'
+        run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
+
       - name: Set up Go for controlled nested execution
         if: steps.nested-runtime.outputs.changed == 'true'
         uses: actions/setup-go@v6
@@ -361,10 +365,6 @@ jobs:
       - name: Run host admission contention
         if: needs.validation-plan.outputs.scope == 'full'
         run: bash ./tests/integration/Test-HostAdmissionContention.sh
-
-      - name: Run isolated image-builder integration
-        if: needs.validation-plan.outputs.scope == 'full'
-        run: bash ./tests/integration/Test-IsolatedImageBuilder.sh
 
   specialized-images:
     name: Specialized profile images

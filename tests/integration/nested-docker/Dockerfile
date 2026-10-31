@@ -7,6 +7,7 @@ RUN apt-get update \
 COPY --from=engine /usr/local/bin/docker /usr/local/bin/dockerd /usr/local/bin/containerd /usr/local/bin/containerd-shim-runc-v2 /usr/local/bin/runc /usr/local/bin/docker-init /usr/local/bin/docker-proxy /usr/local/bin/
 WORKDIR /qualification
 COPY NestedDockerSmoke.csproj Program.cs ./source/
+RUN dotnet --version && docker --version
 RUN test "$(dotnet --version)" = 10.0.302 \
     && test "$(docker --version | cut -d' ' -f3 | tr -d ',')" = 28.5.2 \
     && dotnet publish source/NestedDockerSmoke.csproj --configuration Release --output /qualification/bin \
