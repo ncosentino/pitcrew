@@ -31,15 +31,6 @@
       "requiredChecks": [
         "Build documentation"
       ]
-    },
-    {
-      "source": "repository",
-      "path": ".github/workflows/trusted-auto-merge.yml",
-      "roles": [
-        "draft-optional"
-      ],
-      "draftBehavior": "ready-only",
-      "requiredChecks": []
     }
   ],
   "pullRequestTitle": {

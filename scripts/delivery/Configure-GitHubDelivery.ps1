@@ -308,9 +308,9 @@ if ($status -eq 'ready') {
                 $missingProtectionChecks.Count -eq 0 -and
                 [bool]$snapshot.protection.required_status_checks.strict -and
                 [bool]$snapshot.protection.enforce_admins.enabled -and
-                $null -ne $snapshot.protection.required_pull_request_reviews -and
+                $null -eq $snapshot.protection.required_pull_request_reviews -and
                 -not $hasReviewBypasses -and
-                [bool]$snapshot.protection.required_conversation_resolution.enabled -and
+                -not [bool]$snapshot.protection.required_conversation_resolution.enabled -and
                 -not [bool]$snapshot.protection.allow_force_pushes.enabled -and
                 -not [bool]$snapshot.protection.allow_deletions.enabled
             )
@@ -385,18 +385,13 @@ if ($selectedMode -eq 'Native' -and [string]$snapshot.protectionStatus -ne 'prot
     $protectionBody = [ordered]@{
         required_status_checks = [ordered]@{ strict = $true; checks = $checks }
         enforce_admins = $true
-        required_pull_request_reviews = [ordered]@{
-            dismiss_stale_reviews = $false
-            require_code_owner_reviews = $false
-            required_approving_review_count = 0
-            require_last_push_approval = $false
-        }
+        required_pull_request_reviews = $null
         restrictions = $null
         required_linear_history = $false
         allow_force_pushes = $false
         allow_deletions = $false
         block_creations = $false
-        required_conversation_resolution = $true
+        required_conversation_resolution = $false
         lock_branch = $false
         allow_fork_syncing = $false
     }
