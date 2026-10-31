@@ -607,8 +607,16 @@ else
     digest_blob="blobs/sha256/${digest#sha256:}"
     candidate_failure_category="oci-manifest-missing"
     candidate_failure_detail="OCI output omitted its declared manifest blob."
-    if ! tar -tf "${oci_output}" | grep -Fqx "${digest_blob}"; then
-        echo "OCI output does not contain its declared manifest blob." >&2
+    # Quiet grep can close the pipe before tar finishes its listing.
+    if ! tar -tf "${oci_output}" | grep -Fx -- "${digest_blob}" >/dev/null; then
+        listing_status=("${PIPESTATUS[@]}")
+        if ((listing_status[0] != 0 || listing_status[1] != 1)); then
+            candidate_failure_category="oci-verification-failed"
+            candidate_failure_detail="OCI output verification failed."
+            echo "OCI output member listing failed." >&2
+        else
+            echo "OCI output does not contain its declared manifest blob." >&2
+        fi
         exit 1
     fi
     candidate_output_status="passed"

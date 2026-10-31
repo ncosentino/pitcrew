@@ -14,7 +14,8 @@
     "hostedDefault": "subset",
     "pitcrewDefault": "subset",
     "subsetJobs": [
-      "contracts"
+      "contracts",
+      "image-candidate"
     ]
   },
   "runnerProfiles": [],

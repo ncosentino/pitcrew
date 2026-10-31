@@ -24,6 +24,9 @@ applyTo: "Setup-Runner.ps1,RunnerProfiles.Functions.ps1,runner-profile.schema.js
   hermetic contract tests together when the public profile contract changes.
 - A manager contract version may advance only when fixed and autoscaled
   implementations plus observed-state validation support the same contract.
+- Schema-rejection tests cover both validator exceptions and the resolver's
+  explicit false-result rejection. Success and unrelated failures must still fail
+  those negative tests.
 
 Use [Configuration](../../docs/configuration.md) and
 [Contributor Architecture](../../docs/contributing/architecture.md) for rationale.
