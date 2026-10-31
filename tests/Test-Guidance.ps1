@@ -104,9 +104,13 @@ function New-GuidanceFixture {
 }
 
 try {
+    $expectedInstructionCount = @(
+        Get-ChildItem -LiteralPath (Join-Path $root '.github' 'instructions') `
+            -Recurse -File -Filter '*.instructions.md'
+    ).Count
     $result = & $validator -ProjectRoot $root
-    Add-Check ($result.instructions -eq 9) (
-        'The repository guidance contract did not discover nine instructions.')
+    Add-Check ($result.instructions -eq $expectedInstructionCount) (
+        'The repository guidance contract did not discover the current instruction inventory.')
     Add-Check ($result.adrs -eq 8) (
         'The repository guidance contract did not discover all eight ADRs.')
     $inventory = & $inventoryScript -ProjectRoot $root
@@ -141,11 +145,24 @@ try {
         $supportInstructionPaths -contains
             '.github/instructions/operations-plugin.instructions.md'
     ) 'The support relay does not receive both trust-boundary and product guidance.'
+    $imagePaths = @(
+        'profiles/image-builder/pitcrew-build-image'
+        'tests/Test-ImageCandidateReport.sh'
+    )
+    $imageResolverOutput = @(& $resolver -Path $imagePaths)
+    foreach ($path in $imagePaths) {
+        Add-Check (
+            @($imageResolverOutput | Where-Object {
+                $_.Path -ceq $path -and $_.InstructionPath -ceq
+                    '.github/instructions/image-builder-verification.instructions.md'
+            }).Count -eq 1
+        ) "Image verification guidance was not selected for '$path'."
+    }
 
     $base = Join-Path $temporaryRoot 'base'
     New-GuidanceFixture -Path $base
     Add-Check (
-        (& $validator -ProjectRoot $base).instructions -eq 9
+        (& $validator -ProjectRoot $base).instructions -eq $expectedInstructionCount
     ) 'The clean guidance fixture did not validate.'
 
     $rootBudget = Join-Path $temporaryRoot 'root-budget'
