@@ -32,6 +32,7 @@ BIN_DIRECTORY="${TEMP_DIRECTORY}/bin"
 TLS_DIRECTORY="${TEMP_DIRECTORY}/tls"
 CONTEXT_DIRECTORY="${TEMP_DIRECTORY}/context"
 OUTPUT_DIRECTORY="${TEMP_DIRECTORY}/output"
+REAL_TAR="$(command -v tar)"
 mkdir -p \
     "${BIN_DIRECTORY}" \
     "${TLS_DIRECTORY}" \
@@ -99,7 +100,9 @@ case "${output_value}" in
         oci_root="$(mktemp -d)"
         mkdir -p \
             "${oci_root}/blobs/sha256"
-        printf '{}\n' > "${oci_root}/blobs/sha256/${PITCREW_TEST_DIGEST#sha256:}"
+        if [[ "${PITCREW_TEST_OCI_MANIFEST:-present}" != "missing" ]]; then
+            printf '{}\n' > "${oci_root}/blobs/sha256/${PITCREW_TEST_DIGEST#sha256:}"
+        fi
         jq -n \
             --arg digest "${PITCREW_TEST_DIGEST}" \
             '{schemaVersion:2,manifests:[{digest:$digest}]}' \
@@ -122,10 +125,50 @@ printf '%s\n' "${PITCREW_TEST_REGISTRY_DIGEST:-${PITCREW_TEST_DIGEST}}"
 EOF
 chmod +x "${BIN_DIRECTORY}/crane"
 
+cat > "${BIN_DIRECTORY}/tar" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+if [[ "${1:-}" == "-tf" ]]; then
+    case "${PITCREW_TEST_TAR_MODE:-normal}" in
+        long-listing)
+            "${PITCREW_TEST_REAL_TAR}" "$@"
+            for ((entry = 0; entry < 131072; entry++)); do
+                printf 'fixture-unused-member-%064d\n' "${entry}"
+            done
+            exit 0
+            ;;
+        read-failure)
+            "${PITCREW_TEST_REAL_TAR}" "$@"
+            echo 'Fixture archive read failure.' >&2
+            exit 2
+            ;;
+    esac
+fi
+exec "${PITCREW_TEST_REAL_TAR}" "$@"
+EOF
+chmod +x "${BIN_DIRECTORY}/tar"
+
 export PATH="${BIN_DIRECTORY}:${PATH}"
 export BUILDKIT_TLS_DIR="${TLS_DIRECTORY}"
 export RUNNER_TEMP="${TEMP_DIRECTORY}/runner-temp"
 export PITCREW_TEST_DIGEST="${DIGEST}"
+export PITCREW_TEST_REAL_TAR="${REAL_TAR}"
+
+write_oci_candidate() {
+    local tag="$1"
+    local archive="$2"
+    local report="$3"
+    shift 3
+    "${HELPER}" \
+        --image-ref "registry.example/example/application-ci:${tag}" \
+        --context "${CONTEXT_DIRECTORY}" \
+        --dockerfile "${CONTEXT_DIRECTORY}" \
+        --platform linux/amd64 \
+        --output-oci "${archive}" \
+        --candidate-output "${report}" \
+        --recipe-id application-ci \
+        "$@"
+}
 
 export PITCREW_TEST_CLEANUP_RESULT=failure
 export PITCREW_BUILDER_CLEANUP_TIMEOUT_SECONDS=1
@@ -158,14 +201,10 @@ assert_json \
      )' \
     "Preflight-cleanup candidate report is invalid."
 
-"${HELPER}" \
-    --image-ref registry.example/example/application-ci:verify \
-    --context "${CONTEXT_DIRECTORY}" \
-    --dockerfile "${CONTEXT_DIRECTORY}" \
-    --platform linux/amd64 \
-    --output-oci "${OUTPUT_DIRECTORY}/verification.tar" \
-    --candidate-output "${OUTPUT_DIRECTORY}/oci-candidate.json" \
-    --recipe-id application-ci \
+write_oci_candidate \
+    verify \
+    "${OUTPUT_DIRECTORY}/verification.tar" \
+    "${OUTPUT_DIRECTORY}/oci-candidate.json" \
     --source-repository example-org/example-app \
     --source-commit aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa \
     --workflow-run-id 123 \
@@ -182,6 +221,46 @@ assert_json \
 assert_true \
     "OCI candidate report is not owner-only." \
     test "$(stat -c '%a' "${OUTPUT_DIRECTORY}/oci-candidate.json")" = "600"
+
+export PITCREW_TEST_TAR_MODE=long-listing
+write_oci_candidate \
+    long-listing \
+    "${OUTPUT_DIRECTORY}/long-listing.tar" \
+    "${OUTPUT_DIRECTORY}/long-listing-candidate.json" \
+    >/dev/null
+unset PITCREW_TEST_TAR_MODE
+assert_json \
+    "${OUTPUT_DIRECTORY}/long-listing-candidate.json" \
+    '.status == "ready" and ([.qualifications[].status] | all(. == "passed"))' \
+    "A present manifest with a long trailing member listing was rejected."
+
+export PITCREW_TEST_OCI_MANIFEST=missing
+if write_oci_candidate \
+    missing-manifest \
+    "${OUTPUT_DIRECTORY}/missing-manifest.tar" \
+    "${OUTPUT_DIRECTORY}/missing-manifest-candidate.json" \
+    >/dev/null 2>&1; then
+    fail "An OCI archive without its declared manifest returned success."
+fi
+unset PITCREW_TEST_OCI_MANIFEST
+assert_json \
+    "${OUTPUT_DIRECTORY}/missing-manifest-candidate.json" \
+    '.status == "failed" and .failureCategory == "oci-manifest-missing"' \
+    "Missing OCI manifest was not reported accurately."
+
+export PITCREW_TEST_TAR_MODE=read-failure
+if write_oci_candidate \
+    read-failure \
+    "${OUTPUT_DIRECTORY}/read-failure.tar" \
+    "${OUTPUT_DIRECTORY}/read-failure-candidate.json" \
+    >/dev/null 2>&1; then
+    fail "Archive producer failure after a matching manifest returned success."
+fi
+unset PITCREW_TEST_TAR_MODE
+assert_json \
+    "${OUTPUT_DIRECTORY}/read-failure-candidate.json" \
+    '.status == "failed" and .failureCategory == "oci-verification-failed"' \
+    "An archive read error was misreported as a missing manifest."
 
 "${HELPER}" \
     --image-ref registry.example/example/application-ci:publish \

@@ -29,7 +29,7 @@ report() {
     rm -- "$log"
 }
 trap report EXIT
-docker build --quiet --tag "$image" "$root/tests/integration/nested-docker"
+docker build --progress=plain --tag "$image" "$root/tests/integration/nested-docker"
 image_id="$(docker image inspect --format '{{.Id}}' "$image")"
 echo "[pitcrew:nested-smoke] phase=fixture-image-preparation elapsed_seconds=$((SECONDS - started)) revision=$GITHUB_SHA image=$image_id" | tee -a "$log"
 export PITCREW_TEST_NESTED_DOCKER_IMAGE="$image"

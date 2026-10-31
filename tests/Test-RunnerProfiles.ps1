@@ -56,6 +56,9 @@ $testWorkerImageId = 'sha256:111111111111111111111111111111111111111111111111111
 $changedWorkerImageId = 'sha256:2222222222222222222222222222222222222222222222222222222222222222'
 $digestWorkerImage = 'ghcr.io/example/runner@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 
+# Schema validation can throw its own rejection or return false to the resolver.
+$schemaRejectionPattern = 'not valid with the schema|^Runner profile manifest .+ does not conform to .+\.$'
+
 $errors = [System.Collections.Generic.List[string]]::new()
 $checks = 0
 
@@ -4252,7 +4255,7 @@ try {
                 -RootPath $runnerRoot `
                 -ProfilePath $invalidNetworkManifestPath
         } `
-        -ExpectedMessage 'not valid with the schema' `
+        -ExpectedMessage $schemaRejectionPattern `
         -Failure 'An external profile accepted an invalid service network name.'
 
     $managerNetworkManifestPath = Join-Path $externalDirectory 'manager-network-profile.json'
@@ -4344,12 +4347,12 @@ try {
         @{
             ReadOnly = @()
             ReadWrite = @(@{ name = 'handoff'; source = '/var/run/docker.sock' })
-            Message = 'not valid with the schema'
+            Message = $schemaRejectionPattern
         },
         @{
             ReadOnly = @()
             ReadWrite = @(@{ name = '../handoff'; source = 'pitcrew-handoff-v1' })
-            Message = 'not valid with the schema'
+            Message = $schemaRejectionPattern
         }
     )) {
         $volumeCaseManifest = Get-Content -LiteralPath $externalManifestPath -Raw |
@@ -4425,7 +4428,7 @@ try {
                 -RootPath $runnerRoot `
                 -ProfilePath $invalidVolumeManifestPath
         } `
-        -ExpectedMessage 'not valid with the schema' `
+        -ExpectedMessage $schemaRejectionPattern `
         -Failure 'An external profile accepted a host path as a volume source.'
 
     $excessiveVolumeManifestPath = Join-Path $externalDirectory 'excessive-volume-profile.json'
@@ -4451,7 +4454,7 @@ try {
                 -RootPath $runnerRoot `
                 -ProfilePath $excessiveVolumeManifestPath
         } `
-        -ExpectedMessage 'not valid with the schema' `
+        -ExpectedMessage $schemaRejectionPattern `
         -Failure 'An external profile accepted more than eight read-only volumes.'
 
     $secretManifest = Get-Content -LiteralPath $externalManifestPath -Raw -Encoding UTF8 | ConvertFrom-Json -Depth 10
