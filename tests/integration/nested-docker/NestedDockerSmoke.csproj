@@ -7,7 +7,7 @@
     <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
   </PropertyGroup>
   <ItemGroup>
-    <PackageReference Include="Testcontainers.MariaDb" Version="4.16.0" />
-    <PackageReference Include="MySqlConnector" Version="2.4.0" />
+    <PackageReference Include="Testcontainers.MariaDb" />
+    <PackageReference Include="MySqlConnector" />
   </ItemGroup>
 </Project>
