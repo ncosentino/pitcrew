@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+func forceRegistrationAccessDue(manager *autoscalerManager) {
+	manager.registrationAccessHealth.nextCheckAt = time.Time{}
+}
+
 func TestRegistrationAccessHealthPersistsUntilSuccessfulProbe(t *testing.T) {
 	clock := &fakeClock{current: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)}
 	manager := newAutoscalerManager(
@@ -25,6 +29,7 @@ func TestRegistrationAccessHealthPersistsUntilSuccessfulProbe(t *testing.T) {
 		api:    api,
 	}
 
+	forceRegistrationAccessDue(manager)
 	manager.checkRegistrationAccessIfDue(context.Background())
 	if api.registrationAccessCalls != 1 {
 		t.Fatalf("access checks = %d, want 1", api.registrationAccessCalls)
@@ -52,7 +57,8 @@ func TestRegistrationAccessHealthPersistsUntilSuccessfulProbe(t *testing.T) {
 		t.Fatal("an unrelated GitHub success concealed the credential failure")
 	}
 
-	clock.advance(registrationAccessCheckInterval - time.Second)
+	retryAt := manager.registrationAccessHealth.nextCheckAt
+	clock.current = retryAt.Add(-time.Second)
 	manager.checkRegistrationAccessIfDue(context.Background())
 	if api.registrationAccessCalls != 1 {
 		t.Fatal("credential health check ran before its bounded cadence")
@@ -104,6 +110,7 @@ func TestRegistrationAccessHealthAggregatesMultipleTargets(t *testing.T) {
 		api:    forbidden,
 	}
 
+	forceRegistrationAccessDue(manager)
 	manager.checkRegistrationAccessIfDue(context.Background())
 	health := manager.diagnostics.subsystemHealth()
 	manager.applyRegistrationAccessHealth(&health)
@@ -139,8 +146,8 @@ func TestRegistrationAccessHealthBecomesUnavailableAfterRepeatedFailures(t *test
 	}
 
 	for attempt := 0; attempt < subsystemFailureBand; attempt++ {
+		forceRegistrationAccessDue(manager)
 		manager.checkRegistrationAccessIfDue(context.Background())
-		clock.advance(registrationAccessCheckInterval)
 	}
 	health := manager.diagnostics.subsystemHealth()
 	manager.applyRegistrationAccessHealth(&health)
@@ -186,6 +193,7 @@ func TestRegistrationAccessHealthChecksAcceptedTargetWithoutController(t *testin
 	api.registrationAccessErrors = []error{errGitHubRunnerPermissionDenied}
 	factory.services[targets[0].registrationURL] = api
 
+	forceRegistrationAccessDue(manager)
 	manager.checkRegistrationAccessIfDue(context.Background())
 	if api.registrationAccessCalls != 1 {
 		t.Fatalf("access checks = %d, want 1", api.registrationAccessCalls)
@@ -196,5 +204,72 @@ func TestRegistrationAccessHealthChecksAcceptedTargetWithoutController(t *testin
 		health.GitHub.LastFailure == nil ||
 		health.GitHub.LastFailure.Reason != reasonAuthorizationFailed {
 		t.Fatalf("accepted target health = %#v", health.GitHub)
+	}
+}
+
+func TestRegistrationAccessScheduleIsStaggeredAndBounded(t *testing.T) {
+	first := registrationAccessFirstCheckDelay("automation-control")
+	second := registrationAccessFirstCheckDelay("default")
+	if first < registrationAccessInitialDelay ||
+		first >= registrationAccessInitialDelay+registrationAccessJitterWindow {
+		t.Fatalf("first delay = %s, outside initial jitter window", first)
+	}
+	if second < registrationAccessInitialDelay ||
+		second >= registrationAccessInitialDelay+registrationAccessJitterWindow {
+		t.Fatalf("second delay = %s, outside initial jitter window", second)
+	}
+	if first == second {
+		t.Fatalf("distinct profiles received identical initial delay %s", first)
+	}
+	if first != registrationAccessFirstCheckDelay("automation-control") {
+		t.Fatal("profile jitter is not deterministic")
+	}
+}
+
+func TestRegistrationAccessNextDelayBacksOffRateLimits(t *testing.T) {
+	jitter := registrationAccessJitter("image-builder")
+	tests := []struct {
+		failures    int
+		rateLimited bool
+		expected    time.Duration
+	}{
+		{failures: 0, expected: registrationAccessSuccessInterval + jitter},
+		{failures: 1, expected: registrationAccessFailureInterval + jitter},
+		{
+			failures:    1,
+			rateLimited: true,
+			expected:    registrationAccessRateLimitBase + jitter,
+		},
+		{
+			failures:    2,
+			rateLimited: true,
+			expected:    2*registrationAccessRateLimitBase + jitter,
+		},
+		{
+			failures:    3,
+			rateLimited: true,
+			expected:    registrationAccessMaxBackoff + jitter,
+		},
+		{
+			failures:    20,
+			rateLimited: true,
+			expected:    registrationAccessMaxBackoff + jitter,
+		},
+	}
+	for _, test := range tests {
+		actual := registrationAccessNextDelay(
+			"image-builder",
+			test.failures,
+			test.rateLimited,
+		)
+		if actual != test.expected {
+			t.Fatalf(
+				"failures=%d rateLimited=%t delay=%s, want %s",
+				test.failures,
+				test.rateLimited,
+				actual,
+				test.expected,
+			)
+		}
 	}
 }

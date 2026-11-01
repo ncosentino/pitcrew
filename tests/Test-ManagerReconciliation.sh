@@ -644,6 +644,50 @@ assert_equals \
     "$(github_runner_registration_access_failure_evidence 8)" \
     "Required organization authorization lost its safe evidence category."
 
+assert_equals \
+    "3600" \
+    "$(sed -n 's/^REGISTRATION_ACCESS_SUCCESS_INTERVAL=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "Successful credential authorization still uses the burst-prone short cadence."
+assert_equals \
+    "900" \
+    "$(sed -n 's/^REGISTRATION_ACCESS_RATE_LIMIT_BASE_INTERVAL=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "Rate-limited credential authorization does not start with bounded backoff."
+assert_equals \
+    "300" \
+    "$(sed -n 's/^REGISTRATION_ACCESS_JITTER_WINDOW=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "Credential authorization has no deterministic staggering window."
+
+registration_access_retry_fixture="${TEMP_DIRECTORY}/registration-access-retry.sh"
+sed -n \
+    '/^registration_access_retry_delay() {/,/^reconcile_runner_registration_access() {/p' \
+    "${ROOT}/manager/manage-runners.sh" |
+    sed '$d' > "${registration_access_retry_fixture}"
+. "${registration_access_retry_fixture}"
+REGISTRATION_ACCESS_FAILURE_INTERVAL=300
+REGISTRATION_ACCESS_RATE_LIMIT_BASE_INTERVAL=900
+REGISTRATION_ACCESS_MAX_BACKOFF=3600
+REGISTRATION_ACCESS_JITTER_SECONDS=17
+assert_equals \
+    "317" \
+    "$(registration_access_retry_delay 3 1)" \
+    "Ordinary authorization failure did not retain the bounded retry plus jitter."
+assert_equals \
+    "917" \
+    "$(registration_access_retry_delay 5 1)" \
+    "First rate-limit failure did not apply the initial backoff plus jitter."
+assert_equals \
+    "1817" \
+    "$(registration_access_retry_delay 5 2)" \
+    "Repeated rate-limit failure did not double its backoff."
+assert_equals \
+    "3617" \
+    "$(registration_access_retry_delay 5 3)" \
+    "Rate-limit backoff did not reach its bounded ceiling."
+assert_equals \
+    "3617" \
+    "$(registration_access_retry_delay 5 20)" \
+    "Rate-limit backoff exceeded its bounded ceiling."
+
 fake_docker_directory="${TEMP_DIRECTORY}/fake-docker"
 collected_resources="${TEMP_DIRECTORY}/collected-resources.json"
 partial_resources="${TEMP_DIRECTORY}/partial-resources.json"
