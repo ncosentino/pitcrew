@@ -18,7 +18,15 @@ import (
 const (
 	managerShutdownTimeout             = 50 * time.Second
 	hostAdmissionRecoveryRetryInterval = 30 * time.Second
-	registrationAccessCheckInterval    = 5 * time.Minute
+	// Registration access is a credential-health probe, not demand polling.
+	// Staggered hourly checks avoid a cross-manager registration-token herd.
+	registrationAccessSuccessInterval  = time.Hour
+	registrationAccessFailureInterval  = 5 * time.Minute
+	registrationAccessRateLimitBase    = 15 * time.Minute
+	registrationAccessMaxBackoff       = time.Hour
+	registrationAccessJitterWindow     = 5 * time.Minute
+	registrationAccessInitialDelay     = 30 * time.Second
+	registrationAccessMaxConcurrency   = 4
 )
 
 type autoscalerManager struct {
@@ -106,6 +114,40 @@ type registrationAccessTarget struct {
 	err error
 }
 
+func registrationAccessJitter(profileID string) time.Duration {
+	sum := sha256.Sum256([]byte(profileID))
+	value := int(sum[0])<<8 | int(sum[1])
+	windowSeconds := int(registrationAccessJitterWindow / time.Second)
+	return time.Duration(value%windowSeconds) * time.Second
+}
+
+func registrationAccessFirstCheckDelay(profileID string) time.Duration {
+	return registrationAccessInitialDelay + registrationAccessJitter(profileID)
+}
+
+func registrationAccessNextDelay(
+	profileID string,
+	consecutiveFailures int,
+	rateLimited bool,
+) time.Duration {
+	if consecutiveFailures <= 0 {
+		return registrationAccessSuccessInterval +
+			registrationAccessJitter(profileID)
+	}
+	delay := registrationAccessFailureInterval
+	if rateLimited {
+		delay = registrationAccessRateLimitBase
+		for attempt := 1; attempt < consecutiveFailures &&
+			delay < registrationAccessMaxBackoff; attempt++ {
+			delay *= 2
+		}
+	}
+	if delay > registrationAccessMaxBackoff {
+		delay = registrationAccessMaxBackoff
+	}
+	return delay + registrationAccessJitter(profileID)
+}
+
 func newAutoscalerManager(
 	cfg config,
 	factory scaleSetServiceFactory,
@@ -146,6 +188,11 @@ func newAutoscalerManager(
 		writeObserved:          writeJSONAtomically,
 		writeHardware:          writeJSONAtomically,
 		publishSupportEvidence: publishSupportEvidenceSnapshot,
+		registrationAccessHealth: registrationAccessHealthState{
+			nextCheckAt: managerClock.now().Add(
+				registrationAccessFirstCheckDelay(cfg.profileID),
+			),
+		},
 	}
 }
 
@@ -324,6 +371,9 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 		}
 	}
 	if len(targets) == 0 {
+		m.registrationAccessHealth.nextCheckAt = now.Add(
+			registrationAccessNextDelay(m.cfg.profileID, 0, false),
+		)
 		return
 	}
 
@@ -333,6 +383,7 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 	}
 	sort.Strings(keys)
 	results := make([]error, len(keys))
+	concurrency := make(chan struct{}, registrationAccessMaxConcurrency)
 	var wait sync.WaitGroup
 	for index, key := range keys {
 		target := targets[key]
@@ -347,6 +398,13 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 		wait.Add(1)
 		go func(resultIndex int, api scaleSetService) {
 			defer wait.Done()
+			select {
+			case concurrency <- struct{}{}:
+				defer func() { <-concurrency }()
+			case <-ctx.Done():
+				results[resultIndex] = ctx.Err()
+				return
+			}
 			results[resultIndex] = api.checkRegistrationAccess(ctx)
 		}(index, target.api)
 	}
@@ -356,7 +414,6 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 	previouslyFailed := m.registrationAccessHealth.failed
 	m.registrationAccessHealth.observed = true
 	m.registrationAccessHealth.observedAt = observedAt
-	m.registrationAccessHealth.nextCheckAt = observedAt.Add(registrationAccessCheckInterval)
 	var failures []error
 	for index, err := range results {
 		if err == nil {
@@ -384,6 +441,9 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 		m.registrationAccessHealth.reason = reasonNone
 		m.registrationAccessHealth.evidence = ""
 		m.registrationAccessHealth.consecutiveFailures = 0
+		m.registrationAccessHealth.nextCheckAt = observedAt.Add(
+			registrationAccessNextDelay(m.cfg.profileID, 0, false),
+		)
 		if previouslyFailed {
 			observation.outcome = outcomeRecovered
 			observation.reason = reasonRecovered
@@ -400,6 +460,13 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 	m.registrationAccessHealth.consecutiveFailures = min(
 		m.registrationAccessHealth.consecutiveFailures+1,
 		1000,
+	)
+	m.registrationAccessHealth.nextCheckAt = observedAt.Add(
+		registrationAccessNextDelay(
+			m.cfg.profileID,
+			m.registrationAccessHealth.consecutiveFailures,
+			errors.Is(joined, errGitHubRunnerRateLimited),
+		),
 	)
 	retryAt := m.registrationAccessHealth.nextCheckAt
 	observation.outcome = failureOutcome(joined)

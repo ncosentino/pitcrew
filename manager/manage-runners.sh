@@ -95,7 +95,19 @@ CONTAINER_MONITOR_GROUP_DRAIN_SECONDS="${PITCREW_CONTAINER_MONITOR_GROUP_DRAIN_S
     60
 ))}"
 REGISTRATION_RECONCILE_INTERVAL="${PITCREW_REGISTRATION_RECONCILE_INTERVAL:-60}"
-REGISTRATION_ACCESS_RECONCILE_INTERVAL=300
+# Credential authorization is health evidence, not demand polling. Keep
+# successful checks infrequent and staggered across fixed-profile managers.
+REGISTRATION_ACCESS_SUCCESS_INTERVAL=3600
+REGISTRATION_ACCESS_FAILURE_INTERVAL=300
+REGISTRATION_ACCESS_RATE_LIMIT_BASE_INTERVAL=900
+REGISTRATION_ACCESS_MAX_BACKOFF=3600
+REGISTRATION_ACCESS_JITTER_WINDOW=300
+REGISTRATION_ACCESS_INITIAL_DELAY=30
+REGISTRATION_ACCESS_JITTER_SECONDS=$(
+    printf '%s' "${PROFILE_ID}" |
+        cksum |
+        awk -v window="${REGISTRATION_ACCESS_JITTER_WINDOW}" '{ print $1 % window }'
+)
 REGISTRATION_CLEANUP_THRESHOLD="${PITCREW_REGISTRATION_CLEANUP_THRESHOLD:-2}"
 REGISTRATION_GRACE_SECONDS="${PITCREW_REGISTRATION_GRACE_SECONDS:-90}"
 REGISTRATION_API_TIMEOUT=5
@@ -364,7 +376,11 @@ LAST_RESOURCE_TELEMETRY_SAMPLE_EPOCH=0
 LAST_RESOURCE_TELEMETRY_STATUS=""
 LAST_HOST_HARDWARE_SAMPLE_EPOCH=0
 LAST_REGISTRATION_RECONCILE_EPOCH=0
-LAST_REGISTRATION_ACCESS_RECONCILE_EPOCH=0
+NEXT_REGISTRATION_ACCESS_RECONCILE_EPOCH=$((
+    $(date +%s) +
+    REGISTRATION_ACCESS_INITIAL_DELAY +
+    REGISTRATION_ACCESS_JITTER_SECONDS
+))
 REGISTRATION_ACCESS_HEALTH_STATUS="unknown"
 REGISTRATION_ACCESS_HEALTH_REASON="unknown"
 REGISTRATION_ACCESS_HEALTH_EVIDENCE=""
@@ -1206,13 +1222,31 @@ registration_endpoint_for_slot() {
         "${ENTERPRISE_NAME:-}"
 }
 
+registration_access_retry_delay() {
+    access_code="$1"
+    access_failures="$2"
+    access_delay="${REGISTRATION_ACCESS_FAILURE_INTERVAL}"
+    if [ "${access_code}" -eq 5 ]; then
+        access_delay="${REGISTRATION_ACCESS_RATE_LIMIT_BASE_INTERVAL}"
+        access_attempt=1
+        while [ "${access_attempt}" -lt "${access_failures}" ] &&
+            [ "${access_delay}" -lt "${REGISTRATION_ACCESS_MAX_BACKOFF}" ]; do
+            access_delay=$((access_delay * 2))
+            access_attempt=$((access_attempt + 1))
+        done
+    fi
+    if [ "${access_delay}" -gt "${REGISTRATION_ACCESS_MAX_BACKOFF}" ]; then
+        access_delay="${REGISTRATION_ACCESS_MAX_BACKOFF}"
+    fi
+    printf '%s\n' $((access_delay + REGISTRATION_ACCESS_JITTER_SECONDS))
+}
+
 reconcile_runner_registration_access() {
     registration_access_now=$(date +%s)
-    if [ $((registration_access_now - LAST_REGISTRATION_ACCESS_RECONCILE_EPOCH)) \
-        -lt "${REGISTRATION_ACCESS_RECONCILE_INTERVAL}" ]; then
+    if [ "${registration_access_now}" -lt \
+        "${NEXT_REGISTRATION_ACCESS_RECONCILE_EPOCH}" ]; then
         return
     fi
-    LAST_REGISTRATION_ACCESS_RECONCILE_EPOCH="${registration_access_now}"
     rm -rf "${REGISTRATION_ACCESS_DIRECTORY}"
     mkdir -p "${REGISTRATION_ACCESS_DIRECTORY}"
     access_targets_path="${REGISTRATION_ACCESS_DIRECTORY}/targets.tsv"
@@ -1226,8 +1260,16 @@ reconcile_runner_registration_access() {
         [ "${REGISTRATION_ACCESS_HEALTH_FAILURES}" -le 1000 ] ||
             REGISTRATION_ACCESS_HEALTH_FAILURES=1000
         REGISTRATION_ACCESS_HEALTH_OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+        access_retry_delay=$(
+            registration_access_retry_delay \
+                1 \
+                "${REGISTRATION_ACCESS_HEALTH_FAILURES}"
+        )
+        NEXT_REGISTRATION_ACCESS_RECONCILE_EPOCH=$((
+            registration_access_now + access_retry_delay
+        ))
         REGISTRATION_ACCESS_HEALTH_RETRY_AT=$(
-            diagnostic_retry_timestamp "${REGISTRATION_ACCESS_RECONCILE_INTERVAL}"
+            diagnostic_retry_timestamp "${access_retry_delay}"
         )
         record_manager_diagnostic \
             registration \
@@ -1254,6 +1296,11 @@ reconcile_runner_registration_access() {
             REGISTRATION_ACCESS_HEALTH_RETRY_AT=""
             mark_observed_state_dirty
         fi
+        NEXT_REGISTRATION_ACCESS_RECONCILE_EPOCH=$((
+            registration_access_now +
+                REGISTRATION_ACCESS_SUCCESS_INTERVAL +
+                REGISTRATION_ACCESS_JITTER_SECONDS
+        ))
         return
     fi
 
@@ -1308,9 +1355,6 @@ reconcile_runner_registration_access() {
 
     previous_access_status="${REGISTRATION_ACCESS_HEALTH_STATUS}"
     REGISTRATION_ACCESS_HEALTH_OBSERVED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-    REGISTRATION_ACCESS_HEALTH_RETRY_AT=$(
-        diagnostic_retry_timestamp "${REGISTRATION_ACCESS_RECONCILE_INTERVAL}"
-    )
     if [ "${access_failures}" -gt 0 ]; then
         access_reason=$(
             github_runner_registration_access_failure_reason \
@@ -1330,6 +1374,17 @@ reconcile_runner_registration_access() {
         fi
         [ "${REGISTRATION_ACCESS_HEALTH_FAILURES}" -le 1000 ] ||
             REGISTRATION_ACCESS_HEALTH_FAILURES=1000
+        access_retry_delay=$(
+            registration_access_retry_delay \
+                "${access_failure_code}" \
+                "${REGISTRATION_ACCESS_HEALTH_FAILURES}"
+        )
+        NEXT_REGISTRATION_ACCESS_RECONCILE_EPOCH=$((
+            registration_access_now + access_retry_delay
+        ))
+        REGISTRATION_ACCESS_HEALTH_RETRY_AT=$(
+            diagnostic_retry_timestamp "${access_retry_delay}"
+        )
         record_manager_diagnostic \
             registration \
             registration-token-request \
@@ -1346,6 +1401,11 @@ reconcile_runner_registration_access() {
         REGISTRATION_ACCESS_HEALTH_EVIDENCE=""
         REGISTRATION_ACCESS_HEALTH_FAILURES=0
         REGISTRATION_ACCESS_HEALTH_RETRY_AT=""
+        NEXT_REGISTRATION_ACCESS_RECONCILE_EPOCH=$((
+            registration_access_now +
+                REGISTRATION_ACCESS_SUCCESS_INTERVAL +
+                REGISTRATION_ACCESS_JITTER_SECONDS
+        ))
         if [ "${previous_access_status}" = "failed" ]; then
             record_manager_diagnostic \
                 registration \
