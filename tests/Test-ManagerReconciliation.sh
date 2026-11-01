@@ -646,15 +646,15 @@ assert_equals \
 
 assert_equals \
     "3600" \
-    "$(sed -n 's/^REGISTRATION_ACCESS_SUCCESS_INTERVAL=\\([0-9][0-9]*\\)$/\\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "$(sed -n 's/^REGISTRATION_ACCESS_SUCCESS_INTERVAL=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "Successful credential authorization still uses the burst-prone short cadence."
 assert_equals \
     "900" \
-    "$(sed -n 's/^REGISTRATION_ACCESS_RATE_LIMIT_BASE_INTERVAL=\\([0-9][0-9]*\\)$/\\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "$(sed -n 's/^REGISTRATION_ACCESS_RATE_LIMIT_BASE_INTERVAL=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "Rate-limited credential authorization does not start with bounded backoff."
 assert_equals \
     "300" \
-    "$(sed -n 's/^REGISTRATION_ACCESS_JITTER_WINDOW=\\([0-9][0-9]*\\)$/\\1/p' "${ROOT}/manager/manage-runners.sh")" \
+    "$(sed -n 's/^REGISTRATION_ACCESS_JITTER_WINDOW=\([0-9][0-9]*\)$/\1/p' "${ROOT}/manager/manage-runners.sh")" \
     "Credential authorization has no deterministic staggering window."
 
 registration_access_retry_fixture="${TEMP_DIRECTORY}/registration-access-retry.sh"
