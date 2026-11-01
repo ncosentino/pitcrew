@@ -236,14 +236,22 @@ function Test-PitCrewUnlinkedPath {
             $paths.Add($current)
         }
     }
-    foreach ($path in $paths) {
-        if (-not (Test-Path -LiteralPath $path)) {
-            continue
+    try {
+        foreach ($path in $paths) {
+            if (-not (Test-Path -LiteralPath $path -ErrorAction Stop)) {
+                continue
+            }
+            $item = Get-Item -LiteralPath $path -Force -ErrorAction Stop
+            if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+                return $false
+            }
         }
-        $item = Get-Item -LiteralPath $path -Force
-        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-            return $false
-        }
+    } catch [UnauthorizedAccessException] {
+        return $null
+    } catch [IO.IOException] {
+        return $null
+    } catch [Security.SecurityException] {
+        return $null
     }
     return $true
 }
@@ -782,9 +790,17 @@ function Get-PitCrewConnectorHealth {
         Join-Path $connectorBaseRoot 'pitcrew-connector'
     }
     $healthRoot = Join-Path $dataRoot 'health'
-    if (-not (Test-PitCrewUnlinkedPath `
-            -BasePath $connectorBaseRoot `
-            -TargetPath $healthRoot)) {
+    $healthPathIsUnlinked = Test-PitCrewUnlinkedPath `
+        -BasePath $connectorBaseRoot `
+        -TargetPath $healthRoot
+    if ($null -eq $healthPathIsUnlinked) {
+        Add-PitCrewUnavailable `
+            -Category 'connector-health' `
+            -Reason 'The connector health path could not be inspected through the bounded path-safety check.' `
+            -FollowUp 'Grant the diagnostics principal inherited read and traverse access through the supported connector installer, then repeat collection.'
+        return $null
+    }
+    if (-not $healthPathIsUnlinked) {
         Add-PitCrewUnavailable `
             -Category 'connector-health' `
             -Reason 'The connector health path contains a linked directory.' `
