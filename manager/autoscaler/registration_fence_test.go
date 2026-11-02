@@ -2,7 +2,9 @@ package main
 
 import (
 	"os"
+	"sync"
 	"testing"
+	"time"
 )
 
 func validRegistrationFenceRecord() registrationFenceRecord {
@@ -73,5 +75,72 @@ func TestRegistrationFenceDocumentRejectsInvalidInput(t *testing.T) {
 		); err == nil {
 			t.Fatalf("invalid registration fence was accepted: %s", data)
 		}
+	}
+}
+
+func TestRegistrationFenceWritesSerializeMapAndSnapshot(t *testing.T) {
+		scaler, _, _, _, cancel := newTestScaler(t, 2, 0, 0)
+		defer cancel()
+		releaseFirst := make(chan struct{})
+		store := &blockingRegistrationFenceStore{
+			firstStarted: make(chan struct{}),
+			releaseFirst: releaseFirst,
+			secondSaved:  make(chan struct{}),
+		}
+		scaler.fenceStore = store
+		runners := []runnerRecord{
+			{
+				key:         "repo-1234-1",
+				targetKey:   "repo-1234",
+				runnerName:  "runner-one",
+				runnerID:    1,
+				containerID: "container-one",
+				container:   "runner-one",
+			},
+			{
+				key:         "repo-1234-2",
+				targetKey:   "repo-1234",
+				runnerName:  "runner-two",
+				runnerID:    2,
+				containerID: "container-two",
+				container:   "runner-two",
+			},
+		}
+		var wait sync.WaitGroup
+		wait.Add(2)
+		go func() {
+			defer wait.Done()
+			if _, err := scaler.beginPendingRegistrationFence(
+				runners[0],
+				registrationFenceShutdown,
+				scaler.clock.now().UTC(),
+			); err != nil {
+				t.Errorf("persist registration fence: %v", err)
+			}
+		}()
+		<-store.firstStarted
+		secondCalling := make(chan struct{})
+		go func() {
+			defer wait.Done()
+			close(secondCalling)
+			if _, err := scaler.beginPendingRegistrationFence(
+				runners[1],
+				registrationFenceShutdown,
+				scaler.clock.now().UTC(),
+			); err != nil {
+				t.Errorf("persist second registration fence: %v", err)
+			}
+		}()
+		<-secondCalling
+		select {
+		case <-store.secondSaved:
+			t.Fatal("second fence snapshot wrote while the first transaction was incomplete")
+		case <-time.After(50 * time.Millisecond):
+		}
+		close(releaseFirst)
+		wait.Wait()
+		records, err := store.load()
+		if err != nil || len(records) != 2 {
+			t.Fatalf("serialized fence writes lost an identity: %#v %v", records, err)
 	}
 }

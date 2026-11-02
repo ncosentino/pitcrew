@@ -328,3 +328,63 @@ func TestRegistrationAccessDeadlineSurvivesManagerRestart(t *testing.T) {
 			t.Fatal("registration access did not resume at persisted deadline")
 	}
 }
+
+func TestRegistrationAccessPrecommitsConservativeDeadline(t *testing.T) {
+	directory := projectTestDirectory(t)
+	cfg := managerTestConfig(directory)
+	clock := &fakeClock{
+		current: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+	}
+	manager := newAutoscalerManager(
+		cfg,
+		newFakeScaleSetServiceFactory(),
+		newFakeDockerClient(nil),
+		clock,
+		slog.New(slog.NewTextHandler(io.Discard, nil)),
+		"manager-test",
+	)
+	started := make(chan struct{}, 1)
+	continued := make(chan struct{})
+	api := newFakeScaleSetService(nil)
+	api.registrationAccessStarted = started
+	api.registrationAccessContinue = continued
+	manager.controllers["target"] = &targetController{
+		target: targetSpec{key: "target"},
+		api:    api,
+	}
+	forceRegistrationAccessDue(manager)
+	done := make(chan struct{})
+	go func() {
+		manager.checkRegistrationAccessIfDue(context.Background())
+		close(done)
+	}()
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("credential probe did not start")
+	}
+
+	state, exists, err := loadRegistrationAccessRetryState(
+		manager.paths.registrationAccess,
+		cfg.profileID,
+	)
+	if err != nil || !exists {
+		t.Fatalf("credential preflight was not persisted: %#v %v", state, err)
+	}
+	expected := clock.now().Add(
+		registrationAccessNextDelay(cfg.profileID, 0, false),
+	).UTC().Format(time.RFC3339)
+	if state.NextCheckAt != expected {
+		t.Fatalf(
+			"credential preflight deadline = %s, want %s",
+			state.NextCheckAt,
+			expected,
+		)
+	}
+	close(continued)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("credential probe did not finish")
+	}
+}

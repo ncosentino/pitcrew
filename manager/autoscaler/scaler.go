@@ -126,6 +126,7 @@ type scalerSnapshot struct {
 type runnerScaler struct {
 	operationGate         chan struct{}
 	mu                    sync.Mutex
+	fencePersistenceMu    sync.Mutex
 	hostLeaseSettlementMu sync.Mutex
 
 	lifecycleContext  context.Context
@@ -1642,6 +1643,8 @@ func (s *runnerScaler) beginPendingRegistrationFence(
 	purpose string,
 	now time.Time,
 ) (registrationFenceRecord, error) {
+	s.fencePersistenceMu.Lock()
+	defer s.fencePersistenceMu.Unlock()
 	s.mu.Lock()
 	record, exists := s.pendingFences[runner.key]
 	if !exists {
@@ -1682,6 +1685,8 @@ func (s *runnerScaler) preparePendingRegistrationFenceRetry(
 	record registrationFenceRecord,
 	now time.Time,
 ) (registrationFenceRecord, error) {
+	s.fencePersistenceMu.Lock()
+	defer s.fencePersistenceMu.Unlock()
 	s.mu.Lock()
 	current, exists := s.pendingFences[record.SlotKey]
 	if !exists {
@@ -1735,6 +1740,8 @@ func (s *runnerScaler) resolvePendingRegistrationFence(
 	slotKey string,
 	reason string,
 ) {
+	s.fencePersistenceMu.Lock()
+	defer s.fencePersistenceMu.Unlock()
 	s.mu.Lock()
 	_, exists := s.pendingFences[slotKey]
 	delete(s.pendingFences, slotKey)

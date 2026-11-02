@@ -70,6 +70,8 @@ type fakeScaleSetService struct {
 	ensureErrors             []error
 	registrationAccessErrors []error
 	registrationAccessCalls  int
+	registrationAccessStarted chan struct{}
+	registrationAccessContinue <-chan struct{}
 	deletedScaleSet          []int
 	scaleSetExists           bool
 	openSessionCalls         int
@@ -212,13 +214,24 @@ func (s *fakeScaleSetService) removeRunner(_ context.Context, runnerID int64) er
 
 func (s *fakeScaleSetService) checkRegistrationAccess(context.Context) error {
 	s.mu.Lock()
-	defer s.mu.Unlock()
 	s.registrationAccessCalls++
-	if len(s.registrationAccessErrors) == 0 {
-		return nil
+	var err error
+	if len(s.registrationAccessErrors) > 0 {
+		err = s.registrationAccessErrors[0]
+		s.registrationAccessErrors = s.registrationAccessErrors[1:]
 	}
-	err := s.registrationAccessErrors[0]
-	s.registrationAccessErrors = s.registrationAccessErrors[1:]
+	started := s.registrationAccessStarted
+	continued := s.registrationAccessContinue
+	s.mu.Unlock()
+	if started != nil {
+		select {
+		case started <- struct{}{}:
+		default:
+		}
+	}
+	if continued != nil {
+		<-continued
+	}
 	return err
 }
 
@@ -812,6 +825,44 @@ func (s *failSecondRegistrationCleanupSaveStore) save(
 type failSecondRegistrationFenceSaveStore struct {
 	records   []registrationFenceRecord
 	saveCalls int
+}
+
+type blockingRegistrationFenceStore struct {
+	mu          sync.Mutex
+	records     []registrationFenceRecord
+	saveCalls   int
+	firstStarted chan struct{}
+	releaseFirst <-chan struct{}
+	secondSaved chan struct{}
+}
+
+func (s *blockingRegistrationFenceStore) load() (
+	[]registrationFenceRecord,
+	error,
+) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return append([]registrationFenceRecord(nil), s.records...), nil
+}
+
+func (s *blockingRegistrationFenceStore) save(
+	records []registrationFenceRecord,
+) error {
+	s.mu.Lock()
+	s.saveCalls++
+	call := s.saveCalls
+	s.mu.Unlock()
+	if call == 1 {
+		close(s.firstStarted)
+		<-s.releaseFirst
+	}
+	s.mu.Lock()
+	s.records = append([]registrationFenceRecord(nil), records...)
+	s.mu.Unlock()
+	if call == 2 {
+		close(s.secondSaved)
+	}
+	return nil
 }
 
 func (s *failSecondRegistrationFenceSaveStore) load() (
