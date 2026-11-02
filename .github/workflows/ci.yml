@@ -153,7 +153,21 @@ jobs:
         working-directory: manager/autoscaler
         run: |
           coverage_directory="$RUNNER_TEMP/pitcrew-coverage"
-          go test -covermode=atomic -coverprofile="$coverage_directory/autoscaler.out" ./...
+          set +e
+          go test -covermode=atomic -coverprofile="$coverage_directory/autoscaler.out" ./... \
+            2>&1 | tee "$coverage_directory/autoscaler-test-output.txt"
+          test_status=${PIPESTATUS[0]}
+          set -e
+          if [ "$test_status" -ne 0 ]; then
+            grep -E -- \
+              '^--- FAIL|^FAIL|^panic:|^[[:space:]]*[A-Za-z0-9_./-]+_test\.go:[0-9]+:' \
+              "$coverage_directory/autoscaler-test-output.txt" |
+              head -n 50 |
+              while IFS= read -r line; do
+                echo "::error::$line"
+              done
+            exit "$test_status"
+          fi
           go vet ./...
 
       - name: Report Go coverage
