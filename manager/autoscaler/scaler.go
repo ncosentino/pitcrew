@@ -24,7 +24,12 @@ type clock interface {
 
 type realClock struct{}
 
-const staleFenceRetryDelay = 15 * time.Second
+const (
+	staleFenceRetryDelay      = 15 * time.Second
+	workerLaunchRetryBase     = time.Minute
+	workerLaunchRetryMaximum  = 15 * time.Minute
+	workerLaunchRetryEvidence = "worker launch retry is waiting after a failed dependency operation"
+)
 
 func (realClock) now() time.Time {
 	return time.Now()
@@ -160,6 +165,8 @@ type runnerScaler struct {
 	hostAdmission            *hostAdmissionCoordinator
 	diagnostics              *diagnosticsRecorder
 	blocking                 capacityBlock
+	launchFailures           int
+	launchRetryAt            time.Time
 }
 
 func newRunnerScaler(
@@ -612,6 +619,24 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	}
 	current := s.capacityCountLocked()
 	target := s.targetSlots
+	launchNow := s.clock.now().UTC()
+	if target <= current {
+		s.launchFailures = 0
+		s.launchRetryAt = time.Time{}
+	} else if !s.launchRetryAt.IsZero() {
+		if launchNow.Before(s.launchRetryAt) {
+			s.blocking = capacityBlock{
+				reason:   deficitRetryBackoff,
+				evidence: workerLaunchRetryEvidence,
+			}
+			count := current
+			s.mu.Unlock()
+			s.setProfileAdmissionDemand(0)
+			s.hostAdmission.setTargetDemand(s.target.key, 0)
+			return count, errors.Join(operationErrors...)
+		}
+		s.launchRetryAt = time.Time{}
+	}
 	if target >= current {
 		s.scaleDownAt = nil
 	}
@@ -674,12 +699,14 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 					!errors.Is(err, errHostAdmissionUnavailable) &&
 					!errors.Is(err, errHostAdmissionDegraded) {
 					s.hostAdmission.setTargetDemand(s.target.key, 0)
+					s.scheduleLaunchRetry()
 				}
 				return s.capacityCount(), errors.Join(
 					errors.Join(operationErrors...),
 					fmt.Errorf("start missing runner: %w", err),
 				)
 			}
+			s.clearLaunchRetry()
 		}
 		s.hostAdmission.setTargetDemand(s.target.key, 0)
 		s.onChange()
@@ -788,6 +815,44 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		}
 		s.onChange()
 	}
+}
+
+func (s *runnerScaler) scheduleLaunchRetry() {
+	now := s.clock.now().UTC()
+	s.mu.Lock()
+	s.launchFailures++
+	delay := boundedExponentialBackoff(
+		workerLaunchRetryBase,
+		workerLaunchRetryMaximum,
+		s.launchFailures,
+	)
+	retryAt := now.Add(delay)
+	s.launchRetryAt = retryAt
+	s.blocking = capacityBlock{
+		reason:   deficitRetryBackoff,
+		evidence: workerLaunchRetryEvidence,
+	}
+	attempt := s.launchFailures
+	s.mu.Unlock()
+
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemWorkerLaunch,
+		operation: operationWorkerLaunch,
+		target:    s.target.key,
+		outcome:   outcomeRetry,
+		reason:    reasonRetryBackoff,
+		evidence:  workerLaunchRetryEvidence,
+		attempt:   attempt,
+		retryAt:   &retryAt,
+	})
+	s.onChange()
+}
+
+func (s *runnerScaler) clearLaunchRetry() {
+	s.mu.Lock()
+	s.launchFailures = 0
+	s.launchRetryAt = time.Time{}
+	s.mu.Unlock()
 }
 
 // setBlocking records why the scaler could not reach its activation target, so
