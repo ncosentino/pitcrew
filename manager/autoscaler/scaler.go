@@ -25,7 +25,6 @@ type clock interface {
 type realClock struct{}
 
 const (
-	staleFenceRetryDelay      = 15 * time.Second
 	workerLaunchRetryBase     = time.Minute
 	workerLaunchRetryMaximum  = 15 * time.Minute
 	workerLaunchRetryEvidence = "worker launch retry is waiting after a failed dependency operation"
@@ -69,6 +68,7 @@ type runnerRecord struct {
 	currentJob           *observedJobContext
 	revision             string
 	stale                bool
+	fenceAttempts         int
 	fenceRetryAt         *time.Time
 	recovered            bool
 	protected            bool
@@ -159,6 +159,13 @@ type runnerScaler struct {
 
 	cleanupStore             registrationCleanupStore
 	pendingRegistrations     map[string]registrationCleanupRecord
+	cleanupStateError        error
+	fenceStore               registrationFenceStore
+	pendingFences            map[string]registrationFenceRecord
+	fenceStateError          error
+	launchIntentStore        launchIntentStore
+	pendingLaunchIntent      *launchIntentRecord
+	launchIntentStateError   error
 	hostLeaseCleanupStore    hostLeaseCleanupStore
 	pendingHostLeaseReleases map[string]hostLeaseCleanupRecord
 	admission                *admissionController
@@ -227,6 +234,15 @@ func newRunnerScaler(
 			target.key,
 		),
 		pendingRegistrations: make(map[string]registrationCleanupRecord),
+		fenceStore: newRegistrationFenceStore(
+			cfg.stateDirectory,
+			target.key,
+		),
+		pendingFences: make(map[string]registrationFenceRecord),
+		launchIntentStore: newLaunchIntentStore(
+			cfg.stateDirectory,
+			target.key,
+		),
 		hostLeaseCleanupStore: newHostLeaseCleanupStore(
 			cfg.stateDirectory,
 			target.key,
@@ -237,6 +253,8 @@ func newRunnerScaler(
 		diagnostics:              diagnostics,
 	}
 	scaler.restorePendingRegistrations()
+	scaler.restorePendingFences()
+	scaler.restoreLaunchIntent()
 	scaler.restorePendingHostLeaseReleases()
 	scaler.admission.join(target.key, scaler.runnerCount)
 	scaler.operationGate <- struct{}{}
@@ -249,6 +267,7 @@ func newRunnerScaler(
 func (s *runnerScaler) restorePendingRegistrations() {
 	records, err := s.cleanupStore.load()
 	if err != nil {
+		s.cleanupStateError = err
 		s.onError(fmt.Errorf(
 			"restore pending registration cleanup for %s: %w",
 			s.target.key,
@@ -257,6 +276,9 @@ func (s *runnerScaler) restorePendingRegistrations() {
 		return
 	}
 	for _, record := range records {
+		if record.Attempts > maxRegistrationCleanupAttempts {
+			record.Attempts = maxRegistrationCleanupAttempts
+		}
 		s.pendingRegistrations[record.SlotKey] = record
 	}
 	if len(records) > 0 {
@@ -264,6 +286,45 @@ func (s *runnerScaler) restorePendingRegistrations() {
 			"Restored pending runner registration cleanup",
 			"pendingRegistrations", len(records),
 		)
+	}
+}
+
+func (s *runnerScaler) restorePendingFences() {
+	records, err := s.fenceStore.load()
+	if err != nil {
+		s.fenceStateError = err
+		s.onError(fmt.Errorf(
+			"restore pending registration fences for %s: %w",
+			s.target.key,
+			err,
+		))
+		return
+	}
+	for _, record := range records {
+		s.pendingFences[record.SlotKey] = record
+	}
+	if len(records) > 0 {
+		s.logger.Warn(
+			"Restored pending runner registration fences",
+			"pendingFences", len(records),
+		)
+	}
+}
+
+func (s *runnerScaler) restoreLaunchIntent() {
+	record, exists, err := s.launchIntentStore.load()
+	if err != nil {
+		s.launchIntentStateError = err
+		s.onError(fmt.Errorf(
+			"restore launch intent for %s: %w",
+			s.target.key,
+			err,
+		))
+		return
+	}
+	if exists {
+		s.pendingLaunchIntent = &record
+		s.logger.Warn("Restored pending runner launch intent")
 	}
 }
 
@@ -591,14 +652,47 @@ func (s *runnerScaler) tick(ctx context.Context) error {
 
 func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	var operationErrors []error
+	s.mu.Lock()
+	registrationStateErr := errors.Join(
+		s.cleanupStateError,
+		s.fenceStateError,
+		s.launchIntentStateError,
+	)
+	if registrationStateErr != nil {
+		s.blocking = capacityBlock{
+			reason:   deficitInvalidDesiredState,
+			evidence: "durable registration retry state is unavailable",
+		}
+		count := s.capacityCountLocked()
+		s.mu.Unlock()
+		s.setProfileAdmissionDemand(0)
+		s.hostAdmission.setTargetDemand(s.target.key, 0)
+		return count, fmt.Errorf(
+			"registration retry state for %s is unavailable: %w",
+			s.target.key,
+			registrationStateErr,
+		)
+	}
+	s.mu.Unlock()
 	hostLeasesAdopted, adoptionErr := s.retryPendingHostLeaseAdoptions()
 	if adoptionErr != nil {
 		operationErrors = append(operationErrors, adoptionErr)
 	}
+	if hostLeasesAdopted {
+		if err := s.retryPendingLaunchIntent(ctx); err != nil {
+			operationErrors = append(operationErrors, err)
+		}
+	}
+	s.mu.Lock()
+	launchIntentPending := s.pendingLaunchIntent != nil
+	s.mu.Unlock()
 	if err := s.retryPendingHostLeaseReleases(); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
 	if err := s.retryPendingRegistrations(ctx); err != nil {
+		operationErrors = append(operationErrors, err)
+	}
+	if err := s.retryPendingRegistrationFences(ctx); err != nil {
 		operationErrors = append(operationErrors, err)
 	}
 	if err := s.retryCleanupPending(ctx); err != nil {
@@ -619,6 +713,16 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 	}
 	current := s.capacityCountLocked()
 	target := s.targetSlots
+	if launchIntentPending && target > current {
+		s.blocking = capacityBlock{
+			reason:   deficitRetryBackoff,
+			evidence: "runner launch recovery is waiting on retry backoff",
+		}
+		s.mu.Unlock()
+		s.setProfileAdmissionDemand(0)
+		s.hostAdmission.setTargetDemand(s.target.key, 0)
+		return current, errors.Join(operationErrors...)
+	}
 	launchNow := s.clock.now().UTC()
 	if target <= current {
 		s.launchFailures = 0
@@ -767,7 +871,27 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		s.mu.Unlock()
 		s.onChange()
 
-		if err := registrationRemovalError(
+		fenceRecord, err := s.beginPendingRegistrationFence(
+			stoppedRunner,
+			registrationFenceScaleDown,
+			s.clock.now().UTC(),
+		)
+		if err != nil {
+			s.mu.Lock()
+			if currentRunner := s.runners[runnerKey]; currentRunner != nil &&
+				currentRunner.state == runnerDraining {
+				currentRunner.state = previousState
+				currentRunner.idleSince = previousIdleSince
+				currentRunner.updatedAt = s.clock.now().UTC()
+			}
+			s.mu.Unlock()
+			s.onChange()
+			return s.capacityCount(), errors.Join(
+				errors.Join(operationErrors...),
+				fmt.Errorf("persist scale-down registration fence: %w", err),
+			)
+		}
+		if err = registrationRemovalError(
 			s.api.removeRunner(ctx, runnerID),
 		); err != nil {
 			s.mu.Lock()
@@ -783,12 +907,18 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 			}
 			s.scaleDownAt = nil
 			s.mu.Unlock()
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				s.resolvePendingRegistrationFence(runnerKey, "job-still-running")
+			} else {
+				s.recordPendingRegistrationFenceFailure(fenceRecord, err)
+			}
 			s.onChange()
 			return s.capacityCount(), errors.Join(
 				errors.Join(operationErrors...),
 				fmt.Errorf("remove runner %d before scale-down: %w", runnerID, err),
 			)
 		}
+		s.resolvePendingRegistrationFence(runnerKey, "removed")
 		if err := s.docker.stopAndRemove(ctx, containerID); err != nil {
 			s.mu.Lock()
 			if currentRunner := s.runners[runnerKey]; currentRunner != nil {
@@ -855,6 +985,162 @@ func (s *runnerScaler) clearLaunchRetry() {
 	s.mu.Unlock()
 }
 
+func (s *runnerScaler) beginLaunchIntent(
+	runnerName string,
+	now time.Time,
+) (launchIntentRecord, error) {
+	record := launchIntentRecord{
+		SchemaVersion:          1,
+		ManagerContractVersion: launchIntentContractVersion,
+		TargetKey:              s.target.key,
+		RunnerName:             runnerName,
+		Attempts:               1,
+		LastAttemptAt:          now.UTC().Format(time.RFC3339),
+		NextAttemptAt: now.UTC().Add(
+			registrationOperationRetryDelay(1),
+		).Format(time.RFC3339),
+	}
+	if err := s.launchIntentStore.save(record); err != nil {
+		s.mu.Lock()
+		s.launchIntentStateError = err
+		s.mu.Unlock()
+		return launchIntentRecord{}, err
+	}
+	s.mu.Lock()
+	s.pendingLaunchIntent = &record
+	s.launchIntentStateError = nil
+	s.mu.Unlock()
+	return record, nil
+}
+
+func (s *runnerScaler) updateLaunchIntentRunnerID(runnerID int64) error {
+	s.mu.Lock()
+	if s.pendingLaunchIntent == nil {
+		s.mu.Unlock()
+		return errors.New("launch intent is unavailable")
+	}
+	record := *s.pendingLaunchIntent
+	record.RunnerID = runnerID
+	s.mu.Unlock()
+	if err := s.launchIntentStore.save(record); err != nil {
+		s.mu.Lock()
+		s.launchIntentStateError = err
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Lock()
+	s.pendingLaunchIntent = &record
+	s.launchIntentStateError = nil
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *runnerScaler) prepareLaunchIntentRetry(
+	record launchIntentRecord,
+	now time.Time,
+) (launchIntentRecord, error) {
+	if record.Attempts < maxRegistrationCleanupAttempts {
+		record.Attempts++
+	}
+	record.LastAttemptAt = now.UTC().Format(time.RFC3339)
+	record.NextAttemptAt = now.UTC().Add(
+		registrationOperationRetryDelay(record.Attempts),
+	).Format(time.RFC3339)
+	if err := s.launchIntentStore.save(record); err != nil {
+		s.mu.Lock()
+		s.launchIntentStateError = err
+		s.mu.Unlock()
+		return launchIntentRecord{}, err
+	}
+	s.mu.Lock()
+	s.pendingLaunchIntent = &record
+	s.launchIntentStateError = nil
+	s.mu.Unlock()
+	return record, nil
+}
+
+func (s *runnerScaler) clearLaunchIntent(reason string) error {
+	if err := s.launchIntentStore.clear(); err != nil {
+		s.mu.Lock()
+		s.launchIntentStateError = err
+		s.mu.Unlock()
+		return err
+	}
+	s.mu.Lock()
+	s.pendingLaunchIntent = nil
+	s.launchIntentStateError = nil
+	s.mu.Unlock()
+	s.logger.Info("Runner launch intent resolved", "reason", reason)
+	return nil
+}
+
+func (s *runnerScaler) retryPendingLaunchIntent(ctx context.Context) error {
+	s.mu.Lock()
+	if s.pendingLaunchIntent == nil {
+		s.mu.Unlock()
+		return nil
+	}
+	record := *s.pendingLaunchIntent
+	for _, runner := range s.runners {
+		if runner.runnerName == record.RunnerName {
+			s.mu.Unlock()
+			return s.clearLaunchIntent("live-runner")
+		}
+	}
+	s.mu.Unlock()
+
+	nextAttemptAt, err := time.Parse(time.RFC3339, record.NextAttemptAt)
+	if err != nil {
+		return err
+	}
+	now := s.clock.now().UTC()
+	if now.Before(nextAttemptAt) {
+		s.setBlocking(
+			deficitRetryBackoff,
+			"runner launch recovery is waiting on retry backoff",
+		)
+		return nil
+	}
+	record, err = s.prepareLaunchIntentRetry(record, now)
+	if err != nil {
+		return err
+	}
+	runner, found, err := s.api.findRunnerByName(ctx, record.RunnerName)
+	if err != nil {
+		return fmt.Errorf("recover pending launch registration: %w", err)
+	}
+	if !found {
+		return s.clearLaunchIntent("registration-absent")
+	}
+	if err := registrationRemovalError(
+		s.api.removeRunner(ctx, runner.id),
+	); err != nil {
+		return fmt.Errorf("remove pending launch registration: %w", err)
+	}
+	return s.clearLaunchIntent("registration-removed")
+}
+
+func (s *runnerScaler) removeLaunchIntentRegistration(
+	ctx context.Context,
+) error {
+	s.mu.Lock()
+	if s.pendingLaunchIntent == nil {
+		s.mu.Unlock()
+		return errors.New("launch intent is unavailable")
+	}
+	record := *s.pendingLaunchIntent
+	s.mu.Unlock()
+	if record.RunnerID < 1 {
+		return errors.New("launch intent has no runner registration ID")
+	}
+	if err := registrationRemovalError(
+		s.api.removeRunner(ctx, record.RunnerID),
+	); err != nil {
+		return err
+	}
+	return s.clearLaunchIntent("registration-removed")
+}
+
 // setBlocking records why the scaler could not reach its activation target, so
 // published capacity evidence carries the manager's actual blocking reason.
 func (s *runnerScaler) setBlocking(reason string, evidence string) {
@@ -915,10 +1201,11 @@ func (s *runnerScaler) beginPendingRegistrationCleanup(
 	runner runnerRecord,
 	diagnostic *lastExitDiagnostic,
 	now time.Time,
-) registrationCleanupRecord {
+) (registrationCleanupRecord, error) {
 	s.mu.Lock()
 	record, exists := s.pendingRegistrations[runner.key]
 	if !exists {
+		retryAt := now.Add(registrationOperationRetryDelay(1))
 		record = registrationCleanupRecord{
 			TargetKey:     s.target.key,
 			SlotKey:       runner.key,
@@ -926,66 +1213,82 @@ func (s *runnerScaler) beginPendingRegistrationCleanup(
 			RunnerName:    runner.runnerName,
 			ContainerID:   runner.containerID,
 			ContainerName: runner.container,
+			Attempts:      1,
 			FirstFailedAt: now.Format(time.RFC3339),
+			LastAttemptAt: now.Format(time.RFC3339),
+			NextAttemptAt: retryAt.Format(time.RFC3339),
 		}
+	} else {
+		record.RunnerID = runner.runnerID
+		record.RunnerName = runner.runnerName
+		record.ContainerID = runner.containerID
+		record.ContainerName = runner.container
 	}
 	if diagnostic != nil {
 		value := *diagnostic
 		record.LastExit = &value
 	}
 	s.pendingRegistrations[record.SlotKey] = record
-	evicted := s.boundPendingRegistrationsLocked()
 	records := s.pendingRegistrationsLocked()
 	s.mu.Unlock()
-	s.reportEvictedRegistrations(evicted)
-	s.persistPendingRegistrations(records)
-	return record
+	if err := s.persistPendingRegistrations(records); err != nil {
+		return record, err
+	}
+	return record, nil
 }
 
-// markPendingRegistrationAttempt keeps a failed registration removal pending
-// with bounded retry metadata.
-func (s *runnerScaler) markPendingRegistrationAttempt(
+func (s *runnerScaler) preparePendingRegistrationRetry(
 	record registrationCleanupRecord,
 	now time.Time,
-	cause error,
-) {
+) (registrationCleanupRecord, error) {
 	s.mu.Lock()
 	current, exists := s.pendingRegistrations[record.SlotKey]
 	if !exists {
-		current = record
+		s.mu.Unlock()
+		return registrationCleanupRecord{}, errors.New(
+			"pending registration cleanup disappeared before retry",
+		)
 	}
-	if current.FirstFailedAt == "" {
-		current.FirstFailedAt = now.Format(time.RFC3339)
+	if current.Attempts < maxRegistrationCleanupAttempts {
+		current.Attempts++
 	}
-	current.Attempts++
+	retryDelay := registrationOperationRetryDelay(current.Attempts)
+	retryAt := now.Add(retryDelay)
 	current.LastAttemptAt = now.Format(time.RFC3339)
-	current.NextAttemptAt = now.Add(registrationCleanupRetryDelay).Format(time.RFC3339)
+	current.NextAttemptAt = retryAt.Format(time.RFC3339)
 	s.pendingRegistrations[current.SlotKey] = current
-	evicted := s.boundPendingRegistrationsLocked()
 	records := s.pendingRegistrationsLocked()
 	s.mu.Unlock()
-	s.reportEvictedRegistrations(evicted)
-	s.persistPendingRegistrations(records)
-	retryAt := now.Add(registrationCleanupRetryDelay)
+	if err := s.persistPendingRegistrations(records); err != nil {
+		return registrationCleanupRecord{}, err
+	}
+	return current, nil
+}
+
+func (s *runnerScaler) recordPendingRegistrationFailure(
+	record registrationCleanupRecord,
+	cause error,
+) {
+	retryAt, _ := time.Parse(time.RFC3339, record.NextAttemptAt)
 	s.diagnostics.record(diagnosticsObservation{
 		subsystem: subsystemCleanup,
 		operation: operationRegistrationCleanup,
-		target:    current.SlotKey,
+		target:    record.SlotKey,
 		outcome:   outcomeRetry,
 		reason:    classifyFailure(cause),
 		evidence:  "exact runner registration removal is still pending",
-		attempt:   current.Attempts,
+		attempt:   record.Attempts,
 		retryAt:   &retryAt,
 	})
 	s.logger.Warn(
 		"Runner registration cleanup is pending",
-		"slotKey", current.SlotKey,
-		"runnerId", current.RunnerID,
-		"attempts", current.Attempts,
+		"slotKey", record.SlotKey,
+		"runnerId", record.RunnerID,
+		"attempts", record.Attempts,
 	)
 	s.onError(fmt.Errorf(
-		"remove registration for runner %d after container exit: %w",
-		current.RunnerID,
+		"remove exact runner registration %d: %w",
+		record.RunnerID,
 		cause,
 	))
 }
@@ -999,7 +1302,7 @@ func (s *runnerScaler) resolvePendingRegistration(slotKey string, reason string)
 	if !exists {
 		return
 	}
-	s.persistPendingRegistrations(records)
+	_ = s.persistPendingRegistrations(records)
 	s.diagnostics.record(diagnosticsObservation{
 		subsystem: subsystemCleanup,
 		operation: operationRegistrationCleanup,
@@ -1017,48 +1320,22 @@ func (s *runnerScaler) resolvePendingRegistration(slotKey string, reason string)
 
 func (s *runnerScaler) persistPendingRegistrations(
 	records []registrationCleanupRecord,
-) {
+) error {
 	if err := s.cleanupStore.save(records); err != nil {
+		s.mu.Lock()
+		s.cleanupStateError = err
+		s.mu.Unlock()
 		s.onError(fmt.Errorf(
 			"persist pending registration cleanup for %s: %w",
 			s.target.key,
 			err,
 		))
+		return err
 	}
-}
-
-func (s *runnerScaler) reportEvictedRegistrations(
-	evicted []registrationCleanupRecord,
-) {
-	for _, record := range evicted {
-		s.onError(fmt.Errorf(
-			"pending registration cleanup for runner %d was dropped at the %d record bound",
-			record.RunnerID,
-			maxPendingRegistrationCleanups,
-		))
-	}
-}
-
-func (s *runnerScaler) boundPendingRegistrationsLocked() []registrationCleanupRecord {
-	evicted := make([]registrationCleanupRecord, 0)
-	for len(s.pendingRegistrations) > maxPendingRegistrationCleanups {
-		var oldest *registrationCleanupRecord
-		for _, record := range s.pendingRegistrations {
-			if oldest == nil ||
-				record.FirstFailedAt < oldest.FirstFailedAt ||
-				(record.FirstFailedAt == oldest.FirstFailedAt &&
-					record.SlotKey < oldest.SlotKey) {
-				value := record
-				oldest = &value
-			}
-		}
-		if oldest == nil {
-			break
-		}
-		delete(s.pendingRegistrations, oldest.SlotKey)
-		evicted = append(evicted, *oldest)
-	}
-	return evicted
+	s.mu.Lock()
+	s.cleanupStateError = nil
+	s.mu.Unlock()
+	return nil
 }
 
 func (s *runnerScaler) pendingRegistrationsLocked() []registrationCleanupRecord {
@@ -1078,6 +1355,12 @@ func (s *runnerScaler) pendingRegistrationCount() int {
 	return len(s.pendingRegistrations)
 }
 
+func (s *runnerScaler) pendingRegistrationFenceCount() int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return len(s.pendingFences)
+}
+
 // beginPendingHostLeaseRelease durably records the exact host admission
 // lease identity before its release is attempted, so a crash between
 // deciding to release a lease and confirming that release cannot strand an
@@ -1091,9 +1374,8 @@ func (s *runnerScaler) beginPendingHostLeaseRelease(
 	now time.Time,
 ) hostLeaseCleanupRecord {
 	s.mu.Lock()
-	record, evicted, records := s.beginPendingHostLeaseReleaseLocked(runnerKey, hostSlotKey, now)
+	record, records := s.beginPendingHostLeaseReleaseLocked(runnerKey, hostSlotKey, now)
 	s.mu.Unlock()
-	s.reportEvictedHostLeaseReleases(evicted)
 	s.persistPendingHostLeaseReleases(records)
 	return record
 }
@@ -1106,7 +1388,7 @@ func (s *runnerScaler) beginPendingHostLeaseReleaseLocked(
 	runnerKey string,
 	hostSlotKey string,
 	now time.Time,
-) (hostLeaseCleanupRecord, []hostLeaseCleanupRecord, []hostLeaseCleanupRecord) {
+) (hostLeaseCleanupRecord, []hostLeaseCleanupRecord) {
 	record, exists := s.pendingHostLeaseReleases[hostSlotKey]
 	if !exists {
 		record = hostLeaseCleanupRecord{
@@ -1117,9 +1399,8 @@ func (s *runnerScaler) beginPendingHostLeaseReleaseLocked(
 		}
 	}
 	s.pendingHostLeaseReleases[record.HostSlotKey] = record
-	evicted := s.boundPendingHostLeaseReleasesLocked()
 	records := s.pendingHostLeaseReleasesLocked()
-	return record, evicted, records
+	return record, records
 }
 
 // markPendingHostLeaseReleaseAttempt keeps a failed lease release pending
@@ -1141,10 +1422,8 @@ func (s *runnerScaler) markPendingHostLeaseReleaseAttempt(
 	current.LastAttemptAt = now.Format(time.RFC3339)
 	current.NextAttemptAt = now.Add(hostLeaseReleaseRetryDelay).Format(time.RFC3339)
 	s.pendingHostLeaseReleases[current.HostSlotKey] = current
-	evicted := s.boundPendingHostLeaseReleasesLocked()
 	records := s.pendingHostLeaseReleasesLocked()
 	s.mu.Unlock()
-	s.reportEvictedHostLeaseReleases(evicted)
 	s.persistPendingHostLeaseReleases(records)
 	retryAt := now.Add(hostLeaseReleaseRetryDelay)
 	s.diagnostics.record(diagnosticsObservation{
@@ -1200,40 +1479,6 @@ func (s *runnerScaler) persistPendingHostLeaseReleases(
 			err,
 		))
 	}
-}
-
-func (s *runnerScaler) reportEvictedHostLeaseReleases(
-	evicted []hostLeaseCleanupRecord,
-) {
-	for _, record := range evicted {
-		s.onError(fmt.Errorf(
-			"pending host lease release for slot %s was dropped at the %d record bound",
-			record.HostSlotKey,
-			maxPendingHostLeaseReleases,
-		))
-	}
-}
-
-func (s *runnerScaler) boundPendingHostLeaseReleasesLocked() []hostLeaseCleanupRecord {
-	evicted := make([]hostLeaseCleanupRecord, 0)
-	for len(s.pendingHostLeaseReleases) > maxPendingHostLeaseReleases {
-		var oldest *hostLeaseCleanupRecord
-		for _, record := range s.pendingHostLeaseReleases {
-			if oldest == nil ||
-				record.FirstFailedAt < oldest.FirstFailedAt ||
-				(record.FirstFailedAt == oldest.FirstFailedAt &&
-					record.HostSlotKey < oldest.HostSlotKey) {
-				value := record
-				oldest = &value
-			}
-		}
-		if oldest == nil {
-			break
-		}
-		delete(s.pendingHostLeaseReleases, oldest.HostSlotKey)
-		evicted = append(evicted, *oldest)
-	}
-	return evicted
 }
 
 func (s *runnerScaler) pendingHostLeaseReleasesLocked() []hostLeaseCleanupRecord {
@@ -1314,7 +1559,7 @@ func (s *runnerScaler) retryPendingHostLeaseReleases() error {
 
 func (s *runnerScaler) attemptPendingRegistrationCleanup(
 	record registrationCleanupRecord,
-) {
+) error {
 	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
 	err := registrationRemovalError(
 		s.api.removeRunner(cleanupContext, record.RunnerID),
@@ -1322,9 +1567,32 @@ func (s *runnerScaler) attemptPendingRegistrationCleanup(
 	cleanupCancel()
 	if err == nil {
 		s.resolvePendingRegistration(record.SlotKey, "removed")
-		return
+		return nil
 	}
-	s.markPendingRegistrationAttempt(record, s.clock.now().UTC(), err)
+	s.recordPendingRegistrationFailure(record, err)
+	return err
+}
+
+func (s *runnerScaler) removeRegistrationOrEnqueue(
+	runner runnerRecord,
+) error {
+	if runner.containerID == "" {
+		cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
+		defer cleanupCancel()
+		return s.removeLaunchIntentRegistration(cleanupContext)
+	}
+	record, err := s.beginPendingRegistrationCleanup(
+		runner,
+		nil,
+		s.clock.now().UTC(),
+	)
+	if err != nil {
+		return fmt.Errorf("persist runner registration cleanup: %w", err)
+	}
+	if err := s.clearLaunchIntent("cleanup-persisted"); err != nil {
+		return fmt.Errorf("transfer launch intent to registration cleanup: %w", err)
+	}
+	return s.attemptPendingRegistrationCleanup(record)
 }
 
 // retryPendingRegistrations retries registration removals that previously
@@ -1344,14 +1612,22 @@ func (s *runnerScaler) retryPendingRegistrations(ctx context.Context) error {
 		if !registrationCleanupDue(record, now) {
 			continue
 		}
-		err := registrationRemovalError(
+		record, err := s.preparePendingRegistrationRetry(
+			record,
+			s.clock.now().UTC(),
+		)
+		if err != nil {
+			cleanupErrors = append(cleanupErrors, err)
+			continue
+		}
+		err = registrationRemovalError(
 			s.api.removeRunner(ctx, record.RunnerID),
 		)
 		if err == nil {
 			s.resolvePendingRegistration(record.SlotKey, "removed")
 			continue
 		}
-		s.markPendingRegistrationAttempt(record, s.clock.now().UTC(), err)
+		s.recordPendingRegistrationFailure(record, err)
 		cleanupErrors = append(cleanupErrors, fmt.Errorf(
 			"retry registration removal for runner %d: %w",
 			record.RunnerID,
@@ -1359,6 +1635,303 @@ func (s *runnerScaler) retryPendingRegistrations(ctx context.Context) error {
 		))
 	}
 	return errors.Join(cleanupErrors...)
+}
+
+func (s *runnerScaler) beginPendingRegistrationFence(
+	runner runnerRecord,
+	purpose string,
+	now time.Time,
+) (registrationFenceRecord, error) {
+	s.mu.Lock()
+	record, exists := s.pendingFences[runner.key]
+	if !exists {
+		retryAt := now.Add(registrationOperationRetryDelay(1))
+		record = registrationFenceRecord{
+			TargetKey:     s.target.key,
+			SlotKey:       runner.key,
+			Purpose:       purpose,
+			RunnerID:      runner.runnerID,
+			RunnerName:    runner.runnerName,
+			ContainerID:   runner.containerID,
+			ContainerName: runner.container,
+			Attempts:      1,
+			FirstFailedAt: now.Format(time.RFC3339),
+			LastAttemptAt: now.Format(time.RFC3339),
+			NextAttemptAt: retryAt.Format(time.RFC3339),
+		}
+	}
+	s.pendingFences[record.SlotKey] = record
+	if runner := s.runners[record.SlotKey]; runner != nil {
+		retryAt, _ := time.Parse(time.RFC3339, record.NextAttemptAt)
+		runner.fenceAttempts = record.Attempts
+		runner.fenceRetryAt = &retryAt
+	}
+	s.blocking = capacityBlock{
+		reason:   deficitRetryBackoff,
+		evidence: "runner registration fencing is waiting on retry backoff",
+	}
+	records := s.pendingRegistrationFencesLocked()
+	s.mu.Unlock()
+	if err := s.persistPendingRegistrationFences(records); err != nil {
+		return record, err
+	}
+	return record, nil
+}
+
+func (s *runnerScaler) preparePendingRegistrationFenceRetry(
+	record registrationFenceRecord,
+	now time.Time,
+) (registrationFenceRecord, error) {
+	s.mu.Lock()
+	current, exists := s.pendingFences[record.SlotKey]
+	if !exists {
+		s.mu.Unlock()
+		return registrationFenceRecord{}, errors.New(
+			"pending registration fence disappeared before retry",
+		)
+	}
+	if current.Attempts < maxRegistrationCleanupAttempts {
+		current.Attempts++
+	}
+	retryDelay := registrationOperationRetryDelay(current.Attempts)
+	retryAt := now.Add(retryDelay)
+	current.LastAttemptAt = now.Format(time.RFC3339)
+	current.NextAttemptAt = retryAt.Format(time.RFC3339)
+	s.pendingFences[current.SlotKey] = current
+	if runner := s.runners[current.SlotKey]; runner != nil {
+		runner.fenceAttempts = current.Attempts
+		runner.fenceRetryAt = &retryAt
+	}
+	s.blocking = capacityBlock{
+		reason:   deficitRetryBackoff,
+		evidence: "runner registration fencing is waiting on retry backoff",
+	}
+	records := s.pendingRegistrationFencesLocked()
+	s.mu.Unlock()
+	if err := s.persistPendingRegistrationFences(records); err != nil {
+		return registrationFenceRecord{}, err
+	}
+	return current, nil
+}
+
+func (s *runnerScaler) recordPendingRegistrationFenceFailure(
+	record registrationFenceRecord,
+	cause error,
+) {
+	retryAt, _ := time.Parse(time.RFC3339, record.NextAttemptAt)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemCleanup,
+		operation: operationRegistrationCleanup,
+		target:    record.SlotKey,
+		outcome:   outcomeRetry,
+		reason:    classifyFailure(cause),
+		evidence:  "live runner registration fencing is still pending",
+		attempt:   record.Attempts,
+		retryAt:   &retryAt,
+	})
+}
+
+func (s *runnerScaler) resolvePendingRegistrationFence(
+	slotKey string,
+	reason string,
+) {
+	s.mu.Lock()
+	_, exists := s.pendingFences[slotKey]
+	delete(s.pendingFences, slotKey)
+	if runner := s.runners[slotKey]; runner != nil {
+		runner.fenceAttempts = 0
+		runner.fenceRetryAt = nil
+	}
+	records := s.pendingRegistrationFencesLocked()
+	s.mu.Unlock()
+	if !exists {
+		return
+	}
+	_ = s.persistPendingRegistrationFences(records)
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemCleanup,
+		operation: operationRegistrationCleanup,
+		target:    slotKey,
+		outcome:   outcomeSucceeded,
+		reason:    reasonNone,
+		evidence:  "live runner registration fence resolved as " + reason,
+	})
+}
+
+func (s *runnerScaler) persistPendingRegistrationFences(
+	records []registrationFenceRecord,
+) error {
+	if err := s.fenceStore.save(records); err != nil {
+		s.mu.Lock()
+		s.fenceStateError = err
+		s.mu.Unlock()
+		s.onError(fmt.Errorf(
+			"persist pending registration fences for %s: %w",
+			s.target.key,
+			err,
+		))
+		return err
+	}
+	s.mu.Lock()
+	s.fenceStateError = nil
+	s.mu.Unlock()
+	return nil
+}
+
+func (s *runnerScaler) pendingRegistrationFencesLocked() []registrationFenceRecord {
+	records := make([]registrationFenceRecord, 0, len(s.pendingFences))
+	for _, record := range s.pendingFences {
+		records = append(records, record)
+	}
+	sort.Slice(records, func(i, j int) bool {
+		return records[i].SlotKey < records[j].SlotKey
+	})
+	return records
+}
+
+func (s *runnerScaler) retryPendingRegistrationFences(
+	ctx context.Context,
+) error {
+	s.mu.Lock()
+	pending := s.pendingRegistrationFencesLocked()
+	s.mu.Unlock()
+	var fenceErrors []error
+	for _, record := range pending {
+		if !registrationFenceDue(record, s.clock.now().UTC()) {
+			continue
+		}
+		if err := s.retryPendingRegistrationFence(ctx, record); err != nil {
+			fenceErrors = append(fenceErrors, err)
+		}
+	}
+	return errors.Join(fenceErrors...)
+}
+
+func (s *runnerScaler) retryPendingRegistrationFence(
+	ctx context.Context,
+	record registrationFenceRecord,
+) error {
+	s.mu.Lock()
+	runner := s.runners[record.SlotKey]
+	if runner == nil || runner.runnerID != record.RunnerID {
+		s.mu.Unlock()
+		cleanupRecord, err := s.beginPendingRegistrationCleanup(
+			runnerRecord{
+				key:         record.SlotKey,
+				targetKey:   record.TargetKey,
+				runnerName:  record.RunnerName,
+				runnerID:    record.RunnerID,
+				containerID: record.ContainerID,
+				container:   record.ContainerName,
+			},
+			nil,
+			s.clock.now().UTC(),
+		)
+		if err != nil {
+			return err
+		}
+		s.resolvePendingRegistrationFence(record.SlotKey, "container-absent")
+		return s.attemptPendingRegistrationCleanup(cleanupRecord)
+	}
+	if record.Purpose == registrationFenceScaleDown &&
+		s.capacityCountLocked() <= s.targetSlots {
+		s.mu.Unlock()
+		s.resolvePendingRegistrationFence(record.SlotKey, "scale-down-cancelled")
+		return nil
+	}
+	if record.Purpose == registrationFenceStale && !runner.stale {
+		s.mu.Unlock()
+		s.resolvePendingRegistrationFence(record.SlotKey, "stale-fence-cancelled")
+		return nil
+	}
+	if runner.state == runnerBusy || runner.registrationRemoved {
+		s.mu.Unlock()
+		s.resolvePendingRegistrationFence(record.SlotKey, "live-runner-preserved")
+		return nil
+	}
+	previousState := runner.state
+	previousIdleSince := runner.idleSince
+	runner.state = runnerDraining
+	runner.idleSince = nil
+	runner.updatedAt = s.clock.now().UTC()
+	candidate := *runner
+	s.mu.Unlock()
+	s.onChange()
+
+	record, err := s.preparePendingRegistrationFenceRetry(
+		record,
+		s.clock.now().UTC(),
+	)
+	if err != nil {
+		s.mu.Lock()
+		if current := s.runners[candidate.key]; current != nil &&
+			current.state == runnerDraining {
+			current.state = previousState
+			current.idleSince = previousIdleSince
+			current.updatedAt = s.clock.now().UTC()
+		}
+		s.mu.Unlock()
+		s.onChange()
+		return err
+	}
+	err = registrationRemovalError(s.api.removeRunner(ctx, candidate.runnerID))
+	if err != nil {
+		s.mu.Lock()
+		if current := s.runners[candidate.key]; current != nil {
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				current.state = runnerBusy
+				current.protected = false
+			} else if current.state == runnerDraining {
+				current.state = previousState
+				current.idleSince = previousIdleSince
+			}
+			current.updatedAt = s.clock.now().UTC()
+		}
+		s.mu.Unlock()
+		if errors.Is(err, scaleset.JobStillRunningError) {
+			s.resolvePendingRegistrationFence(record.SlotKey, "job-still-running")
+			s.onChange()
+			return nil
+		}
+		s.recordPendingRegistrationFenceFailure(record, err)
+		s.onChange()
+		return fmt.Errorf(
+			"retry registration fence for runner %d: %w",
+			candidate.runnerID,
+			err,
+		)
+	}
+
+	s.mu.Lock()
+	if current := s.runners[candidate.key]; current != nil {
+		current.registrationRemoved = true
+		current.updatedAt = s.clock.now().UTC()
+	}
+	s.mu.Unlock()
+	s.resolvePendingRegistrationFence(record.SlotKey, "removed")
+	if err := s.docker.stopAndRemove(ctx, candidate.containerID); err != nil {
+		s.mu.Lock()
+		if current := s.runners[candidate.key]; current != nil {
+			current.state = runnerCleanupPending
+			current.updatedAt = s.clock.now().UTC()
+		}
+		s.mu.Unlock()
+		s.onChange()
+		return fmt.Errorf(
+			"remove runner container %s after registration fence: %w",
+			candidate.containerID,
+			err,
+		)
+	}
+	if err := s.settleStoppedRunner(candidate); err != nil {
+		return fmt.Errorf(
+			"settle runner %s after registration fence: %w",
+			candidate.key,
+			err,
+		)
+	}
+	s.onChange()
+	return nil
 }
 
 // registrationHeldByLiveRunner reports whether a live worker still owns the
@@ -1374,7 +1947,8 @@ func (s *runnerScaler) registrationHeldByLiveRunner(
 			continue
 		}
 		if runner.runnerID == record.RunnerID ||
-			runner.containerID == record.ContainerID {
+			record.ContainerID != "" &&
+				runner.containerID == record.ContainerID {
 			return true
 		}
 	}
@@ -1409,6 +1983,12 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		}
 	}
 
+	if _, err := s.beginLaunchIntent(requestedName, s.clock.now().UTC()); err != nil {
+		if hostAdmissionEnabled {
+			_ = s.releaseHostLeaseOrEnqueue(requestedName, hostSlotKey)
+		}
+		return nil, fmt.Errorf("persist runner launch intent: %w", err)
+	}
 	jit, err := s.api.generateJIT(ctx, s.scaleSetID, requestedName)
 	if err != nil {
 		if hostAdmissionEnabled {
@@ -1426,19 +2006,34 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		)
 		return nil, err
 	}
+	if err := s.updateLaunchIntentRunnerID(jit.runnerID); err != nil {
+		if hostAdmissionEnabled {
+			_ = s.releaseHostLeaseOrEnqueue(requestedName, hostSlotKey)
+		}
+		return nil, fmt.Errorf("persist JIT runner identity: %w", err)
+	}
+	slotKey := s.target.key + "-" + strconv.FormatInt(jit.runnerID, 10)
+	registrationRecord := func(containerID string, containerName string) runnerRecord {
+		return runnerRecord{
+			key:         slotKey,
+			targetKey:   s.target.key,
+			runnerName:  jit.runnerName,
+			runnerID:    jit.runnerID,
+			containerID: containerID,
+			container:   containerName,
+		}
+	}
 	if hostAdmissionEnabled {
 		if err := s.hostAdmission.bindRegistration(
 			hostSlotKey,
 			jit.runnerName,
 		); err != nil {
-			cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
-			cleanupErr := registrationRemovalError(
-				s.api.removeRunner(cleanupContext, jit.runnerID),
+			cleanupErr := s.removeRegistrationOrEnqueue(
+				registrationRecord("", ""),
 			)
-			cleanupCancel()
 			cleanupErr = errors.Join(
 				cleanupErr,
-				s.releaseHostLeaseOrEnqueue(requestedName, hostSlotKey),
+				s.releaseHostLeaseOrEnqueue(slotKey, hostSlotKey),
 			)
 			s.setBlocking(
 				deficitHostAdmissionDegraded,
@@ -1451,14 +2046,11 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		}
 	}
 
-	slotKey := s.target.key + "-" + strconv.FormatInt(jit.runnerID, 10)
 	containerName := sanitizeIdentifier(jit.runnerName, 63)
 	if containerName == "" {
-		cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
-		cleanupErr := registrationRemovalError(
-			s.api.removeRunner(cleanupContext, jit.runnerID),
+		cleanupErr := s.removeRegistrationOrEnqueue(
+			registrationRecord("", ""),
 		)
-		cleanupCancel()
 		if hostAdmissionEnabled {
 			cleanupErr = errors.Join(cleanupErr, s.releaseHostLeaseOrEnqueue(slotKey, hostSlotKey))
 		}
@@ -1500,8 +2092,8 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
 		defer cleanupCancel()
 		var cleanupErrors []error
-		if err := registrationRemovalError(
-			s.api.removeRunner(cleanupContext, jit.runnerID),
+		if err := s.removeRegistrationOrEnqueue(
+			registrationRecord(containerID, containerName),
 		); err != nil {
 			cleanupErrors = append(cleanupErrors, fmt.Errorf(
 				"remove registration for abandoned runner %d: %w",
@@ -1632,19 +2224,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 				"classification", launchFailure.Classification,
 				"observedAt", launchFailure.ObservedAt,
 			)
-			cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
-			cleanupErr := registrationRemovalError(
-				s.api.removeRunner(cleanupContext, jit.runnerID),
-			)
-			cleanupCancel()
-			if cleanupErr != nil {
-				return nil, errors.Join(err, fmt.Errorf(
-					"remove registration for unlaunched runner %d: %w",
-					jit.runnerID,
-					cleanupErr,
-				))
-			}
-			return nil, err
+			return abandonLaunch("", err)
 		}
 	}
 
@@ -1671,9 +2251,7 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 		s.mu.Unlock()
 		cleanupContext, cleanupCancel := detachedCleanupContext(ctx)
 		defer cleanupCancel()
-		removeErr := registrationRemovalError(
-			s.api.removeRunner(cleanupContext, runner.runnerID),
-		)
+		removeErr := s.removeRegistrationOrEnqueue(*runner)
 		if removeErr != nil {
 			removeErr = fmt.Errorf(
 				"remove runner %d started during shutdown: %w",
@@ -1698,6 +2276,9 @@ func (s *runnerScaler) startRunner(ctx context.Context) (*runnerRecord, error) {
 	}
 	s.runners[runner.key] = runner
 	s.mu.Unlock()
+	if err := s.clearLaunchIntent("live-runner"); err != nil {
+		s.onError(fmt.Errorf("clear live runner launch intent: %w", err))
+	}
 	s.recordLaunchOutcome(runner.key, launchStartedAt)
 	s.monitorRunner(runner, now)
 	s.onChange()
@@ -2012,27 +2593,20 @@ func (s *runnerScaler) discardUnstartedContainer(
 	cleanupContext, cleanupCancel := detachedCleanupContext(s.lifecycleContext)
 	defer cleanupCancel()
 
-	now := s.clock.now().UTC()
-	registrationRecord := s.beginPendingRegistrationCleanup(runnerRecord{
+	registrationErr := s.removeRegistrationOrEnqueue(runnerRecord{
 		key:         container.slotKey,
 		targetKey:   container.targetKey,
 		runnerName:  container.runnerName,
 		runnerID:    container.runnerID,
 		containerID: container.containerID,
 		container:   container.name,
-	}, nil, now)
-	var registrationErr error
-	if err := registrationRemovalError(
-		s.api.removeRunner(cleanupContext, container.runnerID),
-	); err != nil {
-		s.markPendingRegistrationAttempt(registrationRecord, s.clock.now().UTC(), err)
+	})
+	if registrationErr != nil {
 		registrationErr = fmt.Errorf(
 			"remove registration for discarded created container %s: %w",
 			container.containerID,
-			err,
+			registrationErr,
 		)
-	} else {
-		s.resolvePendingRegistration(registrationRecord.SlotKey, "removed")
 	}
 
 	removeErr := s.docker.stopAndRemove(cleanupContext, container.containerID)
@@ -2093,6 +2667,20 @@ func (s *runnerScaler) insertRecoveredRunner(
 	if _, exists := s.runners[runner.key]; exists {
 		s.mu.Unlock()
 		return fmt.Errorf("duplicate recovered runner key %q", runner.key)
+	}
+	if record, exists := s.pendingFences[runner.key]; exists &&
+		record.NextAttemptAt != "" {
+		retryAt, err := time.Parse(time.RFC3339, record.NextAttemptAt)
+		if err != nil {
+			s.mu.Unlock()
+			return fmt.Errorf(
+				"restore registration fence for runner %s: %w",
+				runner.key,
+				err,
+			)
+		}
+		runner.fenceRetryAt = &retryAt
+		runner.fenceAttempts = record.Attempts
 	}
 	s.runners[runner.key] = runner
 	s.mu.Unlock()
@@ -2163,7 +2751,28 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 		s.mu.Unlock()
 		s.onChange()
 
-		err := registrationRemovalError(s.api.removeRunner(ctx, runnerID))
+		fenceRecord, err := s.beginPendingRegistrationFence(
+			candidate,
+			registrationFenceStale,
+			s.clock.now().UTC(),
+		)
+		if err != nil {
+			s.mu.Lock()
+			if current := s.runners[candidate.key]; current != nil &&
+				current.state == runnerDraining {
+				current.state = previousState
+				current.idleSince = previousIdleSince
+				current.updatedAt = s.clock.now().UTC()
+			}
+			s.mu.Unlock()
+			s.onChange()
+			operationErrors = append(operationErrors, fmt.Errorf(
+				"persist stale registration fence: %w",
+				err,
+			))
+			continue
+		}
+		err = registrationRemovalError(s.api.removeRunner(ctx, runnerID))
 		if err != nil {
 			s.mu.Lock()
 			if current := s.runners[candidate.key]; current != nil {
@@ -2173,12 +2782,15 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 				} else if current.state == runnerDraining {
 					current.state = previousState
 					current.idleSince = previousIdleSince
-					retryAt := s.clock.now().UTC().Add(staleFenceRetryDelay)
-					current.fenceRetryAt = &retryAt
 				}
 				current.updatedAt = s.clock.now().UTC()
 			}
 			s.mu.Unlock()
+			if errors.Is(err, scaleset.JobStillRunningError) {
+				s.resolvePendingRegistrationFence(candidate.key, "job-still-running")
+			} else {
+				s.recordPendingRegistrationFenceFailure(fenceRecord, err)
+			}
 			s.onChange()
 			if !errors.Is(err, scaleset.JobStillRunningError) {
 				operationErrors = append(operationErrors, fmt.Errorf(
@@ -2189,6 +2801,7 @@ func (s *runnerScaler) retireStaleRunners(ctx context.Context) error {
 			}
 			continue
 		}
+		s.resolvePendingRegistrationFence(candidate.key, "removed")
 
 		if err := s.docker.stopAndRemove(ctx, containerID); err != nil {
 			s.mu.Lock()
@@ -2522,11 +3135,26 @@ func (s *runnerScaler) handleContainerExitLocked(
 
 	var registrationRecord *registrationCleanupRecord
 	if !shuttingDown && !exited.registrationRemoved {
-		record := s.beginPendingRegistrationCleanup(
+		record, err := s.beginPendingRegistrationCleanup(
 			exited,
 			&diagnostic,
 			s.clock.now().UTC(),
 		)
+		if err != nil {
+			s.mu.Lock()
+			if current := s.runners[exited.key]; current != nil {
+				current.containerRunning = false
+				current.state = runnerCleanupPending
+				current.updatedAt = s.clock.now().UTC()
+			}
+			s.mu.Unlock()
+			s.onError(fmt.Errorf(
+				"persist registration cleanup after runner exit: %w",
+				err,
+			))
+			s.onChange()
+			return
+		}
 		registrationRecord = &record
 	}
 
@@ -2608,18 +3236,35 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 	s.mu.Unlock()
 
 	var shutdownErrors []error
+	var preserveOnHandoff sync.Map
 	shutdownErrors = append(
 		shutdownErrors,
 		runRunnerOperations(idle, func(runner runnerRecord) error {
+			fenceRecord, err := s.beginPendingRegistrationFence(
+				runner,
+				registrationFenceShutdown,
+				s.clock.now().UTC(),
+			)
+			if err != nil {
+				preserveOnHandoff.Store(runner.key, struct{}{})
+				return fmt.Errorf(
+					"persist shutdown registration fence for runner %d: %w",
+					runner.runnerID,
+					err,
+				)
+			}
 			if err := registrationRemovalError(
 				s.api.removeRunner(ctx, runner.runnerID),
 			); err != nil {
+				preserveOnHandoff.Store(runner.key, struct{}{})
+				s.recordPendingRegistrationFenceFailure(fenceRecord, err)
 				return fmt.Errorf(
 					"remove idle runner %d during shutdown: %w",
 					runner.runnerID,
 					err,
 				)
 			}
+			s.resolvePendingRegistrationFence(runner.key, "removed")
 			if err := s.docker.stopAndRemove(ctx, runner.containerID); err != nil {
 				return err
 			}
@@ -2639,6 +3284,9 @@ func (s *runnerScaler) shutdown(ctx context.Context) error {
 	shutdownErrors = append(
 		shutdownErrors,
 		runRunnerOperations(remaining, func(runner runnerRecord) error {
+			if _, preserve := preserveOnHandoff.Load(runner.key); preserve {
+				return nil
+			}
 			if err := s.docker.stop(ctx, runner.containerID); err != nil {
 				return err
 			}
@@ -2666,13 +3314,12 @@ func (s *runnerScaler) settleStoppedRunner(runner runnerRecord) error {
 		s.mu.Unlock()
 		return nil
 	}
-	pendingRecord, evicted, records := s.beginPendingHostLeaseReleaseLocked(
+	pendingRecord, records := s.beginPendingHostLeaseReleaseLocked(
 		runner.key,
 		hostSlotKey,
 		s.clock.now().UTC(),
 	)
 	s.mu.Unlock()
-	s.reportEvictedHostLeaseReleases(evicted)
 	if err := s.hostLeaseCleanupStore.save(records); err != nil {
 		s.onError(fmt.Errorf(
 			"persist pending host lease release for %s: %w",
@@ -2807,7 +3454,9 @@ func (s *runnerScaler) oldestProtectedRecoveredRunnerLocked() *runnerRecord {
 func (s *runnerScaler) idleRunnersLocked() []runnerRecord {
 	idle := make([]runnerRecord, 0)
 	for _, runner := range s.runners {
-		if runner.state == runnerIdle && !runner.protected {
+		if runner.state == runnerIdle &&
+			!runner.protected &&
+			runner.fenceRetryAt == nil {
 			idle = append(idle, *runner)
 		}
 	}

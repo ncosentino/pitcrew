@@ -910,6 +910,8 @@ func classifyFailure(err error) string {
 		return reasonAuthorizationFailed
 	case errors.Is(err, errGitHubRunnerRateLimited):
 		return reasonRateLimited
+	case githubRateLimitMessage(err):
+		return reasonRateLimited
 	case errors.Is(err, errGitHubRunnerNotFound):
 		return reasonNotFound
 	case errors.Is(err, context.DeadlineExceeded):
@@ -927,6 +929,16 @@ func classifyFailure(err error) string {
 	default:
 		return reasonUnknown
 	}
+}
+
+func githubRateLimitMessage(err error) bool {
+	if err == nil {
+		return false
+	}
+	message := strings.ToLower(err.Error())
+	return strings.Contains(message, "api rate limit exceeded") ||
+		strings.Contains(message, "secondary rate limit") ||
+		strings.Contains(message, "429 too many requests")
 }
 
 // failureOutcome distinguishes a timeout from any other failure so operators

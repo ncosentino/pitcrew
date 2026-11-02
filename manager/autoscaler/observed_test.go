@@ -862,13 +862,18 @@ func TestHashRunnerNameUsesExactLowercaseSHA256(t *testing.T) {
 func TestCleanupSlotOmitsRunnerNameHash(t *testing.T) {
 	slot := observedCleanupSlot(
 		registrationCleanupRecord{
-			SlotKey:    "scope-1",
-			RunnerName: "runner-one",
+			SlotKey:       "scope-1",
+			RunnerName:    "runner-one",
+			LastAttemptAt: "2026-07-20T12:00:00Z",
+			NextAttemptAt: "2026-07-20T12:01:00Z",
 		},
 		scalerSnapshot{target: targetSpec{key: "scope"}},
 	)
 	if slot.ProcessRunning || slot.RunnerNameHash != nil {
 		t.Fatalf("non-running cleanup slot retained live identity: %#v", slot)
+	}
+	if slot.BackoffSeconds != 60 {
+		t.Fatalf("cleanup slot backoff = %d, want 60", slot.BackoffSeconds)
 	}
 }
 
@@ -887,6 +892,28 @@ func TestObservedRunnerDoesNotInferProcessFromRetainedRecord(t *testing.T) {
 	)
 	if slot.ProcessRunning {
 		t.Fatalf("retained runner record was reported as a running container: %#v", slot)
+	}
+}
+
+func TestObservedRunnerPublishesFenceBackoff(t *testing.T) {
+	updatedAt := time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC)
+	retryAt := updatedAt.Add(2 * time.Minute)
+	slot := observedRunnerSlot(
+		runnerRecord{
+			key:              "scope-1",
+			targetKey:        "scope",
+			containerID:      "container-one",
+			containerRunning: true,
+			state:            runnerIdle,
+			updatedAt:        updatedAt,
+			fenceAttempts:    2,
+			fenceRetryAt:     &retryAt,
+		},
+		false,
+		"",
+	)
+	if slot.FailureCount != 2 || slot.BackoffSeconds != 120 {
+		t.Fatalf("registration fence backoff was not published: %#v", slot)
 	}
 }
 

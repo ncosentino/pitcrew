@@ -145,18 +145,19 @@ func TestHostLeaseCleanupRetryHonoursSchedule(t *testing.T) {
 	}
 }
 
-func TestHostLeaseCleanupBoundLimitsBacklogSize(t *testing.T) {
-	records := make([]hostLeaseCleanupRecord, 0, maxPendingHostLeaseReleases+5)
-	for index := 0; index < maxPendingHostLeaseReleases+5; index++ {
+func TestHostLeaseCleanupRetainsEveryExactIdentity(t *testing.T) {
+	records := make([]hostLeaseCleanupRecord, 0, 69)
+	for index := 0; index < 69; index++ {
 		record := validHostLeaseCleanupRecord()
 		record.HostSlotKey = record.HostSlotKey + "-" + time.Now().Add(time.Duration(index)*time.Second).Format(time.RFC3339Nano)
 		records = append(records, record)
 	}
-	if _, err := parseHostLeaseCleanupDocument(
+	document, err := parseHostLeaseCleanupDocument(
 		[]byte(mustMarshalHostLeaseCleanupDocument(t, "repo-1234", records)),
 		"repo-1234",
-	); err == nil {
-		t.Fatal("expected an over-bound host lease cleanup document to be rejected")
+	)
+	if err != nil || len(document.Records) != len(records) {
+		t.Fatalf("host lease cleanup discarded identities: %d %v", len(document.Records), err)
 	}
 }
 

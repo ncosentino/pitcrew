@@ -19,6 +19,8 @@ type statePaths struct {
 	supportEvidence string
 	hardware        string
 	retirements     string
+	hostRecovery    string
+	registrationAccess string
 	shutdownRequest string
 }
 
@@ -51,6 +53,8 @@ func newStatePaths(directory string) statePaths {
 		supportEvidence: filepath.Join(directory, "support-evidence"),
 		hardware:        filepath.Join(directory, "host-hardware.json"),
 		retirements:     filepath.Join(directory, "retiring-targets.json"),
+		hostRecovery:    filepath.Join(directory, "host-admission-recovery.json"),
+		registrationAccess: filepath.Join(directory, "registration-access-retry.json"),
 		shutdownRequest: filepath.Join(directory, "manager-shutdown.json"),
 	}
 }

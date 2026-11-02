@@ -1,11 +1,28 @@
 package main
 
 import (
+	"encoding/json"
 	"os"
 	"strings"
 	"testing"
 	"time"
 )
+
+type contract10CleanupRecord struct {
+	TargetKey     string `json:"targetKey"`
+	SlotKey       string `json:"slotKey"`
+	RunnerID      int64  `json:"runnerId"`
+	RunnerName    string `json:"runnerName"`
+	ContainerID   string `json:"containerId"`
+	ContainerName string `json:"containerName"`
+}
+
+type contract10CleanupDocument struct {
+	SchemaVersion          int                       `json:"schemaVersion"`
+	ManagerContractVersion int                       `json:"managerContractVersion"`
+	TargetKey              string                    `json:"targetKey"`
+	Records                []contract10CleanupRecord `json:"records"`
+}
 
 func validRegistrationCleanupRecord() registrationCleanupRecord {
 	return registrationCleanupRecord{
@@ -18,7 +35,7 @@ func validRegistrationCleanupRecord() registrationCleanupRecord {
 		Attempts:      1,
 		FirstFailedAt: "2026-07-20T12:00:00Z",
 		LastAttemptAt: "2026-07-20T12:00:00Z",
-		NextAttemptAt: "2026-07-20T12:00:15Z",
+		NextAttemptAt: "2026-07-20T12:01:00Z",
 	}
 }
 
@@ -57,6 +74,28 @@ func TestRegistrationCleanupStoreRoundTripsAndClears(t *testing.T) {
 	}
 }
 
+func TestRegistrationCleanupRemainsContract10Compatible(t *testing.T) {
+	document := registrationCleanupDocument{
+		SchemaVersion:          1,
+		ManagerContractVersion: registrationCleanupDocumentContractVersion,
+		TargetKey:              "repo-1234",
+		Records:                []registrationCleanupRecord{validRegistrationCleanupRecord()},
+	}
+	data, err := json.Marshal(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var legacy contract10CleanupDocument
+	if err := json.Unmarshal(data, &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ManagerContractVersion != 10 ||
+		len(legacy.Records) != 1 ||
+		legacy.Records[0].ContainerID == "" {
+		t.Fatalf("cleanup state is not contract-10 compatible: %#v", legacy)
+	}
+}
+
 func TestRegistrationCleanupDocumentRejectsUnusableState(t *testing.T) {
 	tests := []struct {
 		name string
@@ -86,7 +125,18 @@ func TestRegistrationCleanupDocumentRejectsUnusableState(t *testing.T) {
 				`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","containerId":"container-1"},` +
 				`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","containerId":"container-1"}]}`,
 		},
+		{
+			name: "negative attempts",
+			data: `{"schemaVersion":1,"managerContractVersion":10,"targetKey":"repo-1234","records":[` +
+				`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","attempts":-1}]}`,
+		},
+		{
+			name: "invalid retry timestamp",
+			data: `{"schemaVersion":1,"managerContractVersion":10,"targetKey":"repo-1234","records":[` +
+				`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","nextAttemptAt":"soon"}]}`,
+		},
 	}
+
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
 			if _, err := parseRegistrationCleanupDocument(
@@ -96,6 +146,25 @@ func TestRegistrationCleanupDocumentRejectsUnusableState(t *testing.T) {
 				t.Fatal("expected unusable registration cleanup state to be rejected")
 			}
 		})
+	}
+}
+
+func TestRegistrationCleanupDocumentCapsAttempts(t *testing.T) {
+	data := `{"schemaVersion":1,"managerContractVersion":10,"targetKey":"repo-1234","records":[` +
+		`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","containerId":"container-1","attempts":2147483647}]}`
+	document, err := parseRegistrationCleanupDocument(
+		[]byte(data),
+		"repo-1234",
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if document.Records[0].Attempts != maxRegistrationCleanupAttempts {
+		t.Fatalf(
+			"attempts = %d, want %d",
+			document.Records[0].Attempts,
+			maxRegistrationCleanupAttempts,
+		)
 	}
 }
 
@@ -116,11 +185,37 @@ func TestRegistrationCleanupRetryHonoursSchedule(t *testing.T) {
 	if registrationCleanupDue(record, now) {
 		t.Fatal("cleanup retried before its scheduled attempt")
 	}
-	if !registrationCleanupDue(record, now.Add(registrationCleanupRetryDelay)) {
+	scheduledAt, err := time.Parse(time.RFC3339, record.NextAttemptAt)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !registrationCleanupDue(record, scheduledAt) {
 		t.Fatal("cleanup was not retried after its scheduled attempt")
 	}
 	record.NextAttemptAt = ""
 	if !registrationCleanupDue(record, now) {
 		t.Fatal("a record without a schedule was not retried")
+	}
+}
+
+func TestRegistrationCleanupRetryUsesProgressiveBackoff(t *testing.T) {
+	expected := []time.Duration{
+		time.Minute,
+		2 * time.Minute,
+		4 * time.Minute,
+		8 * time.Minute,
+		15 * time.Minute,
+		15 * time.Minute,
+	}
+	for index, delay := range expected {
+		attempts := index + 1
+		if actual := registrationOperationRetryDelay(attempts); actual != delay {
+			t.Fatalf(
+				"attempt %d delay = %s, want %s",
+				attempts,
+				actual,
+				delay,
+			)
+		}
 	}
 }

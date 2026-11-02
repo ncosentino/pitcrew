@@ -3,7 +3,9 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 	"testing"
@@ -265,6 +267,72 @@ func TestJobStillRunningErrorIsPreserved(t *testing.T) {
 	}
 	if runner := findRunner(t, scaler); runner.state != runnerBusy {
 		t.Fatalf("runner was not preserved as busy: %s", runner.state)
+	}
+}
+
+func TestScaleDownRemovalFailureUsesDurableBackoff(t *testing.T) {
+	scaler, api, docker, clock, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	markAllRunnersIdle(scaler)
+	runner := findRunner(t, scaler)
+	api.removeErrors[runner.runnerID] = errors.New("registration removal failed")
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err == nil {
+		t.Fatal("expected scale-down registration failure")
+	}
+	if scaler.pendingRegistrationFenceCount() != 1 {
+		t.Fatal("scale-down registration fence was not persisted")
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{runner.runnerID}) {
+		t.Fatalf("unexpected initial removal calls: %#v", api.removeCalls)
+	}
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("backoff tick failed: %v", err)
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{runner.runnerID}) {
+		t.Fatalf("scale-down retried before its deadline: %#v", api.removeCalls)
+	}
+
+	delete(api.removeErrors, runner.runnerID)
+	clock.advance(registrationOperationRetryDelay(1))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("scale-down retry failed: %v", err)
+	}
+	if scaler.pendingRegistrationFenceCount() != 0 ||
+		len(docker.stopRemove) != 1 ||
+		scaler.runnerCount() != 0 {
+		t.Fatalf(
+			"scale-down retry did not complete: pending=%d removed=%#v runners=%d",
+			scaler.pendingRegistrationFenceCount(),
+			docker.stopRemove,
+			scaler.runnerCount(),
+		)
+	}
+}
+
+func TestScaleDownRetrySaveFailureDoesNotReachGitHub(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	store := &failSecondRegistrationFenceSaveStore{}
+	scaler.fenceStore = store
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	markAllRunnersIdle(scaler)
+	runner := findRunner(t, scaler)
+	api.removeErrors[runner.runnerID] = errors.New("registration removal failed")
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err == nil {
+		t.Fatal("expected scale-down failure")
+	}
+	clock.advance(registrationOperationRetryDelay(1))
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("expected retry-state persistence failure")
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{runner.runnerID}) {
+		t.Fatalf("GitHub was called without a durable retry deadline: %#v", api.removeCalls)
 	}
 }
 
@@ -624,12 +692,77 @@ func TestStaleRunnerFenceFailureUsesRetryDelay(t *testing.T) {
 	if !reflect.DeepEqual(api.removeCalls, []int64{77}) {
 		t.Fatalf("stale runner was retried before its delay: %#v", api.removeCalls)
 	}
-	clock.advance(staleFenceRetryDelay)
+	if scaler.pendingRegistrationFenceCount() != 1 {
+		t.Fatal("failed stale fence was not persisted")
+	}
+	clock.advance(registrationOperationRetryDelay(1))
 	if err := scaler.tick(context.Background()); err == nil {
 		t.Fatal("expected the delayed stale-runner fence to retry and fail")
 	}
 	if !reflect.DeepEqual(api.removeCalls, []int64{77, 77}) {
 		t.Fatalf("stale runner did not retry after its delay: %#v", api.removeCalls)
+	}
+}
+
+func TestStaleRunnerFenceDeadlineSurvivesManagerRestart(t *testing.T) {
+	directory := projectTestDirectory(t)
+	container := recoveredContainer{
+		containerID: "stale-container",
+		name:        "stale",
+		runnerName:  "stale-runner",
+		runnerID:    77,
+		targetKey:   "repo-1234",
+		slotKey:     "repo-1234-77",
+		revision:    "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+		createdAt:   time.Date(2026, 7, 20, 11, 0, 0, 0, time.UTC),
+	}
+	scaler, api, _, _, cancel := newTestScalerInDirectory(
+		t,
+		1,
+		1,
+		0,
+		directory,
+	)
+	api.removeErrors[77] = errors.New("temporary fence failure")
+	if err := scaler.recover(container); err != nil {
+		t.Fatal(err)
+	}
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("expected stale fence failure")
+	}
+	cancel()
+
+	restarted, restartedAPI, _, restartedClock, restartedCancel :=
+		newTestScalerInDirectory(t, 1, 1, 0, directory)
+	defer restartedCancel()
+	if err := restarted.recover(container); err != nil {
+		t.Fatal(err)
+	}
+	if err := restarted.tick(context.Background()); err != nil {
+		t.Fatalf("restart ignored stale fence deadline: %v", err)
+	}
+	if len(restartedAPI.removeCalls) != 0 {
+		t.Fatalf(
+			"restart retried stale fence before its deadline: %#v",
+			restartedAPI.removeCalls,
+		)
+	}
+
+	restartedClock.advance(registrationOperationRetryDelay(1))
+	if err := restarted.tick(context.Background()); err != nil {
+		t.Fatalf("stale fence retry failed: %v", err)
+	}
+	if !reflect.DeepEqual(restartedAPI.removeCalls, []int64{77}) ||
+		restarted.runnerCount() != 1 ||
+		restarted.pendingRegistrationFenceCount() != 0 ||
+		restartedAPI.jitCalls != 1 {
+		t.Fatalf(
+			"stale fence did not converge after restart: remove=%#v runners=%d pending=%d jit=%d",
+			restartedAPI.removeCalls,
+			restarted.runnerCount(),
+			restarted.pendingRegistrationFenceCount(),
+			restartedAPI.jitCalls,
+		)
 	}
 }
 
@@ -1038,6 +1171,34 @@ func TestShutdownTreatsMissingRegistrationAsAlreadyRemoved(t *testing.T) {
 	}
 }
 
+func TestShutdownPreservesRunnerWhenRegistrationRemovalFails(t *testing.T) {
+	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	markAllRunnersIdle(scaler)
+	runner := findRunner(t, scaler)
+	api.removeErrors[runner.runnerID] = errors.New("registration removal failed")
+
+	if err := scaler.shutdown(context.Background()); err == nil {
+		t.Fatal("shutdown hid the registration removal failure")
+	}
+	if len(docker.stopRemove) != 0 || len(docker.stops) != 0 {
+		t.Fatalf(
+			"shutdown stopped a runner whose registration was preserved: remove=%#v stop=%#v",
+			docker.stopRemove,
+			docker.stops,
+		)
+	}
+	if scaler.runnerCount() != 1 {
+		t.Fatal("shutdown discarded the preserved runner identity")
+	}
+	if scaler.pendingRegistrationFenceCount() != 1 {
+		t.Fatal("shutdown did not persist the deferred registration fence")
+	}
+}
+
 func TestShutdownSignalsMultipleRunnersConcurrently(t *testing.T) {
 	scaler, _, docker, _, cancel := newTestScaler(t, 3, 0, time.Minute)
 	defer cancel()
@@ -1249,7 +1410,7 @@ func TestFailedExitCleanupBlocksReplacementUntilRetrySucceeds(t *testing.T) {
 		t.Fatalf("cleanup retry ignored its retry delay: %#v", api.removeCalls)
 	}
 
-	clock.advance(registrationCleanupRetryDelay)
+	clock.advance(registrationOperationRetryDelay(1))
 	if err := scaler.tick(context.Background()); err == nil {
 		t.Fatal("expected the repeated cleanup failure to remain visible")
 	}
@@ -1261,7 +1422,7 @@ func TestFailedExitCleanupBlocksReplacementUntilRetrySucceeds(t *testing.T) {
 	}
 
 	delete(api.removeErrors, exited.runnerID)
-	clock.advance(registrationCleanupRetryDelay)
+	clock.advance(registrationOperationRetryDelay(2))
 	if err := scaler.tick(context.Background()); err != nil {
 		t.Fatalf("final cleanup retry failed: %v", err)
 	}
@@ -1288,13 +1449,149 @@ func TestExitCleanupKeepsJobStillRunningPending(t *testing.T) {
 	if scaler.pendingRegistrationCount() != 1 || api.jitCalls != 1 {
 		t.Fatal("JobStillRunning cleanup was treated as success")
 	}
-	clock.advance(registrationCleanupRetryDelay)
+	clock.advance(registrationOperationRetryDelay(1))
 	err := scaler.tick(context.Background())
 	if !errors.Is(err, scaleset.JobStillRunningError) {
 		t.Fatalf("expected JobStillRunningError to remain visible, got %v", err)
 	}
 	if scaler.pendingRegistrationCount() != 1 {
 		t.Fatal("JobStillRunning cleanup stopped being retried")
+	}
+}
+
+func TestCleanupRetrySaveFailureDoesNotReachGitHub(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
+	defer cancel()
+	store := &failSecondRegistrationCleanupSaveStore{}
+	scaler.cleanupStore = store
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	exited := findRunner(t, scaler)
+	api.removeErrors[exited.runnerID] = errors.New("registration removal failed")
+	scaler.handleContainerExit(exited.containerID, exitStatus(137))
+	clock.advance(registrationOperationRetryDelay(1))
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("expected retry-state persistence failure")
+	}
+	if !reflect.DeepEqual(api.removeCalls, []int64{exited.runnerID}) {
+		t.Fatalf("GitHub was called without a durable retry deadline: %#v", api.removeCalls)
+	}
+}
+
+func TestLaunchIntentWriteFailureStopsGitHubAndReplacement(t *testing.T) {
+	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	scaler.launchIntentStore = &failingLaunchIntentStore{
+		saveErr: errors.New("launch intent storage unavailable"),
+	}
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("launch intent persistence failure was hidden")
+	}
+	if len(api.removeCalls) != 0 {
+		t.Fatalf("registration removal ran without durable intent: %#v", api.removeCalls)
+	}
+	if api.jitCalls != 0 {
+		t.Fatalf("JIT ran without durable launch intent: %d", api.jitCalls)
+	}
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("launch intent failure did not keep the target fail-closed")
+	}
+	if api.jitCalls != 0 {
+		t.Fatal("fail-closed launch state admitted replacement capacity")
+	}
+}
+
+func TestRegistrationCleanupRetainsEveryExactIdentity(t *testing.T) {
+	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	scaler.mu.Lock()
+	for index := 0; index < 64; index++ {
+		key := fmt.Sprintf("repo-1234-%d", index+1)
+		scaler.pendingRegistrations[key] = registrationCleanupRecord{
+			TargetKey:  scaler.target.key,
+			SlotKey:    key,
+			RunnerID:   int64(index + 1),
+			RunnerName: key,
+		}
+	}
+	scaler.mu.Unlock()
+
+	if _, err := scaler.beginPendingRegistrationCleanup(
+		runnerRecord{
+			key:        "repo-1234-overflow",
+			targetKey:  scaler.target.key,
+			runnerName: "overflow",
+			runnerID:   1000,
+		},
+		nil,
+		scaler.clock.now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if scaler.pendingRegistrationCount() != 65 {
+		t.Fatalf(
+			"cleanup ledger discarded an exact identity: %d",
+			scaler.pendingRegistrationCount(),
+		)
+	}
+	records, err := scaler.cleanupStore.load()
+	if err != nil || len(records) != 65 {
+		t.Fatalf("cleanup ledger did not persist every identity: %d %v", len(records), err)
+	}
+	if len(api.removeCalls) != 0 {
+		t.Fatal("cleanup persistence attempted a GitHub mutation")
+	}
+}
+
+func TestCorruptRegistrationCleanupStateBlocksReplacement(t *testing.T) {
+	directory := projectTestDirectory(t)
+	path := registrationCleanupPath(directory, "repo-1234")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scaler, api, _, _, cancel := newTestScalerInDirectory(
+		t,
+		1,
+		0,
+		0,
+		directory,
+	)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("corrupt cleanup state did not fail closed")
+	}
+	if api.jitCalls != 0 {
+		t.Fatal("corrupt cleanup state admitted a new JIT runner")
+	}
+}
+
+func TestCorruptRegistrationFenceStateBlocksReplacement(t *testing.T) {
+	directory := projectTestDirectory(t)
+	path := registrationFencePath(directory, "repo-1234")
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{invalid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	scaler, api, _, _, cancel := newTestScalerInDirectory(
+		t,
+		1,
+		0,
+		0,
+		directory,
+	)
+	defer cancel()
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("corrupt fence state did not fail closed")
+	}
+	if api.jitCalls != 0 {
+		t.Fatal("corrupt fence state admitted a new JIT runner")
 	}
 }
 
@@ -1352,7 +1649,13 @@ func TestPendingCleanupNeverRemovesLiveOrBusyRunner(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
-	scaler.beginPendingRegistrationCleanup(live, nil, clock.now().UTC())
+	if _, err := scaler.beginPendingRegistrationCleanup(
+		live,
+		nil,
+		clock.now().UTC(),
+	); err != nil {
+		t.Fatal(err)
+	}
 
 	if err := scaler.tick(context.Background()); err != nil {
 		t.Fatalf("cleanup retry failed: %v", err)
@@ -1395,7 +1698,9 @@ func TestPendingRegistrationCleanupSurvivesManagerRestart(t *testing.T) {
 	if len(document.Records) != 1 ||
 		document.Records[0].RunnerID != exited.runnerID ||
 		document.Records[0].SlotKey != exited.key ||
-		document.Records[0].ContainerID != exited.containerID {
+		document.Records[0].ContainerID != exited.containerID ||
+		document.Records[0].Attempts != 1 ||
+		document.Records[0].NextAttemptAt != "2026-07-20T12:01:00Z" {
 		t.Fatalf("persisted registration cleanup lost the runner identity: %#v", document.Records)
 	}
 	if strings.Contains(string(data), "jit-secret") {
@@ -1419,8 +1724,17 @@ func TestPendingRegistrationCleanupSurvivesManagerRestart(t *testing.T) {
 	if restartedAPI.jitCalls != 0 {
 		t.Fatal("restart admitted a replacement before cleanup was resolved")
 	}
+	if err := restarted.tick(context.Background()); err != nil {
+		t.Fatalf("restart ignored the pending cleanup deadline: %v", err)
+	}
+	if len(restartedAPI.removeCalls) != 0 {
+		t.Fatalf(
+			"restart retried cleanup before its deadline: %#v",
+			restartedAPI.removeCalls,
+		)
+	}
 
-	restartedClock.advance(registrationCleanupRetryDelay)
+	restartedClock.advance(registrationOperationRetryDelay(1))
 	if err := restarted.tick(context.Background()); err != nil {
 		t.Fatalf("restarted cleanup retry failed: %v", err)
 	}
@@ -1432,5 +1746,59 @@ func TestPendingRegistrationCleanupSurvivesManagerRestart(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("resolved registration cleanup state was not cleared: %v", err)
+	}
+}
+
+func TestAbandonedLaunchRemovalUsesDurableIntent(t *testing.T) {
+	directory := projectTestDirectory(t)
+	scaler, api, docker, clock, cancel := newTestScalerInDirectory(
+		t,
+		1,
+		0,
+		0,
+		directory,
+	)
+	defer cancel()
+	docker.runErrors = []error{errors.New("container launch failed")}
+	api.removeErrors[1] = errors.New("registration removal failed")
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("expected abandoned launch failure")
+	}
+	if scaler.pendingLaunchIntent == nil {
+		t.Fatal("abandoned launch intent was not retained")
+	}
+	record, exists, err := scaler.launchIntentStore.load()
+	if err != nil || !exists {
+		t.Fatalf("load abandoned launch intent: %#v %t %v", record, exists, err)
+	}
+	if record.RunnerID != 1 || record.Attempts != 1 {
+		t.Fatalf("abandoned launch intent lost exact identity: %#v", record)
+	}
+	if api.jitCalls != 1 || !reflect.DeepEqual(api.removeCalls, []int64{1}) {
+		t.Fatalf(
+			"unexpected abandoned launch calls: jit=%d remove=%#v",
+			api.jitCalls,
+			api.removeCalls,
+		)
+	}
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("abandoned launch backoff tick failed: %v", err)
+	}
+	if api.jitCalls != 1 || len(api.removeCalls) != 1 {
+		t.Fatal("abandoned launch retried before its deadline")
+	}
+
+	delete(api.removeErrors, 1)
+	clock.advance(registrationOperationRetryDelay(1))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("abandoned launch recovery retry failed: %v", err)
+	}
+	if scaler.pendingLaunchIntent != nil || api.jitCalls != 2 {
+		t.Fatalf(
+			"abandoned launch intent did not restore demand: pending=%t jit=%d",
+			scaler.pendingLaunchIntent != nil,
+			api.jitCalls,
+		)
 	}
 }

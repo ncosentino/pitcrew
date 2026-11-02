@@ -13,11 +13,22 @@ import (
 	"time"
 )
 
-// maxPendingRegistrationCleanups bounds the durable cleanup-pending backlog.
-const maxPendingRegistrationCleanups = 64
+const (
+	maxRegistrationCleanupAttempts = 1000
+)
 
-// registrationCleanupRetryDelay paces retries of failed registration removal.
-const registrationCleanupRetryDelay = 15 * time.Second
+const (
+	registrationOperationRetryBase    = time.Minute
+	registrationOperationRetryMaximum = 15 * time.Minute
+)
+
+func registrationOperationRetryDelay(attempts int) time.Duration {
+	return boundedExponentialBackoff(
+		registrationOperationRetryBase,
+		registrationOperationRetryMaximum,
+		attempts,
+	)
+}
 
 // registrationCleanupRecord carries only the identity and retry metadata needed
 // to remove one exact JIT registration. It never carries JIT configuration,
@@ -186,6 +197,34 @@ func parseRegistrationCleanupDocument(
 				index,
 			)
 		}
+		if record.Attempts < 0 {
+			return registrationCleanupDocument{}, fmt.Errorf(
+				"registration cleanup record at index %d has negative attempts",
+				index,
+			)
+		}
+		if record.Attempts > maxRegistrationCleanupAttempts {
+			document.Records[index].Attempts = maxRegistrationCleanupAttempts
+		}
+		for _, timestamp := range []struct {
+			name  string
+			value string
+		}{
+			{name: "firstFailedAt", value: record.FirstFailedAt},
+			{name: "lastAttemptAt", value: record.LastAttemptAt},
+			{name: "nextAttemptAt", value: record.NextAttemptAt},
+		} {
+			if timestamp.value == "" {
+				continue
+			}
+			if _, err := time.Parse(time.RFC3339, timestamp.value); err != nil {
+				return registrationCleanupDocument{}, fmt.Errorf(
+					"registration cleanup record at index %d has invalid %s",
+					index,
+					timestamp.name,
+				)
+			}
+		}
 		if _, exists := seen[record.SlotKey]; exists {
 			return registrationCleanupDocument{}, fmt.Errorf(
 				"registration cleanup contains duplicate slot %q",
@@ -193,13 +232,6 @@ func parseRegistrationCleanupDocument(
 			)
 		}
 		seen[record.SlotKey] = struct{}{}
-	}
-	if len(document.Records) > maxPendingRegistrationCleanups {
-		return registrationCleanupDocument{}, fmt.Errorf(
-			"registration cleanup holds %d records, more than the %d bound",
-			len(document.Records),
-			maxPendingRegistrationCleanups,
-		)
 	}
 	return document, nil
 }

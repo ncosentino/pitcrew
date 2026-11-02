@@ -780,6 +780,88 @@ type recordingCleanupStore struct {
 	events *eventRecorder
 }
 
+type failingRegistrationCleanupStore struct {
+	loadErr error
+	saveErr error
+	records []registrationCleanupRecord
+}
+
+type failSecondRegistrationCleanupSaveStore struct {
+	records   []registrationCleanupRecord
+	saveCalls int
+}
+
+func (s *failSecondRegistrationCleanupSaveStore) load() (
+	[]registrationCleanupRecord,
+	error,
+) {
+	return append([]registrationCleanupRecord(nil), s.records...), nil
+}
+
+func (s *failSecondRegistrationCleanupSaveStore) save(
+	records []registrationCleanupRecord,
+) error {
+	s.saveCalls++
+	if s.saveCalls == 2 {
+		return errors.New("second registration cleanup save failed")
+	}
+	s.records = append([]registrationCleanupRecord(nil), records...)
+	return nil
+}
+
+type failSecondRegistrationFenceSaveStore struct {
+	records   []registrationFenceRecord
+	saveCalls int
+}
+
+func (s *failSecondRegistrationFenceSaveStore) load() (
+	[]registrationFenceRecord,
+	error,
+) {
+	return append([]registrationFenceRecord(nil), s.records...), nil
+}
+
+func (s *failSecondRegistrationFenceSaveStore) save(
+	records []registrationFenceRecord,
+) error {
+	s.saveCalls++
+	if s.saveCalls == 2 {
+		return errors.New("second registration fence save failed")
+	}
+	s.records = append([]registrationFenceRecord(nil), records...)
+	return nil
+}
+
+type failingLaunchIntentStore struct {
+	saveErr error
+}
+
+func (*failingLaunchIntentStore) load() (launchIntentRecord, bool, error) {
+	return launchIntentRecord{}, false, nil
+}
+
+func (s *failingLaunchIntentStore) save(launchIntentRecord) error {
+	return s.saveErr
+}
+
+func (*failingLaunchIntentStore) clear() error {
+	return nil
+}
+
+func (s *failingRegistrationCleanupStore) load() ([]registrationCleanupRecord, error) {
+	return append([]registrationCleanupRecord(nil), s.records...), s.loadErr
+}
+
+func (s *failingRegistrationCleanupStore) save(
+	records []registrationCleanupRecord,
+) error {
+	if s.saveErr != nil {
+		return s.saveErr
+	}
+	s.records = append([]registrationCleanupRecord(nil), records...)
+	return nil
+}
+
 func (s *recordingCleanupStore) load() ([]registrationCleanupRecord, error) {
 	return s.inner.load()
 }

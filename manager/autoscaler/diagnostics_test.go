@@ -646,6 +646,28 @@ func TestClassifyFailureUsesClosedVocabulary(t *testing.T) {
 			expectedReason: reasonCancelled,
 			expectOutcome:  outcomeFailed,
 		},
+		"scale set rate limited": {
+			err: errors.New(
+				"failed to get runner registration token: API rate limit exceeded",
+			),
+			expectedReason: reasonRateLimited,
+			expectOutcome:  outcomeFailed,
+		},
+		"secondary rate limited": {
+			err:            errors.New("secondary rate limit"),
+			expectedReason: reasonRateLimited,
+			expectOutcome:  outcomeFailed,
+		},
+		"too many requests": {
+			err:            errors.New("request failed: 429 Too Many Requests"),
+			expectedReason: reasonRateLimited,
+			expectOutcome:  outcomeFailed,
+		},
+		"rate wording near miss": {
+			err:            errors.New("rate calculation limit exceeded"),
+			expectedReason: reasonUnknown,
+			expectOutcome:  outcomeFailed,
+		},
 		"unknown": {
 			err:            errors.New("api returned 500 for https://example.test"),
 			expectedReason: reasonUnknown,

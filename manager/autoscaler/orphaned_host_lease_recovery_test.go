@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 	"time"
 
@@ -52,7 +53,17 @@ func newOrphanedHostLeaseRecoveryFixture(
 		coordinatorLeaseClient{coordinator: coordinator},
 		"profile-a",
 	)
+	directory := projectTestDirectory(t)
+	managerClock := &fakeClock{
+		current: time.Date(2026, 7, 20, 12, 0, 0, 0, time.UTC),
+	}
 	manager := &autoscalerManager{
+		cfg: config{
+			profileID:      "profile-a",
+			stateDirectory: directory,
+		},
+		paths:                        newStatePaths(directory),
+		clock:                        managerClock,
 		hostAdmission:                hostAdmission,
 		hostAdmissionAdoptionPending: true,
 		diagnostics:                  recorder,
@@ -245,6 +256,52 @@ func TestAutoscalerPreservesLeaseWhenRegistrationLookupFails(t *testing.T) {
 			"registration recovery retried before its bounded interval: %d",
 			api.findRunnerCalls["runner-orphan"],
 		)
+	}
+	state, exists, err := loadHostAdmissionRecoveryRetryState(
+		manager.paths.hostRecovery,
+		manager.cfg.profileID,
+	)
+	if err != nil || !exists || state.Attempts != 1 {
+		t.Fatalf("recovery retry state was not persisted: %#v %v", state, err)
+	}
+
+	restartedClock := &fakeClock{current: manager.clock.now()}
+	restarted := &autoscalerManager{
+		cfg:                          manager.cfg,
+		paths:                        manager.paths,
+		clock:                        restartedClock,
+		hostAdmission:                manager.hostAdmission,
+		hostAdmissionAdoptionPending: true,
+		diagnostics:                  manager.diagnostics,
+		controllers:                  manager.controllers,
+		retiring:                     manager.retiring,
+		recovered:                    manager.recovered,
+		orphanRecoveryTargets:        manager.orphanRecoveryTargets,
+	}
+	if err := restarted.loadHostAdmissionRecoveryRetry(); err != nil {
+		t.Fatalf("restore recovery retry state: %v", err)
+	}
+	if err := restarted.completeHostAdmissionAdoptionIfReady(
+		context.Background(),
+	); err != nil {
+		t.Fatalf("restored retry deadline returned an immediate error: %v", err)
+	}
+	if api.findRunnerCalls["runner-orphan"] != 1 {
+		t.Fatalf(
+			"manager restart bypassed the persisted retry deadline: %d",
+			api.findRunnerCalls["runner-orphan"],
+		)
+	}
+
+	delete(api.findRunnerErrors, "runner-orphan")
+	restartedClock.advance(registrationOperationRetryDelay(1))
+	if err := restarted.completeHostAdmissionAdoptionIfReady(
+		context.Background(),
+	); err != nil {
+		t.Fatalf("recovery after persisted deadline failed: %v", err)
+	}
+	if _, err := os.Stat(manager.paths.hostRecovery); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("successful recovery retained retry state: %v", err)
 	}
 }
 
