@@ -753,13 +753,15 @@ func TestStaleRunnerFenceDeadlineSurvivesManagerRestart(t *testing.T) {
 		t.Fatalf("stale fence retry failed: %v", err)
 	}
 	if !reflect.DeepEqual(restartedAPI.removeCalls, []int64{77}) ||
-		restarted.runnerCount() != 0 ||
-		restarted.pendingRegistrationFenceCount() != 0 {
+		restarted.runnerCount() != 1 ||
+		restarted.pendingRegistrationFenceCount() != 0 ||
+		restartedAPI.jitCalls != 1 {
 		t.Fatalf(
-			"stale fence did not converge after restart: remove=%#v runners=%d pending=%d",
+			"stale fence did not converge after restart: remove=%#v runners=%d pending=%d jit=%d",
 			restartedAPI.removeCalls,
 			restarted.runnerCount(),
 			restarted.pendingRegistrationFenceCount(),
+			restartedAPI.jitCalls,
 		)
 	}
 }
