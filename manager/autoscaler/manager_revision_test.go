@@ -258,11 +258,12 @@ func TestRetirementControllerIsRetainedAndRetriedAfterRemovalError(t *testing.T)
 		createdAt:   time.Now().Add(-time.Minute),
 	}}
 	docker.logs["recovered-container"] = []string{"Listening for Jobs"}
+	managerClock := &fakeClock{current: time.Now()}
 	manager := newAutoscalerManager(
 		cfg,
 		factory,
 		docker,
-		&fakeClock{current: time.Now()},
+		managerClock,
 		testLogger(),
 		"instance",
 	)
@@ -297,6 +298,7 @@ func TestRetirementControllerIsRetainedAndRetriedAfterRemovalError(t *testing.T)
 	}
 
 	service.removeErrors[77] = nil
+	managerClock.advance(registrationOperationRetryDelay(1))
 	if err := manager.reconcileRetirements(context.Background()); err != nil {
 		t.Fatal(err)
 	}

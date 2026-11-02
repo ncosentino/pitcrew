@@ -580,6 +580,9 @@ func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady(
 }
 
 func (m *autoscalerManager) loadHostAdmissionRecoveryRetry() error {
+	if m.paths.hostRecovery == "" {
+		return nil
+	}
 	state, exists, err := loadHostAdmissionRecoveryRetryState(
 		m.paths.hostRecovery,
 		m.cfg.profileID,
@@ -613,6 +616,9 @@ func (m *autoscalerManager) prepareHostAdmissionRecoveryAttempt(
 		m.hostAdmissionRecoveryFailures,
 	)
 	m.hostAdmissionRecoveryRetryAt = now.UTC().Add(delay)
+	if m.paths.hostRecovery == "" {
+		return nil
+	}
 	return saveHostAdmissionRecoveryRetryState(
 		m.paths.hostRecovery,
 		hostAdmissionRecoveryRetryState{
@@ -631,6 +637,9 @@ func (m *autoscalerManager) prepareHostAdmissionRecoveryAttempt(
 func (m *autoscalerManager) clearHostAdmissionRecoveryRetry() error {
 	m.hostAdmissionRecoveryFailures = 0
 	m.hostAdmissionRecoveryRetryAt = time.Time{}
+	if m.paths.hostRecovery == "" {
+		return nil
+	}
 	return clearHostAdmissionRecoveryRetryState(m.paths.hostRecovery)
 }
 

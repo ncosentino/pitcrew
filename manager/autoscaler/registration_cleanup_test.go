@@ -151,7 +151,7 @@ func TestRegistrationCleanupDocumentRejectsUnusableState(t *testing.T) {
 
 func TestRegistrationCleanupDocumentCapsAttempts(t *testing.T) {
 	data := `{"schemaVersion":1,"managerContractVersion":10,"targetKey":"repo-1234","records":[` +
-		`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","attempts":2147483647}]}`
+		`{"targetKey":"repo-1234","slotKey":"repo-1234-7","runnerId":7,"runnerName":"one","containerId":"container-1","attempts":2147483647}]}`
 	document, err := parseRegistrationCleanupDocument(
 		[]byte(data),
 		"repo-1234",
