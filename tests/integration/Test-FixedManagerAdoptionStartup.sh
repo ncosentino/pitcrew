@@ -181,21 +181,60 @@ wait_for_refresh_completion() {
     fi
 }
 
-wait_for_converged_admission() {
+wait_for_recovered_adoption() {
     deadline=$((SECONDS + 60))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         if coordinator_status |
             jq -e \
                 --arg profile "${PROFILE_NAME}" \
-                '[(.adoptionFences // [])[] | select(.profileId == $profile)] | length == 0' \
+                '
+                    (
+                        [
+                            (.adoptionFences // [])[]
+                            | select(.profileId == $profile)
+                        ]
+                        | length
+                    ) == 0
+                    and (
+                        [
+                            (.leases // [])[]
+                            | select(
+                                .profileId == $profile
+                                and .status == "active"
+                            )
+                        ]
+                        | length
+                    ) == 1
+                ' \
                 >/dev/null 2>&1 &&
-            [ "$(jq -r '.hostAdmission.status // ""' "${OBSERVED_STATE}" 2>/dev/null || true)" = "available" ]; then
+            jq -e '
+                . as $state
+                | .managerStatus == "running"
+                and .hostAdmission.accounting.activeUnits == 1
+                and .hostAdmission.accounting.provisionalUnits == 0
+                and .hostAdmission.accounting.heldUnits == 1
+                and .hostAdmission.lastDecision.command == "adopt"
+                and .hostAdmission.lastDecision.granted == true
+                and (
+                    (.operationJournal.events // [])
+                    | any(
+                        .managerInstanceId == $state.managerInstanceId
+                        and .operation == "manager-start"
+                        and .outcome == "recovered"
+                    )
+                )
+            ' "${OBSERVED_STATE}" >/dev/null 2>&1 &&
+            ! find "${STATE_DIRECTORY}/host-admission-adoptions" \
+                -maxdepth 1 \
+                -type f \
+                -name '*.pending' |
+                grep -q .; then
             return
         fi
         sleep 1
     done
     dump_convergence_diagnostics
-    fail "Released adoption did not converge to available."
+    fail "Released adoption did not converge to one recovered active lease."
 }
 
 wait_for_worker_replacement() {
@@ -354,7 +393,7 @@ coordinator_status |
 
 : > "${RELEASE_ADOPTION}"
 wait_for_refresh_completion
-wait_for_converged_admission
+wait_for_recovered_adoption
 [ "$(worker_ids)" = "${worker_before}" ] ||
     fail "Completed adoption replaced the preserved worker."
 
