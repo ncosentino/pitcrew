@@ -223,6 +223,7 @@ function New-PitCrewProfileStatusModel {
     $freshness = (
         $GeneratedAt.ToUniversalTime() -
         $managerObservedAt).TotalSeconds
+    $managerEvidenceStale = $freshness -gt $ManagerFreshnessSeconds
     $model.managerFreshnessSeconds = [Math]::Max(
         0,
         [Math]::Round($freshness, 3))
@@ -281,7 +282,7 @@ function New-PitCrewProfileStatusModel {
             Get-PitCrewProfileStatusProperty $autoscaling 'status')
     }
 
-    if ($model.managerFreshnessSeconds -gt $ManagerFreshnessSeconds) {
+    if ($managerEvidenceStale) {
         $model.runtimeState = 'stale'
         $model.reasonCode = 'manager-evidence-stale'
     } elseif ($ExplicitlyPaused) {
