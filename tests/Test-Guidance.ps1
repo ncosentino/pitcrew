@@ -145,6 +145,13 @@ try {
         $supportInstructionPaths -contains
             '.github/instructions/operations-plugin.instructions.md'
     ) 'The support relay does not receive both trust-boundary and product guidance.'
+    $profileStatusInstructions = @(
+        & $resolver -Path 'tests/Test-ProfileStatus.ps1' |
+            ForEach-Object { [string]$_.InstructionPath })
+    Add-Check (
+        $profileStatusInstructions -contains
+            '.github/instructions/operations-plugin.instructions.md'
+    ) 'The profile-status contract test does not receive operations-plugin guidance.'
     $imagePaths = @(
         'profiles/image-builder/pitcrew-build-image'
         'tests/Test-ImageCandidateReport.sh'

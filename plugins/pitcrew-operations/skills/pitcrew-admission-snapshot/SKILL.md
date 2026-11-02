@@ -9,7 +9,10 @@ license: MIT
 Capture one exact node/profile admission observation with the supported script
 in this skill.
 
-Read [operations safety](../../references/safety.md) before running commands.
+Read these shared references before running commands:
+
+- [operations safety](../../references/safety.md)
+- [profile status](../../references/profile-status.md)
 
 ## Required inputs
 
@@ -47,6 +50,11 @@ environment variable is present. Never print its value.
 The command reads only the paginated current-fleet diagnostic endpoint. It
 does not query history, GitHub, logs, artifacts, environments, runner
 registration material, Docker, or the host.
+
+Use `pitcrew-status` when the question is whether the profile is configured.
+An admission snapshot answers whether requested capacity is allocatable now;
+it must not reinterpret zero runners or missing scoped fleet rows as
+configuration absence.
 
 ## Interpretation
 

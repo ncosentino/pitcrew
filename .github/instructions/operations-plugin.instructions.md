@@ -1,5 +1,5 @@
 ---
-applyTo: "plugins/pitcrew-operations/**,.github/plugin/marketplace.json,tests/Test-{AdmissionSnapshot,CopilotPlugin,RemoteDiagnostics,PerformanceReport}.ps1,scripts/release/**"
+applyTo: "plugins/pitcrew-operations/**,.github/plugin/marketplace.json,tests/Test-{AdmissionSnapshot,CopilotPlugin,ProfileStatus,RemoteDiagnostics,PerformanceReport}.ps1,scripts/release/**"
 ---
 
 # Operations Plugin

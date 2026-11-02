@@ -30,6 +30,9 @@ Read these shared references before running commands:
 ## Profile preflight
 
 1. Enumerate configured profiles directly below `.pitcrew-state`.
+   Run the shared `pitcrew-status` projection for each selected profile and
+   retain its configuration/runtime split. `idle-scale-to-zero` is a healthy
+   configured state, not a missing manager or missing configuration.
 2. Match each profile to its exact running manager label. Skip and report
    profiles with no running manager so an intentionally stopped profile remains
    stopped; the updated checkout will be used the next time its operator starts

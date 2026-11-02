@@ -54,6 +54,9 @@ Run the collection only after the user approves the printed plan.
 3. Never open an environment or token file, including with a filtered command.
 4. Record the desired generation, the acknowledged generation, the observed
    generation, `managerStatus`, and observed-state freshness.
+5. Run the shared `pitcrew-status` projection and put its summary banner first
+   in the report. Do not describe zero live workers as unconfigured when the
+   result is `idle-scale-to-zero`.
 
 ## Capacity reconciliation evidence
 

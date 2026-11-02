@@ -48,6 +48,39 @@ coordinator_status() {
         --socket "${SOCKET}"
 }
 
+dump_convergence_diagnostics() {
+    echo "Observed admission projection:" >&2
+    jq '{
+        managerStatus,
+        managerInstanceId,
+        observedAt,
+        hostAdmission,
+        recoveryEvents: [
+            (.operationJournal.events // [])[]
+            | select(.operation == "manager-start")
+        ]
+    }' "${OBSERVED_STATE}" >&2 2>/dev/null || true
+    echo "Coordinator status:" >&2
+    coordinator_status >&2 2>/dev/null || true
+    echo "Tracked adoption files:" >&2
+    find "${STATE_DIRECTORY}/host-admission-adoptions" \
+        -maxdepth 1 \
+        -type f \
+        -printf '%f\n' >&2 2>/dev/null || true
+    current_manager=$(manager_id)
+    if [ -n "${current_manager}" ] &&
+        [ "$(printf '%s\n' "${current_manager}" | wc -l | tr -d ' ')" -eq 1 ]; then
+        echo "Manager release visibility:" >&2
+        docker exec "${current_manager}" sh -c '
+            if [ -f /var/lib/pitcrew/release-adoption ]; then
+                echo release-adoption=visible
+            else
+                echo release-adoption=missing
+            fi
+        ' >&2 2>/dev/null || true
+    fi
+}
+
 run_setup() {
     pwsh -NoProfile -Command \
         "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${TEST_ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=1'"
@@ -148,20 +181,60 @@ wait_for_refresh_completion() {
     fi
 }
 
-wait_for_converged_admission() {
+wait_for_recovered_adoption() {
     deadline=$((SECONDS + 60))
     while [ "${SECONDS}" -lt "${deadline}" ]; do
         if coordinator_status |
             jq -e \
                 --arg profile "${PROFILE_NAME}" \
-                '[(.adoptionFences // [])[] | select(.profileId == $profile)] | length == 0' \
+                '
+                    (
+                        [
+                            (.adoptionFences // [])[]
+                            | select(.profileId == $profile)
+                        ]
+                        | length
+                    ) == 0
+                    and (
+                        [
+                            (.leases // [])[]
+                            | select(
+                                .profileId == $profile
+                                and .status == "active"
+                            )
+                        ]
+                        | length
+                    ) == 1
+                ' \
                 >/dev/null 2>&1 &&
-            [ "$(jq -r '.hostAdmission.status // ""' "${OBSERVED_STATE}" 2>/dev/null || true)" = "available" ]; then
+            jq -e '
+                . as $state
+                | .managerStatus == "running"
+                and .hostAdmission.accounting.activeUnits == 1
+                and .hostAdmission.accounting.provisionalUnits == 0
+                and .hostAdmission.accounting.heldUnits == 1
+                and .hostAdmission.lastDecision.command == "adopt"
+                and .hostAdmission.lastDecision.granted == true
+                and (
+                    (.operationJournal.events // [])
+                    | any(
+                        .managerInstanceId == $state.managerInstanceId
+                        and .operation == "manager-start"
+                        and .outcome == "recovered"
+                    )
+                )
+            ' "${OBSERVED_STATE}" >/dev/null 2>&1 &&
+            ! find "${STATE_DIRECTORY}/host-admission-adoptions" \
+                -maxdepth 1 \
+                -type f \
+                -name '*.pending' |
+                grep -q .; then
             return
         fi
         sleep 1
     done
-    fail "Released adoption did not converge to available."
+    dump_convergence_diagnostics
+    fail "Released adoption did not converge to one recovered active lease."
 }
 
 wait_for_worker_replacement() {
@@ -320,7 +393,7 @@ coordinator_status |
 
 : > "${RELEASE_ADOPTION}"
 wait_for_refresh_completion
-wait_for_converged_admission
+wait_for_recovered_adoption
 [ "$(worker_ids)" = "${worker_before}" ] ||
     fail "Completed adoption replaced the preserved worker."
 
