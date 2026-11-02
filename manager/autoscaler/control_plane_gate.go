@@ -137,9 +137,7 @@ func (g *controlPlaneRateGate) after(operationErr error) {
 	if g.inFlight > 0 || g.rateLimited {
 		return
 	}
-	if operationErr == nil ||
-		expectedControlPlaneResult(operationErr) ||
-		classifyFailure(operationErr) != reasonRateLimited {
+	if operationErr == nil || expectedControlPlaneResult(operationErr) {
 		g.consecutiveFailures = 0
 		g.nextAttemptAt = time.Time{}
 		if err := g.clearLocked(); err != nil {
@@ -149,6 +147,28 @@ func (g *controlPlaneRateGate) after(operationErr error) {
 		}
 		return
 	}
+	g.consecutiveFailures = 0
+	g.nextAttemptAt = time.Time{}
+}
+
+func (g *controlPlaneRateGate) observe(operationErr error) {
+	if g == nil || classifyFailure(operationErr) != reasonRateLimited {
+		return
+	}
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.rateLimited = true
+	if g.consecutiveFailures < maxRegistrationCleanupAttempts {
+		g.consecutiveFailures++
+	}
+	g.nextAttemptAt = g.clock.now().UTC().Add(
+		registrationAccessNextDelay(
+			g.profileID,
+			g.consecutiveFailures,
+			true,
+		),
+	)
+	_ = g.saveLocked()
 }
 
 func (g *controlPlaneRateGate) saveLocked() error {
@@ -308,7 +328,13 @@ func (s *pacedScaleSetService) openSession(
 		result, err = s.inner.openSession(ctx, scaleSetID, owner)
 		return err
 	})
-	return result, err
+	if err != nil {
+		return nil, err
+	}
+	return &pacedMessageSession{
+		inner: result,
+		gate:  s.gate,
+	}, nil
 }
 
 func (s *pacedScaleSetService) deleteScaleSet(
@@ -322,3 +348,48 @@ func (s *pacedScaleSetService) deleteScaleSet(
 
 var _ scaleSetServiceFactory = (*pacedScaleSetServiceFactory)(nil)
 var _ scaleSetService = (*pacedScaleSetService)(nil)
+
+type pacedMessageSession struct {
+	inner messageSession
+	gate  *controlPlaneRateGate
+}
+
+func (s *pacedMessageSession) GetMessage(
+	ctx context.Context,
+	lastMessageID int,
+	maxCapacity int,
+) (*scaleset.RunnerScaleSetMessage, error) {
+	message, err := s.inner.GetMessage(ctx, lastMessageID, maxCapacity)
+	s.gate.observe(err)
+	return message, err
+}
+
+func (s *pacedMessageSession) DeleteMessage(
+	ctx context.Context,
+	messageID int,
+) error {
+	err := s.inner.DeleteMessage(ctx, messageID)
+	s.gate.observe(err)
+	return err
+}
+
+func (s *pacedMessageSession) AcquireJobs(
+	ctx context.Context,
+	jobMessageIDs []int64,
+) ([]int64, error) {
+	acquired, err := s.inner.AcquireJobs(ctx, jobMessageIDs)
+	s.gate.observe(err)
+	return acquired, err
+}
+
+func (s *pacedMessageSession) Session() scaleset.RunnerScaleSetSession {
+	return s.inner.Session()
+}
+
+func (s *pacedMessageSession) Close(ctx context.Context) error {
+	err := s.inner.Close(ctx)
+	s.gate.observe(err)
+	return err
+}
+
+var _ messageSession = (*pacedMessageSession)(nil)
