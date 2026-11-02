@@ -181,10 +181,12 @@ This includes scale-set discovery/creation, JIT generation, runner lookup and
 removal, credential probes, session creation, and scale-set deletion. Calls are
 serialized only around the remote control-plane operation. Before each call the
 gate persists a conservative hourly deadline; success clears it, ordinary
-failure applies progressive 1–15-minute backoff, and a rate limit applies the
-15/30/60-minute schedule plus profile jitter. A manager restart therefore
-cannot turn an interrupted or hidden token refresh into an immediate retry from
-another target.
+failure remains isolated to its target while retaining the on-disk crash fence
+until another successful control-plane call, and a rate limit applies the
+15/30/60-minute schedule plus profile jitter. Message-session operations report
+rate limits into the same gate without holding a concurrency slot across a
+long poll. A manager restart therefore cannot turn an interrupted or hidden
+token refresh into an immediate retry from another target.
 
 Diagnostics never retain access tokens, JIT payloads, HTTP bodies, raw API or
 Docker error output, job output, or environment values; evidence is reduced to a
