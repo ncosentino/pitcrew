@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.21.2') 'The operations plugin patch version was not advanced for writable-volume rollout guidance.'
+Add-Check ($plugin.version -eq '1.22.0') 'The operations plugin minor version was not advanced for canonical profile status.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -59,7 +59,8 @@ $expectedSkills = @(
     'pitcrew-pool-update',
     'pitcrew-profile-recover',
     'pitcrew-profile-rollout',
-    'pitcrew-remote-diagnostics'
+    'pitcrew-remote-diagnostics',
+    'pitcrew-status'
 )
 $skillDirectories = @(
     Get-ChildItem -LiteralPath $skillsRoot -Directory |
@@ -108,6 +109,51 @@ foreach ($skillDirectory in $skillDirectories) {
         ) "Skill '$($skillDirectory.Name)' references a missing file: $referencePath"
     }
 }
+
+$statusSkill = Get-Content `
+    -LiteralPath (Join-Path $skillsRoot 'pitcrew-status' 'SKILL.md') `
+    -Raw `
+    -Encoding UTF8
+$profileStatusReference = Get-Content `
+    -LiteralPath (Join-Path $pluginRoot 'references' 'profile-status.md') `
+    -Raw `
+    -Encoding UTF8
+$profileStatusProjection = Get-Content `
+    -LiteralPath (Join-Path $pluginRoot 'scripts' 'ProfileStatus.Projection.ps1') `
+    -Raw `
+    -Encoding UTF8
+$profileStatusCommand = Get-Content `
+    -LiteralPath (
+        Join-Path `
+            $skillsRoot `
+            'pitcrew-status' `
+            'scripts' `
+            'Get-PitCrewProfileStatus.ps1'
+    ) `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $statusSkill -match 'CONFIGURED · AUTOSCALED · IDLE \(SCALE-TO-ZERO\)' -and
+    $statusSkill -match "GitHub's runner list is\s+runtime evidence, never configuration authority" -and
+    $statusSkill -match 'Dashboard `v0\.12\.44` or newer'
+) 'The profile-status skill does not define canonical scale-to-zero and authority semantics.'
+Add-Check (
+    $profileStatusReference -match '(?m)^## Configuration is not runner presence' -and
+    $profileStatusReference -match '`not-configured`: complete current authoritative inventory' -and
+    $profileStatusReference -match 'ProfileStatus\.Projection\.ps1'
+) 'The shared profile-status reference does not own the canonical classifier.'
+Add-Check (
+    $profileStatusProjection -match 'function New-PitCrewProfileStatusModel' -and
+    $profileStatusProjection -match 'function ConvertTo-PitCrewDashboardProfileStatusModel' -and
+    $profileStatusProjection -match "'idle-scale-to-zero'" -and
+    $profileStatusProjection -match "'inventory-not-authoritative'"
+) 'The shared profile-status projection omits required closed-state behavior.'
+Add-Check (
+    $profileStatusCommand -match '/profiles/\$profilePath/status' -and
+    $profileStatusCommand -match 'ephemeral-runner-manager-profile=\$Profile' -and
+    $profileStatusCommand -match 'PITCREW_DIAGNOSTICS_CREDENTIAL' -and
+    $profileStatusCommand -notmatch 'gh api|api\.github\.com'
+) 'The profile-status command does not use exact local or Dashboard authority boundaries.'
 
 $dashboardUpdateSkill = Get-Content `
     -LiteralPath (Join-Path $skillsRoot 'pitcrew-dashboard-update' 'SKILL.md') `

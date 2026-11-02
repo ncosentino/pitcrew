@@ -159,8 +159,8 @@ idle registrations through GitHub and leave assigned jobs running.
 ## Copilot CLI operations plugin
 
 Install PitCrew's marketplace plugin to give Copilot repeatable workflows for
-capacity changes, release updates, remote-first diagnostics, and hosted
-dashboard updates:
+canonical configured-versus-scale-to-zero status, capacity changes, release
+updates, remote-first diagnostics, and hosted dashboard updates:
 
 ```powershell
 copilot plugin marketplace add ncosentino/pitcrew
@@ -188,8 +188,9 @@ available at [www.devleader.ca/projects/pitcrew](https://www.devleader.ca/projec
 3. Keep changes focused and include contract coverage for behavior changes.
 4. Run `pwsh tests/Test-RunnerProfiles.ps1` and
    `pwsh tests/Test-CopilotPlugin.ps1`. Changes to the portable diagnostics
-   workflow also run `pwsh tests/Test-RemoteDiagnostics.ps1`. Guidance changes
-   run `pwsh tests/Test-Guidance.ps1`.
+   workflow also run `pwsh tests/Test-RemoteDiagnostics.ps1`. Profile-status
+   changes run `pwsh tests/Test-ProfileStatus.ps1`. Guidance changes run
+   `pwsh tests/Test-Guidance.ps1`.
 
 ## About
 

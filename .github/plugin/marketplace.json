@@ -5,14 +5,14 @@
     "url": "https://www.devleader.ca"
   },
   "metadata": {
-    "description": "Operational skills for safely managing PitCrew runner pools and dashboards.",
-    "version": "1.21.2"
+    "description": "Operational skills for classifying and safely managing PitCrew runner pools and dashboards.",
+    "version": "1.22.0"
   },
   "plugins": [
     {
       "name": "pitcrew-operations",
-      "description": "Use PitCrew's supported scripts for capacity, current admission snapshots, safe rollouts, Dashboard and hosted-relay updates, local or outbound-relay diagnostics, read-only job-performance correlation, and explicit manager recovery.",
-      "version": "1.21.2",
+      "description": "Use PitCrew's supported scripts for canonical profile status, capacity, admission snapshots, safe rollouts, Dashboard updates, diagnostics, performance correlation, and manager recovery.",
+      "version": "1.22.0",
       "source": "./plugins/pitcrew-operations",
       "homepage": "https://www.devleader.ca/projects/pitcrew",
       "repository": "https://github.com/ncosentino/pitcrew",

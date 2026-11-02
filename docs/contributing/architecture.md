@@ -97,8 +97,9 @@ documented in
 
 `plugins/pitcrew-operations/` is a published product surface, not contributor
 guidance. Its skills describe bounded operator procedures for capacity, rollout,
-updates, diagnostics, performance correlation, and manager recovery. Shared safety
-contracts live under the plugin's `references/` directory.
+updates, canonical profile status, diagnostics, performance correlation, and
+manager recovery. Shared safety and status contracts live under the plugin's
+`references/` directory.
 
 Plugin manifest, marketplace metadata, documentation, scripts, and tests must remain
 consistent because users install the repository as a Copilot CLI marketplace.

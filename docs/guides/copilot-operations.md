@@ -29,6 +29,34 @@ copilot plugin marketplace update pitcrew
 copilot plugin update pitcrew-operations@pitcrew
 ```
 
+## Profile status skill
+
+`pitcrew-status` reports configuration separately from current runtime
+capacity. It uses complete local `.pitcrew-state` inventory or Dashboard
+`v0.12.44` and newer's exact diagnostic profile-status endpoint.
+
+```powershell
+pwsh ./plugins/pitcrew-operations/skills/pitcrew-status/scripts/Get-PitCrewProfileStatus.ps1 `
+    -PitCrewRoot <pitcrew-root> `
+    -Profile project-ci
+```
+
+```text
+Use the pitcrew-status skill to tell me whether the project-ci profile is
+configured and whether it is active, paused, stopped, degraded, or scaled to
+zero.
+```
+
+Healthy zero-demand autoscaling is reported explicitly:
+
+```text
+CONFIGURED · AUTOSCALED · IDLE (SCALE-TO-ZERO)
+```
+
+Current GitHub runners are runtime evidence, not configuration authority.
+Profile absence is reported only from complete authoritative inventory;
+partial, scoped, unavailable, or stale inventory remains `unknown`.
+
 ## Capacity skill
 
 `pitcrew-capacity` adds, removes, or resizes workers through

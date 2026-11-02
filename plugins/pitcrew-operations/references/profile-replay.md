@@ -3,6 +3,10 @@
 Use this reference whenever `Setup-Runner.ps1` must operate on an existing
 profile.
 
+Read [canonical profile status](profile-status.md) before interpreting zero
+workers, a stopped manager, or an absent GitHub runner as missing
+configuration.
+
 ## Locate the profile
 
 The PitCrew root must contain:
@@ -28,6 +32,11 @@ Read:
 Do not read an environment file with a content-viewing tool. `Setup-Runner.ps1`
 reuses the selected profile's stored `ACCESS_TOKEN` when `-Token` is omitted, so
 the agent never needs to extract or print that secret.
+
+Before changing or recovering a profile, run the shared `pitcrew-status`
+projection. Report `configurationState` and `runtimeState` separately.
+`idle-scale-to-zero`, `manager-stopped`, `degraded`, and `stale` all remain
+configured states.
 
 ## Preserve static configuration
 
