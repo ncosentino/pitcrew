@@ -223,6 +223,25 @@ foreach ($path in @(
 }
 . $coreScript
 
+$utcJsonTimestamp = (
+    '{"value":"2026-11-01T04:05:14.5433284+00:00"}' |
+        ConvertFrom-Json).value
+$offsetJsonTimestamp = (
+    '{"value":"2026-10-31T20:54:15.7578741-07:00"}' |
+        ConvertFrom-Json).value
+Add-Check (
+    (
+        ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
+            -Value $utcJsonTimestamp `
+            -Context 'UTC timestamp regression'
+    ).ToString('O') -eq '2026-11-01T04:05:14.5433284+00:00' -and
+    (
+        ConvertTo-PitCrewRemoteDiagnosticsTimestamp `
+            -Value $offsetJsonTimestamp `
+            -Context 'Offset timestamp regression'
+    ).ToString('O') -eq '2026-11-01T03:54:15.7578741+00:00'
+) 'JSON timestamp conversion changed the represented instant.'
+
 $supportAccessJson = Get-Content `
     -LiteralPath $supportAccessContractPath `
     -Raw `
@@ -827,6 +846,51 @@ if ($CommandArguments[0] -eq '-Pi') {
     Add-Check (
         $windowsReport.verifiedMeasurements.connectorHealth.events.Count -eq 1
     ) 'The Windows collector did not import the bounded connector event journal.'
+    if ($IsWindows) {
+        Write-Host 'Remote diagnostics test: inaccessible connector health'
+        $connectorRoot = Split-Path -Parent $healthRoot
+        $originalConnectorAcl = Get-Acl -LiteralPath $connectorRoot
+        $currentIdentity = [Security.Principal.WindowsIdentity]::GetCurrent()
+        $denyRule = [Security.AccessControl.FileSystemAccessRule]::new(
+            $currentIdentity.User,
+            [Security.AccessControl.FileSystemRights]::ReadAndExecute,
+            (
+                [Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+                [Security.AccessControl.InheritanceFlags]::ObjectInherit
+            ),
+            [Security.AccessControl.PropagationFlags]::None,
+            [Security.AccessControl.AccessControlType]::Deny)
+        $deniedConnectorAcl = Get-Acl -LiteralPath $connectorRoot
+        $deniedConnectorAcl.AddAccessRule($denyRule)
+        Set-Acl -LiteralPath $connectorRoot -AclObject $deniedConnectorAcl
+        try {
+            $deniedOutput = Join-Path $outputRoot 'windows-health-denied'
+            $deniedArtifacts = & $collector `
+                -PitCrewRoot $fixtureRoot `
+                -Profile default `
+                -DiagnosticMode ConnectorOffline `
+                -Platform Windows `
+                -PackageId '77777777777777777777777777777777' `
+                -OutputDirectory $deniedOutput
+            $deniedReport = Get-Content `
+                -LiteralPath $deniedArtifacts.jsonPath `
+                -Raw `
+                -Encoding UTF8 |
+                ConvertFrom-Json -Depth 100
+            Add-Check (
+                $null -eq
+                    $deniedReport.verifiedMeasurements.connectorHealth -and
+                @(
+                    $deniedReport.unavailableEvidence |
+                        Where-Object category -eq 'connector-health'
+                ).Count -eq 1 -and
+                $deniedReport.profile -eq 'default' -and
+                $null -ne $deniedReport.verifiedMeasurements.state
+            ) 'An inaccessible connector health directory aborted or fabricated profile diagnostics.'
+        } finally {
+            Set-Acl -LiteralPath $connectorRoot -AclObject $originalConnectorAcl
+        }
+    }
     $windowsText = (
         Get-Content -LiteralPath $windowsArtifacts.jsonPath -Raw -Encoding UTF8) +
         (Get-Content -LiteralPath $windowsArtifacts.markdownPath -Raw -Encoding UTF8)
