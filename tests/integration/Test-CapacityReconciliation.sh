@@ -136,6 +136,19 @@ wait_for_resource_slot_count() {
     return 1
 }
 
+wait_for_resource_telemetry_available() {
+    deadline=$((SECONDS + 60))
+    while [ "${SECONDS}" -lt "${deadline}" ]; do
+        if [ -f "${OBSERVED_STATE}" ] &&
+            [ "$(jq -r '.resourceTelemetry.status // ""' "${OBSERVED_STATE}" 2>/dev/null || true)" = "available" ]; then
+            return
+        fi
+        sleep 1
+    done
+    echo "Timed out waiting for available aggregate resource telemetry." >&2
+    return 1
+}
+
 wait_for_slot_replacement() {
     slot_key="$1"
     previous_id="$2"
@@ -416,6 +429,7 @@ wait_for_observed_generation 1 accepted
 wait_for_support_evidence_generation 1
 wait_for_worker_count 5
 wait_for_resource_slot_count 5
+wait_for_resource_telemetry_available
 manager_image_kib=$(docker run \
     --rm \
     --entrypoint /bin/sh \

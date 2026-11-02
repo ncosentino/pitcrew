@@ -176,6 +176,16 @@ replacement capacity or discarding an unresolved identity. Durable cleanup
 and host-lease release ledgers retain every unresolved identity; they never
 evict an older record to enforce an in-memory count limit.
 
+All scale-set control-plane methods share one profile-wide durable rate gate.
+This includes scale-set discovery/creation, JIT generation, runner lookup and
+removal, credential probes, session creation, and scale-set deletion. Calls are
+serialized only around the remote control-plane operation. Before each call the
+gate persists a conservative hourly deadline; success clears it, ordinary
+failure applies progressive 1–15-minute backoff, and a rate limit applies the
+15/30/60-minute schedule plus profile jitter. A manager restart therefore
+cannot turn an interrupted or hidden token refresh into an immediate retry from
+another target.
+
 Diagnostics never retain access tokens, JIT payloads, HTTP bodies, raw API or
 Docker error output, job output, or environment values; evidence is reduced to a
 short, sanitized summary. Diagnostics are best-effort: a corrupt or unwritable
