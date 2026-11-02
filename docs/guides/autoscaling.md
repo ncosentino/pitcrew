@@ -142,9 +142,11 @@ observed state so operators can tell an idle pool apart from a stuck one:
   and consecutive failure count. A subsystem that has not been observed stays
   `unknown` rather than reporting a fabricated success. The manager also
   validates its stored runner-administration credential against every target
-  every five minutes. An authorization failure remains projected here until
-  that exact check later succeeds; a healthy scale-set message session or
-  another successful GitHub operation cannot mask it.
+  hourly after a deterministic per-profile startup delay and jitter. Ordinary
+  failures retry after five minutes plus jitter; rate limits use progressive
+  15-, 30-, and 60-minute backoff. An authorization failure remains projected
+  here until that exact check later succeeds; a healthy scale-set message
+  session or another successful GitHub operation cannot mask it.
 - `capacityEvidence` reports per-target deficits against the target's current
   activation target, never the configured maximum, so a healthy pool below its
   ceiling is never presented as an unmet health target. Local Docker worker
@@ -157,6 +159,22 @@ actual blocking reason: the profile-wide admission ceiling, an unavailable
 listener or scale-set session, pending or failed JIT configuration, a Docker
 launch failure, pending registration cleanup, draining, retry backoff, or
 `unknown`.
+
+Failed GitHub registration operations are never retried on the one-second
+reconciliation cadence. Failed launches and exact registration cleanup use
+progressive 1-, 2-, 4-, 8-, and 15-minute backoff. Cleanup for an absent
+container is stored separately from live-runner scale-down or stale-worker
+fencing, so rollback readers cannot mistake a preserved live runner for an
+orphaned registration. Before JIT generation the manager durably records the
+requested runner identity; an interrupted launch is recovered by exact runner
+name before another JIT request is allowed. Every cleanup, fence, credential
+probe, and host-admission recovery attempt commits its next deadline before
+calling GitHub, so a manager crash cannot bypass backoff. Exact identities,
+attempts, and deadlines survive a manager restart. Unreadable or unwritable
+registration retry state fails that target closed instead of admitting
+replacement capacity or discarding an unresolved identity. Durable cleanup
+and host-lease release ledgers retain every unresolved identity; they never
+evict an older record to enforce an in-memory count limit.
 
 Diagnostics never retain access tokens, JIT payloads, HTTP bodies, raw API or
 Docker error output, job output, or environment values; evidence is reduced to a

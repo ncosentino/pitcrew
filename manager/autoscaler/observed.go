@@ -868,6 +868,14 @@ func observedCleanupSlot(
 	if updatedAt != "" {
 		updated = &updatedAt
 	}
+	backoffSeconds := 0
+	if record.LastAttemptAt != "" && record.NextAttemptAt != "" {
+		lastAttemptAt, lastErr := time.Parse(time.RFC3339, record.LastAttemptAt)
+		nextAttemptAt, nextErr := time.Parse(time.RFC3339, record.NextAttemptAt)
+		if lastErr == nil && nextErr == nil && nextAttemptAt.After(lastAttemptAt) {
+			backoffSeconds = int(nextAttemptAt.Sub(lastAttemptAt) / time.Second)
+		}
+	}
 	var repository *string
 	if snapshot.target.repository != "" {
 		value := snapshot.target.repository
@@ -880,7 +888,7 @@ func observedCleanupSlot(
 		ProcessRunning:     false,
 		State:              "draining",
 		FailureCount:       record.Attempts,
-		BackoffSeconds:     0,
+		BackoffSeconds:     backoffSeconds,
 		UpdatedAt:          updated,
 		Resources:          nil,
 		Activity:           "draining",
@@ -921,6 +929,10 @@ func observedRunnerSlot(
 		value := runner.repository
 		repository = &value
 	}
+	backoffSeconds := 0
+	if runner.fenceRetryAt != nil && runner.fenceRetryAt.After(runner.updatedAt) {
+		backoffSeconds = int(runner.fenceRetryAt.Sub(runner.updatedAt) / time.Second)
+	}
 	return observedSlot{
 		Key:        runner.key,
 		Repository: repository,
@@ -929,8 +941,8 @@ func observedRunnerSlot(
 			runner.state != runnerCleanupPending,
 		ProcessRunning:     runner.containerRunning,
 		State:              state,
-		FailureCount:       0,
-		BackoffSeconds:     0,
+		FailureCount:       runner.fenceAttempts,
+		BackoffSeconds:     backoffSeconds,
 		UpdatedAt:          &updatedAt,
 		RunnerNameHash:     hashRunnerName(runner.runnerName),
 		CurrentJob:         cloneJobContext(runner.currentJob),

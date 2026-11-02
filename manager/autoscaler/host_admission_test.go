@@ -2108,7 +2108,7 @@ func TestHostAdmissionCreatedRecoveryDiscardRegistrationFailureIsRetried(t *test
 		t.Fatalf("expected the failed registration removal to be retained as pending, got %d", scaler.pendingRegistrationCount())
 	}
 
-	clock.advance(registrationCleanupRetryDelay)
+	clock.advance(registrationOperationRetryDelay(1))
 	delete(api.removeErrors, 202)
 	if err := scaler.retryPendingRegistrations(context.Background()); err != nil {
 		t.Fatal(err)

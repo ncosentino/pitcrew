@@ -16,8 +16,7 @@ import (
 )
 
 const (
-	managerShutdownTimeout             = 50 * time.Second
-	hostAdmissionRecoveryRetryInterval = 30 * time.Second
+	managerShutdownTimeout = 50 * time.Second
 	// Registration access is a credential-health probe, not demand polling.
 	// Staggered hourly checks avoid a cross-manager registration-token herd.
 	registrationAccessSuccessInterval  = time.Hour
@@ -41,6 +40,7 @@ type autoscalerManager struct {
 	hostAdmission                *hostAdmissionCoordinator
 	hostAdmissionAdoptionPending bool
 	hostAdmissionRecoveryRetryAt time.Time
+	hostAdmissionRecoveryFailures int
 	diagnostics                  *diagnosticsRecorder
 
 	controllers           map[string]*targetController
@@ -198,6 +198,12 @@ func (m *autoscalerManager) run(ctx context.Context) error {
 		return fmt.Errorf("create autoscaler state directory: %w", err)
 	}
 	m.diagnostics.restore()
+	if err := m.loadHostAdmissionRecoveryRetry(); err != nil {
+		return err
+	}
+	if err := m.loadRegistrationAccessRetry(); err != nil {
+		return err
+	}
 	m.diagnostics.record(diagnosticsObservation{
 		subsystem: subsystemRecovery,
 		operation: operationManagerStart,
@@ -335,6 +341,15 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 		now.Before(m.registrationAccessHealth.nextCheckAt) {
 		return
 	}
+	precommitAt := now.Add(registrationOperationRetryDelay(1))
+	m.registrationAccessHealth.nextCheckAt = precommitAt
+	if err := m.persistRegistrationAccessRetry(); err != nil {
+		m.recordCycleError(
+			"Persist registration access preflight failed",
+			err,
+		)
+		return
+	}
 
 	targets := make(map[string]registrationAccessTarget, len(m.controllers)+len(m.retiring))
 	for key, controller := range m.retiring {
@@ -371,6 +386,9 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 		m.registrationAccessHealth.nextCheckAt = now.Add(
 			registrationAccessNextDelay(m.cfg.profileID, 0, false),
 		)
+		if err := m.persistRegistrationAccessRetry(); err != nil {
+			m.recordCycleError("Persist registration access schedule failed", err)
+		}
 		return
 	}
 
@@ -447,6 +465,9 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 			observation.evidence = "stored runner credential authorization recovered"
 		}
 		m.diagnostics.record(observation)
+		if err := m.persistRegistrationAccessRetry(); err != nil {
+			m.recordCycleError("Persist registration access success failed", err)
+		}
 		return
 	}
 
@@ -471,6 +492,42 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 	observation.evidence = m.registrationAccessHealth.evidence
 	observation.retryAt = &retryAt
 	m.diagnostics.record(observation)
+	if err := m.persistRegistrationAccessRetry(); err != nil {
+		m.recordCycleError("Persist registration access failure failed", err)
+	}
+}
+
+func (m *autoscalerManager) loadRegistrationAccessRetry() error {
+	state, exists, err := loadRegistrationAccessRetryState(
+		m.paths.registrationAccess,
+		m.cfg.profileID,
+	)
+	if err != nil || !exists {
+		return err
+	}
+	nextCheckAt, err := time.Parse(time.RFC3339, state.NextCheckAt)
+	if err != nil {
+		return err
+	}
+	m.registrationAccessHealth.nextCheckAt = nextCheckAt
+	m.registrationAccessHealth.consecutiveFailures = state.ConsecutiveFailures
+	return nil
+}
+
+func (m *autoscalerManager) persistRegistrationAccessRetry() error {
+	return saveRegistrationAccessRetryState(
+		m.paths.registrationAccess,
+		registrationAccessRetryState{
+			SchemaVersion:          1,
+			ManagerContractVersion: managerContractVersion,
+			ProfileID:              m.cfg.profileID,
+			ConsecutiveFailures: m.registrationAccessHealth.
+				consecutiveFailures,
+			NextCheckAt: m.registrationAccessHealth.nextCheckAt.UTC().Format(
+				time.RFC3339,
+			),
+		},
+	)
 }
 
 func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady(
@@ -509,21 +566,72 @@ func (m *autoscalerManager) completeHostAdmissionAdoptionIfReady(
 		now.Before(m.hostAdmissionRecoveryRetryAt) {
 		return nil
 	}
+	if err := m.prepareHostAdmissionRecoveryAttempt(now); err != nil {
+		return err
+	}
 	if err := m.reconcileOrphanedHostAdmissionLeases(ctx, pending); err != nil {
-		m.hostAdmissionRecoveryRetryAt = now.Add(
-			hostAdmissionRecoveryRetryInterval,
-		)
 		return err
 	}
 	if err := m.hostAdmission.completeAdoption(); err != nil {
-		m.hostAdmissionRecoveryRetryAt = now.Add(
-			hostAdmissionRecoveryRetryInterval,
-		)
 		return err
 	}
 	m.hostAdmissionAdoptionPending = false
-	m.hostAdmissionRecoveryRetryAt = time.Time{}
+	return m.clearHostAdmissionRecoveryRetry()
+}
+
+func (m *autoscalerManager) loadHostAdmissionRecoveryRetry() error {
+	state, exists, err := loadHostAdmissionRecoveryRetryState(
+		m.paths.hostRecovery,
+		m.cfg.profileID,
+	)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return nil
+	}
+	m.hostAdmissionRecoveryFailures = state.Attempts
+	if state.NextAttemptAt != "" {
+		m.hostAdmissionRecoveryRetryAt, err = time.Parse(
+			time.RFC3339,
+			state.NextAttemptAt,
+		)
+		if err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (m *autoscalerManager) prepareHostAdmissionRecoveryAttempt(
+	now time.Time,
+) error {
+	if m.hostAdmissionRecoveryFailures < maxRegistrationCleanupAttempts {
+		m.hostAdmissionRecoveryFailures++
+	}
+	delay := registrationOperationRetryDelay(
+		m.hostAdmissionRecoveryFailures,
+	)
+	m.hostAdmissionRecoveryRetryAt = now.UTC().Add(delay)
+	return saveHostAdmissionRecoveryRetryState(
+		m.paths.hostRecovery,
+		hostAdmissionRecoveryRetryState{
+			SchemaVersion:          1,
+			ManagerContractVersion: managerContractVersion,
+			ProfileID:              m.cfg.profileID,
+			Attempts:               m.hostAdmissionRecoveryFailures,
+			LastAttemptAt:          now.UTC().Format(time.RFC3339),
+			NextAttemptAt: m.hostAdmissionRecoveryRetryAt.Format(
+				time.RFC3339,
+			),
+		},
+	)
+}
+
+func (m *autoscalerManager) clearHostAdmissionRecoveryRetry() error {
+	m.hostAdmissionRecoveryFailures = 0
+	m.hostAdmissionRecoveryRetryAt = time.Time{}
+	return clearHostAdmissionRecoveryRetryState(m.paths.hostRecovery)
 }
 
 func (m *autoscalerManager) hostAdmissionRecoveryTargetsReady() bool {

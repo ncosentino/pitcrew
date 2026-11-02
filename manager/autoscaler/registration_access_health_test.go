@@ -273,3 +273,58 @@ func TestRegistrationAccessNextDelayBacksOffRateLimits(t *testing.T) {
 		}
 	}
 }
+
+func TestRegistrationAccessDeadlineSurvivesManagerRestart(t *testing.T) {
+		directory := projectTestDirectory(t)
+		cfg := managerTestConfig(directory)
+		clock := &fakeClock{
+			current: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+		}
+		manager := newAutoscalerManager(
+			cfg,
+			newFakeScaleSetServiceFactory(),
+			newFakeDockerClient(nil),
+			clock,
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			"manager-first",
+		)
+		api := newFakeScaleSetService(nil)
+		api.registrationAccessErrors = []error{errGitHubRunnerRateLimited}
+		manager.controllers["target"] = &targetController{
+			target: targetSpec{key: "target"},
+			api:    api,
+		}
+		forceRegistrationAccessDue(manager)
+		manager.checkRegistrationAccessIfDue(context.Background())
+		if api.registrationAccessCalls != 1 {
+			t.Fatalf("initial access calls = %d, want 1", api.registrationAccessCalls)
+		}
+		retryAt := manager.registrationAccessHealth.nextCheckAt
+
+		restarted := newAutoscalerManager(
+			cfg,
+			newFakeScaleSetServiceFactory(),
+			newFakeDockerClient(nil),
+			clock,
+			slog.New(slog.NewTextHandler(io.Discard, nil)),
+			"manager-restarted",
+		)
+		restartedAPI := newFakeScaleSetService(nil)
+		restarted.controllers["target"] = &targetController{
+			target: targetSpec{key: "target"},
+			api:    restartedAPI,
+		}
+		if err := restarted.loadRegistrationAccessRetry(); err != nil {
+			t.Fatal(err)
+		}
+		restarted.checkRegistrationAccessIfDue(context.Background())
+		if restartedAPI.registrationAccessCalls != 0 {
+			t.Fatal("manager restart bypassed registration access backoff")
+		}
+
+		clock.advance(retryAt.Sub(clock.now()))
+		restarted.checkRegistrationAccessIfDue(context.Background())
+		if restartedAPI.registrationAccessCalls != 1 {
+			t.Fatal("registration access did not resume at persisted deadline")
+	}
+}

@@ -13,9 +13,6 @@ import (
 	"time"
 )
 
-// maxPendingHostLeaseReleases bounds the durable host-lease release backlog.
-const maxPendingHostLeaseReleases = 64
-
 // hostLeaseReleaseRetryDelay paces retries of failed host admission lease
 // releases.
 const hostLeaseReleaseRetryDelay = 15 * time.Second
@@ -188,13 +185,6 @@ func parseHostLeaseCleanupDocument(
 			)
 		}
 		seen[record.HostSlotKey] = struct{}{}
-	}
-	if len(document.Records) > maxPendingHostLeaseReleases {
-		return hostLeaseCleanupDocument{}, fmt.Errorf(
-			"host lease cleanup holds %d records, more than the %d bound",
-			len(document.Records),
-			maxPendingHostLeaseReleases,
-		)
 	}
 	return document, nil
 }
