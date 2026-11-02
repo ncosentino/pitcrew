@@ -48,6 +48,91 @@ func TestImmediateScaleUpHasNoCooldownOrBatch(t *testing.T) {
 	}
 }
 
+func TestFailedWorkerLaunchUsesProgressiveBackoff(t *testing.T) {
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	api.generateErrors = []error{
+		errors.New("first JIT failure"),
+		errors.New("second JIT failure"),
+	}
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("initial JIT failure was not returned")
+	}
+	if api.jitCalls != 1 {
+		t.Fatalf("initial failure made %d JIT calls, want 1", api.jitCalls)
+	}
+	if scaler.snapshot().blocking.reason != deficitRetryBackoff {
+		t.Fatalf(
+			"initial failure did not publish retry backoff: %#v",
+			scaler.snapshot().blocking,
+		)
+	}
+
+	clock.advance(workerLaunchRetryBase - time.Second)
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("backoff tick failed: %v", err)
+	}
+	if api.jitCalls != 1 {
+		t.Fatalf("JIT retried before the first backoff elapsed: %d", api.jitCalls)
+	}
+
+	clock.advance(time.Second)
+	if err := scaler.tick(context.Background()); err == nil {
+		t.Fatal("second JIT failure was not returned")
+	}
+	if api.jitCalls != 2 {
+		t.Fatalf("second attempt made %d JIT calls, want 2", api.jitCalls)
+	}
+
+	clock.advance(2*workerLaunchRetryBase - time.Second)
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("second backoff tick failed: %v", err)
+	}
+	if api.jitCalls != 2 {
+		t.Fatalf("JIT retried before the doubled backoff elapsed: %d", api.jitCalls)
+	}
+
+	clock.advance(time.Second)
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatalf("successful retry failed: %v", err)
+	}
+	if api.jitCalls != 3 || scaler.runnerCount() != 1 {
+		t.Fatalf(
+			"successful retry did not restore capacity: jit=%d runners=%d",
+			api.jitCalls,
+			scaler.runnerCount(),
+		)
+	}
+	if scaler.launchFailures != 0 || !scaler.launchRetryAt.IsZero() {
+		t.Fatalf(
+			"successful retry retained launch backoff: failures=%d retryAt=%s",
+			scaler.launchFailures,
+			scaler.launchRetryAt,
+		)
+	}
+}
+
+func TestWorkerLaunchBackoffClearsWhenDemandIsSatisfied(t *testing.T) {
+	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, 0)
+	defer cancel()
+	api.generateErrors = []error{errors.New("JIT unavailable")}
+
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
+		t.Fatal("initial JIT failure was not returned")
+	}
+	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 0); err != nil {
+		t.Fatalf("clearing demand failed: %v", err)
+	}
+	if scaler.launchFailures != 0 || !scaler.launchRetryAt.IsZero() {
+		t.Fatalf(
+			"zero demand retained launch backoff: failures=%d retryAt=%s",
+			scaler.launchFailures,
+			scaler.launchRetryAt,
+		)
+	}
+}
+
 func TestScaleDownDelayCancelsAndDebounces(t *testing.T) {
 	scaler, api, docker, clock, cancel := newTestScaler(t, 2, 0, 10*time.Second)
 	defer cancel()

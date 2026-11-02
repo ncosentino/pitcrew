@@ -136,14 +136,11 @@ func registrationAccessNextDelay(
 	}
 	delay := registrationAccessFailureInterval
 	if rateLimited {
-		delay = registrationAccessRateLimitBase
-		for attempt := 1; attempt < consecutiveFailures &&
-			delay < registrationAccessMaxBackoff; attempt++ {
-			delay *= 2
-		}
-	}
-	if delay > registrationAccessMaxBackoff {
-		delay = registrationAccessMaxBackoff
+		delay = boundedExponentialBackoff(
+			registrationAccessRateLimitBase,
+			registrationAccessMaxBackoff,
+			consecutiveFailures,
+		)
 	}
 	return delay + registrationAccessJitter(profileID)
 }

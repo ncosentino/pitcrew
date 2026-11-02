@@ -1579,7 +1579,7 @@ func TestHostAdmissionScaleToZeroReleasesEveryLease(t *testing.T) {
 // lease against the synthetic budget.
 func TestHostAdmissionNoLeakedLeaseAfterRepeatedFailures(t *testing.T) {
 	client := newFakeHostAdmissionClient(1)
-	scaler, api, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	scaler, api, docker, testClock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
 
 	api.generateErrors = []error{errors.New("jit failed")}
@@ -1589,6 +1589,7 @@ func TestHostAdmissionNoLeakedLeaseAfterRepeatedFailures(t *testing.T) {
 	if client.leaseCount() != 0 {
 		t.Fatalf("lease leaked after JIT failure: %d", client.leaseCount())
 	}
+	testClock.advance(workerLaunchRetryBase)
 
 	docker.createErrors = []error{errors.New("create failed")}
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
@@ -1597,6 +1598,7 @@ func TestHostAdmissionNoLeakedLeaseAfterRepeatedFailures(t *testing.T) {
 	if client.leaseCount() != 0 {
 		t.Fatalf("lease leaked after create failure: %d", client.leaseCount())
 	}
+	testClock.advance(2 * workerLaunchRetryBase)
 
 	docker.startErrors = []error{errors.New("start failed")}
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {

@@ -230,24 +230,17 @@ func TestWorkerLaunchFailureJournalsBlockingReason(t *testing.T) {
 	if len(snapshot.runners) != 0 {
 		t.Fatalf("failed launch left a phantom worker: %#v", snapshot.runners)
 	}
-	if snapshot.blocking.reason != deficitDockerFailed {
-		t.Fatalf("failed launch did not record its blocking reason: %#v", snapshot.blocking)
+	if snapshot.blocking.reason != deficitRetryBackoff {
+		t.Fatalf("failed launch did not schedule retry backoff: %#v", snapshot.blocking)
 	}
 	if len(api.removeCalls) != 1 {
 		t.Fatalf("failed launch did not fence its registration: %#v", api.removeCalls)
 	}
-	journal := scaler.diagnostics.journal()
-	if len(journal.Events) == 0 {
-		t.Fatal("failed launch was not journaled")
-	}
-	last := journal.Events[len(journal.Events)-1]
-	if last.Operation != operationWorkerLaunch || last.Outcome != outcomeFailed {
-		t.Fatalf("unexpected launch event: %#v", last)
-	}
+	assertFailedLaunchRetryJournal(t, scaler, reasonDockerFailed)
 }
 
-// TestJITFailureJournalsPendingConfiguration proves a JIT generation failure is
-// reported as the target's blocking reason.
+// TestJITFailureJournalsPendingConfiguration proves a JIT generation failure
+// records the failed operation and its bounded retry.
 func TestJITFailureJournalsPendingConfiguration(t *testing.T) {
 	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, 0)
 	defer cancel()
@@ -256,13 +249,34 @@ func TestJITFailureJournalsPendingConfiguration(t *testing.T) {
 		t.Fatal("expected the JIT failure to surface")
 	}
 	snapshot := scaler.snapshot()
-	if snapshot.blocking.reason != deficitJITFailed {
-		t.Fatalf("JIT failure did not record its blocking reason: %#v", snapshot.blocking)
+	if snapshot.blocking.reason != deficitRetryBackoff {
+		t.Fatalf("JIT failure did not schedule retry backoff: %#v", snapshot.blocking)
 	}
+	assertFailedLaunchRetryJournal(t, scaler, reasonUnknown)
+}
+
+func assertFailedLaunchRetryJournal(
+	t *testing.T,
+	scaler *runnerScaler,
+	expectedFailureReason string,
+) {
+	t.Helper()
 	journal := scaler.diagnostics.journal()
-	last := journal.Events[len(journal.Events)-1]
-	if last.Operation != operationWorkerLaunch || last.Outcome != outcomeFailed {
-		t.Fatalf("JIT failure was not journaled: %#v", last)
+	if len(journal.Events) < 2 {
+		t.Fatalf("failed launch and retry were not journaled: %#v", journal.Events)
+	}
+	failed := journal.Events[len(journal.Events)-2]
+	if failed.Operation != operationWorkerLaunch ||
+		failed.Outcome != outcomeFailed ||
+		failed.Reason != expectedFailureReason {
+		t.Fatalf("unexpected failed launch event: %#v", failed)
+	}
+	retry := journal.Events[len(journal.Events)-1]
+	if retry.Operation != operationWorkerLaunch ||
+		retry.Outcome != outcomeRetry ||
+		retry.Reason != reasonRetryBackoff ||
+		retry.RetryAt == nil {
+		t.Fatalf("unexpected launch retry event: %#v", retry)
 	}
 }
 
