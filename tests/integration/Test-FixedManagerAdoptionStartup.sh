@@ -48,6 +48,39 @@ coordinator_status() {
         --socket "${SOCKET}"
 }
 
+dump_convergence_diagnostics() {
+    echo "Observed admission projection:" >&2
+    jq '{
+        managerStatus,
+        managerInstanceId,
+        observedAt,
+        hostAdmission,
+        recoveryEvents: [
+            (.operationJournal.events // [])[]
+            | select(.operation == "manager-start")
+        ]
+    }' "${OBSERVED_STATE}" >&2 2>/dev/null || true
+    echo "Coordinator status:" >&2
+    coordinator_status >&2 2>/dev/null || true
+    echo "Tracked adoption files:" >&2
+    find "${STATE_DIRECTORY}/host-admission-adoptions" \
+        -maxdepth 1 \
+        -type f \
+        -printf '%f\n' >&2 2>/dev/null || true
+    current_manager=$(manager_id)
+    if [ -n "${current_manager}" ] &&
+        [ "$(printf '%s\n' "${current_manager}" | wc -l | tr -d ' ')" -eq 1 ]; then
+        echo "Manager release visibility:" >&2
+        docker exec "${current_manager}" sh -c '
+            if [ -f /var/lib/pitcrew/release-adoption ]; then
+                echo release-adoption=visible
+            else
+                echo release-adoption=missing
+            fi
+        ' >&2 2>/dev/null || true
+    fi
+}
+
 run_setup() {
     pwsh -NoProfile -Command \
         "function Invoke-RestMethod { param(\$Method, \$Uri, \$Headers, \$ErrorAction) [pscustomobject]@{ token = 'integration-registration-token' } }; & '${TEST_ROOT}/Setup-Runner.ps1' -ProfilePath '${PROFILE_PATH}' -Token 'integration-token' -Repos '${REPOSITORY_URL}=1'"
@@ -161,6 +194,7 @@ wait_for_converged_admission() {
         fi
         sleep 1
     done
+    dump_convergence_diagnostics
     fail "Released adoption did not converge to available."
 }
 
