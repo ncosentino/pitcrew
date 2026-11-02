@@ -23,6 +23,7 @@ function Add-Check {
     $script:checks++
     if (-not $Condition) {
         $script:errors.Add($Failure)
+        Write-Host "::error title=PitCrew profile status contract::$Failure"
     }
 }
 
