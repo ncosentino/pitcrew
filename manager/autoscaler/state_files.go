@@ -21,6 +21,7 @@ type statePaths struct {
 	retirements     string
 	hostRecovery    string
 	registrationAccess string
+	controlPlane       string
 	shutdownRequest string
 }
 
@@ -55,6 +56,7 @@ func newStatePaths(directory string) statePaths {
 		retirements:     filepath.Join(directory, "retiring-targets.json"),
 		hostRecovery:    filepath.Join(directory, "host-admission-recovery.json"),
 		registrationAccess: filepath.Join(directory, "registration-access-retry.json"),
+		controlPlane:       filepath.Join(directory, "github-control-plane-retry.json"),
 		shutdownRequest: filepath.Join(directory, "manager-shutdown.json"),
 	}
 }

@@ -32,6 +32,7 @@ type autoscalerManager struct {
 	cfg                          config
 	paths                        statePaths
 	factory                      scaleSetServiceFactory
+	controlPlaneGate             *controlPlaneRateGate
 	docker                       dockerClient
 	clock                        clock
 	logger                       *slog.Logger
@@ -154,13 +155,23 @@ func newAutoscalerManager(
 	instanceID string,
 ) *autoscalerManager {
 	diagnostics := newDiagnosticsRecorder(cfg.stateDirectory, instanceID, managerClock)
+	paths := newStatePaths(cfg.stateDirectory)
+	controlPlaneGate := newControlPlaneRateGate(
+		paths.controlPlane,
+		cfg.profileID,
+		managerClock,
+	)
 	return &autoscalerManager{
 		cfg:   cfg,
-		paths: newStatePaths(cfg.stateDirectory),
+		paths: paths,
 		factory: instrumentScaleSetServiceFactory(
-			boundScaleSetServiceFactory(factory),
+			&pacedScaleSetServiceFactory{
+				inner: boundScaleSetServiceFactory(factory),
+				gate:  controlPlaneGate,
+			},
 			diagnostics,
 		),
+		controlPlaneGate: controlPlaneGate,
 		docker:                 instrumentDockerClient(boundDockerClient(docker), diagnostics),
 		clock:                  managerClock,
 		logger:                 logger,
@@ -198,6 +209,11 @@ func (m *autoscalerManager) run(ctx context.Context) error {
 		return fmt.Errorf("create autoscaler state directory: %w", err)
 	}
 	m.diagnostics.restore()
+	if m.controlPlaneGate != nil {
+		if err := m.controlPlaneGate.load(); err != nil {
+			return fmt.Errorf("load GitHub control-plane retry state: %w", err)
+		}
+	}
 	if err := m.loadHostAdmissionRecoveryRetry(); err != nil {
 		return err
 	}
