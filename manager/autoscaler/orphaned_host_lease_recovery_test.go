@@ -265,11 +265,19 @@ func TestAutoscalerPreservesLeaseWhenRegistrationLookupFails(t *testing.T) {
 		t.Fatalf("recovery retry state was not persisted: %#v %v", state, err)
 	}
 
-	restarted := *manager
-	restarted.hostAdmissionRecoveryFailures = 0
-	restarted.hostAdmissionRecoveryRetryAt = time.Time{}
 	restartedClock := &fakeClock{current: manager.clock.now()}
-	restarted.clock = restartedClock
+	restarted := &autoscalerManager{
+		cfg:                          manager.cfg,
+		paths:                        manager.paths,
+		clock:                        restartedClock,
+		hostAdmission:                manager.hostAdmission,
+		hostAdmissionAdoptionPending: true,
+		diagnostics:                  manager.diagnostics,
+		controllers:                  manager.controllers,
+		retiring:                     manager.retiring,
+		recovered:                    manager.recovered,
+		orphanRecoveryTargets:        manager.orphanRecoveryTargets,
+	}
 	if err := restarted.loadHostAdmissionRecoveryRetry(); err != nil {
 		t.Fatalf("restore recovery retry state: %v", err)
 	}
