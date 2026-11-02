@@ -568,7 +568,7 @@ func TestHostAdmissionDisabledCoordinatorIsExactNoOp(t *testing.T) {
 // contract-18 host-admission vocabulary.
 func TestHostAdmissionBudgetDenyBlocksLaunchWithoutGitHubActivity(t *testing.T) {
 	client := newFakeHostAdmissionClient(0)
-	scaler, api, docker, _, _, cancel := newHostAdmissionTestScaler(t, 1, client)
+	scaler, api, docker, clock, _, cancel := newHostAdmissionTestScaler(t, 1, client)
 	defer cancel()
 
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
@@ -1589,6 +1589,7 @@ func TestHostAdmissionNoLeakedLeaseAfterRepeatedFailures(t *testing.T) {
 	if client.leaseCount() != 0 {
 		t.Fatalf("lease leaked after JIT failure: %d", client.leaseCount())
 	}
+	clock.advance(workerLaunchRetryBase)
 
 	docker.createErrors = []error{errors.New("create failed")}
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
@@ -1597,6 +1598,7 @@ func TestHostAdmissionNoLeakedLeaseAfterRepeatedFailures(t *testing.T) {
 	if client.leaseCount() != 0 {
 		t.Fatalf("lease leaked after create failure: %d", client.leaseCount())
 	}
+	clock.advance(2 * workerLaunchRetryBase)
 
 	docker.startErrors = []error{errors.New("start failed")}
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err == nil {
