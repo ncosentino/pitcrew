@@ -93,3 +93,57 @@ func TestControlPlanePrecommitIsConservative(t *testing.T) {
 		)
 	}
 }
+
+func TestControlPlaneOrdinaryFailureDoesNotBlockPeers(t *testing.T) {
+	clock := &fakeClock{
+		current: time.Date(2026, 11, 2, 4, 0, 0, 0, time.UTC),
+	}
+	gate := newControlPlaneRateGate("", "profile-a", clock)
+	api := newFakeScaleSetService(nil)
+	api.ensureErrors = []error{errors.New("temporary target failure")}
+	service := &pacedScaleSetService{inner: api, gate: gate}
+	if _, err := service.ensureScaleSet(
+		context.Background(),
+		"failed-target",
+		"",
+		nil,
+	); err == nil {
+		t.Fatal("ordinary failure was hidden")
+	}
+	if _, err := service.ensureScaleSet(
+		context.Background(),
+		"healthy-target",
+		"",
+		nil,
+	); err != nil {
+		t.Fatalf("ordinary target failure blocked a healthy peer: %v", err)
+	}
+	if api.ensureCalls != 2 {
+		t.Fatalf("underlying API calls = %d, want 2", api.ensureCalls)
+	}
+}
+
+func TestControlPlaneConcurrencyWaitHonorsContext(t *testing.T) {
+	gate := newControlPlaneRateGate(
+		"",
+		"profile-a",
+		&fakeClock{current: time.Now().UTC()},
+	)
+	for index := 0; index < registrationAccessMaxConcurrency; index++ {
+		gate.slots <- struct{}{}
+	}
+	service := &pacedScaleSetService{
+		inner: newFakeScaleSetService(nil),
+		gate:  gate,
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := service.ensureScaleSet(
+		ctx,
+		"scale-set",
+		"",
+		nil,
+	); !errors.Is(err, context.Canceled) {
+		t.Fatalf("blocked control-plane operation ignored cancellation: %v", err)
+	}
+}

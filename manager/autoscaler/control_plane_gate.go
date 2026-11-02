@@ -21,11 +21,13 @@ type controlPlaneRetryState struct {
 }
 
 type controlPlaneRateGate struct {
-	operationMu         sync.Mutex
 	mu                  sync.Mutex
 	path                string
 	profileID           string
 	clock               clock
+	slots               chan struct{}
+	inFlight            int
+	rateLimited         bool
 	consecutiveFailures int
 	nextAttemptAt       time.Time
 }
@@ -47,6 +49,7 @@ func newControlPlaneRateGate(
 		path:      path,
 		profileID: profileID,
 		clock:     gateClock,
+		slots:     make(chan struct{}, registrationAccessMaxConcurrency),
 	}
 }
 
@@ -91,13 +94,20 @@ func (g *controlPlaneRateGate) before() error {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	now := g.clock.now().UTC()
-	if now.Before(g.nextAttemptAt) {
+	if (g.rateLimited || g.inFlight == 0) && now.Before(g.nextAttemptAt) {
 		return controlPlaneBackoffError{retryAt: g.nextAttemptAt}
 	}
-	g.nextAttemptAt = now.Add(
-		registrationAccessNextDelay(g.profileID, 0, false),
-	)
-	return g.saveLocked()
+	if g.inFlight == 0 {
+		g.rateLimited = false
+		g.nextAttemptAt = now.Add(
+			registrationAccessNextDelay(g.profileID, 0, false),
+		)
+		if err := g.saveLocked(); err != nil {
+			return err
+		}
+	}
+	g.inFlight++
+	return nil
 }
 
 func (g *controlPlaneRateGate) after(operationErr error) {
@@ -106,7 +116,30 @@ func (g *controlPlaneRateGate) after(operationErr error) {
 	}
 	g.mu.Lock()
 	defer g.mu.Unlock()
-	if operationErr == nil || expectedControlPlaneResult(operationErr) {
+	if g.inFlight > 0 {
+		g.inFlight--
+	}
+	if classifyFailure(operationErr) == reasonRateLimited {
+		g.rateLimited = true
+		if g.consecutiveFailures < maxRegistrationCleanupAttempts {
+			g.consecutiveFailures++
+		}
+		g.nextAttemptAt = g.clock.now().UTC().Add(
+			registrationAccessNextDelay(
+				g.profileID,
+				g.consecutiveFailures,
+				true,
+			),
+		)
+		_ = g.saveLocked()
+		return
+	}
+	if g.inFlight > 0 || g.rateLimited {
+		return
+	}
+	if operationErr == nil ||
+		expectedControlPlaneResult(operationErr) ||
+		classifyFailure(operationErr) != reasonRateLimited {
 		g.consecutiveFailures = 0
 		g.nextAttemptAt = time.Time{}
 		if err := g.clearLocked(); err != nil {
@@ -116,22 +149,6 @@ func (g *controlPlaneRateGate) after(operationErr error) {
 		}
 		return
 	}
-	if g.consecutiveFailures < maxRegistrationCleanupAttempts {
-		g.consecutiveFailures++
-	}
-	rateLimited := classifyFailure(operationErr) == reasonRateLimited
-	var delay time.Duration
-	if rateLimited {
-		delay = registrationAccessNextDelay(
-			g.profileID,
-			g.consecutiveFailures,
-			true,
-		)
-	} else {
-		delay = registrationOperationRetryDelay(g.consecutiveFailures)
-	}
-	g.nextAttemptAt = g.clock.now().UTC().Add(delay)
-	_ = g.saveLocked()
 }
 
 func (g *controlPlaneRateGate) saveLocked() error {
@@ -186,11 +203,16 @@ type pacedScaleSetService struct {
 }
 
 func (s *pacedScaleSetService) run(
+	ctx context.Context,
 	operation func() error,
 ) error {
 	if s.gate != nil {
-		s.gate.operationMu.Lock()
-		defer s.gate.operationMu.Unlock()
+		select {
+		case s.gate.slots <- struct{}{}:
+			defer func() { <-s.gate.slots }()
+		case <-ctx.Done():
+			return ctx.Err()
+		}
 	}
 	if err := s.gate.before(); err != nil {
 		return err
@@ -207,7 +229,7 @@ func (s *pacedScaleSetService) ensureScaleSet(
 	labels []string,
 ) (scaleSetHandle, error) {
 	var result scaleSetHandle
-	err := s.run(func() error {
+	err := s.run(ctx, func() error {
 		var err error
 		result, err = s.inner.ensureScaleSet(ctx, name, runnerGroup, labels)
 		return err
@@ -222,7 +244,7 @@ func (s *pacedScaleSetService) findScaleSet(
 ) (scaleSetHandle, bool, error) {
 	var result scaleSetHandle
 	var found bool
-	err := s.run(func() error {
+	err := s.run(ctx, func() error {
 		var err error
 		result, found, err = s.inner.findScaleSet(ctx, name, runnerGroup)
 		return err
@@ -236,7 +258,7 @@ func (s *pacedScaleSetService) generateJIT(
 	runnerName string,
 ) (jitRunnerConfig, error) {
 	var result jitRunnerConfig
-	err := s.run(func() error {
+	err := s.run(ctx, func() error {
 		var err error
 		result, err = s.inner.generateJIT(ctx, scaleSetID, runnerName)
 		return err
@@ -250,7 +272,7 @@ func (s *pacedScaleSetService) findRunnerByName(
 ) (runnerReference, bool, error) {
 	var result runnerReference
 	var found bool
-	err := s.run(func() error {
+	err := s.run(ctx, func() error {
 		var err error
 		result, found, err = s.inner.findRunnerByName(ctx, runnerName)
 		return err
@@ -262,7 +284,7 @@ func (s *pacedScaleSetService) removeRunner(
 	ctx context.Context,
 	runnerID int64,
 ) error {
-	return s.run(func() error {
+	return s.run(ctx, func() error {
 		return s.inner.removeRunner(ctx, runnerID)
 	})
 }
@@ -270,7 +292,7 @@ func (s *pacedScaleSetService) removeRunner(
 func (s *pacedScaleSetService) checkRegistrationAccess(
 	ctx context.Context,
 ) error {
-	return s.run(func() error {
+	return s.run(ctx, func() error {
 		return s.inner.checkRegistrationAccess(ctx)
 	})
 }
@@ -281,7 +303,7 @@ func (s *pacedScaleSetService) openSession(
 	owner string,
 ) (messageSession, error) {
 	var result messageSession
-	err := s.run(func() error {
+	err := s.run(ctx, func() error {
 		var err error
 		result, err = s.inner.openSession(ctx, scaleSetID, owner)
 		return err
@@ -293,7 +315,7 @@ func (s *pacedScaleSetService) deleteScaleSet(
 	ctx context.Context,
 	scaleSetID int,
 ) error {
-	return s.run(func() error {
+	return s.run(ctx, func() error {
 		return s.inner.deleteScaleSet(ctx, scaleSetID)
 	})
 }
