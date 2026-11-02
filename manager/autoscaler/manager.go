@@ -341,7 +341,9 @@ func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
 		now.Before(m.registrationAccessHealth.nextCheckAt) {
 		return
 	}
-	precommitAt := now.Add(registrationOperationRetryDelay(1))
+	precommitAt := now.Add(
+		registrationAccessNextDelay(m.cfg.profileID, 0, false),
+	)
 	m.registrationAccessHealth.nextCheckAt = precommitAt
 	if err := m.persistRegistrationAccessRetry(); err != nil {
 		m.recordCycleError(
