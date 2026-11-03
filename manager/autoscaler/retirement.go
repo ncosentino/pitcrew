@@ -5,11 +5,17 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"time"
 )
 
-// The retirement document format has not changed since contract 8. Pinning
-// this value keeps a failed manager handoff rollback-readable by the old image.
+// Optional retry fields remain readable by older managers. Keep retirement
+// intent rollback-readable rather than changing the document contract.
 const retirementDocumentContractVersion = 8
+
+const (
+	retirementStartupRetryBase = time.Minute
+	retirementStartupRetryMax  = 15 * time.Minute
+)
 
 type retirementRecord struct {
 	Key                string `json:"key"`
@@ -18,6 +24,8 @@ type retirementRecord struct {
 	Maximum            int    `json:"maximum"`
 	ScaleSetName       string `json:"scaleSetName"`
 	RetireAtGeneration int    `json:"retireAtGeneration"`
+	StartupAttempts    int    `json:"startupAttempts,omitempty"`
+	StartupRetryAt     string `json:"startupRetryAt,omitempty"`
 }
 
 type retirementDocument struct {
@@ -81,9 +89,49 @@ func parseRetirementDocument(data []byte) (retirementDocument, error) {
 				record.Key,
 			)
 		}
+		if record.StartupAttempts < 0 ||
+			record.StartupAttempts > maxRegistrationCleanupAttempts ||
+			(record.StartupAttempts == 0) != (record.StartupRetryAt == "") {
+			return retirementDocument{}, errors.New("retiring target has invalid startup retry state")
+		}
+		if record.StartupRetryAt != "" {
+			if _, err := time.Parse(time.RFC3339, record.StartupRetryAt); err != nil {
+				return retirementDocument{}, errors.New("retiring target has invalid startup retry deadline")
+			}
+		}
 		seen[record.Key] = struct{}{}
 	}
 	return document, nil
+}
+
+func (m *autoscalerManager) prepareRetirementStartup(record retirementRecord) error {
+	now := m.clock.now().UTC()
+	if record.StartupRetryAt != "" {
+		retryAt, err := time.Parse(time.RFC3339, record.StartupRetryAt)
+		if err != nil {
+			return fmt.Errorf("invalid retiring target %s retry deadline", record.Key)
+		}
+		if now.Before(retryAt) {
+			return fmt.Errorf(
+				"retiring target %s is waiting for retry backoff until %s",
+				record.Key,
+				record.StartupRetryAt,
+			)
+		}
+	}
+	record.StartupAttempts = min(record.StartupAttempts+1, maxRegistrationCleanupAttempts)
+	record.StartupRetryAt = now.Add(boundedExponentialBackoff(
+		retirementStartupRetryBase,
+		retirementStartupRetryMax,
+		record.StartupAttempts,
+	)).Format(time.RFC3339)
+	records := cloneRetirementRecords(m.retirementRecords)
+	records[record.Key] = record
+	// Commit before discovery: failures and manager crashes must not reset pacing.
+	if err := m.persistRetirements(m.current.state.Generation, records); err != nil {
+		return fmt.Errorf("persist startup retry for retiring target %s: %w", record.Key, err)
+	}
+	return nil
 }
 
 func retirementRecordFor(target targetSpec, generation int) retirementRecord {
