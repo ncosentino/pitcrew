@@ -1333,6 +1333,21 @@ func (m *autoscalerManager) reconcileRetirementsWithFinalization(
 				retirementErrors = append(retirementErrors, err)
 				continue
 			}
+			if controller != nil {
+				m.retiring[key] = controller
+				delete(m.orphanRecoveryTargets, key)
+				delete(m.recovered, key)
+			}
+			records := cloneRetirementRecords(m.retirementRecords)
+			record.StartupAttempts = 0
+			record.StartupRetryAt = ""
+			records[key] = record
+			if err := m.persistRetirements(m.current.state.Generation, records); err != nil {
+				retirementErrors = append(retirementErrors, fmt.Errorf(
+					"persist started retiring target %s: %w", key, err,
+				))
+				continue
+			}
 			if controller == nil {
 				if !allowFinalization {
 					continue
@@ -1352,19 +1367,6 @@ func (m *autoscalerManager) reconcileRetirementsWithFinalization(
 				}
 				delete(m.restarts, key)
 				delete(m.orphanRecoveryTargets, key)
-				continue
-			}
-			m.retiring[key] = controller
-			delete(m.orphanRecoveryTargets, key)
-			delete(m.recovered, key)
-			records := cloneRetirementRecords(m.retirementRecords)
-			record.StartupAttempts = 0
-			record.StartupRetryAt = ""
-			records[key] = record
-			if err := m.persistRetirements(m.current.state.Generation, records); err != nil {
-				retirementErrors = append(retirementErrors, fmt.Errorf(
-					"persist started retiring target %s: %w", key, err,
-				))
 				continue
 			}
 		}

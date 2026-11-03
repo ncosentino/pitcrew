@@ -116,10 +116,16 @@ func TestRetirementLookupFailureIsDurablyPacedWithoutBlockingDesiredTargets(t *t
 	}
 	lookup.err = nil
 	clock.advance(2 * time.Minute)
+	if err := restarted.reconcileRetirementsWithFinalization(context.Background(), false); err != nil {
+		t.Fatal(err)
+	}
+	if restarted.retirementRecords[removed.key].StartupAttempts != 0 {
+		t.Fatal("successful absence lookup retained a failed-start retry")
+	}
 	if err := restarted.reconcileRetirements(context.Background()); err != nil {
 		t.Fatal(err)
 	}
-	if lookup.calls != 3 || len(restarted.retirementRecords) != 0 || service.ensureCalls != 0 {
+	if lookup.calls != 4 || len(restarted.retirementRecords) != 0 || service.ensureCalls != 0 {
 		t.Fatal("authoritatively absent scale set did not retire without recreation")
 	}
 }
