@@ -1927,15 +1927,15 @@ function Test-RunnerGitHubAppAccess {
         [string]$OrgName
     )
 
-    $registrationUrls = if ($Scope -eq 'repo') {
+    $registrationUrls = @(if ($Scope -eq 'repo') {
         @(
             $Repositories |
                 ForEach-Object { [string]$_.Url } |
                 Sort-Object -Unique
         )
     } else {
-        @("https://github.com/$OrgName")
-    }
+        "https://github.com/$OrgName"
+    })
     if ($registrationUrls.Count -eq 0) {
         throw 'GitHub App access validation requires at least one target.'
     }
