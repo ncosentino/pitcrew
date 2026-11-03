@@ -4657,6 +4657,14 @@ try {
         }
         if (
             $dockerArguments[0] -eq 'run' -and
+            $dockerArguments -contains 'check-github-app-access' -and
+            $env:PITCREW_TEST_GITHUB_APP_ACCESS_FAILURE -eq '1'
+        ) {
+            $global:LASTEXITCODE = 1
+            return
+        }
+        if (
+            $dockerArguments[0] -eq 'run' -and
             $env:PITCREW_TEST_IMAGE_RUN_FAILURE -eq '1'
         ) {
             $env:PITCREW_TEST_IMAGE_RUN_FAILURE_USED = '1'
@@ -5060,6 +5068,65 @@ try {
         Add-Check (
             -not ($appCommands -match 'test-private-key-fixture')
         ) 'GitHub App setup exposed private key contents.'
+        $appDesiredPath = Join-Path `
+            $fixtureRoot `
+            '.pitcrew-state' `
+            'default' `
+            'desired-capacity.json'
+        $appDesiredBeforeBytes = [IO.File]::ReadAllBytes($appDesiredPath)
+        $appDesiredBefore = Get-Content `
+            -LiteralPath $appDesiredPath `
+            -Raw `
+            -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        $env:PITCREW_TEST_MANAGER_RUNNING = '1'
+        $env:PITCREW_TEST_GITHUB_APP_ACCESS_FAILURE = '1'
+        Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
+        Add-ThrowsCheck `
+            -Action {
+                & $fixtureSetup `
+                    -Autoscale `
+                    -CapacityOnly `
+                    -AddRepos 'https://github.com/example/proposed=2'
+            } `
+            -ExpectedMessage 'does not have runner scale-set access' `
+            -Failure 'A failed GitHub App access probe published capacity-only repository changes.'
+        $appAccessFailureCommands = @(
+            Get-Content -LiteralPath $dockerLog -Encoding UTF8 |
+                Where-Object { $_ -match 'check-github-app-access' }
+        )
+        $appDesiredAfterBytes = [IO.File]::ReadAllBytes($appDesiredPath)
+        $appDesiredAfter = Get-Content `
+            -LiteralPath $appDesiredPath `
+            -Raw `
+            -Encoding UTF8 |
+            ConvertFrom-Json -Depth 10
+        Add-Check (
+            $appAccessFailureCommands.Count -eq 1 -and
+            $appAccessFailureCommands[0] -match
+                [regex]::Escape('https://github.com/example/project') -and
+            $appAccessFailureCommands[0] -match
+                [regex]::Escape('https://github.com/example/proposed')
+        ) 'Capacity-only GitHub App access validation did not receive the complete proposed target set.'
+        Add-Check (
+            [Convert]::ToBase64String($appDesiredAfterBytes) -ceq
+                [Convert]::ToBase64String($appDesiredBeforeBytes)
+        ) 'A failed capacity-only GitHub App access probe changed desired-capacity.json bytes.'
+        Add-Check (
+            [int]$appDesiredAfter.generation -eq
+                [int]$appDesiredBefore.generation
+        ) 'A failed capacity-only GitHub App access probe advanced desired-capacity generation.'
+        Add-Check (
+            @($appDesiredAfter.repositories).Count -eq 1 -and
+            [string]$appDesiredAfter.repositories[0].url -ceq
+                [string]$appDesiredBefore.repositories[0].url -and
+            [int]$appDesiredAfter.repositories[0].workers -eq
+                [int]$appDesiredBefore.repositories[0].workers
+        ) 'A failed capacity-only GitHub App access probe changed the stored repository set.'
+        Remove-Item `
+            Env:\PITCREW_TEST_GITHUB_APP_ACCESS_FAILURE `
+            -ErrorAction SilentlyContinue
+        $env:PITCREW_TEST_MANAGER_RUNNING = '0'
         Remove-Item -LiteralPath (Join-Path $fixtureRoot '.env') -Force
         Remove-Item -LiteralPath (Join-Path $fixtureRoot '.pitcrew-state') -Recurse -Force
 
@@ -6422,6 +6489,7 @@ try {
         Remove-Item Env:\PITCREW_TEST_RESTART_FAILURE -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_EXTRA_ID -ErrorAction SilentlyContinue
         Remove-Item Env:\PITCREW_TEST_MANAGER_CONTRACT -ErrorAction SilentlyContinue
+        Remove-Item Env:\PITCREW_TEST_GITHUB_APP_ACCESS_FAILURE -ErrorAction SilentlyContinue
     }
 }
 finally {

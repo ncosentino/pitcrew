@@ -2750,6 +2750,15 @@ try {
 
     if ($capacityOnlyCompatible) {
         if ($desiredStateChanged) {
+            if ($usingGitHubApp -and -not $Pause) {
+                Test-RunnerGitHubAppAccess `
+                    -ProfileConfig $profileConfig `
+                    -ClientId $GitHubAppClientId `
+                    -PrivateKeyPath $GitHubAppPrivateKeyPath `
+                    -Scope $Scope `
+                    -Repositories @($desiredDraft.repositories) `
+                    -OrgName $OrgName
+            }
             Write-Host "[capacity] Publishing desired-capacity generation $nextGeneration"
             Write-RunnerJsonAtomically `
                 -Path $profileConfig.DesiredCapacityPath `
