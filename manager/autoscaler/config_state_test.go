@@ -185,6 +185,74 @@ func TestLoadConfigRejectsInvalidValues(t *testing.T) {
 	}
 }
 
+func TestLoadConfigAcceptsGitHubAppAuthentication(t *testing.T) {
+	values := map[string]string{
+		"PITCREW_GITHUB_APP_CLIENT_ID":        "Iv1.example",
+		"PITCREW_GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/app.pem",
+		"RUNNER_PROFILE_ID":                   "profile-a",
+		"RUNNER_IMAGE":                        "example/runner:latest",
+		"PITCREW_WORKER_REVISION":             testWorkerRevision,
+		"PITCREW_SESSION_OWNER":               "pitcrew-profile-a",
+		"RUNNER_SCOPE":                        "repo",
+		"RUNNER_NAME_PREFIX":                  "runner",
+	}
+	cfg, err := loadConfig(func(name string) (string, bool) {
+		value, exists := values[name]
+		return value, exists
+	}, "amd64")
+	if err != nil {
+		t.Fatalf("loadConfig returned an error: %v", err)
+	}
+	if !cfg.githubApp.enabled() || cfg.accessToken != "" {
+		t.Fatalf("unexpected GitHub App configuration: %#v", cfg.githubApp)
+	}
+}
+
+func TestLoadConfigRejectsConflictingGitHubAuthentication(t *testing.T) {
+	base := map[string]string{
+		"RUNNER_PROFILE_ID":       "profile-a",
+		"RUNNER_IMAGE":            "example/runner:latest",
+		"PITCREW_WORKER_REVISION": testWorkerRevision,
+		"PITCREW_SESSION_OWNER":   "pitcrew-profile-a",
+		"RUNNER_SCOPE":            "repo",
+		"RUNNER_NAME_PREFIX":      "runner",
+	}
+	tests := []map[string]string{
+		{
+			"ACCESS_TOKEN":                         "pat",
+			"PITCREW_GITHUB_APP_CLIENT_ID":        "Iv1.example",
+			"PITCREW_GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/app.pem",
+		},
+		{
+			"PITCREW_GITHUB_APP_CLIENT_ID": "Iv1.example",
+		},
+		{
+			"PITCREW_GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/app.pem",
+		},
+		{
+			"PITCREW_GITHUB_APP_CLIENT_ID":        "Iv1.example",
+			"PITCREW_GITHUB_APP_PRIVATE_KEY_PATH": "/run/secrets/app.pem",
+			"RUNNER_SCOPE":                        "ent",
+			"ENTERPRISE_NAME":                     "example",
+		},
+	}
+	for index, overrides := range tests {
+		values := make(map[string]string, len(base)+len(overrides))
+		for key, value := range base {
+			values[key] = value
+		}
+		for key, value := range overrides {
+			values[key] = value
+		}
+		if _, err := loadConfig(func(name string) (string, bool) {
+			value, exists := values[name]
+			return value, exists
+		}, "amd64"); err == nil {
+			t.Fatalf("case %d accepted invalid authentication", index)
+		}
+	}
+}
+
 func TestLoadConfigAcceptsScaleDownDelayBounds(t *testing.T) {
 	for _, seconds := range []int{30, 3600} {
 		t.Run(strconv.Itoa(seconds), func(t *testing.T) {

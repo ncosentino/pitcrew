@@ -46,7 +46,7 @@ Add-Check ($marketplacePlugin.version -eq $plugin.version) 'Marketplace and plug
 Add-Check ($marketplace.metadata.version -eq $plugin.version) 'Marketplace metadata and plugin versions do not match.'
 
 Add-Check ($plugin.name -eq 'pitcrew-operations') 'The plugin manifest name is incorrect.'
-Add-Check ($plugin.version -eq '1.22.0') 'The operations plugin minor version was not advanced for canonical profile status.'
+Add-Check ($plugin.version -eq '1.22.1') 'The operations plugin patch version was not advanced for GitHub App replay guidance.'
 Add-Check ($plugin.skills -eq 'skills/') 'The plugin manifest does not expose its skills directory.'
 Add-Check ($plugin.license -eq 'MIT') 'The plugin manifest license is incorrect.'
 
@@ -348,6 +348,18 @@ Add-Check (
     $poolUpdateSkill -match '`-Refresh -RecoverMissingManager`' -and
     $poolUpdateSkill -match 'explicitly authorizes recovery'
 ) 'The pool update skill can implicitly start an intentionally stopped profile.'
+Add-Check (
+    $poolUpdateSkill -match 'stored PAT or GitHub App\s+configuration'
+) 'The pool update skill does not preserve stored GitHub App authentication.'
+$profileReplay = Get-Content `
+    -LiteralPath (Join-Path $pluginRoot 'references' 'profile-replay.md') `
+    -Raw `
+    -Encoding UTF8
+Add-Check (
+    $profileReplay -match '`-GitHubAppClientId`' -and
+    $profileReplay -match '`-GitHubAppPrivateKeyPath`' -and
+    $profileReplay -match 'Never read, copy, or print the PEM'
+) 'The profile replay contract does not define safe GitHub App migration.'
 
 $remoteDiagnosticsRoot = Join-Path $skillsRoot 'pitcrew-remote-diagnostics'
 $remoteDiagnosticsSkill = Get-Content `

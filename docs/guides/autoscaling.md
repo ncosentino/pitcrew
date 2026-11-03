@@ -194,10 +194,13 @@ short, sanitized summary. Diagnostics are best-effort: a corrupt or unwritable
 journal is reported through the journal status and never stops scaling, removes
 workers, or discards retirement, cleanup, or accepted capacity state.
 
-The periodic credential probe requests a short-lived registration token because
+PAT-authenticated managers periodically request a short-lived registration token because
 that is the least disruptive check of the write permission PitCrew actually
 needs. A read-only runner inventory request would not detect a credential that
 retained read permission but lost registration permission. PitCrew validates
+GitHub App access before manager handoff and then relies on the scale-set
+client's real operations and automatic installation-token refresh; App mode
+does not issue idle periodic registration-token probes.
 the response in memory, discards it immediately, rejects redirects, bounds the
 request and response, and never changes workers, scale-set demand, or runner
 registrations as part of the check.
@@ -264,8 +267,9 @@ start forty workers without matching demand.
 ## Security
 
 The manager retains the administration credential. JIT workers receive only
-their one-time encoded configuration and never receive `ACCESS_TOKEN`. Only the
-manager mounts the Docker socket. Periodic authorization checks pass the
+their one-time encoded configuration and never receive `ACCESS_TOKEN` or the
+GitHub App private key. The App key is mounted read-only only into the manager,
+and only the manager mounts the Docker socket. PAT authorization checks pass the
 credential to the bounded manager helper through its environment rather than a
 command-line argument, and neither the generated token nor provider response is
 logged or published.

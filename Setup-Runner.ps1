@@ -20,6 +20,14 @@
     authenticated gh CLI token. Written only to the selected profile's
     gitignored environment file.
 
+.PARAMETER GitHubAppClientId
+    GitHub App client ID for autoscaled repository or organization profiles.
+    Requires GitHubAppPrivateKeyPath and is mutually exclusive with Token.
+
+.PARAMETER GitHubAppPrivateKeyPath
+    Private key PEM for GitHubAppClientId. The file must be outside the PitCrew
+    checkout and is mounted read-only into the selected manager.
+
 .PARAMETER Replicas
     Override the profile's default workers per repo. Pass 0 to auto-size to half
     the machine's logical processors.
@@ -171,6 +179,12 @@
 [CmdletBinding()]
 param(
     [string]$Token,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$GitHubAppClientId,
+    [AllowNull()]
+    [AllowEmptyString()]
+    [string]$GitHubAppPrivateKeyPath,
     [Nullable[int]]$Replicas,
     [AllowNull()]
     [AllowEmptyString()]
@@ -344,6 +358,7 @@ if (-not (Get-Command docker -ErrorAction SilentlyContinue)) {
 
 $legacyLabels = @('ephemeral-managed-runner')
 $composePath = Join-Path $here 'docker-compose.yml'
+$githubAppManagerComposePath = Join-Path $here 'github-app.manager.compose.yml'
 $hostAdmissionComposePath = Join-Path $here 'host-admission.compose.yml'
 $hostAdmissionManagerComposePath = Join-Path $here 'host-admission.manager.compose.yml'
 $hostAdmissionComposeEnvironmentNames = @(
@@ -353,6 +368,8 @@ $hostAdmissionComposeEnvironmentNames = @(
 )
 $composeEnvironmentNames = @(
     'ACCESS_TOKEN',
+    'PITCREW_GITHUB_APP_CLIENT_ID',
+    'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE',
     'REPO_URLS',
     'REPO_URL',
     'RUNNER_SCOPE',
@@ -422,6 +439,12 @@ function Invoke-RunnerCompose {
         )
         if ($ProfileConfig.HostAdmission) {
             $composeArguments += @('--file', $hostAdmissionManagerComposePath)
+        }
+        $appClientID = Get-RunnerEnvironmentFileValue `
+            -Path $ProfileConfig.EnvironmentPath `
+            -Name 'PITCREW_GITHUB_APP_CLIENT_ID'
+        if (-not [string]::IsNullOrWhiteSpace($appClientID)) {
+            $composeArguments += @('--file', $githubAppManagerComposePath)
         }
         $composeArguments += @('--project-name', $ProfileConfig.ComposeProjectName)
         if (Test-Path -LiteralPath $ProfileConfig.EnvironmentPath) {
@@ -1880,6 +1903,66 @@ function Get-RunnerRegistrationAccessValidation {
     }
 }
 
+function Test-RunnerGitHubAppAccess {
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [string]$ClientId,
+
+        [Parameter(Mandatory)]
+        [string]$PrivateKeyPath,
+
+        [Parameter(Mandatory)]
+        [ValidateSet('repo', 'org')]
+        [string]$Scope,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyCollection()]
+        [object[]]$Repositories,
+
+        [Parameter(Mandatory)]
+        [AllowEmptyString()]
+        [string]$OrgName
+    )
+
+    $registrationUrls = if ($Scope -eq 'repo') {
+        @(
+            $Repositories |
+                ForEach-Object { [string]$_.Url } |
+                Sort-Object -Unique
+        )
+    } else {
+        @("https://github.com/$OrgName")
+    }
+    if ($registrationUrls.Count -eq 0) {
+        throw 'GitHub App access validation requires at least one target.'
+    }
+    $commandArguments = @('check-github-app-access')
+    foreach ($registrationUrl in $registrationUrls) {
+        $commandArguments += @('--registration-url', $registrationUrl)
+    }
+    $keyMount = (
+        "type=bind,source=$PrivateKeyPath," +
+        'target=/run/secrets/pitcrew-github-app.pem,readonly'
+    )
+    & docker run `
+        --rm `
+        --read-only `
+        --cap-drop ALL `
+        --security-opt no-new-privileges:true `
+        --mount $keyMount `
+        --env "PITCREW_GITHUB_APP_CLIENT_ID=$ClientId" `
+        --env 'PITCREW_GITHUB_APP_PRIVATE_KEY_PATH=/run/secrets/pitcrew-github-app.pem' `
+        --entrypoint /usr/local/bin/pitcrew-autoscaler `
+        "ephemeral-runner-manager:profile-$($ProfileConfig.Name)" `
+        @commandArguments
+    if ($LASTEXITCODE -ne 0) {
+        throw 'GitHub App does not have runner scale-set access to every selected target.'
+    }
+}
+
 if ($RecoverMissingManager -and -not $Refresh) {
     throw '-RecoverMissingManager requires -Refresh.'
 }
@@ -1930,6 +2013,8 @@ try {
         }
         $mutatingParameterNames = @(
             'Token',
+            'GitHubAppClientId',
+            'GitHubAppPrivateKeyPath',
             'Replicas',
             'Labels',
             'NamePrefix',
@@ -2047,6 +2132,85 @@ try {
 
     Write-Host "[resolve] Resolving workers, targets, and registration credentials"
     $tokenSource = if ($Token) { 'parameter' } else { '' }
+    $appParametersSupplied = (
+        $PSBoundParameters.ContainsKey('GitHubAppClientId') -or
+        $PSBoundParameters.ContainsKey('GitHubAppPrivateKeyPath')
+    )
+    if ($Token -and $appParametersSupplied) {
+        Write-Error '-Token cannot be combined with GitHub App authentication.'
+    }
+    if (
+        $appParametersSupplied -and
+        (
+            [string]::IsNullOrWhiteSpace($GitHubAppClientId) -or
+            [string]::IsNullOrWhiteSpace($GitHubAppPrivateKeyPath)
+        )
+    ) {
+        Write-Error (
+            '-GitHubAppClientId and -GitHubAppPrivateKeyPath must be supplied together.'
+        )
+    }
+    if (-not $appParametersSupplied -and -not $Token) {
+        $storedAppClientId = Get-RunnerEnvironmentFileValue `
+            -Path $profileConfig.EnvironmentPath `
+            -Name 'PITCREW_GITHUB_APP_CLIENT_ID'
+        $storedAppPrivateKeyPath = Get-RunnerEnvironmentFileValue `
+            -Path $profileConfig.EnvironmentPath `
+            -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
+        if (
+            [string]::IsNullOrWhiteSpace($storedAppClientId) -ne
+            [string]::IsNullOrWhiteSpace($storedAppPrivateKeyPath)
+        ) {
+            Write-Error (
+                "Profile '$($profileConfig.Name)' contains incomplete stored GitHub App configuration."
+            )
+        }
+        if (-not [string]::IsNullOrWhiteSpace($storedAppClientId)) {
+            $GitHubAppClientId = $storedAppClientId
+            $GitHubAppPrivateKeyPath = $storedAppPrivateKeyPath
+            Write-Host '  Reusing the selected profile GitHub App configuration.'
+        }
+    }
+    $usingGitHubApp = -not [string]::IsNullOrWhiteSpace($GitHubAppClientId)
+    if ($usingGitHubApp) {
+        if ($Token) {
+            Write-Error '-Token cannot be combined with GitHub App authentication.'
+        }
+        if (-not $profileConfig.Autoscaling) {
+            Write-Error 'GitHub App authentication currently supports autoscaled profiles only.'
+        }
+        if ($Scope -eq 'ent') {
+            Write-Error 'GitHub App authentication does not support enterprise runner scope.'
+        }
+        if ($GitHubAppClientId -notmatch '^[A-Za-z0-9_-]{1,128}$') {
+            Write-Error 'GitHub App client ID contains unsupported characters.'
+        }
+        if (
+            -not (Test-Path `
+                -LiteralPath $GitHubAppPrivateKeyPath `
+                -PathType Leaf)
+        ) {
+            Write-Error 'GitHub App private key path must identify an existing file.'
+        }
+        $GitHubAppPrivateKeyPath = (
+            Resolve-Path -LiteralPath $GitHubAppPrivateKeyPath
+        ).Path
+        $relativeKeyPath = [IO.Path]::GetRelativePath(
+            $here,
+            $GitHubAppPrivateKeyPath
+        )
+        if (
+            $relativeKeyPath -ne '..' -and
+            -not $relativeKeyPath.StartsWith(
+                "..$([IO.Path]::DirectorySeparatorChar)",
+                [StringComparison]::Ordinal
+            )
+        ) {
+            Write-Error 'GitHub App private key must be stored outside the PitCrew checkout.'
+        }
+        $Token = ''
+        $tokenSource = 'github-app'
+    }
     if ($profileConfig.Replicas -eq 0) {
         $profileConfig.Replicas = [math]::Max(2, [math]::Floor([Environment]::ProcessorCount / 2))
     }
@@ -2062,7 +2226,7 @@ try {
     if ($Scope -eq 'repo' -and $profileConfig.RunnerGroup) {
         Write-Error '-RunnerGroup requires org or ent scope.'
     }
-    if (-not $Token) {
+    if (-not $usingGitHubApp -and -not $Token) {
         $Token = Get-RunnerEnvironmentFileValue `
             -Path $profileConfig.EnvironmentPath `
             -Name 'ACCESS_TOKEN'
@@ -2071,13 +2235,17 @@ try {
             Write-Host '  Reusing the selected profile registration token.'
         }
     }
-    if (-not $Token -and (Get-Command gh -ErrorAction SilentlyContinue)) {
+    if (
+        -not $usingGitHubApp -and
+        -not $Token -and
+        (Get-Command gh -ErrorAction SilentlyContinue)
+    ) {
         $Token = gh auth token 2>$null
         if ($Token) {
             $tokenSource = 'gh'
         }
     }
-    if (-not $Token) {
+    if (-not $usingGitHubApp -and -not $Token) {
         Write-Error 'No token: pass -Token <PAT>, or authenticate gh so Setup-Runner can use that token.'
     }
 
@@ -2255,7 +2423,7 @@ try {
         -Scope $Scope `
         -Repositories $desiredRepositories `
         -Replicas $desiredReplicas
-    if (-not $Pause) {
+    if (-not $Pause -and -not $usingGitHubApp) {
         $registrationAccess = Get-RunnerRegistrationAccessValidation `
             -Token $Token `
             -Scope $Scope `
@@ -2448,6 +2616,8 @@ try {
         New-RunnerEnvironmentContent `
             -Profile $profileConfig `
             -AccessToken $Token `
+            -GitHubAppClientId $GitHubAppClientId `
+            -GitHubAppPrivateKeySource $GitHubAppPrivateKeyPath `
             -WorkerRevision ([string]$staticProfileState.workerRevision) `
             -SessionOwner $sessionOwner `
             -AssumeUnversionedCurrent $assumeUnversionedCurrent `
@@ -2794,6 +2964,8 @@ try {
             $environmentContent = New-RunnerEnvironmentContent `
                 -Profile $profileConfig `
                 -AccessToken $Token `
+                -GitHubAppClientId $GitHubAppClientId `
+                -GitHubAppPrivateKeySource $GitHubAppPrivateKeyPath `
                 -WorkerRevision ([string]$staticProfileState.workerRevision) `
                 -SessionOwner $sessionOwner `
                 -AssumeUnversionedCurrent $assumeUnversionedCurrent `
@@ -2956,6 +3128,15 @@ try {
         Invoke-RunnerCompose `
             -ProfileConfig $buildProfileConfig `
             -CommandArguments @('build', 'runner-manager')
+        if ($usingGitHubApp) {
+            Test-RunnerGitHubAppAccess `
+                -ProfileConfig $profileConfig `
+                -ClientId $GitHubAppClientId `
+                -PrivateKeyPath $GitHubAppPrivateKeyPath `
+                -Scope $Scope `
+                -Repositories @($desiredDraft.repositories) `
+                -OrgName $OrgName
+        }
 
         if ($profileConfig.HostAdmission) {
             Invoke-RunnerHostAdmissionClient `

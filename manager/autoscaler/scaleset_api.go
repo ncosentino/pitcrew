@@ -69,23 +69,73 @@ type scaleSetServiceFactory interface {
 
 type githubScaleSetServiceFactory struct {
 	accessToken string
+	githubApp   *githubAppCredentials
+}
+
+func newGitHubScaleSetServiceFactory(
+	cfg config,
+	factoryClock clock,
+) (githubScaleSetServiceFactory, error) {
+	if !cfg.githubApp.enabled() {
+		return githubScaleSetServiceFactory{
+			accessToken: cfg.accessToken,
+		}, nil
+	}
+	app, err := loadGitHubAppCredentials(
+		cfg.githubApp.clientID,
+		cfg.githubApp.privateKeyPath,
+		factoryClock,
+	)
+	if err != nil {
+		return githubScaleSetServiceFactory{}, err
+	}
+	return githubScaleSetServiceFactory{githubApp: app}, nil
 }
 
 func (f githubScaleSetServiceFactory) newService(
 	registrationURL string,
 ) (scaleSetService, error) {
-	client, err := scaleset.NewClientWithPersonalAccessToken(
-		scaleset.NewClientWithPersonalAccessTokenConfig{
+	systemInfo := scaleset.SystemInfo{
+		System:    "pitcrew",
+		Version:   "1",
+		CommitSHA: "unknown",
+		Subsystem: "autoscaler",
+	}
+	var client *scaleset.Client
+	var err error
+	if f.githubApp != nil {
+		ctx, cancel := context.WithTimeout(
+			context.Background(),
+			githubAppRequestTimeout,
+		)
+		defer cancel()
+		installationID, resolveErr := f.githubApp.installationID(
+			ctx,
+			registrationURL,
+		)
+		if resolveErr != nil {
+			return nil, resolveErr
+		}
+		client, err = scaleset.NewClientWithGitHubApp(
+			scaleset.ClientWithGitHubAppConfig{
+				GitHubConfigURL: registrationURL,
+				GitHubAppAuth: scaleset.GitHubAppAuth{
+					ClientID:       f.githubApp.clientID,
+					InstallationID: installationID,
+					PrivateKey:     f.githubApp.privateKey,
+				},
+				SystemInfo: systemInfo,
+			},
+		)
+	} else {
+		client, err = scaleset.NewClientWithPersonalAccessToken(
+			scaleset.NewClientWithPersonalAccessTokenConfig{
 			GitHubConfigURL:     registrationURL,
 			PersonalAccessToken: f.accessToken,
-			SystemInfo: scaleset.SystemInfo{
-				System:    "pitcrew",
-				Version:   "1",
-				CommitSHA: "unknown",
-				Subsystem: "autoscaler",
+				SystemInfo:          systemInfo,
 			},
-		},
-	)
+		)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("create scale-set client for %s: %w", registrationURL, err)
 	}
@@ -96,6 +146,7 @@ func (f githubScaleSetServiceFactory) newService(
 	return &githubScaleSetService{
 		client:                     client,
 		accessToken:                f.accessToken,
+		registrationAccessEnabled: f.githubApp == nil,
 		registrationAccessEndpoint: registrationAccessEndpoint,
 		httpClient: &http.Client{
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -108,6 +159,7 @@ func (f githubScaleSetServiceFactory) newService(
 type githubScaleSetService struct {
 	client                     *scaleset.Client
 	accessToken                string
+	registrationAccessEnabled bool
 	registrationAccessEndpoint string
 	httpClient                 *http.Client
 }
@@ -235,6 +287,9 @@ func (s *githubScaleSetService) removeRunner(
 }
 
 func (s *githubScaleSetService) checkRegistrationAccess(ctx context.Context) error {
+	if !s.registrationAccessEnabled {
+		return nil
+	}
 	return checkGitHubRunnerRegistrationAccess(
 		ctx,
 		s.httpClient,

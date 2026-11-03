@@ -161,6 +161,7 @@ func newAutoscalerManager(
 		cfg.profileID,
 		managerClock,
 	)
+	controlPlaneGate.credentialIdentity = cfg.githubCredentialIdentity()
 	return &autoscalerManager{
 		cfg:   cfg,
 		paths: paths,
@@ -217,8 +218,10 @@ func (m *autoscalerManager) run(ctx context.Context) error {
 	if err := m.loadHostAdmissionRecoveryRetry(); err != nil {
 		return err
 	}
-	if err := m.loadRegistrationAccessRetry(); err != nil {
-		return err
+	if !m.cfg.githubApp.enabled() {
+		if err := m.loadRegistrationAccessRetry(); err != nil {
+			return err
+		}
 	}
 	m.diagnostics.record(diagnosticsObservation{
 		subsystem: subsystemRecovery,
@@ -352,6 +355,9 @@ func (m *autoscalerManager) runReconciliationCycle(ctx context.Context) {
 }
 
 func (m *autoscalerManager) checkRegistrationAccessIfDue(ctx context.Context) {
+	if m.cfg.githubApp.enabled() {
+		return
+	}
 	now := m.clock.now()
 	if !m.registrationAccessHealth.nextCheckAt.IsZero() &&
 		now.Before(m.registrationAccessHealth.nextCheckAt) {

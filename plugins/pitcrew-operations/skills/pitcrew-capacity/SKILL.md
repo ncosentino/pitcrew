@@ -73,7 +73,9 @@ Read these shared references before running commands:
    - If the profile is stopped, require confirmation that the user intends to
      start it as part of the configuration change.
 11. Build the complete `Setup-Runner.ps1` invocation with the selected profile,
-   stored static configuration, scope, and owner identity. Never pass a token.
+   stored static configuration, scope, and owner identity. Omit authentication
+   parameters so setup reuses the selected profile's stored PAT or GitHub App
+   configuration.
 12. Before execution, report the exact profile plus the non-secret current and
    requested capacity/autoscaling policy. State whether the manager should
    remain unchanged or be replaced.

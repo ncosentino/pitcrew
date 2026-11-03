@@ -55,9 +55,9 @@ Read these shared references before running commands:
 2. Switch the clean deployment checkout to the selected release tag without
    rewriting history.
 3. For each in-scope profile with a running manager, invoke its complete
-   existing setup command with `-Refresh`. Omit `-Token` so
-   `Setup-Runner.ps1` securely reuses and validates the profile's stored
-   registration token.
+   existing setup command with `-Refresh`. Omit authentication parameters so
+   `Setup-Runner.ps1` securely reuses the profile's stored PAT or GitHub App
+   configuration.
    For an explicitly authorized profile with no manager, invoke that same
    complete command with `-Refresh -RecoverMissingManager`. Never infer this
    authorization from a missing container; the extra switch is invalid when a

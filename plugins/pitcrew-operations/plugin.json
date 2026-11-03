@@ -1,7 +1,7 @@
 {
   "name": "pitcrew-operations",
   "description": "Classify configured, scale-to-zero, and unavailable PitCrew profiles; safely manage capacity and autoscaling; capture admission snapshots; roll worker images; update PitCrew and its dashboard; collect diagnostics; correlate performance; and recover managers.",
-  "version": "1.22.0",
+  "version": "1.22.1",
   "author": {
     "name": "Nick Cosentino",
     "url": "https://www.devleader.ca"
