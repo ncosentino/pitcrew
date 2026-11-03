@@ -2474,7 +2474,13 @@ function New-RunnerHostAdmissionEnvironmentContent {
     Effective profile returned by Resolve-RunnerProfile.
 
 .PARAMETER AccessToken
-    Registration token written only to the gitignored profile environment file.
+    PAT written only to the gitignored profile environment file.
+
+.PARAMETER GitHubAppClientId
+    Non-secret GitHub App client identifier for autoscaled profiles.
+
+.PARAMETER GitHubAppPrivateKeySource
+    Absolute host path mounted read-only into an autoscaled manager.
 
 .PARAMETER WorkerRevision
     SHA-256 revision assigned to newly launched worker containers.
@@ -2497,8 +2503,14 @@ function New-RunnerEnvironmentContent {
         [Parameter(Mandatory)]
         [PSCustomObject]$Profile,
 
-        [Parameter(Mandatory)]
+        [AllowEmptyString()]
         [string]$AccessToken,
+
+        [AllowEmptyString()]
+        [string]$GitHubAppClientId = '',
+
+        [AllowEmptyString()]
+        [string]$GitHubAppPrivateKeySource = '',
 
         [Parameter(Mandatory)]
         [ValidatePattern('^[0-9a-f]{64}$')]
@@ -2523,8 +2535,30 @@ function New-RunnerEnvironmentContent {
         [string]$EnterpriseName = ''
     )
 
+    $appConfigured = (
+        -not [string]::IsNullOrWhiteSpace($GitHubAppClientId) -and
+        -not [string]::IsNullOrWhiteSpace($GitHubAppPrivateKeySource)
+    )
+    if (
+        [string]::IsNullOrWhiteSpace($GitHubAppClientId) -ne
+        [string]::IsNullOrWhiteSpace($GitHubAppPrivateKeySource)
+    ) {
+        throw 'GitHub App client ID and private key source must be supplied together.'
+    }
+    if (-not [string]::IsNullOrWhiteSpace($AccessToken) -and $appConfigured) {
+        throw 'PAT and GitHub App authentication are mutually exclusive.'
+    }
+    if ([string]::IsNullOrWhiteSpace($AccessToken) -and -not $appConfigured) {
+        throw 'Runner environment requires PAT or GitHub App authentication.'
+    }
+    if ($appConfigured -and -not $Profile.Autoscaling) {
+        throw 'GitHub App authentication currently supports autoscaled profiles only.'
+    }
+
     $values = @(
         $AccessToken,
+        $GitHubAppClientId,
+        $GitHubAppPrivateKeySource,
         $Scope,
         $OrgName,
         $EnterpriseName,
@@ -2632,6 +2666,8 @@ function New-RunnerEnvironmentContent {
     }
     return @(
         "ACCESS_TOKEN=$AccessToken"
+        "PITCREW_GITHUB_APP_CLIENT_ID=$GitHubAppClientId"
+        "PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE=$GitHubAppPrivateKeySource"
         "RUNNER_SCOPE=$Scope"
         "ORG_NAME=$OrgName"
         "ENTERPRISE_NAME=$EnterpriseName"

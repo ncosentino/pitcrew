@@ -16,6 +16,7 @@ type controlPlaneRetryState struct {
 	SchemaVersion          int    `json:"schemaVersion"`
 	ManagerContractVersion int    `json:"managerContractVersion"`
 	ProfileID              string `json:"profileId"`
+	CredentialIdentity     string `json:"credentialIdentity,omitempty"`
 	ConsecutiveFailures    int    `json:"consecutiveFailures"`
 	NextAttemptAt          string `json:"nextAttemptAt"`
 }
@@ -24,6 +25,7 @@ type controlPlaneRateGate struct {
 	mu                  sync.Mutex
 	path                string
 	profileID           string
+	credentialIdentity  string
 	clock               clock
 	slots               chan struct{}
 	inFlight            int
@@ -46,10 +48,11 @@ func newControlPlaneRateGate(
 	gateClock clock,
 ) *controlPlaneRateGate {
 	return &controlPlaneRateGate{
-		path:      path,
-		profileID: profileID,
-		clock:     gateClock,
-		slots:     make(chan struct{}, registrationAccessMaxConcurrency),
+		path:               path,
+		profileID:          profileID,
+		credentialIdentity: "pat",
+		clock:              gateClock,
+		slots:              make(chan struct{}, registrationAccessMaxConcurrency),
 	}
 }
 
@@ -72,6 +75,13 @@ func (g *controlPlaneRateGate) load() error {
 		state.ConsecutiveFailures < 0 ||
 		state.NextAttemptAt == "" {
 		return errors.New("GitHub control-plane retry state is incompatible")
+	}
+	savedCredentialIdentity := state.CredentialIdentity
+	if savedCredentialIdentity == "" {
+		savedCredentialIdentity = "pat"
+	}
+	if savedCredentialIdentity != g.credentialIdentity {
+		return nil
 	}
 	nextAttemptAt, err := time.Parse(time.RFC3339, state.NextAttemptAt)
 	if err != nil {
@@ -179,6 +189,7 @@ func (g *controlPlaneRateGate) saveLocked() error {
 		SchemaVersion:          1,
 		ManagerContractVersion: managerContractVersion,
 		ProfileID:              g.profileID,
+		CredentialIdentity:     g.credentialIdentity,
 		ConsecutiveFailures:    g.consecutiveFailures,
 		NextAttemptAt:          g.nextAttemptAt.Format(time.RFC3339),
 	})

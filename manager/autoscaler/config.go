@@ -16,6 +16,7 @@ const managerContractVersion = 22
 
 type config struct {
 	accessToken          string
+	githubApp            githubAppConfig
 	profileID            string
 	runnerImage          string
 	workerRevision       string
@@ -43,6 +44,22 @@ type config struct {
 	legacyRepositoryURL  string
 	legacyReplicas       string
 	hostAdmission        hostAdmissionConfig
+}
+
+type githubAppConfig struct {
+	clientID       string
+	privateKeyPath string
+}
+
+func (c githubAppConfig) enabled() bool {
+	return c.clientID != "" && c.privateKeyPath != ""
+}
+
+func (c config) githubCredentialIdentity() string {
+	if c.githubApp.enabled() {
+		return "app:" + c.githubApp.clientID
+	}
+	return "pat"
 }
 
 // hostAdmissionConfig carries this profile's identity for the host-local
@@ -297,6 +314,14 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 
 	cfg := config{
 		accessToken:          strings.TrimSpace(value("ACCESS_TOKEN", "")),
+		githubApp: githubAppConfig{
+			clientID: strings.TrimSpace(
+				value("PITCREW_GITHUB_APP_CLIENT_ID", ""),
+			),
+			privateKeyPath: strings.TrimSpace(
+				value("PITCREW_GITHUB_APP_PRIVATE_KEY_PATH", ""),
+			),
+		},
 		profileID:            strings.TrimSpace(value("RUNNER_PROFILE_ID", "")),
 		runnerImage:          strings.TrimSpace(value("RUNNER_IMAGE", "")),
 		workerRevision:       strings.TrimSpace(value("PITCREW_WORKER_REVISION", "")),
@@ -336,8 +361,18 @@ func loadConfig(lookup func(string) (string, bool), architecture string) (config
 
 func (c config) validate() error {
 	switch {
-	case c.accessToken == "":
-		return errors.New("ACCESS_TOKEN is required")
+	case c.accessToken == "" && !c.githubApp.enabled():
+		return errors.New(
+			"ACCESS_TOKEN or complete GitHub App authentication is required",
+		)
+	case c.accessToken != "" && c.githubApp.enabled():
+		return errors.New(
+			"ACCESS_TOKEN and GitHub App authentication are mutually exclusive",
+		)
+	case (c.githubApp.clientID == "") != (c.githubApp.privateKeyPath == ""):
+		return errors.New(
+			"GitHub App authentication requires client ID and private key path together",
+		)
 	case c.profileID == "":
 		return errors.New("RUNNER_PROFILE_ID is required")
 	case c.runnerImage == "":
@@ -373,6 +408,11 @@ func (c config) validate() error {
 			"host admission requires PITCREW_HOST_ADMISSION_NAMESPACE, " +
 				"PITCREW_HOST_ADMISSION_SOCKET, PITCREW_HOST_ADMISSION_HOST_FINGERPRINT, " +
 				"and PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT together",
+		)
+	}
+	if c.githubApp.enabled() && c.scope == "ent" {
+		return errors.New(
+			"GitHub App authentication does not support enterprise runner scope",
 		)
 	}
 
@@ -429,6 +469,8 @@ func (c config) validate() error {
 
 	for _, value := range []string{
 		c.accessToken,
+		c.githubApp.clientID,
+		c.githubApp.privateKeyPath,
 		c.profileID,
 		c.runnerImage,
 		c.workerRevision,

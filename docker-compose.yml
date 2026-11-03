@@ -44,8 +44,9 @@ services:
       REPO_URL: ${REPO_URL:-}
       ORG_NAME: ${ORG_NAME:-}
       ENTERPRISE_NAME: ${ENTERPRISE_NAME:-}
-      # Fine-grained PAT used to register runners. Setup-Runner validates it before
-      # replacing a live profile.
+      # PAT fallback used to register runners. Autoscaled profiles may instead
+      # use the read-only GitHub App key overlay. Setup validates either
+      # authentication mode before replacing a live profile.
       ACCESS_TOKEN: ${ACCESS_TOKEN:-}
       # Cosmetic name prefix; the repo slug + index + timestamp are appended, so
       # workers read like builder-project-a-1-..., builder-project-b-2-....

@@ -12,6 +12,8 @@ profile without changing other profiles on the same host.
 | Parameter | Required | Description | Default |
 |-----------|----------|-------------|---------|
 | `-Token` | No | Fine-grained PAT used only to register runners. When omitted for an existing profile, PitCrew reuses its stored token before trying `gh auth token`. | Stored profile token, then authenticated `gh` token |
+| `-GitHubAppClientId` | No | GitHub App client ID for an autoscaled repository or organization profile. Requires `-GitHubAppPrivateKeyPath` and cannot be combined with `-Token`. | Stored profile App configuration |
+| `-GitHubAppPrivateKeyPath` | No | Existing RSA PEM outside the PitCrew checkout. Setup mounts it read-only into the selected autoscaled manager and never copies its contents into generated state. | Stored profile key path |
 | `-Profile` | No | Built-in profile name. | `default` |
 | `-ProfilePath` | No | Path to an external profile manifest. Relative image-build paths resolve from the manifest directory. | None |
 | `-Scope` | No | GitHub runner scope: `repo`, `org`, or `ent`. | `repo` |
@@ -39,6 +41,31 @@ profile without changing other profiles on the same host.
 | `-RecoverMissingManager` | No | With `-Refresh`, explicitly starts an existing selected profile that has no running manager. Plain refresh continues to preserve intentionally stopped profiles. | Off |
 | `-CapacityOnly` | No | Requires an in-place capacity update and fails rather than replacing a manager when the current profile cannot reconcile capacity safely. | Off |
 | `-Pause` | No | Reuses the existing desired targets, sets their effective capacity to zero, and drains busy workers naturally without stopping the manager. | Off |
+
+### GitHub App authentication
+
+Autoscaled repository and organization profiles can authenticate as a GitHub
+App installation instead of consuming a user's PAT quota:
+
+```powershell
+.\Setup-Runner.ps1 `
+    -GitHubAppClientId Iv23liExample `
+    -GitHubAppPrivateKeyPath C:\ProgramData\PitCrew\github-app.pem `
+    -Autoscale `
+    -Repos https://github.com/example/project=4
+```
+
+Install the App on every target account and grant it access to the selected
+repositories. Repository scope requires repository **Administration: Read and
+write**. Organization scope requires organization **Self-hosted runners: Read
+and write**. Setup validates every selected target before manager handoff. The
+manager discovers and caches installation IDs by repository owner; the
+`actions/scaleset` client mints and refreshes installation tokens.
+
+The private key file remains outside the checkout and is mounted read-only only
+into the selected manager. App authentication currently supports autoscaled
+repository and organization profiles. Fixed and enterprise profiles continue
+to use `-Token`.
 
 ## Repository worker counts
 
@@ -377,7 +404,8 @@ leave offline runner registrations behind.
 ## Generated state
 
 The default profile writes `.env`; named profiles write `.env.<profile>`. These
-static environment files contain the runner-registration token plus image,
+static environment files contain either the PAT or the non-secret GitHub App
+client ID and host key path plus image,
 immutable local image ID, labels, scope, runner group, name-prefix settings,
 and canonical manager policy. PitCrew generates them and Git ignores them. Do
 not edit or commit them.
@@ -997,7 +1025,7 @@ Scale-down is graceful:
   does not query GitHub's runner `busy` state in this reconciliation path.
 
 Changes to labels, default-label behavior, scope, organization or enterprise
-identity, runner group, name prefix, registration token, build or verification
+identity, runner group, name prefix, registration authentication, build or verification
 contract, or manager runtime contract continue to replace the selected
 profile. Worker image content and resource-policy changes advance the worker
 revision but remain rolling-compatible, so busy workers can finish before

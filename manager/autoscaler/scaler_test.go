@@ -1282,7 +1282,7 @@ func TestShutdownDeadlineBoundsBlockedDockerOperation(t *testing.T) {
 	}
 }
 
-func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
+func TestWorkerLaunchPreservesImageUserAndContainsNoManagerCredential(t *testing.T) {
 	launch := containerLaunch{
 		name:      "runner-one",
 		image:     "example/runner:latest",
@@ -1302,8 +1302,10 @@ func TestWorkerLaunchPreservesImageUserAndContainsNoAccessToken(t *testing.T) {
 	arguments := buildDockerRunArguments(launch)
 	command := strings.Join(arguments, " ")
 	if strings.Contains(command, "ACCESS_TOKEN") ||
-		strings.Contains(command, "pat-super-secret") {
-		t.Fatalf("worker command contains a PAT: %s", command)
+		strings.Contains(command, "pat-super-secret") ||
+		strings.Contains(command, "PITCREW_GITHUB_APP") ||
+		strings.Contains(command, "pitcrew-github-app.pem") {
+		t.Fatalf("worker command contains a manager credential: %s", command)
 	}
 	if strings.Contains(command, "--user") {
 		t.Fatalf("worker command overrides the image user: %s", command)

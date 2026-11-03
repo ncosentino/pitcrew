@@ -30,8 +30,15 @@ Read:
 - `.pitcrew-state/<profile>/observed-state.json`
 
 Do not read an environment file with a content-viewing tool. `Setup-Runner.ps1`
-reuses the selected profile's stored `ACCESS_TOKEN` when `-Token` is omitted, so
-the agent never needs to extract or print that secret.
+reuses the selected profile's stored PAT or GitHub App client ID and private-key
+path when authentication parameters are omitted, so the agent never needs to
+extract or print a credential.
+
+To migrate an autoscaled repository or organization profile from PAT to GitHub
+App authentication, pass the operator-provided `-GitHubAppClientId` and
+`-GitHubAppPrivateKeyPath` once with the complete existing profile command and
+`-Refresh`. Never read, copy, or print the PEM. Fixed and enterprise profiles
+continue to use PAT authentication.
 
 Before changing or recovering a profile, run the shared `pitcrew-status`
 projection. Report `configurationState` and `runtimeState` separately.

@@ -1,0 +1,10 @@
+services:
+  runner-manager:
+    environment:
+      PITCREW_GITHUB_APP_CLIENT_ID: ${PITCREW_GITHUB_APP_CLIENT_ID:?Set PITCREW_GITHUB_APP_CLIENT_ID}
+      PITCREW_GITHUB_APP_PRIVATE_KEY_PATH: /run/secrets/pitcrew-github-app.pem
+    volumes:
+      - type: bind
+        source: ${PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE:?Set PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE}
+        target: /run/secrets/pitcrew-github-app.pem
+        read_only: true

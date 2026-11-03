@@ -27,6 +27,16 @@ func main() {
 		}
 		os.Exit(githubRunnerAccessExitCode(err))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "check-github-app-access" {
+		if err := runGitHubAppAccessCheck(os.Args[2:]); err != nil {
+			fmt.Fprintln(
+				os.Stderr,
+				"pitcrew autoscaler GitHub App access check failed",
+			)
+			os.Exit(1)
+		}
+		return
+	}
 	cfg, err := loadConfig(os.LookupEnv, runtime.GOARCH)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "pitcrew autoscaler configuration error: %v\n", err)
@@ -41,8 +51,10 @@ func main() {
 		"profileId", cfg.profileID,
 		"managerInstanceId", instanceID,
 	)
-	factory := githubScaleSetServiceFactory{
-		accessToken: cfg.accessToken,
+	factory, err := newGitHubScaleSetServiceFactory(cfg, realClock{})
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "pitcrew autoscaler authentication error: %v\n", err)
+		os.Exit(1)
 	}
 	docker := newDockerCLI()
 	if cfg.runtime.dockerMode != "" {
