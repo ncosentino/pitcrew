@@ -971,7 +971,7 @@ func TestDockerWaitTimeoutPreservesStillRunningContainer(t *testing.T) {
 }
 
 func TestDockerWaitTimeoutRemovesConfirmedAbsentContainer(t *testing.T) {
-	scaler, api, docker, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	scaler, api, docker, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
 	defer cancel()
 	docker.waitResults["container-1"] = []fakeWaitResult{{
 		err: context.DeadlineExceeded,
@@ -1000,15 +1000,23 @@ func TestDockerWaitTimeoutRemovesConfirmedAbsentContainer(t *testing.T) {
 		t.Fatal("container absence was not checked after wait timeout")
 	}
 	deadline := time.Now().Add(time.Second)
-	var replacement runnerRecord
-	for time.Now().Before(deadline) {
-		snapshot := scaler.snapshot()
-		if len(snapshot.runners) == 1 && snapshot.runners[0].containerID != "container-1" {
-			replacement = snapshot.runners[0]
-			break
-		}
+	for scaler.hasRunner("container-1") && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
+	if scaler.hasRunner("container-1") {
+		t.Fatal("confirmed absent runner was not reclaimed")
+	}
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if api.jitCallCount() != 1 || scaler.runnerCount() != 0 {
+		t.Fatal("unknown exit bypassed replacement backoff")
+	}
+	clock.advance(scaler.exitRetryAt.Sub(clock.now()))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	replacement := findRunner(t, scaler)
 	if replacement.containerID == "" || api.jitCallCount() != 2 {
 		t.Fatalf(
 			"confirmed absent runner was not replaced: runner=%#v jitCalls=%d",

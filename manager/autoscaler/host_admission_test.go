@@ -1677,7 +1677,7 @@ func TestContainerExitPersistsHostLeaseBeforeRunnerIdentityIsForgotten(t *testin
 
 func TestSimultaneousMonitorTimeoutsReleaseExactLeasesAcrossProfiles(t *testing.T) {
 	client := newFakeHostAdmissionClient(2)
-	first, firstAPI, firstDocker, _, _, firstCancel :=
+	first, firstAPI, firstDocker, firstClock, _, firstCancel :=
 		newHostAdmissionTestScalerForProfile(
 			t,
 			1,
@@ -1687,7 +1687,7 @@ func TestSimultaneousMonitorTimeoutsReleaseExactLeasesAcrossProfiles(t *testing.
 			"pitcrew-a",
 		)
 	defer firstCancel()
-	second, secondAPI, secondDocker, _, _, secondCancel :=
+	second, secondAPI, secondDocker, secondClock, _, secondCancel :=
 		newHostAdmissionTestScalerForProfile(
 			t,
 			1,
@@ -1735,16 +1735,21 @@ func TestSimultaneousMonitorTimeoutsReleaseExactLeasesAcrossProfiles(t *testing.
 	close(secondContinue)
 
 	deadline := time.Now().Add(time.Second)
-	for (firstAPI.jitCalls < 2 || secondAPI.jitCalls < 2) &&
+	for (first.runnerCount() != 0 || second.runnerCount() != 0) &&
 		time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if firstAPI.jitCalls != 2 || secondAPI.jitCalls != 2 {
-		t.Fatalf(
-			"simultaneous confirmed absences did not restore both profiles: first=%d second=%d",
-			firstAPI.jitCalls,
-			secondAPI.jitCalls,
-		)
+	if first.runnerCount() != 0 || second.runnerCount() != 0 {
+		t.Fatal("simultaneous confirmed absences did not reclaim both profiles")
+	}
+	for _, scaler := range []*runnerScaler{first, second} {
+		if err := scaler.tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if firstAPI.jitCallCount() != 1 || secondAPI.jitCallCount() != 1 ||
+		client.leaseCount() != 0 {
+		t.Fatal("exit backoff bypassed or leases retained after simultaneous absences")
 	}
 	if first.pendingHostLeaseReleaseCount() != 0 ||
 		second.pendingHostLeaseReleaseCount() != 0 {
@@ -1755,6 +1760,17 @@ func TestSimultaneousMonitorTimeoutsReleaseExactLeasesAcrossProfiles(t *testing.
 	client.mu.Unlock()
 	if len(releaseCalls) != 2 {
 		t.Fatalf("expected two exact profile lease releases, got %#v", releaseCalls)
+	}
+	firstClock.advance(first.exitRetryAt.Sub(firstClock.now()))
+	secondClock.advance(second.exitRetryAt.Sub(secondClock.now()))
+	for _, scaler := range []*runnerScaler{first, second} {
+		if err := scaler.tick(context.Background()); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if firstAPI.jitCallCount() != 2 || secondAPI.jitCallCount() != 2 ||
+		client.leaseCount() != 2 {
+		t.Fatal("retry deadlines did not restore both profiles with exact replacement leases")
 	}
 }
 
