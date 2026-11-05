@@ -191,14 +191,26 @@ Manager handoff resets this in-memory exit streak, not durable cleanup state.
 All scale-set control-plane methods share one profile-wide durable rate gate.
 This includes scale-set discovery/creation, JIT generation, runner lookup and
 removal, credential probes, session creation, and scale-set deletion. Calls are
-serialized only around the remote control-plane operation. Before each call the
-gate persists a conservative hourly deadline; success clears it, ordinary
-failure remains isolated to its target while retaining the on-disk crash fence
-until another successful control-plane call, and a rate limit applies the
-15/30/60-minute schedule plus profile jitter. Message-session operations report
-rate limits into the same gate without holding a concurrency slot across a
-long poll. A manager restart therefore cannot turn an interrupted or hidden
-token refresh into an immediate retry from another target.
+concurrency-bounded only around the remote control-plane operation. Before the
+first overlapping call the gate persists a one-minute crash guard with
+deterministic profile jitter of less than 15 seconds, not the hourly credential
+probe interval. When the last call completes without rate-limit evidence,
+success, ordinary failure, timeout, and cancellation all clear that synthetic
+guard from memory and disk. An interrupted process retains only the short
+guard. Persistence failures are returned explicitly rather than hidden.
+
+A genuine rate limit still applies the existing 15/30/60-minute schedule plus
+profile jitter. Message-session operations report rate limits into the same
+gate without holding a concurrency slot across a long poll; successful or
+canceled overlapping calls cannot erase that cooldown.
+
+On startup, a compatible retry record with zero consecutive failures is
+synthetic crash evidence, not proof of a rate limit. An old long guard is
+atomically shortened to at most the new crash delay from migration time.
+Repeated restarts retain that persisted deadline instead of extending it.
+Positive-failure cooldowns and credential-identity binding are preserved;
+incompatible or unreadable state remains an explicit error. No manual retry
+state edit or credential/authentication bypass is needed.
 
 Diagnostics never retain access tokens, JIT payloads, HTTP bodies, raw API or
 Docker error output, job output, or environment values; evidence is reduced to a
