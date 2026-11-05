@@ -1,6 +1,19 @@
 package main
 
-import "time"
+import (
+	"crypto/sha256"
+	"time"
+)
+
+func deterministicRetryJitter(identity string, window time.Duration) time.Duration {
+	windowSeconds := int(window / time.Second)
+	if windowSeconds <= 0 {
+		return 0
+	}
+	sum := sha256.Sum256([]byte(identity))
+	value := int(sum[0])<<8 | int(sum[1])
+	return time.Duration(value%windowSeconds) * time.Second
+}
 
 func boundedExponentialBackoff(
 	base time.Duration,

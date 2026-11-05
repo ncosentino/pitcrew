@@ -1117,13 +1117,20 @@ func TestDockerLogTimeoutPreservesFutureReplayBoundary(t *testing.T) {
 }
 
 func TestUnexpectedStoppedRunnerIsRemovedAndRetried(t *testing.T) {
-	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
 	defer cancel()
 	if _, err := scaler.HandleDesiredRunnerCount(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
 	first := findRunner(t, scaler)
 	scaler.handleContainerExit(first.containerID, exitStatus(137))
+	if scaler.runnerCount() != 0 || api.jitCalls != 1 {
+		t.Fatal("unexpected exit bypassed replacement backoff")
+	}
+	clock.advance(scaler.exitRetryAt.Sub(clock.now()))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	replacement := findRunner(t, scaler)
 	if replacement.containerID == first.containerID {
 		t.Fatal("unexpectedly exited runner was not replaced")
@@ -1329,7 +1336,7 @@ func TestWorkerLaunchPreservesImageUserAndContainsNoManagerCredential(t *testing
 }
 
 func TestExitedRunnerRegistrationIsRemovedBeforeIdentityIsForgotten(t *testing.T) {
-	scaler, api, _, _, cancel := newTestScaler(t, 1, 0, time.Minute)
+	scaler, api, _, clock, cancel := newTestScaler(t, 1, 0, time.Minute)
 	defer cancel()
 	scaler.cleanupStore = &recordingCleanupStore{
 		inner:  scaler.cleanupStore,
@@ -1354,6 +1361,10 @@ func TestExitedRunnerRegistrationIsRemovedBeforeIdentityIsForgotten(t *testing.T
 	}
 	if scaler.pendingRegistrationCount() != 0 {
 		t.Fatal("successful registration removal stayed pending")
+	}
+	clock.advance(scaler.exitRetryAt.Sub(clock.now()))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 	replacement := findRunner(t, scaler)
 	if replacement.containerID == exited.containerID || api.jitCalls != 2 {

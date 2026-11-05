@@ -2789,8 +2789,24 @@ $androidProfile = Resolve-RunnerProfile -RootPath $runnerRoot -Profile android-e
 Add-Check $defaultProfile.IsDefault 'The implicit default profile is not marked as default.'
 Add-Check (
     $defaultProfile.Image -eq
-        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+        'myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa'
 ) 'The default profile runner image is not pinned by version and digest.'
+foreach ($relativePath in @(
+    'Dockerfile',
+    'docker-compose.yml',
+    'manager/manage-runners.sh',
+    'profiles/copilot-cli/Dockerfile',
+    'profiles/copilot-cli/profile.json',
+    'profiles/android-emulator/Dockerfile',
+    'profiles/android-emulator/profile.json',
+    'profiles/image-builder/Dockerfile'
+)) {
+    $imageSource = Get-Content `
+        -LiteralPath (Join-Path $runnerRoot $relativePath) -Raw -Encoding UTF8
+    Add-Check (
+        $imageSource.Contains($defaultProfile.Image)
+    ) "Repository-owned runner base differs from the default pin: $relativePath"
+}
 Add-Check ($defaultProfile.Replicas -eq 1) 'The default profile changed its backward-compatible replica count.'
 Add-Check ($defaultProfile.EnvironmentPath -eq (Join-Path $runnerRoot '.env')) 'The default profile no longer uses the backward-compatible .env path.'
 Add-Check ($defaultProfile.ComposeProjectName -eq 'self-hosted-runner') 'The default profile no longer uses the backward-compatible Compose project.'
@@ -2806,6 +2822,13 @@ Add-Check (-not $automationControlProfile.PullImage) 'The locally built automati
 Add-Check ($automationControlProfile.Autoscaling.Mode -eq 'scale-set') 'The automation-control profile is not scale-set-only.'
 Add-Check ($automationControlProfile.Autoscaling.MinimumIdle -eq 0) 'The automation-control profile does not scale to zero.'
 Add-Check ($automationControlProfile.Autoscaling.MaximumActiveWorkers -eq 1) 'The automation-control profile does not use a conservative default maximum.'
+Add-Check (
+    $automationControlProfile.Build.Arguments.RUNNER_VERSION -ceq '2.338.2' -and
+    $automationControlProfile.Build.Arguments.RUNNER_SHA256_X64 -ceq
+        'baebf204307bac6193480852732f0aba2ae97b6c5597c244f4d5558390147c40' -and
+    $automationControlProfile.Build.Arguments.RUNNER_SHA256_ARM64 -ceq
+        '670adb2f268fe21dcbb58b3db0e0aa9d5b3bddfe2c651481336e561ff86de945'
+) 'The automation-control runner version and release checksums are not aligned.'
 Add-Check (
     $automationControlProfile.Build.Arguments.RUNTIME_IMAGE -match
         '@sha256:[0-9a-f]{64}$'
@@ -3040,7 +3063,7 @@ Add-Check ($copilotProfile.VerificationCommands.Count -eq 2) 'The Copilot CLI pr
 Add-Check (-not $copilotProfile.PullImage) 'A locally built profile must not be replaced by a remote pull.'
 Add-Check (
     $copilotProfile.Build.Arguments['RUNNER_IMAGE'] -eq
-        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+        'myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa'
 ) 'The Copilot CLI runner base image is not pinned by version and digest.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_VERSION'] -eq '1.0.71') 'The Copilot CLI version is not pinned in the profile.'
 Add-Check ($copilotProfile.Build.Arguments['COPILOT_CLI_SHA256_X64'] -match '^[0-9a-f]{64}$') 'The Copilot CLI x64 checksum is not pinned.'
@@ -5186,7 +5209,7 @@ try {
             $defaultCommands -match (
                 'pull.*' +
                 [regex]::Escape(
-                    'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+                    'myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa'
                 )
             )
         ) 'Default setup did not prepare its pinned image before replacement.'
@@ -5611,7 +5634,7 @@ try {
                 $managerBuildFailureCommands -match (
                     "tag.*$([regex]::Escape($testWorkerImageId)).*" +
                     [regex]::Escape(
-                        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+                        'myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa'
                     )
                 )
             )
@@ -5666,7 +5689,7 @@ try {
                 $rollbackCommands -match (
                     "tag.*$([regex]::Escape($testWorkerImageId)).*" +
                     [regex]::Escape(
-                        'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+                        'myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa'
                     )
                 )
             )
@@ -5932,7 +5955,7 @@ try {
         Add-Check ($automationControlState -match '(?m)^RUNNER_LABELS=automation-control$') 'Automation-control setup exposed labels beyond its exact profile identity.'
         Add-Check ($automationControlState -match '(?m)^RUNNER_NO_DEFAULT_LABELS=1$') 'Automation-control setup did not disable broad default labels.'
         Add-Check ($automationControlState -match '(?m)^PITCREW_AUTOSCALING_MODE=scale-set$') 'Automation-control setup did not retain scale-set-only execution.'
-        Add-Check ($automationControlCommands -match 'build.*--tag.*pitcrew-automation-control:runner2\.336\.0-gh2\.98\.0-pwsh7\.6\.5-git2\.55\.0') 'Automation-control setup did not build the versioned image.'
+        Add-Check ($automationControlCommands -match 'build.*--tag.*pitcrew-automation-control:runner2\.338\.2-gh2\.98\.0-pwsh7\.6\.5-git2\.55\.0') 'Automation-control setup did not build the versioned image.'
         Add-Check ($automationControlCommands -match 'run.*--entrypoint.*/bin/sh.*Runner\.Listener --version') 'Automation-control setup did not verify the JIT listener.'
         Add-Check ($automationControlCommands -match 'run.*--entrypoint.*/bin/sh.*gh --version') 'Automation-control setup did not verify GitHub CLI.'
         Add-Check ($automationControlCommands -match 'run.*--entrypoint.*/bin/sh.*pwsh ') 'Automation-control setup did not verify PowerShell.'

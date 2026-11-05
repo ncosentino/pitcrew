@@ -1,4 +1,4 @@
-ARG RUNNER_IMAGE=myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817
+ARG RUNNER_IMAGE=myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa
 ARG DOCKER_ANDROID_IMAGE=budtmo/docker-android:emulator_14.0_v3.6.0-p0@sha256:d0e1c84530702c1b1bcfb1b51b12bfd63b179932accab86d159fb870a994404b
 
 FROM ${RUNNER_IMAGE} AS runner

@@ -28,6 +28,8 @@ const (
 	workerLaunchRetryBase     = time.Minute
 	workerLaunchRetryMaximum  = 15 * time.Minute
 	workerLaunchRetryEvidence = "worker launch retry is waiting after a failed dependency operation"
+	workerExitRetryJitter     = 15 * time.Second
+	workerExitRetryEvidence   = "worker replacement is waiting after an unexpected container exit"
 )
 
 func (realClock) now() time.Time {
@@ -175,6 +177,9 @@ type runnerScaler struct {
 	blocking                 capacityBlock
 	launchFailures           int
 	launchRetryAt            time.Time
+	// A Docker launch is not recovery; only observed one-job completion resets this streak.
+	exitFailures             int
+	exitRetryAt              time.Time
 }
 
 func newRunnerScaler(
@@ -742,6 +747,16 @@ func (s *runnerScaler) reconcileLocked(ctx context.Context) (int, error) {
 		}
 		s.launchRetryAt = time.Time{}
 	}
+	if target > current && launchNow.Before(s.exitRetryAt) {
+		s.blocking = capacityBlock{
+			reason:   deficitRetryBackoff,
+			evidence: workerExitRetryEvidence,
+		}
+		s.mu.Unlock()
+		s.setProfileAdmissionDemand(0)
+		s.hostAdmission.setTargetDemand(s.target.key, 0)
+		return current, errors.Join(operationErrors...)
+	}
 	if target >= current {
 		s.scaleDownAt = nil
 	}
@@ -984,6 +999,50 @@ func (s *runnerScaler) clearLaunchRetry() {
 	s.launchFailures = 0
 	s.launchRetryAt = time.Time{}
 	s.mu.Unlock()
+}
+
+func workerExitRetryDelay(profileID, targetKey string, failures int) time.Duration {
+	delay := boundedExponentialBackoff(
+		workerLaunchRetryBase,
+		workerLaunchRetryMaximum,
+		failures,
+	)
+	if delay == 0 {
+		return 0
+	}
+	jitter := deterministicRetryJitter(profileID+"\x00"+targetKey, workerExitRetryJitter)
+	return min(delay+jitter, workerLaunchRetryMaximum)
+}
+
+func (s *runnerScaler) scheduleExitRetry() {
+	now := s.clock.now().UTC()
+	s.mu.Lock()
+	s.exitFailures++
+	attempt := s.exitFailures
+	retryAt := now.Add(workerExitRetryDelay(s.profileID, s.target.key, attempt))
+	s.exitRetryAt = retryAt
+	s.blocking = capacityBlock{
+		reason:   deficitRetryBackoff,
+		evidence: workerExitRetryEvidence,
+	}
+	s.mu.Unlock()
+
+	s.diagnostics.record(diagnosticsObservation{
+		subsystem: subsystemWorkerExit,
+		operation: operationWorkerExit,
+		target:    s.target.key,
+		outcome:   outcomeRetry,
+		reason:    reasonRetryBackoff,
+		evidence:  workerExitRetryEvidence,
+		attempt:   attempt,
+		retryAt:   &retryAt,
+	})
+	s.logger.Warn(
+		"Deferring worker replacement after unexpected exit",
+		"attempt", attempt,
+		"retryAt", retryAt,
+	)
+	s.onChange()
 }
 
 func (s *runnerScaler) beginLaunchIntent(
@@ -3138,7 +3197,15 @@ func (s *runnerScaler) handleContainerExitLocked(
 	exited := *runner
 	shuttingDown := s.shuttingDown
 	unexpected := runner.state != runnerDraining && !shuttingDown
+	if !unexpected && diagnostic.Classification == "clean" && runner.completedAt != nil {
+		s.exitFailures = 0
+		s.exitRetryAt = time.Time{}
+	}
 	s.mu.Unlock()
+
+	if unexpected && diagnostic.Classification != "clean" {
+		s.scheduleExitRetry()
+	}
 
 	var registrationRecord *registrationCleanupRecord
 	if !shuttingDown && !exited.registrationRemoved {
