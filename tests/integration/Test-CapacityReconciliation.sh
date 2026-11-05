@@ -440,6 +440,13 @@ manager_image_kib=$(docker run \
     exit 1
 }
 echo "Manager filesystem size: ${manager_image_kib} KiB"
+docker run \
+    --rm \
+    --network none \
+    --entrypoint /bin/sh \
+    --volume "${ROOT}:/pitcrew:ro" \
+    "ephemeral-runner-manager:profile-${PROFILE_NAME}" \
+    /pitcrew/tests/Test-ResourceTelemetryTimeout.sh
 MANAGER_ID=$(manager_id)
 [ -n "${MANAGER_ID}" ] || {
     echo "Runner manager did not start." >&2
