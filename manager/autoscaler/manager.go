@@ -116,10 +116,7 @@ type registrationAccessTarget struct {
 }
 
 func registrationAccessJitter(profileID string) time.Duration {
-	sum := sha256.Sum256([]byte(profileID))
-	value := int(sum[0])<<8 | int(sum[1])
-	windowSeconds := int(registrationAccessJitterWindow / time.Second)
-	return time.Duration(value%windowSeconds) * time.Second
+	return deterministicRetryJitter(profileID, registrationAccessJitterWindow)
 }
 
 func registrationAccessFirstCheckDelay(profileID string) time.Duration {

@@ -176,6 +176,18 @@ replacement capacity or discarding an unresolved identity. Durable cleanup
 and host-lease release ledgers retain every unresolved identity; they never
 evict an older record to enforce an in-memory count limit.
 
+Unexpected non-clean worker exits also defer replacement for 1, 2, 4, 8,
+and at most 15 minutes, with deterministic per-profile/target jitter of less
+than 15 seconds inside that maximum. This separate in-memory backoff is not
+reset by a successful Docker launch, a reconciliation tick, or a demand
+update: container creation does not prove that the runner can receive jobs.
+A clean exit after observed job completion clears the failure streak and
+replenishes one-job capacity immediately. Exact registration cleanup and lease
+settlement continue during the delay; surviving workers and GitHub demand are
+unchanged. `capacityEvidence` reports `retry-backoff`, and `operationJournal`
+records the replacement attempt and retry deadline without retaining logs.
+Manager handoff resets this in-memory exit streak, not durable cleanup state.
+
 All scale-set control-plane methods share one profile-wide durable rate gate.
 This includes scale-set discovery/creation, JIT generation, runner lookup and
 removal, credential probes, session creation, and scale-set deletion. Calls are

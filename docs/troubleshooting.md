@@ -19,6 +19,26 @@ Common causes:
    startup does not starve the host.
 3. **Invalid token scope:** verify repository Administration read/write access
    or the corresponding organization/enterprise permission.
+4. **Deprecated runner version:** a runner can connect and create a broker
+   session yet be refused messages because its version is no longer supported.
+   A successful registration or container launch does not prove job readiness.
+   Check the listener version against the supported
+   [upstream runner release](https://github.com/actions/runner/releases).
+   Scale-set workers disable automatic runner updates, so rebuild and roll
+   forward the image rather than repeatedly recreating the same version.
+
+Repository-owned runner images pin version 2.338.2 and immutable base or
+release checksums. Rebuild derived profiles through their existing setup path
+so their specialized tooling is preserved. External custom images need their
+own runner-only refresh; do not substitute the general-purpose image for an
+SDK-specific image. Apply compatible image and manager updates through the
+[rolling-update procedure](guides/rolling-updates.md) to preserve active jobs.
+Image verification alone checks executability, not broker acceptance.
+
+Scale-set workers that exit unexpectedly with a non-clean status use a
+separate bounded replacement backoff; inspect `retry-backoff` capacity evidence
+and the sanitized retry deadline in `operationJournal`. See
+[autoscaling operation evidence](guides/autoscaling.md#operation-evidence).
 
 ## Jobs remain queued
 

@@ -53,9 +53,13 @@ func TestContainerLivenessReconciliationReclaimsAbsentContainerIndependentOfWedg
 	if len(docker.stopRemove) != 0 {
 		t.Fatalf("reconciliation must never issue a worker-directed command for an already-absent container: %#v", docker.stopRemove)
 	}
-	// Target capacity stays 1, so the same tick that reclaims the absent
-	// slot must also restore withheld demand with a fresh replacement
-	// rather than leaving capacity stuck short.
+	if len(docker.launches) != 1 || client.leaseCount() != 0 {
+		t.Fatal("unexpected absence bypassed replacement backoff or retained its lease")
+	}
+	clock.advance(scaler.exitRetryAt.Sub(clock.now()))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	if len(docker.launches) != 2 {
 		t.Fatalf("withheld demand was not restored after reclaiming the absent container: %#v", docker.launches)
 	}
@@ -268,6 +272,13 @@ func TestContainerLivenessReconciliationConvergesMonitorLeaseInvariant(t *testin
 		t.Fatal(err)
 	}
 
+	if scaler.hasRunner(toReplace.containerID) || client.leaseCount() != 1 {
+		t.Fatal("absent worker or its lease was retained during replacement backoff")
+	}
+	clock.advance(scaler.exitRetryAt.Sub(clock.now()))
+	if err := scaler.tick(context.Background()); err != nil {
+		t.Fatal(err)
+	}
 	converged := scaler.snapshot().runners
 	if len(converged) != 2 {
 		t.Fatalf("withheld demand was not restored after convergence: expected 2 runners, got %d: %#v", len(converged), converged)

@@ -481,7 +481,7 @@ function Resolve-RunnerProfile {
         $manifestKind = 'built-in'
     }
 
-    $effectiveImage = 'myoung34/github-runner:2.336.0-ubuntu-noble@sha256:c803ddbc5b91961aabf3411c6336cb2c838cdaa2f917f76654c15a1948934817'
+    $effectiveImage = 'myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa'
     $effectiveReplicas = 1
     $effectiveLabels = @()
     $disableDefaultLabels = $false

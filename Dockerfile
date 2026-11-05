@@ -15,7 +15,7 @@
 # check below turns "the base still ships the tools jobs assume" into a loud build
 # failure instead of a silent CI break if a future base tag drops them. Add any
 # pool-wide runner tooling here.
-FROM myoung34/github-runner:ubuntu-noble
+FROM myoung34/github-runner:2.338.2-ubuntu-noble@sha256:23e3a4a1da30de5b462ad0ae13d901288e803a688075c3b9b5bb79b7148c07fa
 
 # Build-time invariant: fail loudly if the base ever stops shipping what CI needs.
 RUN command -v pwsh >/dev/null && pwsh --version \
