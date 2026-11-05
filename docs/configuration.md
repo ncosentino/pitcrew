@@ -427,7 +427,12 @@ can exceed `1.0` for a multi-core workload.
 
 Resource telemetry is marked `available`, `partial`, or `unavailable`; missing
 measurements remain `null` rather than appearing as zero usage. The manager
-collects these values through its existing Docker socket. Connectors and
+collects these values through its existing Docker socket. Fixed-manager read-only
+Docker telemetry queries (`info`, `ps`, and `stats`, including hardware probes)
+send TERM at their command deadline and escalate to KILL after one additional
+second if the client ignores TERM. Only the diagnostic client is bounded, not
+the Docker daemon, workers, or jobs. Incomplete samples publish partial or
+unavailable evidence so observation and admission can continue. Connectors and
 dashboard services continue to consume only the read-only state projection and
 do not receive Docker access.
 

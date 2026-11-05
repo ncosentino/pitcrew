@@ -1587,6 +1587,13 @@ write_stale_or_unavailable_host_hardware() (
     mv -f "${temporary}" "${output_path}"
 )
 
+run_telemetry_docker_query() (
+    query_timeout="$1"
+    shift
+    # BusyBox and GNU timeout both support this bounded TERM-to-KILL escalation.
+    exec timeout -s TERM -k 1 "${query_timeout}" docker "$@"
+)
+
 collect_host_hardware() (
     output_path="$1"
     command_timeout="$2"
@@ -1606,7 +1613,7 @@ collect_host_hardware() (
     printf '{}\n' > "${docker_info_path}"
 
     docker_info_available=0
-    if timeout "${command_timeout}" docker info \
+    if run_telemetry_docker_query "${command_timeout}" info \
         --format '{"logicalProcessorCount":{{.NCPU}},"memoryBytes":{{.MemTotal}},"operatingSystem":{{json .OperatingSystem}},"dockerServerVersion":{{json .ServerVersion}},"dockerStorageDriver":{{json .Driver}}}' \
         > "${docker_info_path}.candidate" 2>/dev/null &&
         jq -e '
@@ -1623,7 +1630,7 @@ collect_host_hardware() (
     fi
 
     docker_backing_filesystem=$(
-        timeout "${command_timeout}" docker info \
+        run_telemetry_docker_query "${command_timeout}" info \
             --format '{{range .DriverStatus}}{{if eq (index . 0) "Backing Filesystem"}}{{index . 1}}{{end}}{{end}}' \
             2>/dev/null || true
     )
@@ -2264,7 +2271,7 @@ collect_resource_telemetry() (
     fi
 
     host_available=0
-    if timeout "${command_timeout}" docker info \
+    if run_telemetry_docker_query "${command_timeout}" info \
         --format '{"logicalProcessorCount":{{.NCPU}},"memoryBytes":{{.MemTotal}}}' \
         > "${host_path}.candidate" 2>/dev/null &&
         jq -e '
@@ -2280,8 +2287,8 @@ collect_resource_telemetry() (
     manager_id="${HOSTNAME:-}"
     if [ -z "${manager_id}" ]; then
         manager_id=$(
-            timeout "${command_timeout}" \
-                docker ps -q --filter "label=${manager_label}" 2>/dev/null |
+            run_telemetry_docker_query "${command_timeout}" \
+                ps -q --filter "label=${manager_label}" 2>/dev/null |
                 head -n 1
         )
     fi
@@ -2290,7 +2297,7 @@ collect_resource_telemetry() (
     fi
 
     worker_inventory_available=0
-    if timeout "${command_timeout}" docker ps \
+    if run_telemetry_docker_query "${command_timeout}" ps \
         --filter "label=${managed_label}" \
         --format "{{.ID}} {{.Label \"${slot_label_key}\"}} {{.Names}}" \
         > "${working_directory}/workers.txt" 2>/dev/null; then
@@ -2308,10 +2315,14 @@ collect_resource_telemetry() (
     cut -f1 "${inventory_path}" > "${ids_path}"
     stats_command_available=1
     if [ -s "${ids_path}" ]; then
-        if ! xargs timeout "${command_timeout}" docker stats \
+        set --
+        while IFS= read -r container_id; do
+            set -- "$@" "${container_id}"
+        done < "${ids_path}"
+        if ! run_telemetry_docker_query "${command_timeout}" stats \
             --no-stream \
             --format '{{json .}}' \
-            < "${ids_path}" > "${raw_stats_path}" 2>/dev/null; then
+            "$@" > "${raw_stats_path}" 2>/dev/null; then
             stats_command_available=0
         fi
     fi

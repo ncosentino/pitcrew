@@ -7002,8 +7002,19 @@ Add-Check (
         [regex]::Escape('/usr/local/bin/container-monitor-group-leader.sh')
     )).Count -ge 2
 ) 'The manager image does not ship and mark executable the bounded monitor process-group leader the manager launches from its installed path.'
-Add-Check ($observability -match [regex]::Escape('docker stats')) 'Resource telemetry does not use the existing manager Docker client.'
-Add-Check ($observability -match [regex]::Escape('timeout "${command_timeout}"')) 'Resource telemetry Docker calls do not have a hard deadline.'
+Add-Check (
+    $observability -match [regex]::Escape(
+        'run_telemetry_docker_query "${command_timeout}" stats') -and
+    $observability -match [regex]::Escape('docker "$@"')
+) 'Resource telemetry does not use the shared manager Docker client query.'
+Add-Check (
+    $observability -match [regex]::Escape(
+        'exec timeout -s TERM -k 1 "${query_timeout}" docker "$@"') -and
+    ([regex]::Matches(
+        $observability,
+        [regex]::Escape('run_telemetry_docker_query "${command_timeout}"')
+    )).Count -eq 6
+) 'Read-only telemetry queries do not share bounded TERM-to-KILL deadlines.'
 Add-Check ($observability -match [regex]::Escape('cpuCores')) 'Resource telemetry does not expose normalized CPU cores.'
 Add-Check ($observability -match [regex]::Escape('memoryWorkingSetBytes')) 'Resource telemetry does not expose memory working-set bytes.'
 Add-Check ($compose -match [regex]::Escape('RUNNER_PROFILE_ID: ${RUNNER_PROFILE_ID:-default}')) 'Compose does not pass the profile identity to the manager.'

@@ -912,7 +912,6 @@ assert_equals "null" "$(jq -r '.host' "${host_partial_resources}")" "A failed ho
 assert_equals "0.0125" "$(jq -r '.manager.cpuCores' "${host_partial_resources}")" "Host-capacity failure discarded valid manager telemetry."
 assert_equals "134217728" "$(jq -r '.slots["slot-one"].usage.memoryWorkingSetBytes' "${host_partial_resources}")" "Host-capacity failure discarded valid worker telemetry."
 
-timeout_started=$(date +%s)
 PITCREW_HOST_PROC_PATH="${host_proc_fixture}" \
 PITCREW_TEST_STATS_SLEEP=5 \
 HOSTNAME=manager123 \
@@ -923,11 +922,9 @@ PATH="${fake_docker_directory}:${PATH}" \
         'ephemeral-runner-manager-profile=default' \
         'ephemeral-managed-runner-slot' \
         1
-timeout_elapsed=$(($(date +%s) - timeout_started))
-assert_true \
-    "A stalled Docker stats request blocked telemetry collection for ${timeout_elapsed} seconds." \
-    test "${timeout_elapsed}" -lt 4
 assert_equals "partial" "$(jq -r '.status' "${timed_resources}")" "A timed-out stats sample was not surfaced as partial telemetry."
+
+sh "${ROOT}/tests/Test-ResourceTelemetryTimeout.sh"
 
 launched_marker_slot="${TEMP_DIRECTORY}/connect-marker-launched"
 recovered_marker_slot="${TEMP_DIRECTORY}/connect-marker-recovered"
