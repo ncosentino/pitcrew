@@ -1109,11 +1109,30 @@ function ConvertTo-PitCrewRemoteDiagnosticsTimestamp {
     if ($null -eq $Value) {
         return $null
     }
+    if ($Value -is [DateTimeOffset]) {
+        return $Value.ToUniversalTime()
+    }
+    if ($Value -is [DateTime]) {
+        $dateTime = [DateTime]$Value
+        if ($dateTime.Kind -eq [DateTimeKind]::Utc) {
+            return [DateTimeOffset]::new($dateTime)
+        }
+        if ($dateTime.Kind -eq [DateTimeKind]::Local) {
+            return ([DateTimeOffset]::new($dateTime)).ToUniversalTime()
+        }
+        return [DateTimeOffset]::new(
+            [DateTime]::SpecifyKind(
+                $dateTime,
+                [DateTimeKind]::Utc))
+    }
     $parsed = [DateTimeOffset]::MinValue
     if (-not [DateTimeOffset]::TryParse(
             [string]$Value,
             [Globalization.CultureInfo]::InvariantCulture,
-            [Globalization.DateTimeStyles]::AssumeUniversal,
+            (
+                [Globalization.DateTimeStyles]::AssumeUniversal -bor
+                [Globalization.DateTimeStyles]::AdjustToUniversal
+            ),
             [ref]$parsed)) {
         throw "$Context is not a timestamp."
     }
