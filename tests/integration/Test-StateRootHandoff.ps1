@@ -250,21 +250,21 @@ try {
             Copy-Item -LiteralPath (Join-Path $root $name) -Destination $destination -Recurse
         }
     }
+    Write-RunnerJsonAtomically -Path (Join-Path $Workspace 'profile.json') -Value @{
+        schemaVersion = 1; name = $profileName; image = $image; labels = @('migration-fixture')
+        description = 'Disposable same-engine state-root handoff experiment.'
+        replicas = 1; pullImage = $false; disableDefaultLabels = $true
+        resources = @{ memory = '128m'; cpus = '0.25'; pids = 64 }
+        readWriteVolumes = @(@{ name = 'handoff'; source = $volume })
+    }
+    $a = Get-Profile 'a'
+    $b = Get-Profile 'b'
     Invoke-Docker @('build', '-q', '-t', $image, (Join-Path $PSScriptRoot 'fake-runner')) | Out-Null
     $imageCreated = $true
     Invoke-Docker @('volume', 'create', $volume) | Out-Null
     $volumeCreated = $true
     Invoke-Docker @('run', '--rm', '--mount', "type=volume,src=$volume,dst=/data",
         '--entrypoint', 'sh', $image, '-c', 'touch /data/migration-fixture') | Out-Null
-    Write-RunnerJsonAtomically -Path (Join-Path $Workspace 'profile.json') -Value @{
-        schemaVersion = 1; name = $profileName; image = $image; labels = @('migration-fixture')
-        description = 'Disposable same-engine state-root handoff experiment.'
-        replicas = 1; pullImage = $false; disableDefaultLabels = $true
-        resources = @{ memory = '128m'; cpus = 0.25; pids = 64 }
-        readWriteVolumes = @(@{ name = 'handoff'; source = $volume })
-    }
-    $a = Get-Profile 'a'
-    $b = Get-Profile 'b'
     # The existing integration suite uses the same token-validation stub.
     function Invoke-RestMethod {
         param($Method, $Uri, $Headers, $ErrorAction)
