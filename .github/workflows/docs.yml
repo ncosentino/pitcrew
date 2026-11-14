@@ -41,6 +41,9 @@ jobs:
       - name: Build documentation
         run: python -m mkdocs build --strict
 
+      - name: Verify documentation descriptions
+        run: python tests/Test-DocumentationMetadata.py
+
       - name: Verify documentation titles
         run: python tests/Test-DocumentationTitles.py site
 

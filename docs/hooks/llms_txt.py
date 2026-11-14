@@ -1,7 +1,7 @@
 """MkDocs build hook: auto-generate llms.txt at build time.
 
 Walks the site nav, collects each page's title and description (from front
-matter or the global site_description fallback), then writes site/llms.txt
+matter or the preceding metadata hook), then writes site/llms.txt
 following the llmstxt.org convention. The file stays in sync automatically as
 pages are added, removed, or re-described.
 """
