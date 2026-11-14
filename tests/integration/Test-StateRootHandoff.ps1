@@ -80,8 +80,8 @@ function Copy-FinalState($Source, $Target) {
 
 function Wait-Manager($Profile, [string]$PreviousInstance = '') {
     $generation = (Read-RunnerJsonFile -Path $Profile.DesiredCapacityPath).generation
-    Wait-RunnerCapacityAcknowledgement -ProfileConfig $Profile -Generation $generation `
-        -TimeoutSeconds 60 -MinimumManagerContractVersion 9 | Out-Null
+    $acknowledgement = Wait-RunnerCapacityAcknowledgement -ProfileConfig $Profile -Generation $generation `
+        -TimeoutSeconds 60 -MinimumManagerContractVersion 9
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     do {
         $observed = if (Test-Path -LiteralPath $Profile.ObservedStatePath) {
@@ -89,6 +89,7 @@ function Wait-Manager($Profile, [string]$PreviousInstance = '') {
         } else { $null }
         if ($observed -and $observed.managerStatus -eq 'running' -and
             $observed.managerInstanceId -ne $PreviousInstance -and
+            $observed.desiredStateHash -ceq $acknowledgement.desiredStateHash -and
             [DateTimeOffset]$observed.observedAt -gt [DateTimeOffset]::UtcNow.AddSeconds(-15)) {
             return $observed
         }
