@@ -3639,6 +3639,25 @@ try {
         Add-Check ($modeFingerprintOne -ne $modeFingerprintTwo) 'Changed Unix build-input mode was omitted from the context fingerprint.'
     }
 
+    $unlinkedRoot = Join-Path $tempRoot 'unlinked-material'
+    $linkedRoot = Join-Path $tempRoot 'linked-material'
+    New-Item -ItemType Directory -Path $unlinkedRoot | Out-Null
+    $unlinkedFile = Join-Path $unlinkedRoot 'material.txt'
+    Set-Content -LiteralPath $unlinkedFile -Value 'material' -Encoding UTF8
+    Assert-RunnerUnlinkedPath -Path $unlinkedFile
+    $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+    New-Item -ItemType $linkType -Path $linkedRoot -Target $unlinkedRoot | Out-Null
+    try {
+        Add-ThrowsCheck -Action {
+            Assert-RunnerUnlinkedPath -Path $linkedRoot
+        } -ExpectedMessage 'does not accept linked' -Failure 'A linked material directory was accepted.'
+        Add-ThrowsCheck -Action {
+            Assert-RunnerUnlinkedPath -Path (Join-Path $linkedRoot 'material.txt')
+        } -ExpectedMessage 'does not accept linked' -Failure 'An ordinary file through a linked ancestor was accepted.'
+    } finally {
+        Remove-Item -LiteralPath $linkedRoot -Force
+    }
+
     $lockPath = Join-Path $tempRoot 'lock-contract' 'setup.lock'
     $firstLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
     try {

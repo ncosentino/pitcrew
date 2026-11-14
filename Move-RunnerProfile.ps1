@@ -51,10 +51,7 @@ function Get-RelocationProfile([string]$RootPath) {
 }
 
 function Assert-UnlinkedPath([string]$Path) {
-    $item = Get-Item -LiteralPath $Path -Force
-    if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
-        throw 'Relocation does not accept linked source or destination material.'
-    }
+    Assert-RunnerUnlinkedPath -Path $Path
 }
 
 function Get-EngineId {
@@ -192,6 +189,10 @@ if ($Action -in @('target-check', 'target-prepare', 'target-material-check', 'ta
     }
     $receiptPath = Join-Path $destination.StateDirectory 'relocation.json'
     if ($Action -eq 'target-prepare') {
+        foreach ($directory in @('.pitcrew-state', '.pitcrew-private', '.pitcrew-deployment')) {
+            $materialRoot = Join-Path $destination.RootPath $directory
+            if (Test-Path -LiteralPath $materialRoot) { Assert-UnlinkedPath $materialRoot }
+        }
         if ((Test-Path -LiteralPath $destination.StateDirectory) -or
             (Test-Path -LiteralPath $destination.EnvironmentPath) -or
             (Test-Path -LiteralPath (Join-Path $destination.RootPath '.pitcrew-private' $Profile)) -or

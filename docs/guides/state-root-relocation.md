@@ -7,8 +7,11 @@ description: Experimental guarded relocation of one profile between roots on the
 `Move-RunnerProfile.ps1` is an experimental, manager-only relocation command.
 It defaults to a read-only dry run. It does not move a Docker engine, workers,
 external volumes, service networks, or the connector and support services.
-Do not treat its disposable fixed-worker CI evidence as qualification of
-autoscaled listeners, real credentials, or Windows-to-WSL operation.
+The disposable CI fixture qualifies the product command, failure fencing and
+latest-state rollback. A same-engine Windows-to-WSL deployment has additionally
+qualified protected credential transport, existing built-image provenance,
+fresh autoscaled listener evidence and fixed-worker preservation. These checks
+do not qualify a different Docker engine or a host restart.
 
 ## Preconditions
 
@@ -56,6 +59,15 @@ the shared profile lock.
 Windows sources also make that lock read-only, blocking obsolete setup versions
 that require the same read/write lock. Explicit recovery retains an exclusive
 read-only lease; normal write access returns only after the source is active again.
+
+After acceptance, require another fresh target publication and verify that the
+source has stopped publishing. For active autoscaled targets, successful
+`session-create`, `session-refresh` or `message-poll` evidence belongs to
+`subsystemHealth.github.lastSuccess`, not necessarily the bounded event journal.
+The success must postdate the replacement manager's startup, and each active
+target must have fresh GitHub statistics. Preserve any explicitly reviewed
+pre-existing degraded condition without reporting it as healthy; stop on a new
+or unexplained failure.
 
 ## Failure and explicit rollback
 

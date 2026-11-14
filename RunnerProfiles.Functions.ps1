@@ -2439,6 +2439,22 @@ function Get-RunnerManagerAcknowledgementTimeoutSeconds {
 .EXCEPTION
     Throws when the lock cannot be acquired before the timeout.
 #>
+function Assert-RunnerUnlinkedPath {
+    [CmdletBinding()]
+    param([Parameter(Mandatory)][string]$Path)
+
+    $item = Get-Item -LiteralPath $Path -Force
+    while ($null -ne $item) {
+        if (($item.Attributes -band [IO.FileAttributes]::ReparsePoint) -ne 0) {
+            throw 'Relocation does not accept linked source or destination material.'
+        }
+        $parent = [IO.Directory]::GetParent($item.FullName)
+        $item = if ($null -ne $parent) {
+            Get-Item -LiteralPath $parent.FullName -Force
+        } else { $null }
+    }
+}
+
 function Assert-RunnerProfileOperationAuthority {
     [CmdletBinding()]
     param(
