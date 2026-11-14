@@ -19,6 +19,9 @@ applyTo: "README.md,docs/**,mkdocs.yml,requirements-docs.txt,.github/workflows/d
   The canonical router, not the origin, removes that header.
 - Keep page descriptions and heading structure compatible with the MkDocs hooks that
   generate structured data and `llms.txt`.
+- Maintain descriptive titles and substantive opening prose; the shared metadata hook
+  derives missing descriptions. Preserve authored overrides rather than backfilling
+  per-page metadata. See [Contributor Architecture](../../docs/contributing/architecture.md).
 - Update navigation and relative links whenever pages move or are added.
 - Run `python -m mkdocs build --strict` for documentation behavior changes.
 

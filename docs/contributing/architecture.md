@@ -106,6 +106,27 @@ consistent because users install the repository as a Copilot CLI marketplace.
 
 ## Executable contracts
 
+### Documentation metadata
+
+The documentation build runs `docs/hooks/metadata.py` before the structured-data
+and `llms.txt` hooks. It preserves nonblank authored descriptions and the homepage's
+configured site description. Other pages combine their resolved title with the first
+substantive rendered paragraph, shortened at a word boundary to 240 characters.
+Headings, code blocks, lists, tables, notes, and image-only paragraphs are excluded.
+Pages without suitable prose receive a truthful project-and-page identity fallback.
+
+Maintain useful titles and opening prose instead of adding description boilerplate
+to every page. Explicit frontmatter remains available when a page needs an authored
+summary. This deterministic build-time policy requires no AI, network service, or
+additional dependency. Authored summaries offer editorial control but require manual
+maintenance; source-derived defaults stay aligned with the documentation.
+
+Source metadata stays decoded plain text for structured data and `llms.txt`. Only
+the template-facing page copy escapes descriptions for HTML attributes. The shared
+schema serializer escapes less-than characters after JSON serialization so content
+cannot terminate a JSON-LD script. `tests/Test-DocumentationMetadata.py` exercises
+these contracts through the real templates in the Documentation workflow.
+
 The complete validation and delivery definitions live in:
 
 - `.github/workflows/ci.yml`

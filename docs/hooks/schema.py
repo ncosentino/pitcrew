@@ -13,6 +13,11 @@ import json
 import re
 
 
+def _json_ld_script(schema: dict) -> str:
+    serialized = json.dumps(schema, indent=2, ensure_ascii=False).replace('<', '\\u003c')
+    return '<script type="application/ld+json">\n' + serialized + '\n</script>\n'
+
+
 def _extract_h2_sections(html: str) -> list[tuple[str, str]]:
     """Return a list of (heading_text, first_paragraph_text) for each H2 in html."""
     sections = []
@@ -74,12 +79,7 @@ def _inject_howto_schema(html: str, page) -> str:
         'step': steps,
     }
 
-    script_tag = (
-        '<script type="application/ld+json">\n'
-        + json.dumps(schema, indent=2, ensure_ascii=False)
-        + '\n</script>\n'
-    )
-    return html + script_tag
+    return html + _json_ld_script(schema)
 
 
 def _inject_faq_schema(html: str, page) -> str:
@@ -109,9 +109,4 @@ def _inject_faq_schema(html: str, page) -> str:
         'mainEntity': questions,
     }
 
-    script_tag = (
-        '<script type="application/ld+json">\n'
-        + json.dumps(schema, indent=2, ensure_ascii=False)
-        + '\n</script>\n'
-    )
-    return html + script_tag
+    return html + _json_ld_script(schema)
