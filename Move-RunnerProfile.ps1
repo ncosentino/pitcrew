@@ -24,6 +24,12 @@ param(
 )
 $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'RunnerProfiles.Functions.ps1')
+if ($IsLinux -and (($Apply) -or $Action -in @('target-prepare', 'target-material-check', 'target-start', 'target-quiesce'))) {
+    $uid = & id -u
+    if ($LASTEXITCODE -ne 0 -or ([string]$uid).Trim() -ne '0') {
+        throw 'Native relocation requires root authority for manager-owned protected state.'
+    }
+}
 
 function Get-RelocationProfile([string]$RootPath) {
     $state = Join-Path $RootPath '.pitcrew-state' $Profile
@@ -280,6 +286,8 @@ if ($Action -in @('target-check', 'target-prepare', 'target-material-check', 'ta
             throw 'Worker image identity moved; relocation never pulls or rebuilds it.'
         }
         if ($IsLinux) {
+            & chmod -R go-rwx $destination.StateDirectory
+            if ($LASTEXITCODE -ne 0) { throw 'Cannot protect transferred private state.' }
             & chmod 0600 $destination.EnvironmentPath
             if ($LASTEXITCODE -ne 0) { throw 'Cannot protect destination environment.' }
             $privateDirectory = Join-Path $destination.RootPath '.pitcrew-private' $Profile
@@ -487,6 +495,17 @@ try {
         $transfer.portableBuildHash = Get-RunnerBuildContextFingerprint -ContextPath $static.configuration.build.context `
             -ExcludedPaths $exclusions -IgnoreFileModes
     }
+    $keySource = Get-RunnerEnvironmentFileValue -Path $source.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
+    if ($static.configuration.autoscaling -and -not $keySource) {
+        throw 'Autoscaled relocation requires the existing protected GitHub App key source.'
+    }
+    if ($keySource) {
+        Assert-UnlinkedPath $keySource
+        $keyLease = [IO.File]::Open($keySource, [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::Read)
+        try {
+            if ($keyLease.Length -eq 0) { throw 'Protected key source is empty.' }
+        } finally { $keyLease.Dispose() }
+    }
     Invoke-Target 'target-prepare'
     $targetStatic = $null
     if ($static.manifest) {
@@ -531,7 +550,6 @@ try {
         }
         $transfer.nativeBuild = $materialReceipt.transfer.nativeBuild
     }
-    $keySource = Get-RunnerEnvironmentFileValue -Path $source.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
     $nativeKeyPath = ''
     if ($keySource) {
         Assert-UnlinkedPath $keySource

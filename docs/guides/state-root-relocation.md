@@ -16,6 +16,8 @@ Use matching relocation, shared lifecycle, Compose, and schema code at both root
 The destination must have no state, environment, or private deployment material
 for the selected profile. Linux destinations must be native ext4. Shared
 host-admission configurations are not supported.
+Native apply and recovery require root authority because managers own protected
+state. Windows-to-WSL target actions run as the explicitly selected distro's root.
 
 Both roots must use the same Docker engine and existing manager and worker images.
 The source must have one fresh running manager supporting non-destructive handoff.

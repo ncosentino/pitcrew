@@ -68,4 +68,7 @@ jobs:
         run: ./tests/Test-RunnerProfiles.ps1
       - name: Exercise handoff and injected failures
         shell: pwsh
-        run: ./tests/integration/Test-StateRootHandoff.ps1
+        run: |
+          sudo -n --preserve-env=GITHUB_ACTIONS,GITHUB_STEP_SUMMARY pwsh -NoLogo -NoProfile -NonInteractive `
+            -File ./tests/integration/Test-StateRootHandoff.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Protected-state handoff fixture failed.' }
