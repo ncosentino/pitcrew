@@ -66,6 +66,8 @@ GitHub runner scale-set demand to return toward their operator-defined maximum.
   calibration, rollout, diagnostics, and rollback.
 - [Support Broker Access](guides/support-broker-access.md) defines the exact
   read and dedicated evidence-directory ACL contract for file-only diagnostics.
+- [State-root Relocation](guides/state-root-relocation.md) documents experimental
+  same-engine manager handoff, fencing, and explicit rollback.
 - [Troubleshooting](troubleshooting.md) diagnoses registration, routing, capacity,
   image, and Docker failures.
 - [Building from Source](building.md) identifies local validation entry points.

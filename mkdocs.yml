@@ -69,6 +69,7 @@ nav:
       - Host-Local Admission: guides/host-admission.md
       - Demand-Driven Autoscaling: guides/autoscaling.md
       - Rolling Updates: guides/rolling-updates.md
+      - State-root Relocation: guides/state-root-relocation.md
       - Security Boundaries: guides/security-boundaries.md
       - Support Broker Access: guides/support-broker-access.md
       - Copilot CLI Operations: guides/copilot-operations.md

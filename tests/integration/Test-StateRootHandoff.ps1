@@ -10,34 +10,6 @@ $ErrorActionPreference = 'Stop'
 $root = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
 . (Join-Path $root 'RunnerProfiles.Functions.ps1')
 
-# Import the real setup helpers without executing the operator entry point.
-$tokens = $null
-$errors = $null
-$setup = [Management.Automation.Language.Parser]::ParseFile(
-    (Join-Path $root 'Setup-Runner.ps1'), [ref]$tokens, [ref]$errors)
-if ($errors.Count) { throw 'Setup helper parsing failed.' }
-foreach ($name in @(
-    'Get-RunnerManagerContainerIdList', 'Get-RunnerManagerContainerId',
-    'Get-RunnerManagerContractVersion', 'Stop-RunnerManagerForHandoff',
-    'Get-RunnerEnvironmentFileValue', 'Invoke-RunnerCompose',
-    'Wait-RunnerCapacityAcknowledgement'
-)) {
-    $definition = $setup.Find({
-        param($node)
-        $node -is [Management.Automation.Language.FunctionDefinitionAst] -and
-            $node.Name -eq $name
-    }, $true)
-    if (-not $definition) { throw "Missing shared setup helper: $name" }
-    Invoke-Expression $definition.Extent.Text
-}
-$environmentAssignment = $setup.Find({
-    param($node)
-    $node -is [Management.Automation.Language.AssignmentStatementAst] -and
-        $node.Left.Extent.Text -eq '$composeEnvironmentNames'
-}, $true)
-if (-not $environmentAssignment) { throw 'Missing Compose environment boundary.' }
-Invoke-Expression $environmentAssignment.Extent.Text
-
 function Assert-That([bool]$Condition, [string]$Message) {
     if (-not $Condition) { throw $Message }
 }
@@ -62,6 +34,14 @@ function Set-Receipt([string]$Phase, [string]$Authority) {
         phase = $Phase
         authority = $Authority
     }
+    foreach ($side in @('a', 'b')) {
+        Write-RunnerJsonAtomically -Path (Join-Path (Get-Profile $side).StateDirectory 'relocation.json') -Value @{
+            schemaVersion = 1
+            operationId = $configuration.operationId
+            role = if ($side -eq $Authority) { 'target' } else { 'source' }
+            status = if ($Phase -eq 'committed') { 'committed' } else { 'prepared' }
+        }
+    }
 }
 
 function Start-Manager($Profile) {
@@ -85,12 +65,12 @@ function Stop-Manager($Profile) {
 function Copy-FinalState($Source, $Target) {
     # This transfer is fixture-only: no real registration material is present.
     foreach ($item in Get-ChildItem -LiteralPath $Target.StateDirectory -Force) {
-        if ($item.Name -ne 'setup.lock') {
+        if ($item.Name -notin @('setup.lock', 'relocation.json')) {
             Remove-Item -LiteralPath $item.FullName -Recurse -Force
         }
     }
     foreach ($item in Get-ChildItem -LiteralPath $Source.StateDirectory -Force) {
-        if ($item.Name -ne 'setup.lock') {
+        if ($item.Name -notin @('setup.lock', 'relocation.json')) {
             Copy-Item -LiteralPath $item.FullName -Destination $Target.StateDirectory -Recurse
         }
     }
@@ -125,7 +105,8 @@ function Invoke-Transfer {
     $locks = [Collections.Generic.List[IDisposable]]::new()
     try {
         foreach ($side in @('a', 'b')) {
-            $locks.Add((Enter-RunnerProfileLock -Path (Get-Profile $side).LockPath -TimeoutSeconds 2))
+            $locks.Add((Enter-RunnerProfileLock -Path (Get-Profile $side).LockPath `
+                -TimeoutSeconds 2 -RelocationId $configuration.operationId))
         }
         $receipt = Read-Receipt
         Assert-That ($receipt.phase -eq 'committed' -and $receipt.authority -eq $sourceSide) `
@@ -196,6 +177,7 @@ $imageCreated = $false
 $volumeCreated = $false
 $configuration = @{
     profile = $profileName
+    operationId = [guid]::NewGuid().ToString('D')
     engine = ([string](Invoke-Docker @('info', '--format', '{{.ID}}'))).Trim()
 }
 $results = [Collections.Generic.List[string]]::new()
@@ -245,7 +227,7 @@ try {
     foreach ($side in @('a', 'b')) {
         $destination = Join-Path $Workspace $side
         New-Item -ItemType Directory -Path $destination | Out-Null
-        foreach ($name in @('Setup-Runner.ps1', 'RunnerProfiles.Functions.ps1', 'runner-profile.schema.json',
+        foreach ($name in @('Setup-Runner.ps1', 'Move-RunnerProfile.ps1', 'RunnerProfiles.Functions.ps1', 'runner-profile.schema.json',
             'docker-compose.yml', 'github-app.manager.compose.yml', 'manager')) {
             Copy-Item -LiteralPath (Join-Path $root $name) -Destination $destination -Recurse
         }
@@ -284,6 +266,19 @@ try {
     $script:worker = $ids[0]
     Start-Sleep -Seconds 2
     Assert-Worker
+    $firstObserved = Read-RunnerJsonFile -Path $a.ObservedStatePath
+    $firstDesired = Read-RunnerJsonFile -Path $a.DesiredCapacityPath
+    & (Join-Path $root 'Move-RunnerProfile.ps1') -Profile $profileName -SourceRoot $a.RootPath `
+        -DestinationRoot $b.RootPath -Apply -ExpectedManagerInstanceId $firstObserved.managerInstanceId `
+        -ExpectedGeneration $firstDesired.generation -ExpectedDesiredStateHash $firstObserved.desiredStateHash
+    Assert-Worker
+    $targetObserved = Read-RunnerJsonFile -Path $b.ObservedStatePath
+    $targetDesired = Read-RunnerJsonFile -Path $b.DesiredCapacityPath
+    & (Join-Path $root 'Move-RunnerProfile.ps1') -Profile $profileName -SourceRoot $a.RootPath `
+        -DestinationRoot $b.RootPath -Action rollback -Apply -ExpectedManagerInstanceId $targetObserved.managerInstanceId `
+        -ExpectedGeneration $targetDesired.generation -ExpectedDesiredStateHash $targetObserved.desiredStateHash
+    Assert-Worker
+    $results.Add('product-relocation-and-rollback: real command preserved the original progressing worker')
     $desiredHash = (Get-FileHash $a.DesiredCapacityPath).Hash
     $staticHash = (Get-FileHash $a.StaticProfilePath).Hash
     $ownerHash = (Get-FileHash $a.SessionOwnerPath).Hash
@@ -371,7 +366,7 @@ try {
             '## Disposable state-root prototype'
             ($results | ForEach-Object { "- PASS $_" })
             ''
-            'Fixed fake-worker lifecycle only. Prototype-local fencing is not a guard in production Setup-Runner.'
+            'Fixed fake-worker lifecycle only. Includes production Move-RunnerProfile, rollback and shared root fencing.'
             'Not proven: autoscaled listener migration, Windows/WSL mounts, real credentials, connector migration.'
         ) | Add-Content -LiteralPath $env:GITHUB_STEP_SUMMARY
     }
