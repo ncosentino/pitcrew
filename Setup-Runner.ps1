@@ -366,113 +366,9 @@ $hostAdmissionComposeEnvironmentNames = @(
     'PITCREW_HOST_ADMISSION_VOLUME',
     'PITCREW_HOST_ADMISSION_PROTOCOL_VERSION'
 )
-$composeEnvironmentNames = @(
-    'ACCESS_TOKEN',
-    'PITCREW_GITHUB_APP_CLIENT_ID',
-    'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE',
-    'REPO_URLS',
-    'REPO_URL',
-    'RUNNER_SCOPE',
-    'ORG_NAME',
-    'ENTERPRISE_NAME',
-    'RUNNER_PROFILE_ID',
-    'RUNNER_REPLICAS',
-    'RUNNER_IMAGE',
-    'RUNNER_PULL_IMAGE',
-    'RUNNER_NAME_PREFIX',
-    'RUNNER_LABELS',
-    'RUNNER_NO_DEFAULT_LABELS',
-    'RUNNER_GROUP',
-    'PITCREW_WORKER_REVISION',
-    'PITCREW_WORKER_IMAGE_ID',
-    'PITCREW_WORKER_MEMORY_BYTES',
-    'PITCREW_WORKER_MEMORY_SWAP_BYTES',
-    'PITCREW_WORKER_CPU_CORES',
-    'PITCREW_WORKER_PIDS_LIMIT',
-    'PITCREW_WORKER_RUNTIME_DEVICES',
-    'PITCREW_WORKER_SHM_SIZE_BYTES',
-    'PITCREW_READ_ONLY_VOLUMES',
-    'PITCREW_READ_WRITE_VOLUMES',
-    'PITCREW_SERVICE_NETWORK',
-    'PITCREW_SESSION_OWNER',
-    'PITCREW_ASSUME_UNVERSIONED_CURRENT',
-    'PITCREW_AUTOSCALING_MODE',
-    'PITCREW_AUTOSCALING_MIN_IDLE',
-    'PITCREW_AUTOSCALING_SCALE_DOWN_DELAY_SECONDS',
-    'PITCREW_AUTOSCALING_MAX_ACTIVE_WORKERS',
-    'PITCREW_HOST_ADMISSION_NAMESPACE',
-    'PITCREW_HOST_ADMISSION_VOLUME',
-    'PITCREW_HOST_ADMISSION_SOCKET',
-    'PITCREW_HOST_ADMISSION_HOST_FINGERPRINT',
-    'PITCREW_HOST_ADMISSION_PROFILE_FINGERPRINT',
-    'PITCREW_HOST_ADMISSION_PROTOCOL_VERSION',
-    'PITCREW_STATE_DIR',
-    'PITCREW_MANAGER_CONTRACT_VERSION'
-)
 
-function Invoke-RunnerCompose {
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$ProfileConfig,
 
-        [Parameter(Mandatory)]
-        [string[]]$CommandArguments,
 
-        [switch]$DiscardOutput
-    )
-
-    $savedEnvironment = @{}
-    foreach ($name in $composeEnvironmentNames) {
-        $item = Get-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
-        $savedEnvironment[$name] = [PSCustomObject]@{
-            Exists = $null -ne $item
-            Value = if ($item) { $item.Value } else { $null }
-        }
-        Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
-    }
-
-    $exitCode = 1
-    try {
-        $composeArguments = @(
-            'compose',
-            '--file', $composePath
-        )
-        if ($ProfileConfig.HostAdmission) {
-            $composeArguments += @('--file', $hostAdmissionManagerComposePath)
-        }
-        $appClientID = Get-RunnerEnvironmentFileValue `
-            -Path $ProfileConfig.EnvironmentPath `
-            -Name 'PITCREW_GITHUB_APP_CLIENT_ID'
-        if (-not [string]::IsNullOrWhiteSpace($appClientID)) {
-            $composeArguments += @('--file', $githubAppManagerComposePath)
-        }
-        $composeArguments += @('--project-name', $ProfileConfig.ComposeProjectName)
-        if (Test-Path -LiteralPath $ProfileConfig.EnvironmentPath) {
-            $composeArguments += @('--env-file', $ProfileConfig.EnvironmentPath)
-        }
-        $composeArguments += $CommandArguments
-
-        if ($DiscardOutput) {
-            & docker @composeArguments 2>&1 | Out-Null
-        } else {
-            & docker @composeArguments
-        }
-        $exitCode = $LASTEXITCODE
-    }
-    finally {
-        foreach ($name in $composeEnvironmentNames) {
-            if ($savedEnvironment[$name].Exists) {
-                Set-Item -LiteralPath "Env:$name" -Value $savedEnvironment[$name].Value
-            } else {
-                Remove-Item -LiteralPath "Env:$name" -ErrorAction SilentlyContinue
-            }
-        }
-    }
-
-    if ($exitCode -ne 0) {
-        Write-Error "docker compose $($CommandArguments[0]) failed for profile '$($ProfileConfig.Name)'."
-    }
-}
 
 function Invoke-RunnerHostAdmissionCompose {
     param(
@@ -953,70 +849,13 @@ function Stop-RunnerProfile {
     }
 }
 
-function Get-RunnerManagerContainerIdList {
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$ProfileConfig
-    )
 
-    $managerIds = @(
-        docker ps -q --filter "label=ephemeral-runner-manager-profile=$($ProfileConfig.Name)" 2>$null |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    )
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to inspect the manager for profile '$($ProfileConfig.Name)'."
-    }
-    return @($managerIds | ForEach-Object { ([string]$_).Trim() })
-}
 
-function Get-RunnerWorkerContainerIdList {
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$ProfileConfig
-    )
 
-    $workerIds = @(
-        docker ps -q --filter "label=$($ProfileConfig.ManagedRunnerLabel)" 2>$null |
-            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
-    )
-    if ($LASTEXITCODE -ne 0) {
-        Write-Error "Failed to inspect workers for profile '$($ProfileConfig.Name)'."
-    }
-    return @($workerIds | ForEach-Object { ([string]$_).Trim() })
-}
 
-function Get-RunnerManagerContainerId {
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$ProfileConfig
-    )
 
-    $managerIds = @(Get-RunnerManagerContainerIdList -ProfileConfig $ProfileConfig)
-    if ($managerIds.Count -gt 1) {
-        throw "Profile '$($ProfileConfig.Name)' has multiple running manager containers."
-    }
-    if ($managerIds.Count -eq 0) {
-        return $null
-    }
-    return [string]$managerIds[0]
-}
 
-function Get-RunnerManagerContractVersion {
-    param(
-        [Parameter(Mandatory)]
-        [string]$ContainerId
-    )
 
-    $contractOutput = & docker inspect `
-        --format '{{ index .Config.Labels "pitcrew-manager-contract-version" }}' `
-        $ContainerId 2>$null
-    if ($LASTEXITCODE -ne 0) {
-        return 0
-    }
-    $managerContract = 0
-    [void][int]::TryParse(([string]$contractOutput).Trim(), [ref]$managerContract)
-    return $managerContract
-}
 
 function Test-RunnerManagerRunning {
     param(
@@ -1550,36 +1389,7 @@ function Get-RunnerSessionOwner {
     return "pitcrew-$($ProfileConfig.Name)-$([guid]::NewGuid().ToString('N'))"
 }
 
-function Stop-RunnerManagerForHandoff {
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$ProfileConfig,
 
-        [Parameter(Mandatory)]
-        [string]$ContainerId
-    )
-
-    $managerContract = Get-RunnerManagerContractVersion -ContainerId $ContainerId
-    $supportsHandoff = $managerContract -ge 9
-    if ($supportsHandoff) {
-        Write-Host "[handoff] Stopping manager '$ContainerId' while preserving profile workers"
-        & docker stop --time 60 $ContainerId 2>&1 | Out-Null
-        if ($LASTEXITCODE -ne 0) {
-            throw "Manager '$ContainerId' did not stop cleanly for handoff."
-        }
-        return
-    }
-
-    Write-Host "[handoff] Removing legacy manager '$ContainerId' without signaling its destructive shutdown path"
-    & docker update --restart=no $ContainerId 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to disable restart policy for legacy manager '$ContainerId'."
-    }
-    & docker rm -f $ContainerId 2>&1 | Out-Null
-    if ($LASTEXITCODE -ne 0) {
-        throw "Failed to remove legacy manager '$ContainerId' for handoff."
-    }
-}
 
 function Restore-RunnerImageTag {
     param(
@@ -1672,28 +1482,7 @@ function Get-RunnerResolvedImageId {
     return $imageId
 }
 
-function New-RunnerTextStagingFile {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
 
-        [Parameter(Mandatory)]
-        [AllowEmptyString()]
-        [string]$Value
-    )
-
-    $directory = Split-Path -Parent $Path
-    New-Item -ItemType Directory -Path $directory -Force | Out-Null
-    $temporaryPath = Join-Path $directory ".$([IO.Path]::GetFileName($Path)).$([guid]::NewGuid().ToString('N')).tmp"
-    try {
-        [IO.File]::WriteAllText($temporaryPath, $Value, [Text.UTF8Encoding]::new($false))
-        return $temporaryPath
-    }
-    catch {
-        Remove-Item -LiteralPath $temporaryPath -Force -ErrorAction SilentlyContinue
-        throw
-    }
-}
 
 function New-RunnerJsonStagingFile {
     param(
@@ -1708,94 +1497,11 @@ function New-RunnerJsonStagingFile {
     return New-RunnerTextStagingFile -Path $Path -Value "$json`n"
 }
 
-function Complete-RunnerStagedFile {
-    param(
-        [Parameter(Mandatory)]
-        [string]$TemporaryPath,
 
-        [Parameter(Mandatory)]
-        [string]$Path
-    )
 
-    [IO.File]::Move($TemporaryPath, $Path, $true)
-}
 
-function Wait-RunnerCapacityAcknowledgement {
-    param(
-        [Parameter(Mandatory)]
-        [PSCustomObject]$ProfileConfig,
 
-        [Parameter(Mandatory)]
-        [ValidateRange(1, [int]::MaxValue)]
-        [int]$Generation,
 
-        [Parameter(Mandatory)]
-        [ValidateRange(1, 300)]
-        [int]$TimeoutSeconds,
-
-        [Parameter(Mandatory)]
-        [ValidateRange(1, [int]::MaxValue)]
-        [int]$MinimumManagerContractVersion
-    )
-
-    $stopwatch = [Diagnostics.Stopwatch]::StartNew()
-    $lastReadError = $null
-    do {
-        if (Test-Path -LiteralPath $ProfileConfig.CapacityAcknowledgementPath -PathType Leaf) {
-            try {
-                $acknowledgement = Read-RunnerJsonFile -Path $ProfileConfig.CapacityAcknowledgementPath
-                if (
-                    [int]$acknowledgement.schemaVersion -ne 1 -or
-                    [string]$acknowledgement.status -ne 'accepted'
-                ) {
-                    throw 'Acknowledgement has an unsupported contract.'
-                }
-
-                $acknowledgedGeneration = [int]$acknowledgement.generation
-                $acknowledgedContract = [int]$acknowledgement.managerContractVersion
-                if (
-                    $acknowledgedGeneration -eq $Generation -and
-                    $acknowledgedContract -ge $MinimumManagerContractVersion
-                ) {
-                    return $acknowledgement
-                }
-                if ($acknowledgedGeneration -gt $Generation) {
-                    throw "Manager acknowledged generation $acknowledgedGeneration while setup was waiting for generation $Generation."
-                }
-                $lastReadError = $null
-            } catch {
-                $lastReadError = $_.Exception.Message
-            }
-        }
-        Start-Sleep -Milliseconds 200
-    } while ($stopwatch.Elapsed.TotalSeconds -lt $TimeoutSeconds)
-
-    $detail = if ($lastReadError) { " Last acknowledgement error: $lastReadError" } else { '' }
-    throw "Manager for profile '$($ProfileConfig.Name)' did not acknowledge desired-capacity generation $Generation with contract $MinimumManagerContractVersion or newer within $TimeoutSeconds seconds.$detail"
-}
-
-function Get-RunnerEnvironmentFileValue {
-    param(
-        [Parameter(Mandatory)]
-        [string]$Path,
-
-        [Parameter(Mandatory)]
-        [string]$Name
-    )
-
-    if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
-        return $null
-    }
-
-    $prefix = "$Name="
-    $line = Get-Content -LiteralPath $Path -Encoding UTF8 |
-        Where-Object { $_.StartsWith($prefix, [StringComparison]::Ordinal) } |
-        Select-Object -Last 1
-    if ($null -eq $line) {
-        return $null
-    }
-    return $line.Substring($prefix.Length)
-}
 
 function Get-RunnerRegistrationAccessValidation {
     param(

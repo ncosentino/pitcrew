@@ -3639,6 +3639,25 @@ try {
         Add-Check ($modeFingerprintOne -ne $modeFingerprintTwo) 'Changed Unix build-input mode was omitted from the context fingerprint.'
     }
 
+    $unlinkedRoot = Join-Path $tempRoot 'unlinked-material'
+    $linkedRoot = Join-Path $tempRoot 'linked-material'
+    New-Item -ItemType Directory -Path $unlinkedRoot | Out-Null
+    $unlinkedFile = Join-Path $unlinkedRoot 'material.txt'
+    Set-Content -LiteralPath $unlinkedFile -Value 'material' -Encoding UTF8
+    Assert-RunnerUnlinkedPath -Path $unlinkedFile
+    $linkType = if ($IsWindows) { 'Junction' } else { 'SymbolicLink' }
+    New-Item -ItemType $linkType -Path $linkedRoot -Target $unlinkedRoot | Out-Null
+    try {
+        Add-ThrowsCheck -Action {
+            Assert-RunnerUnlinkedPath -Path $linkedRoot
+        } -ExpectedMessage 'does not accept linked' -Failure 'A linked material directory was accepted.'
+        Add-ThrowsCheck -Action {
+            Assert-RunnerUnlinkedPath -Path (Join-Path $linkedRoot 'material.txt')
+        } -ExpectedMessage 'does not accept linked' -Failure 'An ordinary file through a linked ancestor was accepted.'
+    } finally {
+        Remove-Item -LiteralPath $linkedRoot -Force
+    }
+
     $lockPath = Join-Path $tempRoot 'lock-contract' 'setup.lock'
     $firstLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
     try {
@@ -3656,6 +3675,71 @@ try {
     $releasedLock = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
     $releasedLock.Dispose()
     Add-Check $true 'A released profile setup lock could not be reacquired.'
+
+    $relocationPath = Join-Path (Split-Path $lockPath -Parent) 'relocation.json'
+    $relocationId = [guid]::NewGuid().ToString('D')
+    $relocation = @{
+        schemaVersion = 1
+        operationId = $relocationId
+        role = 'source'
+        status = 'committed'
+    }
+    Write-RunnerJsonAtomically -Path $relocationPath -Value $relocation
+    Add-ThrowsCheck -Action {
+        $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
+        $lease.Dispose()
+    } -ExpectedMessage 'root is retired or relocation is incomplete' `
+        -Failure 'Retired source admitted an ordinary setup mutation.'
+    $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1 -RelocationId $relocationId
+    $lease.Dispose()
+    $relocation.role = 'target'
+    $relocation.status = 'starting'
+    Write-RunnerJsonAtomically -Path $relocationPath -Value $relocation
+    Add-ThrowsCheck -Action {
+        $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
+        $lease.Dispose()
+    } -ExpectedMessage 'root is retired or relocation is incomplete' `
+        -Failure 'Incomplete target admitted an ordinary setup mutation.'
+    $relocation.status = 'committed'
+    Write-RunnerJsonAtomically -Path $relocationPath -Value $relocation
+    $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1
+    $lease.Dispose()
+    $relocation.status = 'unknown'
+    Write-RunnerJsonAtomically -Path $relocationPath -Value $relocation
+    Add-ThrowsCheck -Action {
+        $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1 -RelocationId $relocationId
+        $lease.Dispose()
+    } -ExpectedMessage 'Invalid profile relocation receipt' `
+        -Failure 'Malformed receipt was bypassed by an operation identifier.'
+    Remove-Item -LiteralPath $relocationPath
+
+    if ($IsWindows) {
+        $relocation.role = 'source'
+        $relocation.status = 'committed'
+        Write-RunnerJsonAtomically -Path $relocationPath -Value $relocation
+        $attributes = [IO.File]::GetAttributes($lockPath)
+        try {
+            $fencingLease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1 -RelocationId $relocationId
+            try {
+                [IO.File]::SetAttributes($lockPath, ($attributes -bor [IO.FileAttributes]::ReadOnly))
+            } finally { $fencingLease.Dispose() }
+            $oldWriterRejected = $false
+            try {
+                $oldLease = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
+                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                $oldLease.Dispose()
+            } catch [UnauthorizedAccessException] {
+                $oldWriterRejected = $true
+            }
+            Add-Check $oldWriterRejected 'A legacy Windows writer opened the retired read-only setup lock.'
+            $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1 -RelocationId $relocationId
+            Add-Check (-not $lease.CanWrite) 'Explicit relocation recovery did not use a read-only exclusive lock.'
+            $lease.Dispose()
+        } finally {
+            [IO.File]::SetAttributes($lockPath, $attributes)
+            Remove-Item -LiteralPath $relocationPath
+        }
+    }
 
     $externalDirectory = Join-Path $tempRoot 'external-profile'
     New-Item -ItemType Directory -Path $externalDirectory -Force | Out-Null
@@ -3716,6 +3800,57 @@ try {
     Add-Check ($externalProfile.Name -eq 'browser-testing') 'An external profile did not resolve its manifest name.'
     Add-Check ($externalProfile.Build.Context -eq $externalDirectory) 'External build context is not relative to the profile manifest.'
     Add-Check ($externalProfile.Replicas -eq 2) 'External profile replica defaults were not applied.'
+    $relocatedRoot = Join-Path $tempRoot 'relocated-build'
+    New-Item -ItemType Directory -Path $relocatedRoot -Force | Out-Null
+    Copy-Item -LiteralPath (Join-Path $runnerRoot 'runner-profile.schema.json') -Destination $relocatedRoot
+    Copy-Item -LiteralPath $externalDirectory -Destination (Join-Path $relocatedRoot 'build') -Recurse
+    $relocatedManifest = $externalProfile.ManifestDocument | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    $relocatedManifest.build.context = './build'
+    $relocatedManifestPath = Join-Path $relocatedRoot 'profile.json'
+    Write-RunnerJsonAtomically -Path $relocatedManifestPath -Value $relocatedManifest
+    $relocatedProfile = Resolve-RunnerProfile -RootPath $relocatedRoot -ProfilePath $relocatedManifestPath -HostName 'test-host'
+    $nativeBuildBaseline = (New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName '').configuration.build
+    $originalBuildState = New-RunnerStaticProfileState -Profile $externalProfile -Scope repo -OrgName '' -EnterpriseName ''
+    Write-RunnerJsonAtomically -Path $relocatedProfile.StaticProfilePath -Value $originalBuildState
+    Write-RunnerJsonAtomically -Path (Join-Path $relocatedProfile.StateDirectory 'relocation.json') -Value @{
+        schemaVersion = 1; operationId = [guid]::NewGuid().ToString('D'); role = 'target'; status = 'committed'
+    }
+    $relocatedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+    Add-Check ($relocatedBuildState.workerRevision -ceq $originalBuildState.workerRevision) `
+        'Identical relocated build inputs unnecessarily changed the worker revision.'
+    $historicalState = $originalBuildState | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    $historicalState.configuration.build.contextSha256 = Get-RunnerBuildContextFingerprint `
+        -ContextPath $externalDirectory -ExcludedPaths @() -IgnoreFileModes
+    $historicalState.fingerprint = Get-RunnerObjectFingerprint -Value $historicalState.configuration
+    $historicalState.workerRevision = Get-RunnerObjectFingerprint -Value (
+        Get-RunnerWorkerConfiguration -Configuration $historicalState.configuration)
+    Write-RunnerJsonAtomically -Path $relocatedProfile.StaticProfilePath -Value $historicalState
+    Write-RunnerJsonAtomically -Path (Join-Path $relocatedProfile.StateDirectory 'relocation.json') -Value @{
+        schemaVersion = 1; operationId = [guid]::NewGuid().ToString('D'); role = 'target'; status = 'committed'
+        transfer = @{ nativeBuild = $nativeBuildBaseline }
+    }
+    $relocatedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+    Add-Check ($relocatedBuildState.workerRevision -ceq $historicalState.workerRevision) `
+        'Qualified native mode provenance did not preserve a mode-independent historical worker revision.'
+    if ($IsLinux) {
+        $originalMode = [IO.File]::GetUnixFileMode($relocatedProfile.Build.Dockerfile)
+        try {
+            [IO.File]::SetUnixFileMode($relocatedProfile.Build.Dockerfile,
+                ($originalMode -bor [IO.UnixFileMode]::UserExecute))
+            $changedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+            Add-Check ($changedBuildState.workerRevision -cne $historicalState.workerRevision) `
+                'Relocation provenance masked a native build-mode change.'
+        } finally { [IO.File]::SetUnixFileMode($relocatedProfile.Build.Dockerfile, $originalMode) }
+    }
+    $relocatedProfile.Build.Arguments['RELOCATION_TEST'] = 'changed'
+    $changedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+    Add-Check ($changedBuildState.workerRevision -cne $historicalState.workerRevision) `
+        'Relocation provenance masked changed build arguments.'
+    $relocatedProfile.Build.Arguments.Remove('RELOCATION_TEST')
+    Add-Content -LiteralPath $relocatedProfile.Build.Dockerfile -Value '# Changed build input.'
+    $changedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+    Add-Check ($changedBuildState.workerRevision -cne $historicalState.workerRevision) `
+        'Relocation provenance masked changed build bytes.'
     Add-Check ($externalProfile.ReadOnlyVolumes.Count -eq 1) 'External profile read-only volumes were not resolved.'
     Add-Check (
         $externalProfile.ReadOnlyVolumes[0].Target -eq '/mnt/pitcrew-data/reference-data'

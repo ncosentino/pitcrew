@@ -27,6 +27,9 @@ applyTo: "manager/**/*.sh,manager/Dockerfile,docker-compose.yml,tests/Test-Manag
   client-bound output before killing a client. Accept only verified empty-state
   cleanup or fail-closed classification followed by exact test-owned service
   recovery; generic cache/history presence is not deterministic evidence.
+- Transition fixtures must match observed desired-state hashes to the accepted
+  acknowledgement before using instance/generation fences. A fresh timestamp alone
+  does not prove publication of the acknowledged generation.
 - Update shell syntax checks, hermetic reconciliation contracts, and real Docker
   integration coverage for lifecycle changes.
 

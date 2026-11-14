@@ -1,0 +1,74 @@
+name: State-root migration prototype
+
+on:
+  push:
+    branches: [prototype/state-root-handoff]
+    paths:
+      - tests/integration/Test-StateRootHandoff.ps1
+      - RunnerProfiles.Functions.ps1
+      - Setup-Runner.ps1
+      - Move-RunnerProfile.ps1
+      - tests/Test-RunnerProfiles.ps1
+      - tests/integration/fake-runner/**
+      - .github/workflows/state-root-prototype.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - tests/integration/Test-StateRootHandoff.ps1
+      - RunnerProfiles.Functions.ps1
+      - Setup-Runner.ps1
+      - Move-RunnerProfile.ps1
+      - tests/Test-RunnerProfiles.ps1
+      - tests/integration/fake-runner/**
+      - .github/workflows/state-root-prototype.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: state-root-prototype-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  windows-guard:
+    name: Windows retired-root guard
+    runs-on: windows-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate Windows lock and profile contracts
+        shell: pwsh
+        run: ./tests/Test-RunnerProfiles.ps1
+  handoff:
+    name: Disposable same-engine handoff
+    # Match the repository's existing real-Docker integration lane. No host
+    # Docker socket is exposed to a production PitCrew job container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate fixture syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          foreach ($path in @('Move-RunnerProfile.ps1', 'RunnerProfiles.Functions.ps1',
+              'Setup-Runner.ps1', 'tests/Test-RunnerProfiles.ps1', 'tests/integration/Test-StateRootHandoff.ps1')) {
+            [Management.Automation.Language.Parser]::ParseFile(
+              (Join-Path $PWD $path), [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          sh -n tests/integration/fake-runner/fake-runner.sh
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture shell syntax failed.' }
+      - name: Validate shared profile and relocation contracts
+        shell: pwsh
+        run: ./tests/Test-RunnerProfiles.ps1
+      - name: Exercise handoff and injected failures
+        shell: pwsh
+        run: |
+          sudo -n --preserve-env=GITHUB_ACTIONS,GITHUB_STEP_SUMMARY pwsh -NoLogo -NoProfile -NonInteractive `
+            -File ./tests/integration/Test-StateRootHandoff.ps1
+          if ($LASTEXITCODE -ne 0) { throw 'Protected-state handoff fixture failed.' }

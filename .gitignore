@@ -3,6 +3,8 @@
 .env.*
 !.env.example
 .pitcrew-state/
+.pitcrew-private/
+.pitcrew-deployment/
 
 # Generated documentation and local Python state.
 site/

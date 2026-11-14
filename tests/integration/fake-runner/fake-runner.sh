@@ -25,6 +25,20 @@ shutdown() {
 
 trap shutdown TERM INT
 echo "Listening for Jobs"
+if [ -f /mnt/pitcrew-data/handoff/migration-fixture ]; then
+    echo "Running job: migration-fixture"
+    progress=0
+    while [ ! -f /mnt/pitcrew-data/handoff/finish ]; do
+        progress=$((progress + 1))
+        printf '%s\n' "$progress" > /tmp/progress.new
+        mv /tmp/progress.new /tmp/progress
+        sleep 1 &
+        wait "$!"
+    done
+    printf '%s\n' "$progress" > /mnt/pitcrew-data/handoff/completed
+    echo "Job migration-fixture completed with result: Succeeded"
+    exit 0
+fi
 while :; do
     sleep 1 &
     wait "$!"
