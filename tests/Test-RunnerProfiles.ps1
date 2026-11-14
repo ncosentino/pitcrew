@@ -3694,6 +3694,34 @@ try {
         -Failure 'Malformed receipt was bypassed by an operation identifier.'
     Remove-Item -LiteralPath $relocationPath
 
+    if ($IsWindows) {
+        $relocation.role = 'source'
+        $relocation.status = 'committed'
+        Write-RunnerJsonAtomically -Path $relocationPath -Value $relocation
+        $attributes = [IO.File]::GetAttributes($lockPath)
+        try {
+            $fencingLease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1 -RelocationId $relocationId
+            try {
+                [IO.File]::SetAttributes($lockPath, ($attributes -bor [IO.FileAttributes]::ReadOnly))
+            } finally { $fencingLease.Dispose() }
+            $oldWriterRejected = $false
+            try {
+                $oldLease = [IO.File]::Open($lockPath, [IO.FileMode]::OpenOrCreate,
+                    [IO.FileAccess]::ReadWrite, [IO.FileShare]::None)
+                $oldLease.Dispose()
+            } catch [UnauthorizedAccessException] {
+                $oldWriterRejected = $true
+            }
+            Add-Check $oldWriterRejected 'A legacy Windows writer opened the retired read-only setup lock.'
+            $lease = Enter-RunnerProfileLock -Path $lockPath -TimeoutSeconds 1 -RelocationId $relocationId
+            Add-Check (-not $lease.CanWrite) 'Explicit relocation recovery did not use a read-only exclusive lock.'
+            $lease.Dispose()
+        } finally {
+            [IO.File]::SetAttributes($lockPath, $attributes)
+            Remove-Item -LiteralPath $relocationPath
+        }
+    }
+
     $externalDirectory = Join-Path $tempRoot 'external-profile'
     New-Item -ItemType Directory -Path $externalDirectory -Force | Out-Null
     Set-Content -LiteralPath (Join-Path $externalDirectory 'Dockerfile') -Value 'FROM scratch' -Encoding UTF8
@@ -3762,6 +3790,7 @@ try {
     $relocatedManifestPath = Join-Path $relocatedRoot 'profile.json'
     Write-RunnerJsonAtomically -Path $relocatedManifestPath -Value $relocatedManifest
     $relocatedProfile = Resolve-RunnerProfile -RootPath $relocatedRoot -ProfilePath $relocatedManifestPath -HostName 'test-host'
+    $nativeBuildBaseline = (New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName '').configuration.build
     $originalBuildState = New-RunnerStaticProfileState -Profile $externalProfile -Scope repo -OrgName '' -EnterpriseName ''
     Write-RunnerJsonAtomically -Path $relocatedProfile.StaticProfilePath -Value $originalBuildState
     Write-RunnerJsonAtomically -Path (Join-Path $relocatedProfile.StateDirectory 'relocation.json') -Value @{
@@ -3770,14 +3799,38 @@ try {
     $relocatedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
     Add-Check ($relocatedBuildState.workerRevision -ceq $originalBuildState.workerRevision) `
         'Identical relocated build inputs unnecessarily changed the worker revision.'
+    $historicalState = $originalBuildState | ConvertTo-Json -Depth 20 | ConvertFrom-Json -Depth 20
+    $historicalState.configuration.build.contextSha256 = Get-RunnerBuildContextFingerprint `
+        -ContextPath $externalDirectory -ExcludedPaths @() -IgnoreFileModes
+    $historicalState.fingerprint = Get-RunnerObjectFingerprint -Value $historicalState.configuration
+    $historicalState.workerRevision = Get-RunnerObjectFingerprint -Value (
+        Get-RunnerWorkerConfiguration -Configuration $historicalState.configuration)
+    Write-RunnerJsonAtomically -Path $relocatedProfile.StaticProfilePath -Value $historicalState
+    Write-RunnerJsonAtomically -Path (Join-Path $relocatedProfile.StateDirectory 'relocation.json') -Value @{
+        schemaVersion = 1; operationId = [guid]::NewGuid().ToString('D'); role = 'target'; status = 'committed'
+        transfer = @{ nativeBuild = $nativeBuildBaseline }
+    }
+    $relocatedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+    Add-Check ($relocatedBuildState.workerRevision -ceq $historicalState.workerRevision) `
+        'Qualified native mode provenance did not preserve a mode-independent historical worker revision.'
+    if ($IsLinux) {
+        $originalMode = [IO.File]::GetUnixFileMode($relocatedProfile.Build.Dockerfile)
+        try {
+            [IO.File]::SetUnixFileMode($relocatedProfile.Build.Dockerfile,
+                ($originalMode -bor [IO.UnixFileMode]::UserExecute))
+            $changedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
+            Add-Check ($changedBuildState.workerRevision -cne $historicalState.workerRevision) `
+                'Relocation provenance masked a native build-mode change.'
+        } finally { [IO.File]::SetUnixFileMode($relocatedProfile.Build.Dockerfile, $originalMode) }
+    }
     $relocatedProfile.Build.Arguments['RELOCATION_TEST'] = 'changed'
     $changedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
-    Add-Check ($changedBuildState.workerRevision -cne $originalBuildState.workerRevision) `
+    Add-Check ($changedBuildState.workerRevision -cne $historicalState.workerRevision) `
         'Relocation provenance masked changed build arguments.'
     $relocatedProfile.Build.Arguments.Remove('RELOCATION_TEST')
     Add-Content -LiteralPath $relocatedProfile.Build.Dockerfile -Value '# Changed build input.'
     $changedBuildState = New-RunnerStaticProfileState -Profile $relocatedProfile -Scope repo -OrgName '' -EnterpriseName ''
-    Add-Check ($changedBuildState.workerRevision -cne $originalBuildState.workerRevision) `
+    Add-Check ($changedBuildState.workerRevision -cne $historicalState.workerRevision) `
         'Relocation provenance masked changed build bytes.'
     Add-Check ($externalProfile.ReadOnlyVolumes.Count -eq 1) 'External profile read-only volumes were not resolved.'
     Add-Check (

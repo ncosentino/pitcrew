@@ -1370,7 +1370,9 @@ function Get-RunnerBuildContextFingerprint {
 
         [Parameter(Mandatory)]
         [AllowEmptyCollection()]
-        [string[]]$ExcludedPaths
+        [string[]]$ExcludedPaths,
+
+        [switch]$IgnoreFileModes
     )
 
     $resolvedContext = (Resolve-Path -LiteralPath $ContextPath).Path
@@ -1414,7 +1416,7 @@ function Get-RunnerBuildContextFingerprint {
             $value = @($item.Target) -join '|'
         } elseif ($item.PSIsContainer) {
             $kind = 'D'
-            $modeValue = if ($IsWindows) {
+            $modeValue = if ($IsWindows -or $IgnoreFileModes) {
                 ''
             } else {
                 ([int][IO.File]::GetUnixFileMode($fullPath)).ToString()
@@ -1422,7 +1424,7 @@ function Get-RunnerBuildContextFingerprint {
             $value = $modeValue
         } else {
             $kind = 'F'
-            $modeValue = if ($IsWindows) {
+            $modeValue = if ($IsWindows -or $IgnoreFileModes) {
                 ''
             } else {
                 ([int][IO.File]::GetUnixFileMode($fullPath)).ToString()
@@ -2002,9 +2004,14 @@ function New-RunnerStaticProfileState {
             if ($relocation.role -eq 'target' -and $relocation.status -eq 'committed') {
                 Assert-RunnerProfileOperationAuthority -Directory $Profile.StateDirectory
                 $storedBuild = (Read-RunnerJsonFile -Path $Profile.StaticProfilePath).configuration.build
+                $nativeBuild = if ($relocation.PSObject.Properties['transfer'] -and $relocation.transfer -and
+                    $relocation.transfer.PSObject.Properties['nativeBuild']) {
+                    $relocation.transfer.nativeBuild
+                } else { $null }
                 if ($storedBuild -and
                     $storedBuild.dockerfileSha256 -ceq $buildState.dockerfileSha256 -and
-                    $storedBuild.contextSha256 -ceq $buildState.contextSha256 -and
+                    ($storedBuild.contextSha256 -ceq $buildState.contextSha256 -or
+                        ($nativeBuild -and $nativeBuild.contextSha256 -ceq $buildState.contextSha256)) -and
                     (Get-RunnerObjectFingerprint -Value $storedBuild.arguments) -ceq
                         (Get-RunnerObjectFingerprint -Value $buildState.arguments)) {
                     # Absolute paths are provenance, not a new worker revision when relocated bytes are identical.
@@ -2471,14 +2478,19 @@ function Enter-RunnerProfileLock {
         [string]$RelocationId = ''
     )
 
+    Assert-RunnerProfileOperationAuthority -Directory (Split-Path -Parent $Path) -RelocationId $RelocationId
     New-Item -ItemType Directory -Path (Split-Path -Parent $Path) -Force | Out-Null
     $stopwatch = [Diagnostics.Stopwatch]::StartNew()
     do {
         try {
+            $access = if ($IsWindows -and $RelocationId -and (Test-Path -LiteralPath $Path) -and
+                ([IO.File]::GetAttributes($Path) -band [IO.FileAttributes]::ReadOnly)) {
+                [IO.FileAccess]::Read
+            } else { [IO.FileAccess]::ReadWrite }
             $lease = [IO.File]::Open(
                 $Path,
                 [IO.FileMode]::OpenOrCreate,
-                [IO.FileAccess]::ReadWrite,
+                $access,
                 [IO.FileShare]::None)
         } catch [IO.IOException] {
             if ($stopwatch.Elapsed.TotalSeconds -ge $TimeoutSeconds) {

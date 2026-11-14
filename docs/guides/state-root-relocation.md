@@ -43,12 +43,17 @@ quiesces only its manager, and copies final state after manager exit.
 Authentication is transferred internally; native private directories are protected.
 Stored external manifests and build contexts are materialized below
 `.pitcrew-deployment`, outside git. Identical relocated build inputs retain their
-existing worker revision; changed bytes or arguments do not.
+existing worker revision. Mode-independent source bytes and the native mode
+baseline are qualified separately; later changes to bytes, arguments, or native
+permissions do not masquerade as unchanged provenance.
 
 Startup requires matching image identities, preserved session ownership and
 desired state, a new manager instance, and a fresh acknowledgement. The committed
 target admits ordinary profile operations. The retired source rejects them through
 the shared profile lock.
+Windows sources also make that lock read-only, blocking obsolete setup versions
+that require the same read/write lock. Explicit recovery retains an exclusive
+read-only lease; normal write access returns only after the source is active again.
 
 ## Failure and explicit rollback
 

@@ -31,6 +31,16 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  windows-guard:
+    name: Windows retired-root guard
+    runs-on: windows-latest
+    timeout-minutes: 10
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate Windows lock and profile contracts
+        shell: pwsh
+        run: ./tests/Test-RunnerProfiles.ps1
   handoff:
     name: Disposable same-engine handoff
     # Match the repository's existing real-Docker integration lane. No host

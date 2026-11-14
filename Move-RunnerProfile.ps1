@@ -15,7 +15,7 @@ param(
     [Parameter(Mandatory)][string]$DestinationRoot,
     [string]$TargetDistribution = '',
     [switch]$Apply,
-    [ValidateSet('move', 'rollback', 'target-check', 'target-prepare', 'target-start', 'target-quiesce')][string]$Action = 'move',
+    [ValidateSet('move', 'rollback', 'target-check', 'target-prepare', 'target-material-check', 'target-start', 'target-quiesce')][string]$Action = 'move',
     [string]$OperationId = '',
     [string]$ExpectedEngine = '',
     [string]$ExpectedManagerInstanceId = '',
@@ -146,7 +146,24 @@ function Copy-RelocationEnvironment($From, $To, [string]$KeyPath = '') {
     Complete-RunnerStagedFile -TemporaryPath $staging -Path $To.EnvironmentPath
 }
 
-if ($Action -in @('target-check', 'target-prepare', 'target-start', 'target-quiesce')) {
+function Get-RelocationBuildState($Config, $Static, $Transfer) {
+    if (-not $Static.configuration.build) { return $null }
+    $replay = Resolve-RunnerProfile -RootPath $Config.RootPath -ProfilePath $Static.manifest.sourcePath
+    $nativeState = New-RunnerStaticProfileState -Profile $replay -Scope $Static.configuration.scope `
+        -OrgName ([string]$Static.configuration.organization) -EnterpriseName ([string]$Static.configuration.enterprise) `
+        -ResolvedImageId $Static.configuration.resolvedImageId
+    $portableHash = Get-RunnerBuildContextFingerprint -ContextPath $replay.Build.Context `
+        -ExcludedPaths @((Split-Path -Parent $replay.StateDirectory), $replay.EnvironmentPath) -IgnoreFileModes
+    if ($portableHash -cne $Transfer.portableBuildHash -or
+        $nativeState.configuration.build.dockerfileSha256 -cne $Static.configuration.build.dockerfileSha256 -or
+        (Get-RunnerObjectFingerprint -Value $nativeState.configuration.build.arguments) -cne
+            (Get-RunnerObjectFingerprint -Value $Static.configuration.build.arguments)) {
+        throw 'Native build material does not match the approved source bytes and arguments.'
+    }
+    return $nativeState.configuration.build
+}
+
+if ($Action -in @('target-check', 'target-prepare', 'target-material-check', 'target-start', 'target-quiesce')) {
     $destination = Get-RelocationProfile ([IO.Path]::GetFullPath($DestinationRoot))
     Assert-UnlinkedPath $destination.RootPath
     if ((Get-EngineId) -cne $ExpectedEngine) { throw 'Target Docker engine does not match the source.' }
@@ -203,6 +220,11 @@ if ($Action -in @('target-check', 'target-prepare', 'target-start', 'target-quie
             if ($currentStatic.workerRevision -cne $receipt.transfer.workerRevision) {
                 throw 'Worker configuration changed after relocation; roll back that rollout separately first.'
             }
+            $keySource = Get-RunnerEnvironmentFileValue -Path $destination.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
+            $expectedKeySource = Join-Path $destination.RootPath '.pitcrew-private' $Profile 'github-app.pem'
+            if ($keySource -and $keySource -cne $expectedKeySource) {
+                throw 'Authentication moved outside the relocation-owned key path; reconcile it before rollback.'
+            }
             $managerId = Get-RunnerManagerContainerId -ProfileConfig $destination
             if (-not $managerId -or (Get-RunnerManagerContractVersion -ContainerId $managerId) -lt 9) {
                 throw 'Rollback requires one handoff-capable target manager.'
@@ -228,6 +250,16 @@ if ($Action -in @('target-check', 'target-prepare', 'target-start', 'target-quie
         }
         $transfer = $receipt.transfer
         $static = Read-RunnerJsonFile -Path $destination.StaticProfilePath
+        $nativeBuild = Get-RelocationBuildState $destination $static $transfer
+        if ($Action -eq 'target-material-check') {
+            $transfer.nativeBuild = $nativeBuild
+            Write-RelocationReceipt $destination 'target' 'prepared' $transfer
+            exit
+        }
+        if ($nativeBuild -and $nativeBuild.contextSha256 -cne $transfer.nativeBuild.contextSha256 -and
+            $nativeBuild.contextSha256 -cne $static.configuration.build.contextSha256) {
+            throw 'Native build permissions or inputs moved after material qualification.'
+        }
         $desired = Read-RunnerJsonFile -Path $destination.DesiredCapacityPath
         if ((Get-FileHash $destination.StaticProfilePath).Hash -cne $transfer.staticHash -or
             (Get-FileHash $destination.DesiredCapacityPath).Hash -cne $transfer.desiredHash -or
@@ -287,6 +319,10 @@ if ($Action -in @('target-check', 'target-prepare', 'target-start', 'target-quie
             throw 'Replacement manager identity moved before commit.'
         }
         Write-RelocationReceipt $destination 'target' 'committed' $transfer
+        if ($IsWindows) {
+            $attributes = [IO.File]::GetAttributes($destination.LockPath)
+            [IO.File]::SetAttributes($destination.LockPath, ($attributes -band (-bnot [IO.FileAttributes]::ReadOnly)))
+        }
         Write-Host "Profile '$Profile' acknowledged generation $($desired.generation) at the native destination."
     } catch {
         if (Test-Path -LiteralPath $receiptPath) {
@@ -339,10 +375,23 @@ if ($Action -eq 'rollback') {
         if ($quiesced.operationId -cne $OperationId -or $quiesced.status -ne 'quiesced') {
             throw 'Target final state is not fenced and quiescent.'
         }
-        $originalKeyPath = Get-RunnerEnvironmentFileValue -Path $source.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
+        $restoredKeyPath = ''
+        $nativeKeySource = Get-RunnerEnvironmentFileValue -Path $destination.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
+        if ($nativeKeySource) {
+            $keyFile = Join-Path $destinationFiles '.pitcrew-private' $Profile 'github-app.pem'
+            Assert-UnlinkedPath $keyFile
+            $sourcePrivate = Join-Path $SourceRoot '.pitcrew-private' $Profile
+            New-Item -ItemType Directory -Path $sourcePrivate -Force | Out-Null
+            if ($IsLinux) {
+                & chmod 0700 $sourcePrivate
+                if ($LASTEXITCODE -ne 0) { throw 'Cannot protect rollback authentication directory.' }
+            }
+            $restoredKeyPath = Join-Path $sourcePrivate "github-app-rollback-$OperationId.pem"
+            Copy-Item -LiteralPath $keyFile -Destination $restoredKeyPath
+        }
         $originalManifest = (Read-RunnerJsonFile -Path $source.StaticProfilePath).manifest
         Copy-RelocationState $destination $source
-        Copy-RelocationEnvironment $destination $source $originalKeyPath
+        Copy-RelocationEnvironment $destination $source $restoredKeyPath
         $restoredStatic = Read-RunnerJsonFile -Path $source.StaticProfilePath
         $restoredStatic.manifest = $originalManifest
         Write-RunnerJsonAtomically -Path $source.StaticProfilePath -Value $restoredStatic
@@ -420,7 +469,23 @@ try {
         desiredHash = (Get-FileHash $source.DesiredCapacityPath).Hash
         ownerHash = (Get-FileHash $source.SessionOwnerPath).Hash
         workerRevision = $static.workerRevision
+        portableBuildHash = ''
+        nativeBuild = $null
         workersBefore = @(Get-RunnerWorkerContainerIdList -ProfileConfig $source)
+    }
+    if ($static.configuration.build) {
+        Assert-UnlinkedPath $static.configuration.build.context
+        Assert-UnlinkedPath $static.configuration.build.dockerfile
+        $exclusions = @((Split-Path -Parent $source.StateDirectory), $source.EnvironmentPath)
+        $currentBuildHash = Get-RunnerBuildContextFingerprint -ContextPath $static.configuration.build.context `
+            -ExcludedPaths $exclusions
+        if ($currentBuildHash -cne $static.configuration.build.contextSha256 -or
+            (Get-FileHash $static.configuration.build.dockerfile).Hash.ToLowerInvariant() -cne
+                $static.configuration.build.dockerfileSha256) {
+            throw 'Source build provenance changed; no relocation started.'
+        }
+        $transfer.portableBuildHash = Get-RunnerBuildContextFingerprint -ContextPath $static.configuration.build.context `
+            -ExcludedPaths $exclusions -IgnoreFileModes
     }
     Invoke-Target 'target-prepare'
     $targetStatic = $null
@@ -457,6 +522,14 @@ try {
         } else { $manifestPath }
         $targetStatic.manifest.document = $manifest
         $targetStatic.manifest.sha256 = (Get-FileHash $manifestPath).Hash.ToLowerInvariant()
+        Write-RunnerJsonAtomically -Path $destination.StaticProfilePath -Value $targetStatic
+        Write-RelocationReceipt $destination 'target' 'prepared' $transfer
+        Invoke-Target 'target-material-check'
+        $materialReceipt = Read-RunnerJsonFile -Path (Join-Path $destination.StateDirectory 'relocation.json')
+        if ($materialReceipt.operationId -cne $OperationId -or $materialReceipt.status -ne 'prepared') {
+            throw 'Native material qualification lost the operation fence.'
+        }
+        $transfer.nativeBuild = $materialReceipt.transfer.nativeBuild
     }
     $keySource = Get-RunnerEnvironmentFileValue -Path $source.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
     $nativeKeyPath = ''
@@ -470,6 +543,10 @@ try {
         }
     }
     Write-RelocationReceipt $source 'source' 'prepared' $transfer
+    if ($IsWindows) {
+        [IO.File]::SetAttributes($source.LockPath,
+            ([IO.File]::GetAttributes($source.LockPath) -bor [IO.FileAttributes]::ReadOnly))
+    }
     Stop-RunnerManagerForHandoff -ProfileConfig $source -ContainerId $managerId
     $sourceStopped = $true
     if (Get-RunnerManagerContainerId -ProfileConfig $source) { throw 'Source manager is not quiescent.' }
