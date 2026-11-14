@@ -41,6 +41,9 @@ jobs:
       - name: Build documentation
         run: python -m mkdocs build --strict
 
+      - name: Verify documentation titles
+        run: python tests/Test-DocumentationTitles.py site
+
       - name: Verify Pages origin indexing policy
         run: |
           grep -Fqx 'https://:project.pages.dev/*' site/_headers
