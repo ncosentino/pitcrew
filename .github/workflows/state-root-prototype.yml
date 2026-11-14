@@ -1,0 +1,48 @@
+name: State-root migration prototype
+
+on:
+  push:
+    branches: [prototype/state-root-handoff]
+    paths:
+      - tests/integration/Test-StateRootHandoff.ps1
+      - tests/integration/fake-runner/**
+      - .github/workflows/state-root-prototype.yml
+  pull_request:
+    branches: [main]
+    paths:
+      - tests/integration/Test-StateRootHandoff.ps1
+      - tests/integration/fake-runner/**
+      - .github/workflows/state-root-prototype.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: state-root-prototype-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  handoff:
+    name: Disposable same-engine handoff
+    # Match the repository's existing real-Docker integration lane. No host
+    # Docker socket is exposed to a production PitCrew job container.
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    steps:
+      - uses: actions/checkout@v6
+      - name: Validate fixture syntax
+        shell: pwsh
+        run: |
+          $tokens = $null
+          $errors = $null
+          [Management.Automation.Language.Parser]::ParseFile(
+            "$PWD/tests/integration/Test-StateRootHandoff.ps1",
+            [ref]$tokens, [ref]$errors) | Out-Null
+          if ($errors.Count) { throw ($errors | Out-String) }
+          sh -n tests/integration/fake-runner/fake-runner.sh
+          if ($LASTEXITCODE -ne 0) { throw 'Fixture shell syntax failed.' }
+      - name: Exercise handoff and injected failures
+        shell: pwsh
+        run: ./tests/integration/Test-StateRootHandoff.ps1
