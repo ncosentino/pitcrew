@@ -1,4 +1,5 @@
 ---
+title: Architecture Decision Records
 description: Index of PitCrew architecture decision records.
 ---
 

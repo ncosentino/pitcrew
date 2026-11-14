@@ -1,4 +1,5 @@
 ---
+title: Guides
 description: Task-focused PitCrew guides for profiles, workflow routing, custom images, and security boundaries.
 ---
 
