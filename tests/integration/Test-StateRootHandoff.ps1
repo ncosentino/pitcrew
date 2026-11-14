@@ -258,6 +258,7 @@ try {
         '--entrypoint', 'sh', $image, '-c', 'touch /data/migration-fixture') | Out-Null
     Write-RunnerJsonAtomically -Path (Join-Path $Workspace 'profile.json') -Value @{
         schemaVersion = 1; name = $profileName; image = $image; labels = @('migration-fixture')
+        description = 'Disposable same-engine state-root handoff experiment.'
         replicas = 1; pullImage = $false; disableDefaultLabels = $true
         resources = @{ memory = '128m'; cpus = 0.25; pids = 64 }
         readWriteVolumes = @(@{ name = 'handoff'; source = $volume })
