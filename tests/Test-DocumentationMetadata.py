@@ -60,6 +60,7 @@ class DocumentationMetadataTests(unittest.TestCase):
                 '## Configure\n\nRegister services.\n'
             ),
             'guides/safety.md': (
+                "---\ntitle: 'Safety </script>'\n---\n"
                 '# Safety\n\nUse safe workers.\n\n'
                 '## Configure\n\nUse `</script>` &amp; "plugins".\n'
             ),
@@ -134,7 +135,7 @@ class DocumentationMetadataTests(unittest.TestCase):
                              html, re.DOTALL)
         schemas = [json.loads(script) for script in scripts]
         faq = next(schema for schema in schemas if schema.get('@type') == 'FAQPage')
-        self.assertIn('</script>', faq['mainEntity'][0]['acceptedAnswer']['text'])
+        self.assertIn('</script>', faq['mainEntity'][0]['name'])
 
     def test_llms_description_is_plain_source_text(self):
         llms = (self.site / 'llms.txt').read_text(encoding='utf-8')
