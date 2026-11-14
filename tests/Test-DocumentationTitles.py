@@ -53,7 +53,7 @@ def main():
     assert pages, f"No HTML pages in {site}"
     for path in pages:
         relative = path.relative_to(site).as_posix()
-        if relative == "404.html":
+        if relative == "404.html" or relative.startswith("overrides/"):
             continue
         metadata = Metadata()
         metadata.feed(path.read_text(encoding="utf-8"))
