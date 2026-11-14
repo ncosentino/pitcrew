@@ -254,7 +254,6 @@ try {
     }
     & (Join-Path $a.RootPath 'Setup-Runner.ps1') -ProfilePath (Join-Path $Workspace 'profile.json') `
         -Token 'integration-token' -Repos 'https://github.com/example/integration=1' -NamePrefix $profileName
-    Remove-Item Function:\Invoke-RestMethod
     Wait-Manager $a | Out-Null
     $deadline = [DateTime]::UtcNow.AddSeconds(60)
     do {
@@ -272,13 +271,28 @@ try {
         -DestinationRoot $b.RootPath -Apply -ExpectedManagerInstanceId $firstObserved.managerInstanceId `
         -ExpectedGeneration $firstDesired.generation -ExpectedDesiredStateHash $firstObserved.desiredStateHash
     Assert-Worker
-    $targetObserved = Read-RunnerJsonFile -Path $b.ObservedStatePath
+    $sourceRejected = $false
+    try {
+        & (Join-Path $a.RootPath 'Setup-Runner.ps1') -ProfilePath (Join-Path $Workspace 'profile.json') `
+            -CapacityOnly -NamePrefix $profileName
+    } catch {
+        $sourceRejected = $_.Exception.Message -match 'root is retired or relocation is incomplete'
+    }
+    Assert-That $sourceRejected 'Real Setup-Runner did not reject the retired source through its shared guard.'
+    Remove-Item Function:\Invoke-RestMethod
     $targetDesired = Read-RunnerJsonFile -Path $b.DesiredCapacityPath
+    $targetDesired.generation = [int]$targetDesired.generation + 1
+    Write-RunnerJsonAtomically -Path $b.DesiredCapacityPath -Value $targetDesired
+    $targetObserved = Wait-Manager $b
+    $productLatestHash = (Get-FileHash $b.DesiredCapacityPath).Hash
     & (Join-Path $root 'Move-RunnerProfile.ps1') -Profile $profileName -SourceRoot $a.RootPath `
         -DestinationRoot $b.RootPath -Action rollback -Apply -ExpectedManagerInstanceId $targetObserved.managerInstanceId `
         -ExpectedGeneration $targetDesired.generation -ExpectedDesiredStateHash $targetObserved.desiredStateHash
     Assert-Worker
-    $results.Add('product-relocation-and-rollback: real command preserved the original progressing worker')
+    Assert-That ((Get-FileHash $a.DesiredCapacityPath).Hash -ceq $productLatestHash) `
+        'Product rollback lost the newer acknowledged desired state.'
+    $results.Add('product-relocation-and-rollback: real command preserved the original progressing worker and newer state')
+    $results.Add('product-source-fence: real Setup-Runner rejected the retired root')
     $desiredHash = (Get-FileHash $a.DesiredCapacityPath).Hash
     $staticHash = (Get-FileHash $a.StaticProfilePath).Hash
     $ownerHash = (Get-FileHash $a.SessionOwnerPath).Hash

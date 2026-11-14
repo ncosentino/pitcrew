@@ -2,7 +2,7 @@ name: State-root migration prototype
 
 on:
   push:
-    branches: [prototype/state-root-handoff, feat/native-state-relocation]
+    branches: [prototype/state-root-handoff]
     paths:
       - tests/integration/Test-StateRootHandoff.ps1
       - RunnerProfiles.Functions.ps1
@@ -53,9 +53,9 @@ jobs:
           }
           sh -n tests/integration/fake-runner/fake-runner.sh
           if ($LASTEXITCODE -ne 0) { throw 'Fixture shell syntax failed.' }
-      - name: Exercise handoff and injected failures
-        shell: pwsh
-        run: ./tests/integration/Test-StateRootHandoff.ps1
       - name: Validate shared profile and relocation contracts
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
+      - name: Exercise handoff and injected failures
+        shell: pwsh
+        run: ./tests/integration/Test-StateRootHandoff.ps1

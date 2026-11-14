@@ -100,7 +100,8 @@ function Invoke-Target([string]$TargetAction) {
 
 function Copy-RelocationState($From, $To) {
     $sourceFiles = @{}
-    foreach ($item in Get-ChildItem -LiteralPath $From.StateDirectory -Force -Recurse) {
+    $sourceItems = @(Get-ChildItem -LiteralPath $From.StateDirectory -Force -Recurse)
+    foreach ($item in $sourceItems) {
         Assert-UnlinkedPath $item.FullName
         $relative = [IO.Path]::GetRelativePath($From.StateDirectory, $item.FullName)
         $sourceFiles[$relative] = $true
@@ -108,13 +109,27 @@ function Copy-RelocationState($From, $To) {
     foreach ($item in Get-ChildItem -LiteralPath $To.StateDirectory -Force -Recurse -File) {
         Assert-UnlinkedPath $item.FullName
         $relative = [IO.Path]::GetRelativePath($To.StateDirectory, $item.FullName)
-        if ($item.Name -notin @('setup.lock', 'relocation.json') -and -not $sourceFiles.ContainsKey($relative)) {
-            Remove-Item -LiteralPath $item.FullName
+        if ($relative -notin @('setup.lock', 'relocation.json') -and
+            ($relative -eq 'manager-shutdown.json' -or -not $sourceFiles.ContainsKey($relative))) {
+            Remove-Item -LiteralPath $item.FullName -Force
         }
     }
-    foreach ($item in Get-ChildItem -LiteralPath $From.StateDirectory -Force) {
-        if ($item.Name -notin @('setup.lock', 'relocation.json', 'manager-shutdown.json')) {
-            Copy-Item -LiteralPath $item.FullName -Destination $To.StateDirectory -Recurse -Force
+    foreach ($item in $sourceItems) {
+        $relative = [IO.Path]::GetRelativePath($From.StateDirectory, $item.FullName)
+        if ($relative -in @('setup.lock', 'relocation.json', 'manager-shutdown.json')) { continue }
+        $targetPath = Join-Path $To.StateDirectory $relative
+        if ($item.PSIsContainer) {
+            New-Item -ItemType Directory -Path $targetPath -Force | Out-Null
+            continue
+        }
+        $parent = Split-Path -Parent $targetPath
+        New-Item -ItemType Directory -Path $parent -Force | Out-Null
+        $temporaryPath = Join-Path $parent ".$($item.Name).$([guid]::NewGuid().ToString('N')).tmp"
+        try {
+            Copy-Item -LiteralPath $item.FullName -Destination $temporaryPath
+            Complete-RunnerStagedFile -TemporaryPath $temporaryPath -Path $targetPath
+        } finally {
+            if (Test-Path -LiteralPath $temporaryPath) { Remove-Item -LiteralPath $temporaryPath -Force }
         }
     }
 }
