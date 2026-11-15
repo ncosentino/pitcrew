@@ -5265,6 +5265,9 @@ try {
             "PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE=$ownedAppKey")
         Set-Content -LiteralPath $appProfile.EnvironmentPath `
             -Value $relocatedAppEnvironment -NoNewline -Encoding UTF8
+        Set-TestCapacityAcknowledgement -Path $appProfile.CapacityAcknowledgementPath `
+            -Generation $appDesiredBefore.generation -DesiredSlots 1 `
+            -AddedSlots 0 -DrainingSlots 0 -UnchangedSlots 1
         & $fixtureSetup -Autoscale -CapacityOnly -Repos 'https://github.com/example/project=1'
         Add-Check (
             [Convert]::ToBase64String([IO.File]::ReadAllBytes($appDesiredPath)) -ceq
