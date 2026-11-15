@@ -22,6 +22,14 @@ The replacement manager discovers workers by exact profile and slot labels,
 adopts them, and resumes reconciliation. Busy jobs and idle registrations remain
 connected throughout the handoff.
 
+To avoid building on a runner host, CI can export a prepared manager image using
+the manual `export_manager_image` input. Verify the artifact checksum, load the
+archive, and pass its exact local image ID as `-PreparedManagerImage` alongside
+the complete existing setup command. Setup checks the image's source fingerprint
+against the checkout and its manager contract before replacing the manager. It
+does not pull an image or build the manager in this mode. Existing credential,
+worker-image, configuration, and handoff checks still apply.
+
 Plain refresh never starts a profile with no running manager, because that
 profile may be intentionally stopped. After bounded diagnosis confirms an
 unexpected missing manager, replay the exact existing setup command with

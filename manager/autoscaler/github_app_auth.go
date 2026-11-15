@@ -19,18 +19,19 @@ import (
 
 const (
 	githubAppPrivateKeyMaximumBytes = 64 * 1024
-	githubAppRequestTimeout          = 15 * time.Second
+	githubAppRequestTimeout         = 15 * time.Second
 )
 
 type githubAppCredentials struct {
-	clientID        string
-	privateKey      string
-	signingKey      *rsa.PrivateKey
-	apiBaseURL      string
-	httpClient      *http.Client
-	clock           clock
-	mu              sync.Mutex
-	installationIDs map[string]int64
+	clientID         string
+	privateKey       string
+	signingKey       *rsa.PrivateKey
+	apiBaseURL       string
+	httpClient       *http.Client
+	clock            clock
+	mu               sync.Mutex
+	installationIDs  map[string]int64
+	installationURLs map[string]string
 }
 
 type githubAppInstallationResponse struct {
@@ -70,10 +71,10 @@ func loadGitHubAppCredentials(
 		appClock = realClock{}
 	}
 	return &githubAppCredentials{
-		clientID:        clientID,
-		privateKey:      string(privateKeyBytes),
-		signingKey:      signingKey,
-		apiBaseURL:      githubAPIBaseURL,
+		clientID:   clientID,
+		privateKey: string(privateKeyBytes),
+		signingKey: signingKey,
+		apiBaseURL: githubAPIBaseURL,
 		httpClient: &http.Client{
 			Timeout: githubAppRequestTimeout,
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -89,22 +90,39 @@ func (a *githubAppCredentials) installationID(
 	ctx context.Context,
 	registrationURL string,
 ) (int64, error) {
+	installationID, _, err := a.installation(ctx, registrationURL)
+	return installationID, err
+}
+
+func (a *githubAppCredentials) installation(
+	ctx context.Context,
+	registrationURL string,
+) (int64, string, error) {
 	if a == nil {
-		return 0, errors.New("GitHub App credentials are unavailable")
+		return 0, "", errors.New("GitHub App credentials are unavailable")
 	}
 	cacheKey, endpoint, err := githubAppInstallationEndpoint(registrationURL)
 	if err != nil {
-		return 0, err
+		return 0, "", err
+	}
+	// Repository redirects can cross installation owners. An owner-wide cached
+	// installation would bypass discovery of a transferred retirement target.
+	if strings.HasPrefix(endpoint, "/repos/") {
+		cacheKey = strings.ToLower(endpoint)
 	}
 
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	if installationID := a.installationIDs[cacheKey]; installationID > 0 {
-		return installationID, nil
+		resolvedURL := a.installationURLs[cacheKey]
+		if resolvedURL == "" {
+			resolvedURL = registrationURL
+		}
+		return installationID, resolvedURL, nil
 	}
 	token, err := a.signedJWT()
 	if err != nil {
-		return 0, err
+		return 0, "", err
 	}
 
 	base, err := url.Parse(a.apiBaseURL)
@@ -112,7 +130,7 @@ func (a *githubAppCredentials) installationID(
 		(base.Scheme != "https" && base.Scheme != "http") ||
 		base.Host == "" || base.User != nil ||
 		base.RawQuery != "" || base.Fragment != "" {
-		return 0, errors.New("GitHub App API base URL is invalid")
+		return 0, "", errors.New("GitHub App API base URL is invalid")
 	}
 	requestURL := *base
 	requestURL.Path = endpoint
@@ -124,36 +142,59 @@ func (a *githubAppCredentials) installationID(
 		nil,
 	)
 	if err != nil {
-		return 0, fmt.Errorf("create GitHub App installation request: %w", err)
+		return 0, "", fmt.Errorf("create GitHub App installation request: %w", err)
 	}
 	request.Header.Set("Accept", "application/vnd.github+json")
 	request.Header.Set("Authorization", "Bearer "+token)
 	request.Header.Set("User-Agent", "pitcrew-manager")
 	request.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 
-	response, err := a.httpClient.Do(request)
+	client := *a.httpClient
+	client.CheckRedirect = func(_ *http.Request, _ []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	response, err := client.Do(request)
 	if err != nil {
-		return 0, fmt.Errorf("discover GitHub App installation: %w", err)
+		return 0, "", fmt.Errorf("discover GitHub App installation: %w", err)
 	}
 	defer response.Body.Close()
+	if response.StatusCode == http.StatusMovedPermanently &&
+		strings.HasPrefix(endpoint, "/repos/") {
+		installationID, canonicalURL, resolveErr := a.resolveRepositoryRedirect(
+			ctx, &client, request.URL, response.Header.Get("Location"), token,
+		)
+		if resolveErr != nil {
+			return 0, "", resolveErr
+		}
+		if a.installationIDs == nil {
+			a.installationIDs = make(map[string]int64)
+		}
+		if a.installationURLs == nil {
+			a.installationURLs = make(map[string]string)
+		}
+		a.installationIDs[cacheKey] = installationID
+		a.installationURLs[cacheKey] = canonicalURL
+		return installationID, canonicalURL, nil
+	}
 	if response.StatusCode != http.StatusOK {
 		_, _ = io.Copy(
 			io.Discard,
 			io.LimitReader(response.Body, githubRunnerAccessResponseLimit),
 		)
-		return 0, fmt.Errorf(
-			"discover GitHub App installation returned HTTP status %d",
-			response.StatusCode,
-		)
+		return 0, "", fmt.Errorf("discover GitHub App installation: %w",
+			&githubAppHTTPError{statusCode: response.StatusCode})
 	}
 	var installation githubAppInstallationResponse
 	if err := json.NewDecoder(
 		io.LimitReader(response.Body, githubRunnerAccessResponseLimit),
 	).Decode(&installation); err != nil || installation.ID <= 0 {
-		return 0, errors.New("GitHub App installation response was invalid")
+		return 0, "", errors.New("GitHub App installation response was invalid")
+	}
+	if a.installationIDs == nil {
+		a.installationIDs = make(map[string]int64)
 	}
 	a.installationIDs[cacheKey] = installation.ID
-	return installation.ID, nil
+	return installation.ID, registrationURL, nil
 }
 
 func (a *githubAppCredentials) signedJWT() (string, error) {

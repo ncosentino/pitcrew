@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"log/slog"
 	"os"
@@ -29,10 +30,15 @@ func main() {
 	}
 	if len(os.Args) > 1 && os.Args[1] == "check-github-app-access" {
 		if err := runGitHubAppAccessCheck(os.Args[2:]); err != nil {
-			fmt.Fprintln(
-				os.Stderr,
-				"pitcrew autoscaler GitHub App access check failed",
-			)
+			var httpError *githubAppHTTPError
+			if errors.As(err, &httpError) {
+				fmt.Fprintf(os.Stderr,
+					"pitcrew autoscaler GitHub App access check failed: HTTP status %d\n",
+					httpError.statusCode)
+			} else {
+				fmt.Fprintln(os.Stderr,
+					"pitcrew autoscaler GitHub App access check failed")
+			}
 			os.Exit(1)
 		}
 		return

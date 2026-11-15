@@ -14,6 +14,11 @@ on:
         default: 'full'
         type: choice
         options: [full, subset, nested-runtime]
+      export_manager_image:
+        description: 'Build and export a source-bound manager image for build-free operator installation'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -103,6 +108,10 @@ jobs:
       - name: Run runner-profile contracts
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
+
+      - name: Validate prepared manager image contracts
+        shell: pwsh
+        run: ./tests/Test-PreparedManagerImage.ps1
 
       - name: Validate opt-in nested Docker contracts
         shell: pwsh
@@ -273,6 +282,48 @@ jobs:
       - name: Run image candidate contracts
         run: bash ./tests/Test-ImageCandidateReport.sh
 
+  prepared-manager-image:
+    name: Prepared manager image
+    needs: [validation-plan, contracts]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.export_manager_image &&
+      needs.contracts.result == 'success'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v6
+      - name: Build source-bound manager image
+        shell: pwsh
+        run: |
+          . ./RunnerProfiles.Functions.ps1
+          $sourceHash = Get-RunnerBuildContextFingerprint `
+            -ContextPath (Join-Path $PWD 'manager') `
+            -ExcludedPaths @() -IgnoreFileModes
+          $contract = (Get-RunnerImplementedManagerContract -RootPath $PWD).Implemented
+          docker build --label "pitcrew.manager.source-sha256=$sourceHash" `
+            --label "pitcrew.manager.contract=$contract" `
+            --label "org.opencontainers.image.revision=$env:GITHUB_SHA" `
+            --tag "ephemeral-runner-manager:qualified-$env:GITHUB_SHA" manager
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared manager image build failed.' }
+          docker image inspect "ephemeral-runner-manager:qualified-$env:GITHUB_SHA" `
+            --format '{{.Id}}' | Set-Content manager-image-id.txt -Encoding utf8NoBOM
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared image identity unavailable.' }
+          docker save --output manager-image.tar "ephemeral-runner-manager:qualified-$env:GITHUB_SHA"
+          if ($LASTEXITCODE -ne 0) { throw 'Prepared manager image export failed.' }
+          Get-FileHash manager-image.tar -Algorithm SHA256 |
+            ForEach-Object { $_.Hash.ToLowerInvariant() + '  manager-image.tar' } |
+            Set-Content manager-image.sha256 -Encoding utf8NoBOM
+      - name: Upload prepared manager image
+        uses: actions/upload-artifact@v4
+        with:
+          name: prepared-manager-image
+          path: |
+            manager-image.tar
+            manager-image-id.txt
+            manager-image.sha256
+          retention-days: 7
+
   coverage-comment:
     name: Publish Go coverage comment
     needs: [validation-plan, contracts]
@@ -409,6 +460,7 @@ jobs:
         validation-plan,
         contracts,
         image-candidate,
+        prepared-manager-image,
         coverage-comment,
         docker-integration,
         specialized-images,
@@ -422,6 +474,7 @@ jobs:
       PLAN_RESULT: ${{ needs.validation-plan.result }}
       CONTRACTS_RESULT: ${{ needs.contracts.result }}
       IMAGE_CANDIDATE_RESULT: ${{ needs.image-candidate.result }}
+      PREPARED_IMAGE_RESULT: ${{ needs.prepared-manager-image.result }}
       COMMENT_RESULT: ${{ needs.coverage-comment.result }}
       DOCKER_RESULT: ${{ needs.docker-integration.result }}
       SPECIALIZED_IMAGES_RESULT: ${{ needs.specialized-images.result }}
@@ -437,7 +490,7 @@ jobs:
             exit 1
           fi
 
-          for result in "$CONTRACTS_RESULT" "$IMAGE_CANDIDATE_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
+          for result in "$CONTRACTS_RESULT" "$IMAGE_CANDIDATE_RESULT" "$PREPARED_IMAGE_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "::error::A required validation job failed or was cancelled."
               exit 1

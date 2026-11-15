@@ -1345,6 +1345,49 @@ function Assert-RunnerResilienceContractActivation {
 
 <#
 .SYNOPSIS
+    Selects an operator-approved, source-bound manager image without building.
+
+.DESCRIPTION
+    Requires an exact local image ID and matching checkout/contract labels.
+    Only the selected profile's manager image tag is changed.
+#>
+function Use-RunnerPreparedManagerImage {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]
+        [PSCustomObject]$ProfileConfig,
+
+        [Parameter(Mandatory)]
+        [string]$ImageId
+    )
+
+    if ($ImageId -cnotmatch '^sha256:[0-9a-f]{64}$') {
+        throw 'Prepared manager image must be an exact local SHA-256 image ID.'
+    }
+    $rawLabels = & docker image inspect $ImageId --format '{{json .Config.Labels}}'
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Prepared manager image is not available locally.'
+    }
+    $labels = $rawLabels | ConvertFrom-Json -AsHashtable -ErrorAction Stop
+    $sourceHash = Get-RunnerBuildContextFingerprint `
+        -ContextPath (Join-Path $ProfileConfig.RootPath 'manager') `
+        -ExcludedPaths @() `
+        -IgnoreFileModes
+    if (
+        $null -eq $labels -or
+        $labels['pitcrew.manager.source-sha256'] -cne $sourceHash -or
+        $labels['pitcrew.manager.contract'] -cne [string]$ProfileConfig.ManagerContractVersion
+    ) {
+        throw 'Prepared manager image does not match the selected checkout and manager contract.'
+    }
+    & docker tag $ImageId "ephemeral-runner-manager:profile-$($ProfileConfig.Name)"
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Prepared manager image could not be assigned to the selected profile.'
+    }
+}
+
+<#
+.SYNOPSIS
     Computes a conservative content fingerprint for a Docker build context.
 
 .DESCRIPTION

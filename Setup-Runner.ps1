@@ -224,6 +224,8 @@ param(
     [string]$ProfilePath = '',
     [switch]$Down,
     [switch]$Refresh,
+    [AllowEmptyString()]
+    [string]$PreparedManagerImage = '',
     [switch]$RecoverMissingManager,
     [switch]$CapacityOnly,
     [switch]$Pause,
@@ -239,6 +241,10 @@ param(
     [int]$RecoveryTimeoutSeconds = 120
 )
 $ErrorActionPreference = 'Stop'
+
+if ($PreparedManagerImage -and ($Down -or $CapacityOnly -or $Pause -or $RecoverManager)) {
+    throw '-PreparedManagerImage cannot be combined with a shutdown, capacity-only, pause, or manager-recovery operation.'
+}
 
 $here = $PSScriptRoot
 . (Join-Path $here 'RunnerProfiles.Functions.ps1')
@@ -2840,9 +2846,15 @@ try {
             Select-Object -First 1
         $buildProfileConfig = $profileConfig.PSObject.Copy()
         $buildProfileConfig.EnvironmentPath = $stagedEnvironment.TemporaryPath
-        Invoke-RunnerCompose `
-            -ProfileConfig $buildProfileConfig `
-            -CommandArguments @('build', 'runner-manager')
+        if ($PreparedManagerImage) {
+            Use-RunnerPreparedManagerImage `
+                -ProfileConfig $profileConfig `
+                -ImageId $PreparedManagerImage
+        } else {
+            Invoke-RunnerCompose `
+                -ProfileConfig $buildProfileConfig `
+                -CommandArguments @('build', 'runner-manager')
+        }
         if ($usingGitHubApp) {
             Test-RunnerGitHubAppAccess `
                 -ProfileConfig $profileConfig `
@@ -2895,6 +2907,7 @@ try {
                 '-d',
                 '--no-deps',
                 '--force-recreate',
+                '--no-build',
                 'runner-manager'
             )
         $replacementManagerStarted = $true

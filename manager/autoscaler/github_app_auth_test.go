@@ -59,7 +59,7 @@ func TestGitHubAppInstallationEndpoint(t *testing.T) {
 	}
 }
 
-func TestGitHubAppInstallationDiscoveryCachesByOwner(t *testing.T) {
+func TestGitHubAppInstallationDiscoveryCachesByRepository(t *testing.T) {
 	privateKey := testGitHubAppPrivateKey(t)
 	var requests atomic.Int32
 	server := httptest.NewServer(http.HandlerFunc(
@@ -114,8 +114,8 @@ func TestGitHubAppInstallationDiscoveryCachesByOwner(t *testing.T) {
 	if first != 12345 || second != 12345 {
 		t.Fatalf("unexpected installation IDs: %d %d", first, second)
 	}
-	if requests.Load() != 1 {
-		t.Fatalf("installation discovery requests = %d, want 1", requests.Load())
+	if requests.Load() != 2 {
+		t.Fatalf("installation discovery requests = %d, want 2", requests.Load())
 	}
 	service, err := (githubScaleSetServiceFactory{
 		githubApp: credentials,
