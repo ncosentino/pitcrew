@@ -14,6 +14,11 @@ on:
         default: 'full'
         type: choice
         options: [full, subset, nested-runtime]
+      export_manager_image:
+        description: 'Build and export a source-bound manager image for build-free operator installation'
+        required: false
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -103,6 +108,10 @@ jobs:
       - name: Run runner-profile contracts
         shell: pwsh
         run: ./tests/Test-RunnerProfiles.ps1
+
+      - name: Validate prepared manager image contracts
+        shell: pwsh
+        run: ./tests/Test-PreparedManagerImage.ps1
 
       - name: Validate opt-in nested Docker contracts
         shell: pwsh
@@ -273,6 +282,15 @@ jobs:
       - name: Run image candidate contracts
         run: bash ./tests/Test-ImageCandidateReport.sh
 
+  prepared-manager-image:
+    name: Prepared manager image
+    needs: [validation-plan, contracts]
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      inputs.export_manager_image &&
+      needs.contracts.result == 'success'
+    uses: ./.github/workflows/prepared-manager-image.yml
+
   coverage-comment:
     name: Publish Go coverage comment
     needs: [validation-plan, contracts]
@@ -409,6 +427,7 @@ jobs:
         validation-plan,
         contracts,
         image-candidate,
+        prepared-manager-image,
         coverage-comment,
         docker-integration,
         specialized-images,
@@ -422,6 +441,7 @@ jobs:
       PLAN_RESULT: ${{ needs.validation-plan.result }}
       CONTRACTS_RESULT: ${{ needs.contracts.result }}
       IMAGE_CANDIDATE_RESULT: ${{ needs.image-candidate.result }}
+      PREPARED_IMAGE_RESULT: ${{ needs.prepared-manager-image.result }}
       COMMENT_RESULT: ${{ needs.coverage-comment.result }}
       DOCKER_RESULT: ${{ needs.docker-integration.result }}
       SPECIALIZED_IMAGES_RESULT: ${{ needs.specialized-images.result }}
@@ -437,7 +457,7 @@ jobs:
             exit 1
           fi
 
-          for result in "$CONTRACTS_RESULT" "$IMAGE_CANDIDATE_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
+          for result in "$CONTRACTS_RESULT" "$IMAGE_CANDIDATE_RESULT" "$PREPARED_IMAGE_RESULT" "$DOCKER_RESULT" "$SPECIALIZED_IMAGES_RESULT" "$FIXED_ADOPTION_RESULT"; do
             if [ "$result" = "failure" ] || [ "$result" = "cancelled" ]; then
               echo "::error::A required validation job failed or was cancelled."
               exit 1

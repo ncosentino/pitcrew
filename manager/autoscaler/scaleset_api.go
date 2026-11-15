@@ -109,13 +109,14 @@ func (f githubScaleSetServiceFactory) newService(
 			githubAppRequestTimeout,
 		)
 		defer cancel()
-		installationID, resolveErr := f.githubApp.installationID(
+		installationID, canonicalURL, resolveErr := f.githubApp.installation(
 			ctx,
 			registrationURL,
 		)
 		if resolveErr != nil {
 			return nil, resolveErr
 		}
+		registrationURL = canonicalURL
 		client, err = scaleset.NewClientWithGitHubApp(
 			scaleset.ClientWithGitHubAppConfig{
 				GitHubConfigURL: registrationURL,
@@ -130,8 +131,8 @@ func (f githubScaleSetServiceFactory) newService(
 	} else {
 		client, err = scaleset.NewClientWithPersonalAccessToken(
 			scaleset.NewClientWithPersonalAccessTokenConfig{
-			GitHubConfigURL:     registrationURL,
-			PersonalAccessToken: f.accessToken,
+				GitHubConfigURL:     registrationURL,
+				PersonalAccessToken: f.accessToken,
 				SystemInfo:          systemInfo,
 			},
 		)
@@ -146,7 +147,7 @@ func (f githubScaleSetServiceFactory) newService(
 	return &githubScaleSetService{
 		client:                     client,
 		accessToken:                f.accessToken,
-		registrationAccessEnabled: f.githubApp == nil,
+		registrationAccessEnabled:  f.githubApp == nil,
 		registrationAccessEndpoint: registrationAccessEndpoint,
 		httpClient: &http.Client{
 			CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
@@ -159,7 +160,7 @@ func (f githubScaleSetServiceFactory) newService(
 type githubScaleSetService struct {
 	client                     *scaleset.Client
 	accessToken                string
-	registrationAccessEnabled bool
+	registrationAccessEnabled  bool
 	registrationAccessEndpoint string
 	httpClient                 *http.Client
 }
