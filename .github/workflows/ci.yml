@@ -289,40 +289,7 @@ jobs:
       github.event_name == 'workflow_dispatch' &&
       inputs.export_manager_image &&
       needs.contracts.result == 'success'
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@v6
-      - name: Build source-bound manager image
-        shell: pwsh
-        run: |
-          . ./RunnerProfiles.Functions.ps1
-          $sourceHash = Get-RunnerBuildContextFingerprint `
-            -ContextPath (Join-Path $PWD 'manager') `
-            -ExcludedPaths @() -IgnoreFileModes
-          $contract = (Get-RunnerImplementedManagerContract -RootPath $PWD).Implemented
-          docker build --label "pitcrew.manager.source-sha256=$sourceHash" `
-            --label "pitcrew.manager.contract=$contract" `
-            --label "org.opencontainers.image.revision=$env:GITHUB_SHA" `
-            --tag "ephemeral-runner-manager:qualified-$env:GITHUB_SHA" manager
-          if ($LASTEXITCODE -ne 0) { throw 'Prepared manager image build failed.' }
-          docker image inspect "ephemeral-runner-manager:qualified-$env:GITHUB_SHA" `
-            --format '{{.Id}}' | Set-Content manager-image-id.txt -Encoding utf8NoBOM
-          if ($LASTEXITCODE -ne 0) { throw 'Prepared image identity unavailable.' }
-          docker save --output manager-image.tar "ephemeral-runner-manager:qualified-$env:GITHUB_SHA"
-          if ($LASTEXITCODE -ne 0) { throw 'Prepared manager image export failed.' }
-          Get-FileHash manager-image.tar -Algorithm SHA256 |
-            ForEach-Object { $_.Hash.ToLowerInvariant() + '  manager-image.tar' } |
-            Set-Content manager-image.sha256 -Encoding utf8NoBOM
-      - name: Upload prepared manager image
-        uses: actions/upload-artifact@v4
-        with:
-          name: prepared-manager-image
-          path: |
-            manager-image.tar
-            manager-image-id.txt
-            manager-image.sha256
-          retention-days: 7
+    uses: ./.github/workflows/prepared-manager-image.yml
 
   coverage-comment:
     name: Publish Go coverage comment
