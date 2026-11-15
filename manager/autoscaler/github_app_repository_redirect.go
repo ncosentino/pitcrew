@@ -9,6 +9,7 @@ import (
 	"io"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 )
@@ -17,6 +18,7 @@ const githubAppRepositoryResponseLimit = 64 * 1024
 
 type githubAppHTTPError struct {
 	statusCode int
+	location   string
 }
 
 func (e *githubAppHTTPError) Error() string {
@@ -26,6 +28,14 @@ func (e *githubAppHTTPError) Error() string {
 func githubAppRepositoryRedirect(
 	source *url.URL,
 	location string,
+) (*url.URL, int64, error) {
+	return githubAppRepositoryIdentityRedirect(source, location, true)
+}
+
+func githubAppRepositoryIdentityRedirect(
+	source *url.URL,
+	location string,
+	installation bool,
 ) (*url.URL, int64, error) {
 	redirect, err := url.Parse(location)
 	if err != nil || location == "" {
@@ -39,8 +49,12 @@ func githubAppRepositoryRedirect(
 		return nil, 0, errors.New("GitHub App repository redirect crossed its trusted origin")
 	}
 	segments := strings.Split(strings.Trim(redirect.Path, "/"), "/")
-	if len(segments) != 3 || segments[0] != "repositories" ||
-		segments[2] != "installation" {
+	expectedSegments := 2
+	if installation {
+		expectedSegments = 3
+	}
+	if len(segments) != expectedSegments || segments[0] != "repositories" ||
+		(installation && segments[2] != "installation") {
 		return nil, 0, errors.New("GitHub App repository redirect had an unsupported path")
 	}
 	repositoryID, err := strconv.ParseInt(segments[1], 10, 64)
@@ -80,7 +94,10 @@ func githubAppBoundedJSONRequest(
 	}
 	defer response.Body.Close()
 	if response.StatusCode != expectedStatus {
-		return &githubAppHTTPError{statusCode: response.StatusCode}
+		return &githubAppHTTPError{
+			statusCode: response.StatusCode,
+			location:   response.Header.Get("Location"),
+		}
 	}
 	data, err := io.ReadAll(io.LimitReader(
 		response.Body, githubAppRepositoryResponseLimit+1,
@@ -116,7 +133,7 @@ func (a *githubAppCredentials) resolveRepositoryRedirect(
 	tokenURL := *source
 	tokenURL.Path = fmt.Sprintf("/app/installations/%d/access_tokens", installation.ID)
 	tokenURL.RawPath = ""
-	body, err := json.Marshal(struct {
+	token, err := githubAppMetadataToken(ctx, client, &tokenURL, jwt, struct {
 		RepositoryIDs []int64           `json:"repository_ids"`
 		Permissions   map[string]string `json:"permissions"`
 	}{
@@ -124,42 +141,155 @@ func (a *githubAppCredentials) resolveRepositoryRedirect(
 		Permissions:   map[string]string{"metadata": "read"},
 	})
 	if err != nil {
-		return 0, "", errors.New("encode GitHub App metadata token request")
-	}
-	var access githubRunnerAccessResponse
-	if err := githubAppBoundedJSONRequest(
-		ctx, client, http.MethodPost, &tokenURL, jwt, body,
-		http.StatusCreated, &access,
-	); err != nil {
 		return 0, "", err
 	}
-	if access.Token == "" {
-		return 0, "", errors.New("GitHub App metadata token response was invalid")
-	}
-	defer func() { access.Token = "" }()
+	defer func() { token = "" }()
 	repositoryURL := *source
 	repositoryURL.Path = fmt.Sprintf("/repositories/%d", repositoryID)
 	repositoryURL.RawPath = ""
-	var repository struct {
-		ID       int64  `json:"id"`
-		FullName string `json:"full_name"`
-	}
+	var repository githubAppRepositoryMetadata
 	if err := githubAppBoundedJSONRequest(
-		ctx, client, http.MethodGet, &repositoryURL, access.Token, nil,
+		ctx, client, http.MethodGet, &repositoryURL, token, nil,
 		http.StatusOK, &repository,
 	); err != nil {
 		return 0, "", err
 	}
+	canonicalURL, err := repository.canonicalURL(repositoryID)
+	return installation.ID, canonicalURL, err
+}
+
+func githubAppMetadataToken(
+	ctx context.Context,
+	client *http.Client,
+	tokenURL *url.URL,
+	jwt string,
+	scope any,
+) (string, error) {
+	body, err := json.Marshal(scope)
+	if err != nil {
+		return "", errors.New("encode GitHub App metadata token request")
+	}
+	var access githubRunnerAccessResponse
+	if err := githubAppBoundedJSONRequest(
+		ctx, client, http.MethodPost, tokenURL, jwt, body,
+		http.StatusCreated, &access,
+	); err != nil {
+		return "", err
+	}
+	if access.Token == "" {
+		return "", errors.New("GitHub App metadata token response was invalid")
+	}
+	return access.Token, nil
+}
+
+type githubAppRepositoryMetadata struct {
+	ID       int64  `json:"id"`
+	FullName string `json:"full_name"`
+}
+
+func (repository githubAppRepositoryMetadata) canonicalURL(repositoryID int64) (string, error) {
 	segments := strings.Split(repository.FullName, "/")
-	if repository.ID != repositoryID || len(segments) != 2 ||
+	if repositoryID <= 0 || repository.ID != repositoryID || len(segments) != 2 ||
 		!validGitHubPathSegment(segments[0]) ||
 		!validGitHubPathSegment(segments[1]) {
-		return 0, "", errors.New("GitHub App canonical repository identity did not match its redirect")
+		return "", errors.New("GitHub App canonical repository identity did not match its redirect")
 	}
 	canonicalURL := "https://github.com/" + url.PathEscape(segments[0]) +
 		"/" + url.PathEscape(segments[1])
 	if _, _, err := githubAppInstallationEndpoint(canonicalURL); err != nil {
-		return 0, "", errors.New("GitHub App canonical repository URL was invalid")
+		return "", errors.New("GitHub App canonical repository URL was invalid")
 	}
-	return installation.ID, canonicalURL, nil
+	return canonicalURL, nil
+}
+
+// Installation discovery can conceal a transfer with 404 even when repository
+// metadata redirects. Only already-authenticated repositories provide candidates.
+// The caller holds a.mu; this path must not recursively discover installations.
+func (a *githubAppCredentials) resolveRepositoryNotFound(
+	ctx context.Context,
+	client *http.Client,
+	source *url.URL,
+	jwt string,
+) (int64, string, error) {
+	candidates := make([]string, 0, len(a.installationURLs))
+	for key := range a.installationURLs {
+		if strings.HasPrefix(key, "/repos/") && a.installationIDs[key] > 0 {
+			candidates = append(candidates, key)
+		}
+	}
+	sort.Strings(candidates)
+	for _, key := range candidates {
+		candidate := a.installationURLs[key]
+		_, endpoint, err := githubAppInstallationEndpoint(candidate)
+		if err != nil || !strings.HasPrefix(endpoint, "/repos/") {
+			return 0, "", errors.New("GitHub App cached repository identity was invalid")
+		}
+		fullName := strings.TrimSuffix(strings.TrimPrefix(endpoint, "/repos/"), "/installation")
+		repositoryName := strings.Split(fullName, "/")[1]
+		tokenURL := *source
+		tokenURL.Path = fmt.Sprintf("/app/installations/%d/access_tokens", a.installationIDs[key])
+		tokenURL.RawPath = ""
+		token, err := githubAppMetadataToken(ctx, client, &tokenURL, jwt, struct {
+			Repositories []string          `json:"repositories"`
+			Permissions  map[string]string `json:"permissions"`
+		}{
+			Repositories: []string{repositoryName},
+			Permissions:  map[string]string{"metadata": "read"},
+		})
+		if err != nil {
+			return 0, "", fmt.Errorf("create repository identity proof token: %w", err)
+		}
+		canonicalURL, err := githubAppProveRepositoryAlias(ctx, client, source, token, candidate)
+		token = ""
+		if err != nil {
+			var status *githubAppHTTPError
+			if errors.As(err, &status) && status.statusCode == http.StatusNotFound {
+				continue
+			}
+			return 0, "", err
+		}
+		return a.installationIDs[key], canonicalURL, nil
+	}
+	return 0, "", &githubAppHTTPError{statusCode: http.StatusNotFound}
+}
+
+func githubAppProveRepositoryAlias(
+	ctx context.Context,
+	client *http.Client,
+	source *url.URL,
+	token string,
+	candidate string,
+) (string, error) {
+	metadataURL := *source
+	metadataURL.Path = strings.TrimSuffix(source.Path, "/installation")
+	metadataURL.RawPath = ""
+	var repository githubAppRepositoryMetadata
+	err := githubAppBoundedJSONRequest(ctx, client, http.MethodGet,
+		&metadataURL, token, nil, http.StatusOK, &repository)
+	repositoryID := repository.ID
+	if err != nil {
+		var status *githubAppHTTPError
+		if !errors.As(err, &status) || status.statusCode != http.StatusMovedPermanently {
+			return "", err
+		}
+		redirect, id, redirectErr := githubAppRepositoryIdentityRedirect(
+			&metadataURL, status.location, false,
+		)
+		if redirectErr != nil {
+			return "", redirectErr
+		}
+		repositoryID = id
+		if err := githubAppBoundedJSONRequest(ctx, client, http.MethodGet,
+			redirect, token, nil, http.StatusOK, &repository); err != nil {
+			return "", err
+		}
+	}
+	canonicalURL, err := repository.canonicalURL(repositoryID)
+	if err != nil {
+		return "", err
+	}
+	if !strings.EqualFold(canonicalURL, candidate) {
+		return "", errors.New("GitHub App repository metadata did not match its scoped candidate")
+	}
+	return canonicalURL, nil
 }

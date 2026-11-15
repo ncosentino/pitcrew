@@ -145,3 +145,137 @@ func TestGitHubAppRepositoryDiscoveryBoundsAndRedactsFailures(t *testing.T) {
 		})
 	}
 }
+
+func TestGitHubAppHiddenTransferRequiresScopedMetadataProof(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		status   int
+		location string
+		metadata string
+		cache    bool
+		success  bool
+	}{
+		{"hidden-transfer", 404, "/repositories/42", `{"id":42,"full_name":"replacement/project"}`, true, true},
+		{"direct-metadata-alias", 404, "direct", `{"id":42,"full_name":"replacement/project"}`, true, true},
+		{"wrong-id", 404, "/repositories/42", `{"id":43,"full_name":"replacement/project"}`, true, false},
+		{"wrong-repository", 404, "/repositories/42", `{"id":42,"full_name":"replacement/other"}`, true, false},
+		{"untrusted-origin", 404, "https://example.com/repositories/42", "", true, false},
+		{"installation-redirect-path", 404, "/repositories/42/installation", "", true, false},
+		{"unavailable", 404, "", "", true, false},
+		{"no-authenticated-candidate", 404, "/repositories/42", "", false, false},
+		{"forbidden-not-a-transfer", 403, "/repositories/42", "", true, false},
+		{"metadata-forbidden", 404, "forbidden", "", true, false},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			privateKey := testGitHubAppPrivateKey(t)
+			var proofRequests atomic.Int32
+			var unrelatedProofs atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				switch r.URL.Path {
+				case "/repos/earlier/unrelated/installation":
+					fmt.Fprint(w, `{"id":123}`)
+				case "/repos/replacement/project/installation":
+					fmt.Fprint(w, `{"id":456}`)
+				case "/repos/original/project/installation":
+					w.WriteHeader(test.status)
+				case "/app/installations/456/access_tokens":
+					proofRequests.Add(1)
+					var scope struct {
+						Repositories  []string          `json:"repositories"`
+						RepositoryIDs []int64           `json:"repository_ids"`
+						Permissions   map[string]string `json:"permissions"`
+					}
+					if r.Method != http.MethodPost || json.NewDecoder(r.Body).Decode(&scope) != nil ||
+						len(scope.Repositories) != 1 || scope.Repositories[0] != "project" ||
+						len(scope.RepositoryIDs) != 0 || len(scope.Permissions) != 1 ||
+						scope.Permissions["metadata"] != "read" {
+						t.Error("hidden-transfer proof requested excess token scope")
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"token":"private-proof-token"}`)
+				case "/app/installations/123/access_tokens":
+					unrelatedProofs.Add(1)
+					w.WriteHeader(http.StatusCreated)
+					fmt.Fprint(w, `{"token":"unrelated-scoped-token"}`)
+				case "/repos/original/project":
+					if r.Header.Get("Authorization") == "Bearer unrelated-scoped-token" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					if r.Header.Get("Authorization") != "Bearer private-proof-token" {
+						t.Error("original repository metadata did not use the candidate-scoped token")
+					}
+					if test.location == "" {
+						w.WriteHeader(http.StatusNotFound)
+						return
+					}
+					if test.location == "direct" {
+						fmt.Fprint(w, test.metadata)
+						return
+					}
+					if test.location == "forbidden" {
+						w.WriteHeader(http.StatusForbidden)
+						fmt.Fprint(w, `{"token":"private-proof-token"}`)
+						return
+					}
+					w.Header().Set("Location", test.location)
+					w.WriteHeader(http.StatusMovedPermanently)
+				case "/repositories/42":
+					if r.Header.Get("Authorization") != "Bearer private-proof-token" {
+						t.Error("redirected metadata did not preserve the scoped token")
+					}
+					fmt.Fprint(w, test.metadata)
+				default:
+					t.Errorf("unexpected proof request %s", r.URL.Path)
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			credentials := &githubAppCredentials{
+				clientID: "Iv1.example", signingKey: privateKey,
+				apiBaseURL: server.URL, httpClient: server.Client(),
+				clock: &fakeClock{current: time.Now().UTC()},
+			}
+			if test.name == "hidden-transfer" {
+				if _, _, err := credentials.installation(context.Background(),
+					"https://github.com/earlier/unrelated"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if test.cache {
+				if _, _, err := credentials.installation(context.Background(),
+					"https://github.com/replacement/project"); err != nil {
+					t.Fatal(err)
+				}
+			}
+			id, canonical, err := credentials.installation(context.Background(),
+				"https://github.com/original/project")
+			if (err == nil) != test.success {
+				t.Fatalf("success=%t, got error %v", test.success, err)
+			}
+			if err != nil && (strings.Contains(err.Error(), "private-proof-token") ||
+				strings.Contains(err.Error(), "example.com")) {
+				t.Fatal("proof error disclosed token or untrusted redirect")
+			}
+			if test.success {
+				if id != 456 || canonical != "https://github.com/replacement/project" {
+					t.Fatalf("wrong authenticated identity: %d %q", id, canonical)
+				}
+				if _, _, err := credentials.installation(context.Background(),
+					"https://github.com/original/project"); err != nil || proofRequests.Load() != 1 {
+					t.Fatal("successful proof was not cached")
+				}
+			} else if credentials.installationIDs["/repos/original/project/installation"] != 0 {
+				t.Fatal("failed proof was cached")
+			}
+			if (!test.cache || test.status != 404) && proofRequests.Load() != 0 {
+				t.Fatal("proof ran without an authenticated candidate or without HTTP 404")
+			}
+			if test.name == "hidden-transfer" && unrelatedProofs.Load() != 1 {
+				t.Fatal("an unrelated candidate's HTTP 404 was not skipped exactly once")
+			}
+		})
+	}
+}
