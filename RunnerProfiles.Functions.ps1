@@ -2523,6 +2523,78 @@ function Assert-RunnerProfileOperationAuthority {
     throw 'Profile root is retired or relocation is incomplete; operations require reconciliation.'
 }
 
+function Get-RunnerRelocatedGitHubAppKeyPath {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$ProfileConfig,
+        [AllowEmptyString()][string]$RollbackOperationId = '',
+        [switch]$PosixPath
+    )
+
+    $name = 'github-app.pem'
+    if ($RollbackOperationId) {
+        $operationId = [guid]::Empty
+        if (-not [guid]::TryParse($RollbackOperationId, [ref]$operationId) -or
+            $operationId -eq [guid]::Empty) {
+            throw 'Relocated GitHub App key requires a valid rollback operation identity.'
+        }
+        $name = "github-app-rollback-$RollbackOperationId.pem"
+    }
+    if ($PosixPath) {
+        return "$($ProfileConfig.RootPath.TrimEnd('/'))/.pitcrew-private/$($ProfileConfig.Name)/$name"
+    }
+    return Join-Path $ProfileConfig.RootPath '.pitcrew-private' $ProfileConfig.Name $name
+}
+
+function Assert-RunnerGitHubAppKeyLocation {
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)][PSCustomObject]$ProfileConfig,
+        [Parameter(Mandatory)][string]$Path,
+        [switch]$AllowRelocatedKey
+    )
+
+    $relativePath = [IO.Path]::GetRelativePath($ProfileConfig.RootPath, $Path)
+    if ($relativePath -eq '..' -or $relativePath.StartsWith(
+        "..$([IO.Path]::DirectorySeparatorChar)", [StringComparison]::Ordinal
+    )) { return }
+
+    $receiptPath = Join-Path $ProfileConfig.StateDirectory 'relocation.json'
+    if (-not $AllowRelocatedKey -or -not (Test-Path -LiteralPath $receiptPath)) {
+        throw 'GitHub App private key must be stored outside the PitCrew checkout.'
+    }
+    Assert-RunnerProfileOperationAuthority -Directory $ProfileConfig.StateDirectory
+    $receipt = Read-RunnerJsonFile -Path $receiptPath
+    $ownedPaths = @(
+        Get-RunnerRelocatedGitHubAppKeyPath -ProfileConfig $ProfileConfig
+        Get-RunnerRelocatedGitHubAppKeyPath -ProfileConfig $ProfileConfig `
+            -RollbackOperationId $receipt.operationId
+    )
+    $comparison = if ($IsWindows) {
+        [StringComparison]::OrdinalIgnoreCase
+    } else { [StringComparison]::Ordinal }
+    if (-not @($ownedPaths | Where-Object {
+        [string]::Equals([IO.Path]::GetFullPath($_), [IO.Path]::GetFullPath($Path), $comparison)
+    }).Count) {
+        throw 'GitHub App private key must be stored outside the PitCrew checkout.'
+    }
+    Assert-RunnerUnlinkedPath -Path $Path
+    & git -C $ProfileConfig.RootPath check-ignore --quiet -- $Path
+    if ($LASTEXITCODE -ne 0) {
+        throw 'Relocated GitHub App key must remain untracked and gitignored.'
+    }
+    if ($IsLinux) {
+        $publicPermissions = [IO.UnixFileMode]::GroupRead -bor [IO.UnixFileMode]::GroupWrite -bor
+            [IO.UnixFileMode]::GroupExecute -bor [IO.UnixFileMode]::OtherRead -bor
+            [IO.UnixFileMode]::OtherWrite -bor [IO.UnixFileMode]::OtherExecute
+        foreach ($privatePath in @($Path, (Split-Path -Parent $Path))) {
+            if (([IO.File]::GetUnixFileMode($privatePath) -band $publicPermissions) -ne 0) {
+                throw 'Relocated GitHub App key and its profile directory require private permissions.'
+            }
+        }
+    }
+}
+
 function Enter-RunnerProfileLock {
     [CmdletBinding()]
     param(

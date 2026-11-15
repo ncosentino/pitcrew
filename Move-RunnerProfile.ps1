@@ -228,8 +228,12 @@ if ($Action -in @('target-check', 'target-prepare', 'target-material-check', 'ta
                 throw 'Worker configuration changed after relocation; roll back that rollout separately first.'
             }
             $keySource = Get-RunnerEnvironmentFileValue -Path $destination.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
-            $expectedKeySource = Join-Path $destination.RootPath '.pitcrew-private' $Profile 'github-app.pem'
-            if ($keySource -and $keySource -cne $expectedKeySource) {
+            $expectedKeySources = @(
+                Get-RunnerRelocatedGitHubAppKeyPath -ProfileConfig $destination
+                Get-RunnerRelocatedGitHubAppKeyPath -ProfileConfig $destination `
+                    -RollbackOperationId $receipt.operationId
+            )
+            if ($keySource -and $keySource -cnotin $expectedKeySources) {
                 throw 'Authentication moved outside the relocation-owned key path; reconcile it before rollback.'
             }
             $managerId = Get-RunnerManagerContainerId -ProfileConfig $destination
@@ -291,7 +295,8 @@ if ($Action -in @('target-check', 'target-prepare', 'target-material-check', 'ta
             if ($LASTEXITCODE -ne 0) { throw 'Cannot protect transferred private state.' }
             & chmod 0600 $destination.EnvironmentPath
             if ($LASTEXITCODE -ne 0) { throw 'Cannot protect destination environment.' }
-            $privateDirectory = Join-Path $destination.RootPath '.pitcrew-private' $Profile
+            $privateDirectory = Split-Path -Parent (Get-RunnerRelocatedGitHubAppKeyPath `
+                -ProfileConfig $destination)
             if (Test-Path -LiteralPath $privateDirectory) {
                 & chmod -R go-rwx $privateDirectory
                 if ($LASTEXITCODE -ne 0) { throw 'Cannot protect destination authentication files.' }
@@ -387,15 +392,18 @@ if ($Action -eq 'rollback') {
         $restoredKeyPath = ''
         $nativeKeySource = Get-RunnerEnvironmentFileValue -Path $destination.EnvironmentPath -Name 'PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE'
         if ($nativeKeySource) {
-            $keyFile = Join-Path $destinationFiles '.pitcrew-private' $Profile 'github-app.pem'
+            $privateFiles = Split-Path -Parent (Get-RunnerRelocatedGitHubAppKeyPath `
+                -ProfileConfig (Get-RelocationProfile $destinationFiles))
+            $keyFile = Join-Path $privateFiles ([IO.Path]::GetFileName($nativeKeySource))
             Assert-UnlinkedPath $keyFile
-            $sourcePrivate = Join-Path $SourceRoot '.pitcrew-private' $Profile
+            $restoredKeyPath = Get-RunnerRelocatedGitHubAppKeyPath `
+                -ProfileConfig $source -RollbackOperationId $OperationId
+            $sourcePrivate = Split-Path -Parent $restoredKeyPath
             New-Item -ItemType Directory -Path $sourcePrivate -Force | Out-Null
             if ($IsLinux) {
                 & chmod 0700 $sourcePrivate
                 if ($LASTEXITCODE -ne 0) { throw 'Cannot protect rollback authentication directory.' }
             }
-            $restoredKeyPath = Join-Path $sourcePrivate "github-app-rollback-$OperationId.pem"
             Copy-Item -LiteralPath $keyFile -Destination $restoredKeyPath
         }
         $originalManifest = (Read-RunnerJsonFile -Path $source.StaticProfilePath).manifest
@@ -554,12 +562,14 @@ try {
     $nativeKeyPath = ''
     if ($keySource) {
         Assert-UnlinkedPath $keySource
-        $privateFiles = Join-Path $destinationFiles '.pitcrew-private' $Profile
+        $stagedKeyPath = Get-RunnerRelocatedGitHubAppKeyPath `
+            -ProfileConfig (Get-RelocationProfile $destinationFiles)
+        $privateFiles = Split-Path -Parent $stagedKeyPath
         New-Item -ItemType Directory -Path $privateFiles -Force | Out-Null
-        Copy-Item -LiteralPath $keySource -Destination (Join-Path $privateFiles 'github-app.pem')
-        $nativeKeyPath = if ($TargetDistribution) { "$DestinationRoot/.pitcrew-private/$Profile/github-app.pem" } else {
-            Join-Path $privateFiles 'github-app.pem'
-        }
+        Copy-Item -LiteralPath $keySource -Destination $stagedKeyPath
+        $nativeKeyPath = Get-RunnerRelocatedGitHubAppKeyPath `
+            -ProfileConfig (Get-RelocationProfile $DestinationRoot) `
+            -PosixPath:([bool]$TargetDistribution)
     }
     Write-RelocationReceipt $source 'source' 'prepared' $transfer
     if ($IsWindows) {

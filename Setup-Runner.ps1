@@ -26,7 +26,8 @@
 
 .PARAMETER GitHubAppPrivateKeyPath
     Private key PEM for GitHubAppClientId. The file must be outside the PitCrew
-    checkout and is mounted read-only into the selected manager.
+    checkout and is mounted read-only into the selected manager. Stored keys in
+    the protected relocation-owned directory are reused after committed relocation.
 
 .PARAMETER Replicas
     Override the profile's default workers per repo. Pass 0 to auto-size to half
@@ -1907,19 +1908,8 @@ try {
         $GitHubAppPrivateKeyPath = (
             Resolve-Path -LiteralPath $GitHubAppPrivateKeyPath
         ).Path
-        $relativeKeyPath = [IO.Path]::GetRelativePath(
-            $here,
-            $GitHubAppPrivateKeyPath
-        )
-        if (
-            $relativeKeyPath -ne '..' -and
-            -not $relativeKeyPath.StartsWith(
-                "..$([IO.Path]::DirectorySeparatorChar)",
-                [StringComparison]::Ordinal
-            )
-        ) {
-            Write-Error 'GitHub App private key must be stored outside the PitCrew checkout.'
-        }
+        Assert-RunnerGitHubAppKeyLocation -ProfileConfig $profileConfig `
+            -Path $GitHubAppPrivateKeyPath -AllowRelocatedKey:(-not $appParametersSupplied)
         $Token = ''
         $tokenSource = 'github-app'
     }
