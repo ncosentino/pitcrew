@@ -5238,6 +5238,92 @@ try {
             -Encoding UTF8 |
             ConvertFrom-Json -Depth 10
         $env:PITCREW_TEST_MANAGER_RUNNING = '1'
+        & git -C $fixtureRoot init --quiet
+        if ($LASTEXITCODE -ne 0) { throw 'Credential replay fixture Git initialization failed.' }
+        Set-Content -LiteralPath (Join-Path $fixtureRoot '.gitignore') `
+            -Value '.pitcrew-private/' -Encoding UTF8
+        $appProfile = Resolve-RunnerProfile -RootPath $fixtureRoot -Profile default
+        $ownedAppKey = Get-RunnerRelocatedGitHubAppKeyPath -ProfileConfig $appProfile
+        $ownedAppDirectory = Split-Path -Parent $ownedAppKey
+        New-Item -ItemType Directory -Path $ownedAppDirectory -Force | Out-Null
+        Set-Content -LiteralPath $ownedAppKey -Value 'relocated-test-key' -Encoding UTF8
+        if ($IsLinux) {
+            & chmod 0700 $ownedAppDirectory
+            & chmod 0600 $ownedAppKey
+            if ($LASTEXITCODE -ne 0) { throw 'Credential replay fixture permission setup failed.' }
+        }
+        $appRelocationPath = Join-Path $appProfile.StateDirectory 'relocation.json'
+        $appRelocation = @{
+            schemaVersion = 1
+            operationId = [guid]::NewGuid().ToString('D')
+            role = 'target'
+            status = 'committed'
+        }
+        Write-RunnerJsonAtomically -Path $appRelocationPath -Value $appRelocation
+        $relocatedAppEnvironment = $appEnvironment.Replace(
+            "PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE=$((Resolve-Path $appKeyPath).Path)",
+            "PITCREW_GITHUB_APP_PRIVATE_KEY_SOURCE=$ownedAppKey")
+        Set-Content -LiteralPath $appProfile.EnvironmentPath `
+            -Value $relocatedAppEnvironment -NoNewline -Encoding UTF8
+        & $fixtureSetup -Autoscale -CapacityOnly -Repos 'https://github.com/example/project=1'
+        Add-Check (
+            [Convert]::ToBase64String([IO.File]::ReadAllBytes($appDesiredPath)) -ceq
+                [Convert]::ToBase64String($appDesiredBeforeBytes)
+        ) 'Ordinary setup could not reuse committed relocation credentials without changing capacity.'
+        Add-ThrowsCheck -Action {
+            & $fixtureSetup -GitHubAppClientId 'Iv1example' -GitHubAppPrivateKeyPath $ownedAppKey `
+                -Autoscale -CapacityOnly -Repos 'https://github.com/example/project=1'
+        } -ExpectedMessage 'outside the PitCrew checkout' `
+            -Failure 'Explicit GitHub App key parameters bypassed the outside-checkout boundary.'
+        $otherAppKey = Join-Path $fixtureRoot '.pitcrew-private' 'other' 'github-app.pem'
+        New-Item -ItemType Directory -Path (Split-Path -Parent $otherAppKey) -Force | Out-Null
+        Set-Content -LiteralPath $otherAppKey -Value 'other-test-key' -Encoding UTF8
+        Add-ThrowsCheck -Action {
+            Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $otherAppKey -AllowRelocatedKey
+        } -ExpectedMessage 'outside the PitCrew checkout' `
+            -Failure 'Relocation credential replay accepted another profile key.'
+        $rollbackAppKey = Get-RunnerRelocatedGitHubAppKeyPath -ProfileConfig $appProfile `
+            -RollbackOperationId $appRelocation.operationId
+        Copy-Item -LiteralPath $ownedAppKey -Destination $rollbackAppKey
+        if ($IsLinux) { & chmod 0600 $rollbackAppKey }
+        Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $rollbackAppKey -AllowRelocatedKey
+        $appRelocation.status = 'prepared'
+        Write-RunnerJsonAtomically -Path $appRelocationPath -Value $appRelocation
+        Add-ThrowsCheck -Action {
+            Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $ownedAppKey -AllowRelocatedKey
+        } -ExpectedMessage 'operations require reconciliation' `
+            -Failure 'Incomplete relocation admitted credential replay.'
+        Remove-Item -LiteralPath $appRelocationPath
+        Add-ThrowsCheck -Action {
+            Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $ownedAppKey -AllowRelocatedKey
+        } -ExpectedMessage 'outside the PitCrew checkout' `
+            -Failure 'An unreceipted checkout key bypassed the outside-checkout boundary.'
+        $appRelocation.status = 'committed'
+        Write-RunnerJsonAtomically -Path $appRelocationPath -Value $appRelocation
+        & git -C $fixtureRoot add --force -- $ownedAppKey
+        if ($LASTEXITCODE -ne 0) { throw 'Tracked-key rejection fixture staging failed.' }
+        Add-ThrowsCheck -Action {
+            Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $ownedAppKey -AllowRelocatedKey
+        } -ExpectedMessage 'untracked and gitignored' `
+            -Failure 'A tracked checkout key was admitted as relocation-owned authentication.'
+        & git -C $fixtureRoot rm --cached --quiet -- $ownedAppKey
+        if ($LASTEXITCODE -ne 0) { throw 'Tracked-key rejection fixture cleanup failed.' }
+        if ($IsLinux) {
+            & chmod 0644 $ownedAppKey
+            Add-ThrowsCheck -Action {
+                Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $ownedAppKey -AllowRelocatedKey
+            } -ExpectedMessage 'private permissions' `
+                -Failure 'A publicly readable relocation key was admitted.'
+            Remove-Item -LiteralPath $ownedAppKey
+            New-Item -ItemType SymbolicLink -Path $ownedAppKey -Value $appKeyPath | Out-Null
+            Add-ThrowsCheck -Action {
+                Assert-RunnerGitHubAppKeyLocation -ProfileConfig $appProfile -Path $ownedAppKey -AllowRelocatedKey
+            } -ExpectedMessage 'linked source or destination' `
+                -Failure 'A linked relocation key was admitted.'
+            Remove-Item -LiteralPath $ownedAppKey
+        }
+        Remove-Item -LiteralPath $appRelocationPath
+        Set-Content -LiteralPath $appProfile.EnvironmentPath -Value $appEnvironment -NoNewline -Encoding UTF8
         $env:PITCREW_TEST_GITHUB_APP_ACCESS_FAILURE = '1'
         Set-Content -LiteralPath $dockerLog -Value '' -NoNewline
         Add-ThrowsCheck `

@@ -46,6 +46,10 @@ environment files or private keys to obtain this evidence.
 Apply holds the source lock, stages deployment material, fences the source,
 quiesces only its manager, and copies final state after manager exit.
 Authentication is transferred internally; native private directories are protected.
+Ordinary setup reuses stored keys in the exact relocation-owned private directory
+only after a committed relocation. Keys must remain unlinked, untracked and
+gitignored, with private file and profile-directory permissions on Linux.
+Explicit authentication parameters still require a key outside the checkout.
 Stored external manifests and build contexts are materialized below
 `.pitcrew-deployment`, outside git. Identical relocated build inputs retain their
 existing worker revision. Mode-independent source bytes and the native mode
