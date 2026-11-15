@@ -181,6 +181,17 @@ func (a *githubAppCredentials) installation(
 			io.Discard,
 			io.LimitReader(response.Body, githubRunnerAccessResponseLimit),
 		)
+		if response.StatusCode == http.StatusNotFound && strings.HasPrefix(endpoint, "/repos/") {
+			installationID, canonicalURL, resolveErr := a.resolveRepositoryNotFound(
+				ctx, &client, request.URL, token,
+			)
+			if resolveErr == nil {
+				a.installationIDs[cacheKey] = installationID
+				a.installationURLs[cacheKey] = canonicalURL
+				return installationID, canonicalURL, nil
+			}
+			return 0, "", fmt.Errorf("prove GitHub App repository transfer: %w", resolveErr)
+		}
 		return 0, "", fmt.Errorf("discover GitHub App installation: %w",
 			&githubAppHTTPError{statusCode: response.StatusCode})
 	}
@@ -193,7 +204,11 @@ func (a *githubAppCredentials) installation(
 	if a.installationIDs == nil {
 		a.installationIDs = make(map[string]int64)
 	}
+	if a.installationURLs == nil {
+		a.installationURLs = make(map[string]string)
+	}
 	a.installationIDs[cacheKey] = installation.ID
+	a.installationURLs[cacheKey] = registrationURL
 	return installation.ID, registrationURL, nil
 }
 

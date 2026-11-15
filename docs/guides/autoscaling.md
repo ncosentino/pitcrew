@@ -229,6 +229,16 @@ the response in memory, discards it immediately, rejects redirects, bounds the
 request and response, and never changes workers, scale-set demand, or runner
 registrations as part of the check.
 
+For a transferred repository, GitHub App installation discovery may return
+HTTP 404 instead of an HTTP 301 redirect. The manager can prove that transfer
+using an already-authenticated repository target: a metadata-only token scoped
+to that one candidate must resolve the original repository's metadata to the
+same canonical repository. Redirects must remain on the trusted API origin and
+identify a matching numeric repository ID. No candidate, inaccessible metadata,
+or a mismatched identity leaves retirement pending with its existing retry
+policy; HTTP 404 alone never proves that a repository or scale set is absent.
+The logical target key and durable retirement state do not change.
+
 ## Compatibility
 
 Autoscaling uses the same multi-label workflow routing as fixed profiles. The
