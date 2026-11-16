@@ -27,6 +27,10 @@ class Metadata(HTMLParser):
             name = attrs.get('property') or attrs.get('name')
             if name:
                 self.values.setdefault(name, []).append(attrs.get('content'))
+        elif tag == 'link' and self.in_head:
+            attrs = dict(attrs)
+            if attrs.get('rel') == 'canonical':
+                self.values.setdefault('canonical', []).append(attrs.get('href'))
 
     def handle_endtag(self, tag):
         if tag == 'head':
@@ -54,6 +58,7 @@ class DocumentationMetadataTests(unittest.TestCase):
             ),
             'blank.md': "---\ndescription: '   '\n---\n# Blank\n\nRegister services.\n",
             'empty.md': '# Empty\n\n```text\nnot introductory prose\n```\n',
+            'generic,A.md': '# Generic A\n\nRead the generated reference.\n',
             'long.md': '# Long\n\n' + 'Register services and manage application lifetimes. ' * 15,
             'getting-started.md': (
                 '# Getting Started\n\nUse `</script>` &amp; "plugins".\n\n'
@@ -120,21 +125,40 @@ class DocumentationMetadataTests(unittest.TestCase):
         self.assertRegex(html, r'<h1[^>]*>Guide(?:<a[^>]*>.*?</a>)?</h1>')
         self.assertIn('Ignore later prose.', html)
 
-    def test_source_description_stays_plain_and_safe_in_howto_json_ld(self):
-        html, _ = self.read('getting-started')
+    def schemas(self, source):
+        html, _ = self.read(source)
         scripts = re.findall(r'<script type="application/ld\+json">\s*(.*?)\s*</script>',
                              html, re.DOTALL)
-        schemas = [json.loads(script) for script in scripts]
-        howto = next(schema for schema in schemas if schema.get('@type') == 'HowTo')
+        return [json.loads(script) for script in scripts]
+
+    def test_page_identity_reuses_rendered_metadata_and_canonical(self):
+        for source, title in (
+            ('index', 'Home'), ('guide', 'Guide'), ('authored', 'Authored'),
+            ('empty', 'Empty'), ('getting-started', 'Getting Started'), ('generic,A', 'Generic A'),
+        ):
+            with self.subTest(source=source):
+                _, metadata = self.read(source)
+                pages = [schema for schema in self.schemas(source) if schema.get('@type') == 'WebPage']
+                self.assertEqual(len(pages), 1)
+                page = pages[0]
+                suffix = '' if source == 'index' else '/' + source.replace(',', '%2C')
+                expected = 'https://example.test/docs' + suffix
+                self.assertEqual(metadata.get('canonical'), [expected])
+                self.assertEqual(metadata.get('og:url'), [expected])
+                self.assertEqual(page['@id'], expected)
+                self.assertEqual(page['url'], expected)
+                self.assertEqual(page['name'], title)
+                self.assertEqual(page['description'], self.description(source))
+
+    def test_source_description_stays_plain_and_safe_in_howto_json_ld(self):
+        howto = next(schema for schema in self.schemas('getting-started')
+                     if schema.get('@type') == 'HowTo')
         self.assertEqual(howto['description'], self.description('getting-started'))
         self.assertIn('</script>', howto['description'])
 
     def test_faq_json_ld_cannot_close_its_script(self):
-        html, _ = self.read('guides/safety')
-        scripts = re.findall(r'<script type="application/ld\+json">\s*(.*?)\s*</script>',
-                             html, re.DOTALL)
-        schemas = [json.loads(script) for script in scripts]
-        faq = next(schema for schema in schemas if schema.get('@type') == 'FAQPage')
+        faq = next(schema for schema in self.schemas('guides/safety')
+                   if schema.get('@type') == 'FAQPage')
         self.assertIn('</script>', faq['mainEntity'][0]['name'])
 
     def test_llms_description_is_plain_source_text(self):

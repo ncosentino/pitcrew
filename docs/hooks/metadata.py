@@ -77,6 +77,12 @@ def page_description(content: str, title: str, site_name: str) -> str:
     return description[:end].rstrip() + '...' if end > 0 else description
 
 
+def on_page_markdown(markdown: str, page, config, files) -> str:
+    if page.canonical_url is not None:
+        page.canonical_url = page.canonical_url.rstrip('/')
+    return markdown
+
+
 def on_page_content(content: str, page, config, files) -> str:
     authored = page.meta.get('description')
     if authored is not None and not isinstance(authored, str):
